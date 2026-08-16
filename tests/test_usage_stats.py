@@ -15,7 +15,13 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage, parse_usage_window
+from mindroom.usage_stats import (
+    UsageStatsSourceUnavailableError,
+    UsageStatsValidationError,
+    collect_admin_usage,
+    collect_self_usage,
+    parse_usage_window,
+)
 from mindroom.usage_stats_storage import (
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -90,7 +96,7 @@ def _raw_run(
     user_id: str | None = "@alice:example.test",
     agent_id: str | None = "code",
     team_id: str | None = None,
-    created_at: str = "2026-01-02T12:00:00Z",
+    created_at: str | None = "2026-01-02T12:00:00Z",
     metrics: dict[str, object] | None = None,
     model: str = "gpt-5.6",
     provider: str = "openai",
@@ -112,7 +118,7 @@ def _raw_run(
         "model_provider": provider,
         "model": model,
         "status": "completed",
-        "metrics": metrics or {"total_tokens": 10},
+        "metrics": metrics if metrics is not None else {"total_tokens": 10},
         "metadata": metadata,
         "messages": [{"content": sensitive_text}],
         "room_id": "!secret-room:example.test",
@@ -136,7 +142,6 @@ def _row(
         entity_id=entity_id,
         entity_kind=entity_kind,  # type: ignore[arg-type]
         row_key=f"test-row-{next(_ROW_KEYS)}",
-        session_user_id="@session-secret:example.test",
         session_metrics=session_metrics,
         runs=(_extract_run_node(raw_run, depth=0, extracted_nodes=[0], extracted_model_metrics=[0]),),
     )
@@ -256,6 +261,57 @@ def test_admin_validates_entity_filters_before_scanning(tmp_path: Path, monkeypa
     assert not scanned
 
 
+def test_admin_validates_runtime_grouping_before_scanning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runtime caller cannot route an unsupported grouping through the day fallback."""
+    scanned = False
+
+    def discover(**_: object) -> tuple[UsageStorageSource, ...]:
+        nonlocal scanned
+        scanned = True
+        return (_source(),)
+
+    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", discover)
+
+    with pytest.raises(UsageStatsValidationError, match="group"):
+        collect_admin_usage(
+            config=_config(),
+            runtime_paths=_paths(tmp_path),
+            start=None,
+            end=None,
+            group_by="unsupported",  # type: ignore[arg-type]
+            entity_names=None,
+            requester_ids=None,
+        )
+
+    assert not scanned
+
+
+def test_self_validates_runtime_grouping_before_scanning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Self collection rejects an unsupported grouping before source discovery."""
+    scanned = False
+
+    def discover(**_: object) -> tuple[UsageStorageSource, ...]:
+        nonlocal scanned
+        scanned = True
+        return (_source(),)
+
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", discover)
+
+    with pytest.raises(UsageStatsValidationError, match="group"):
+        collect_self_usage(
+            agent_name="code",
+            requester_id="@alice:example.test",
+            config=_config(),
+            runtime_paths=_paths(tmp_path),
+            execution_identity=_identity(),
+            start=None,
+            end=None,
+            group_by="unsupported",  # type: ignore[arg-type]
+        )
+
+    assert not scanned
+
+
 def test_admin_entity_grouping_and_filters_use_direct_run_attribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -291,17 +347,13 @@ def test_admin_entity_grouping_and_filters_use_direct_run_attribution(
     assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {("other", 7), ("engineering", 5)}
 
 
-@pytest.mark.parametrize(
-    ("group_by", "breakdown_key"),
-    [("day", "2026-01-02"), ("requester", "@alice:example.test"), ("model", "gpt-5.6")],
-)
-def test_unfiltered_admin_non_entity_grouping_retains_entityless_direct_runs(
+@pytest.mark.parametrize("group_by", ["day", "requester", "model"])
+def test_unfiltered_admin_non_entity_grouping_rejects_entityless_direct_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     group_by: str,
-    breakdown_key: str,
 ) -> None:
-    """A changed entity requirement would discard valid admin usage outside entity semantics."""
+    """Every admin metric needs valid configured attribution, regardless of grouping."""
     _wire_admin(
         monkeypatch,
         (
@@ -323,10 +375,13 @@ def test_unfiltered_admin_non_entity_grouping_retains_entityless_direct_runs(
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
-    assert report.run_count == 1
-    assert report.totals.total_tokens == 11
-    assert report.breakdown[0].key == breakdown_key
-    assert report.coverage.malformed_runs == 0
+    assert report.turn_count == 0
+    assert report.run_count == 0
+    assert report.totals.total_tokens == 0
+    assert report.breakdown == ()
+    assert report.coverage.malformed_runs == 1
+    assert report.coverage.skipped_runs == 1
+    assert report.coverage.status == "partial"
 
 
 @pytest.mark.parametrize(
@@ -365,6 +420,45 @@ def test_entityless_direct_runs_are_skipped_when_admin_entity_semantics_require_
     assert report.breakdown == ()
     assert report.coverage.malformed_runs == 1
     assert report.coverage.skipped_runs == 1
+
+
+def test_unfiltered_admin_rejects_removed_nested_entity_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested metrics for an entity absent from current configuration never enter totals."""
+    source = _source(scope="team", source_agent_id=None, allowed_teams=frozenset({"engineering"}))
+    root = _raw_run(
+        agent_id=None,
+        team_id="engineering",
+        metrics={"total_tokens": 4},
+        nested=[
+            _raw_run(
+                agent_id="removed",
+                requester_id=None,
+                user_id=None,
+                metrics={"total_tokens": 6},
+            ),
+        ],
+    )
+    _wire_admin(monkeypatch, (_row(root, entity_id="engineering", entity_kind="team", source=source),))
+
+    report = collect_admin_usage(
+        config=_config(team_names=("engineering",)),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.turn_count == 1
+    assert report.run_count == 1
+    assert report.totals.total_tokens == 4
+    assert report.coverage.malformed_runs == 1
+    assert report.coverage.status == "partial"
 
 
 def test_usage_window_uses_configured_timezone_and_exclusive_date_end() -> None:
@@ -639,6 +733,7 @@ def test_team_nested_runs_inherit_requester_and_deduplicate_stable_member_ids(
         ("code", 3),
         ("nested", 4),
     }
+    assert report.turn_count == 1
     assert report.run_count == 3
 
 
@@ -720,8 +815,83 @@ def test_nested_runs_without_ids_count_once_per_structural_location(
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
+    assert report.turn_count == 1
     assert report.run_count == 3
     assert report.totals.total_tokens == 6
+
+
+def test_nested_runs_inherit_only_missing_parent_timestamps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing child timestamp inherits its parent, while an explicit child timestamp wins."""
+    source = _source(scope="team", source_agent_id=None, allowed_teams=frozenset({"engineering"}))
+    root = _raw_run(
+        agent_id=None,
+        team_id="engineering",
+        created_at="2026-01-02T12:00:00Z",
+        metrics={},
+        nested=[
+            _raw_run(
+                agent_id="code",
+                requester_id=None,
+                user_id=None,
+                created_at=None,
+                metrics={"total_tokens": 3},
+            ),
+            _raw_run(
+                agent_id="other",
+                requester_id=None,
+                user_id=None,
+                created_at="2026-01-03T12:00:00Z",
+                metrics={"total_tokens": 4},
+            ),
+        ],
+    )
+    _wire_admin(monkeypatch, (_row(root, entity_id="engineering", entity_kind="team", source=source),))
+
+    report = collect_admin_usage(
+        config=_config(team_names=("engineering",)),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 4, tzinfo=UTC),
+    )
+
+    assert report.turn_count == 1
+    assert report.run_count == 2
+    assert report.totals.total_tokens == 7
+    assert [(row.key, row.totals.total_tokens) for row in report.breakdown] == [
+        ("2026-01-03", 4),
+        ("2026-01-02", 3),
+    ]
+
+
+def test_admitted_empty_metric_turn_is_not_a_metered_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admitted retained turn without any token or cost field is not metered."""
+    _wire_admin(monkeypatch, (_row(_raw_run(metrics={}), session_metrics={}),))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.turn_count == 1
+    assert report.run_count == 0
+    assert report.cost.to_dict() == {"known_cost": "0", "runs_with_cost": 0, "runs_without_cost": 0}
+    assert report.coverage.retained_runs == 0
 
 
 def test_coverage_compaction_and_source_diagnostics_are_bounded(
@@ -749,6 +919,91 @@ def test_coverage_compaction_and_source_diagnostics_are_bounded(
     assert report.coverage.status == "partial"
     assert report.coverage.compacted_sessions == 1
     assert report.coverage.partial_sources == 1
+
+
+@pytest.mark.parametrize(
+    ("raw_run", "expected_turn_count", "expected_malformed", "expected_missing_timestamp"),
+    [
+        (_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 10}), 0, 1, 0),
+        (_raw_run(created_at=None, metrics={"total_tokens": 10}), 0, 0, 1),
+        (_raw_run(metrics={"total_tokens": "invalid"}), 1, 1, 0),
+    ],
+)
+def test_coverage_exclusions_are_partial_without_fabricating_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_run: dict[str, object],
+    expected_turn_count: int,
+    expected_malformed: int,
+    expected_missing_timestamp: int,
+) -> None:
+    """Excluded retained records cannot prove complete history or a compaction gap."""
+    source = _source(source_agent_id=None) if raw_run.get("agent_id") is None else _source()
+    _wire_admin(monkeypatch, (_row(raw_run, source=source, session_metrics={"total_tokens": 10}),))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.coverage.status == "partial"
+    assert report.turn_count == expected_turn_count
+    assert report.coverage.compacted_sessions == 0
+    assert report.coverage.skipped_runs == 1
+    assert report.coverage.malformed_runs == expected_malformed
+    assert report.coverage.missing_timestamp_runs == expected_missing_timestamp
+
+
+def test_oversized_numeric_metric_skips_one_source_and_continues_others(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A byte-bounded but conversion-hostile metric cannot abort independent sources."""
+    oversized = replace(_source(), path_label="agents/code/sessions/code.db")
+    valid = replace(_source(source_agent_id="other"), path_label="agents/other/sessions/other.db")
+    rows = {
+        oversized.path_label: _row(
+            _raw_run(metrics={"total_tokens": "9" * 5_000}),
+            source=oversized,
+            session_metrics={"total_tokens": 0},
+        ),
+        valid.path_label: _row(
+            _raw_run(agent_id="other", metrics={"total_tokens": 7}),
+            source=valid,
+            session_metrics={"total_tokens": 7},
+        ),
+    }
+    monkeypatch.setattr(
+        "mindroom.usage_stats.discover_admin_usage_sources",
+        lambda **_: (oversized, valid),
+    )
+    monkeypatch.setattr(
+        "mindroom.usage_stats.iter_usage_storage_rows",
+        lambda source: iter((rows[source.path_label],)),
+    )
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.totals.total_tokens == 7
+    assert report.run_count == 1
+    assert report.coverage.scanned_sources == 2
+    assert report.coverage.malformed_runs == 1
+    assert report.coverage.status == "partial"
 
 
 def test_self_coverage_uses_private_cumulative_evidence_but_keeps_shared_evidence_unknown(
@@ -813,7 +1068,7 @@ def test_self_coverage_distinguishes_unavailable_sources_from_absent_history(
         lambda _: iter((UsageStorageDiagnostic(path_label="safe", status="busy", detail="database busy"),)),
     )
 
-    with pytest.raises(ValueError, match="Usage source unavailable"):
+    with pytest.raises(UsageStatsSourceUnavailableError, match="Usage source unavailable"):
         collect_self_usage(
             agent_name="code",
             requester_id="@alice:example.test",
@@ -929,6 +1184,7 @@ def test_top_level_stable_run_ids_deduplicate_without_collapsing_anonymous_locat
         requester_ids=None,
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
+    assert report.turn_count == 1
     assert report.run_count == 1
 
 

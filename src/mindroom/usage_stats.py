@@ -38,6 +38,8 @@ __all__ = [
     "UsageBreakdownRow",
     "UsageCoverage",
     "UsageReport",
+    "UsageStatsSourceUnavailableError",
+    "UsageStatsValidationError",
     "collect_admin_usage",
     "collect_self_usage",
     "parse_usage_window",
@@ -62,6 +64,17 @@ _TOKEN_FIELDS = (
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _TIMESTAMP_OFFSET = re.compile(r".*(?:Z|[+-]\d{2}:\d{2})\Z")
 _MAX_BREAKDOWN_ROWS = 200
+_MAX_PERSISTED_NUMERIC_TEXT_LENGTH = 128
+_SELF_GROUPS = frozenset({"day", "model"})
+_ADMIN_GROUPS = frozenset({"day", "entity", "model", "requester"})
+
+
+class UsageStatsValidationError(ValueError):
+    """A usage query contains an unsupported caller-controlled value."""
+
+
+class UsageStatsSourceUnavailableError(RuntimeError):
+    """No expected retained-history source could be read safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,15 +251,12 @@ class _DirectRunEntity:
 class _UsageMetricRecord:
     """One normalized retained metric contribution with no raw persisted payload."""
 
-    entity_kind: Literal["agent", "team"]
     entity_id: str
     requester_id: str | None
     created_at: datetime
     model_type: str
     provider: str
     model_id: str
-    run_id: str | None
-    structural_key: str
     status: str
     totals: TokenTotals
     cost: Decimal | None
@@ -293,13 +303,17 @@ class _CollectionState:
     row_history_totals: dict[tuple[str, str], TokenTotals]
     row_session_metrics: dict[tuple[str, str], TokenTotals | None]
     row_comparison_allowed: dict[tuple[str, str], bool]
+    row_history_complete: dict[tuple[str, str], bool]
+    top_level_turn_ids: set[tuple[str, str, str]]
     scanned_sources: int = 0
     scanned_sessions: int = 0
     retained_runs: int = 0
+    turn_count: int = 0
     skipped_runs: int = 0
     malformed_runs: int = 0
     missing_requester_runs: int = 0
     missing_timestamp_runs: int = 0
+    coverage_exclusions: int = 0
 
 
 def parse_usage_window(
@@ -316,7 +330,7 @@ def parse_usage_window(
     parsed_end = _parse_boundary(end, timezone=timezone, is_end=True) if end is not None else normalized_as_of
     if parsed_start is not None and parsed_start >= parsed_end:
         msg = "start must be before end"
-        raise ValueError(msg)
+        raise UsageStatsValidationError(msg)
     return parsed_start, parsed_end
 
 
@@ -333,6 +347,7 @@ def collect_self_usage(
     as_of: datetime | None = None,
 ) -> UsageReport:
     """Collect direct retained usage for one agent and requester without session totals."""
+    _validate_group_by(group_by, allowed=_SELF_GROUPS)
     query_as_of = _query_as_of(as_of)
     window_start, window_end = parse_usage_window(
         start=start,
@@ -381,6 +396,7 @@ def collect_admin_usage(
     as_of: datetime | None = None,
 ) -> UsageReport:
     """Collect direct retained usage from current configured agent and team sources."""
+    _validate_group_by(group_by, allowed=_ADMIN_GROUPS)
     entity_filter = _validate_entity_filter(entity_names, config)
     requester_filter = (
         frozenset(config.authorization.resolve_alias(requester_id) for requester_id in requester_ids)
@@ -445,6 +461,8 @@ def _collect(
         row_history_totals={},
         row_session_metrics={},
         row_comparison_allowed={},
+        row_history_complete={},
+        top_level_turn_ids=set(),
     )
     timezone = _usage_timezone(config.timezone)
     for source in sources:
@@ -476,7 +494,7 @@ def _collect(
             state.readable_source_labels.add(source.path_label)
     if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
         msg = "Usage source unavailable"
-        raise ValueError(msg)
+        raise UsageStatsSourceUnavailableError(msg)
     return state
 
 
@@ -500,6 +518,7 @@ def _collect_row(
     state.row_history_totals[row_key] = TokenTotals()
     state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
     state.row_comparison_allowed[row_key] = scope == "admin" or row.source.requester_isolated
+    state.row_history_complete[row_key] = True
     for index, run in enumerate(row.runs):
         _collect_run_tree(
             state=state,
@@ -507,6 +526,7 @@ def _collect_row(
             run=run,
             is_top_level=True,
             parent_requester=None,
+            parent_timestamp=None,
             structural_key=str(index),
             config=config,
             scope=scope,
@@ -528,6 +548,7 @@ def _collect_run_tree(
     run: UsageRunNode,
     is_top_level: bool,
     parent_requester: str | None,
+    parent_timestamp: datetime | None,
     structural_key: str,
     config: Config,
     scope: Literal["self", "admin"],
@@ -542,22 +563,24 @@ def _collect_run_tree(
 ) -> None:
     requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else parent_requester
     entity = _run_entity(row=row, run=run, is_top_level=is_top_level)
-    timestamp = _run_timestamp(run.created_at)
-    entity_required = scope == "self" or group_by == "entity" or entity_filter is not None
-    if (entity is None and entity_required) or timestamp is None:
+    timestamp = parent_timestamp if run.created_at is None else _run_timestamp(run.created_at)
+    if entity is None or timestamp is None:
         state.malformed_runs += entity is None
         state.missing_timestamp_runs += timestamp is None
+        state.missing_requester_runs += requester is None
         state.skipped_runs += 1
+        state.coverage_exclusions += 1
+        _mark_row_history_incomplete(state, row)
     else:
-        effective_entity = entity or _DirectRunEntity(kind="agent", entity_id="")
         _collect_normalized_run(
             state=state,
             row=row,
             run=run,
-            entity=effective_entity,
+            entity=entity,
             requester=requester,
             timestamp=timestamp,
             structural_key=structural_key,
+            is_top_level=is_top_level,
             scope=scope,
             group_by=group_by,
             timezone=timezone,
@@ -575,6 +598,7 @@ def _collect_run_tree(
             run=child,
             is_top_level=False,
             parent_requester=requester,
+            parent_timestamp=timestamp,
             structural_key=f"{structural_key}.{index}",
             config=config,
             scope=scope,
@@ -598,6 +622,7 @@ def _collect_normalized_run(
     requester: str | None,
     timestamp: datetime,
     structural_key: str,
+    is_top_level: bool,
     scope: Literal["self", "admin"],
     group_by: _UsageGroupBy,
     timezone: ZoneInfo,
@@ -608,55 +633,9 @@ def _collect_normalized_run(
     entity_filter: frozenset[str] | None,
     requester_filter: frozenset[str] | None,
 ) -> None:
-    dedup_key = (entity.kind, entity.entity_id, run.run_id) if run.run_id else None
-    structural_dedup = (row.source.path_label, row.row_key, structural_key)
-    if run.run_id is None and structural_dedup in state.structural_run_ids:
+    if not _admit_structural_run(state=state, row=row, run=run, structural_key=structural_key):
         return
-    if run.run_id is None:
-        state.structural_run_ids.add(structural_dedup)
-    contributions = _run_contributions(run)
-    if contributions is None:
-        state.malformed_runs += 1
-        state.skipped_runs += 1
-        return
-    records = tuple(
-        _UsageMetricRecord(
-            entity_kind=entity.kind,
-            entity_id=entity.entity_id,
-            requester_id=requester,
-            created_at=timestamp,
-            model_type=contribution.model_type,
-            provider=contribution.provider,
-            model_id=contribution.model_id,
-            run_id=run.run_id,
-            structural_key=structural_key,
-            status=run.status,
-            totals=contribution.totals,
-            cost=contribution.cost,
-        )
-        for contribution in contributions
-    )
-    row_key = (row.source.path_label, row.row_key)
-    if run.run_id is None:
-        state.row_history_totals[row_key] = _add_totals(
-            state.row_history_totals[row_key],
-            _records_totals(records),
-        )
-    else:
-        history_key = (*row_key, entity.kind, entity.entity_id, run.run_id)
-        if history_key not in state.history_stable_run_ids:
-            state.history_stable_run_ids.add(history_key)
-            state.row_history_totals[row_key] = _add_totals(
-                state.row_history_totals[row_key],
-                _records_totals(records),
-            )
-    if dedup_key is not None and dedup_key in state.stable_run_ids:
-        return
-    if dedup_key is not None:
-        state.stable_run_ids.add(dedup_key)
-    if requester is None:
-        state.missing_requester_runs += 1
-    if not _accept_run(
+    accepted = _accept_run(
         entity=entity,
         requester=requester,
         timestamp=timestamp,
@@ -667,10 +646,125 @@ def _collect_normalized_run(
         requester_filter=requester_filter,
         window_start=window_start,
         window_end=window_end,
-    ):
+    )
+    if is_top_level and accepted:
+        _count_top_level_turn(
+            state=state,
+            row=row,
+            run=run,
+            entity=entity,
+            structural_key=structural_key,
+        )
+    contributions = _run_contributions(run)
+    if contributions is None:
+        state.malformed_runs += 1
+        state.skipped_runs += 1
+        state.coverage_exclusions += 1
+        _mark_row_history_incomplete(state, row)
+        return
+    records = tuple(
+        _UsageMetricRecord(
+            entity_id=entity.entity_id,
+            requester_id=requester,
+            created_at=timestamp,
+            model_type=contribution.model_type,
+            provider=contribution.provider,
+            model_id=contribution.model_id,
+            status=run.status,
+            totals=contribution.totals,
+            cost=contribution.cost,
+        )
+        for contribution in contributions
+    )
+    _record_row_history(state=state, row=row, run=run, entity=entity, records=records)
+    if not _admit_stable_run(state=state, run=run, entity=entity):
+        return
+    if requester is None:
+        state.missing_requester_runs += 1
+    if not accepted:
+        if requester is None and (scope == "self" or requester_filter is not None):
+            state.coverage_exclusions += 1
+            _mark_row_history_incomplete(state, row)
+        state.skipped_runs += 1
+        return
+    if not records:
         state.skipped_runs += 1
         return
     _aggregate_records(state=state, row=row, records=records, group_by=group_by, timezone=timezone)
+
+
+def _admit_structural_run(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    structural_key: str,
+) -> bool:
+    if run.run_id is not None:
+        return True
+    identity = (row.source.path_label, row.row_key, structural_key)
+    if identity in state.structural_run_ids:
+        return False
+    state.structural_run_ids.add(identity)
+    return True
+
+
+def _record_row_history(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    entity: _DirectRunEntity,
+    records: tuple[_UsageMetricRecord, ...],
+) -> None:
+    row_key = (row.source.path_label, row.row_key)
+    if run.run_id is not None:
+        history_key = (*row_key, entity.kind, entity.entity_id, run.run_id)
+        if history_key in state.history_stable_run_ids:
+            return
+        state.history_stable_run_ids.add(history_key)
+    state.row_history_totals[row_key] = _add_totals(
+        state.row_history_totals[row_key],
+        _records_totals(records),
+    )
+
+
+def _admit_stable_run(
+    *,
+    state: _CollectionState,
+    run: UsageRunNode,
+    entity: _DirectRunEntity,
+) -> bool:
+    if run.run_id is None:
+        return True
+    identity = (entity.kind, entity.entity_id, run.run_id)
+    if identity in state.stable_run_ids:
+        return False
+    state.stable_run_ids.add(identity)
+    return True
+
+
+def _count_top_level_turn(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    entity: _DirectRunEntity,
+    structural_key: str,
+) -> None:
+    identity = (
+        (entity.kind, entity.entity_id, run.run_id)
+        if run.run_id is not None
+        else (row.source.path_label, row.row_key, structural_key)
+    )
+    if identity in state.top_level_turn_ids:
+        return
+    state.top_level_turn_ids.add(identity)
+    state.turn_count += 1
+
+
+def _mark_row_history_incomplete(state: _CollectionState, row: UsageSessionRow) -> None:
+    state.row_history_complete[(row.source.path_label, row.row_key)] = False
 
 
 def _aggregate_records(
@@ -794,18 +888,25 @@ def _run_entity(  # noqa: PLR0911
 def _run_contributions(run: UsageRunNode) -> tuple[_MetricContribution, ...] | None:
     model_metrics = run.model_metrics
     if model_metrics:
-        contributions = tuple(_model_metric_contribution(metric) for metric in model_metrics)
-    else:
-        contribution = _metric_contribution(
-            model_type="model",
-            provider=run.model_provider or "unknown",
-            model_id=run.model_id or "unknown",
-            metrics=run.metrics,
-        )
-        contributions = (contribution,)
-    if any(contribution is None for contribution in contributions):
-        return None
-    return tuple(contribution for contribution in contributions if contribution is not None)
+        metered_model_metrics = tuple(metric for metric in model_metrics if _has_actual_metric(metric.metrics))
+        contributions = tuple(_model_metric_contribution(metric) for metric in metered_model_metrics)
+        if any(contribution is None for contribution in contributions):
+            return None
+        if contributions:
+            return tuple(contribution for contribution in contributions if contribution is not None)
+    if not _has_actual_metric(run.metrics):
+        return ()
+    contribution = _metric_contribution(
+        model_type="model",
+        provider=run.model_provider or "unknown",
+        model_id=run.model_id or "unknown",
+        metrics=run.metrics,
+    )
+    return None if contribution is None else (contribution,)
+
+
+def _has_actual_metric(metrics: Mapping[str, object]) -> bool:
+    return any(metrics.get(field) is not None for field in (*_TOKEN_FIELDS, "cost"))
 
 
 def _model_metric_contribution(metric: UsageModelMetric) -> _MetricContribution | None:
@@ -851,7 +952,7 @@ def _token_value(value: object) -> int | None:
         return value if value >= 0 else None
     if isinstance(value, float):
         return int(value) if math.isfinite(value) and value >= 0 and value.is_integer() else None
-    if isinstance(value, str) and value.isdecimal():
+    if isinstance(value, str) and len(value) <= _MAX_PERSISTED_NUMERIC_TEXT_LENGTH and value.isdecimal():
         return int(value)
     return None
 
@@ -860,6 +961,8 @@ def _cost_value(value: object) -> Decimal | None:
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, str) and len(value) > _MAX_PERSISTED_NUMERIC_TEXT_LENGTH:
         return None
     try:
         cost = Decimal(str(value))
@@ -907,7 +1010,7 @@ def _report(
     coverage_status: Literal["complete_retained", "partial", "unknown"]
     partial_sources = len(state.partial_source_labels)
     compacted_sessions, comparison_unknown = _coverage_comparison(state)
-    if partial_sources or compacted_sessions:
+    if partial_sources or compacted_sessions or state.coverage_exclusions:
         coverage_status = "partial"
     elif comparison_unknown or not state.scanned_sources:
         coverage_status = "unknown"
@@ -921,7 +1024,7 @@ def _report(
         as_of=_format_timestamp(as_of),
         totals=state.aggregate.totals,
         cost=state.aggregate.cost_coverage(),
-        turn_count=state.aggregate.run_count,
+        turn_count=state.turn_count,
         run_count=state.aggregate.run_count,
         session_count=len(state.included_sessions),
         first_observed_at=_format_timestamp(min(state.observed_at)) if state.observed_at else None,
@@ -950,6 +1053,9 @@ def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
     compacted_sessions = 0
     unknown = not state.row_session_metrics
     for row_key, retained in state.row_history_totals.items():
+        if not state.row_history_complete[row_key]:
+            unknown = True
+            continue
         if not state.row_comparison_allowed[row_key]:
             unknown = True
             continue
@@ -959,13 +1065,9 @@ def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
             continue
         if _totals_dominate(cumulative, retained):
             compacted_sessions += 1
-        elif not _totals_equal(cumulative, retained):
+        elif cumulative != retained:
             unknown = True
     return compacted_sessions, unknown
-
-
-def _totals_equal(left: TokenTotals, right: TokenTotals) -> bool:
-    return left == right
 
 
 def _totals_dominate(left: TokenTotals, right: TokenTotals) -> bool:
@@ -984,8 +1086,14 @@ def _validate_entity_filter(entity_names: tuple[str, ...] | None, config: Config
     unknown = sorted(set(entity_names) - known_entities)
     if unknown:
         msg = "Unknown entity filter"
-        raise ValueError(msg)
+        raise UsageStatsValidationError(msg)
     return frozenset(entity_names)
+
+
+def _validate_group_by(group_by: object, *, allowed: frozenset[str]) -> None:
+    if group_by not in allowed:
+        msg = "Unsupported usage statistics group_by"
+        raise UsageStatsValidationError(msg)
 
 
 def _query_as_of(as_of: datetime | None) -> datetime:
@@ -997,7 +1105,7 @@ def _usage_timezone(timezone_name: str) -> ZoneInfo:
         return ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError as error:
         msg = "Unknown timezone"
-        raise ValueError(msg) from error
+        raise UsageStatsValidationError(msg) from error
 
 
 def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime:
@@ -1006,18 +1114,18 @@ def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime
             local_date = date.fromisoformat(value)
         except ValueError as error:
             msg = "Invalid date"
-            raise ValueError(msg) from error
+            raise UsageStatsValidationError(msg) from error
         if is_end:
             local_date += timedelta(days=1)
         return datetime.combine(local_date, datetime.min.time(), tzinfo=timezone).astimezone(UTC)
     if _TIMESTAMP_OFFSET.fullmatch(value) is None:
         msg = "Timestamp must include Z or an explicit offset"
-        raise ValueError(msg)
+        raise UsageStatsValidationError(msg)
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
         msg = "Invalid timestamp"
-        raise ValueError(msg) from error
+        raise UsageStatsValidationError(msg) from error
     return _as_utc(parsed, error="Timestamp must include Z or an explicit offset")
 
 
@@ -1045,7 +1153,7 @@ def _run_timestamp(value: str | None) -> datetime | None:  # noqa: PLR0911
 
 def _as_utc(value: datetime, *, error: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(error)
+        raise UsageStatsValidationError(error)
     return value.astimezone(UTC)
 
 

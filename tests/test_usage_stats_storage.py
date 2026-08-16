@@ -236,7 +236,6 @@ def test_reader_extracts_a_field_selective_immutable_agno_session_row(tmp_path: 
     assert isinstance(row, UsageSessionRow)
     assert row.entity_id == "agent-code"
     assert row.entity_kind == "agent"
-    assert row.session_user_id == "@alice:example.test"
     assert row.session_metrics == {"total_tokens": 20}
     assert row.runs[0].metrics == {
         "input_tokens": 12,
@@ -340,7 +339,7 @@ def test_read_only_connection_rejects_insert(tmp_path: Path) -> None:
     database = tmp_path / "code.db"
     _create_database(database)
 
-    with _open_read_only_database(database) as connection, pytest.raises(sqlite3.OperationalError):
+    with _open_read_only_database(_source(database)) as connection, pytest.raises(sqlite3.OperationalError):
         connection.execute("INSERT INTO code_sessions VALUES ('other', 'agent', NULL, NULL, NULL, NULL, NULL, 1, 1)")
 
 
@@ -615,6 +614,34 @@ def test_reader_uses_only_the_expected_session_table(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("table", "accepted"),
+    [("123_sessions", True), ("bad-name_sessions", False), ("semi;drop_sessions", False)],
+)
+def test_reader_identifier_validation_matches_configured_entity_names(
+    tmp_path: Path,
+    table: str,
+    accepted: bool,
+) -> None:
+    """Numeric-leading configured names work without admitting unsafe SQL identifiers."""
+    database = tmp_path / "identifier.db"
+    _create_database(database, table=table)
+
+    result = _read(_source(database, table=table))
+
+    if accepted:
+        assert len(result) == 1
+        assert isinstance(result[0], UsageSessionRow)
+    else:
+        assert result == [
+            UsageStorageDiagnostic(
+                path_label="identifier.db",
+                status="unsupported_schema",
+                detail="session table unavailable",
+            ),
+        ]
+
+
 def test_discovery_self_uses_exact_runtime_database_and_team_sources(tmp_path: Path) -> None:
     """Self discovery cannot enumerate another requester's private agent database."""
     config = _discovery_config()
@@ -648,6 +675,63 @@ def test_discovery_self_uses_exact_runtime_database_and_team_sources(tmp_path: P
     assert private_source.path == alice_database.resolve()
     assert all(source.path != bob_database.resolve() for source in sources)
     assert all(source.path.is_relative_to(session_root.resolve()) for source in sources)
+
+
+def test_team_discovery_never_opens_sqlite_or_creates_wal_sidecars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery returns structural candidates without crossing the preflighted reader boundary."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    session_root = runtime_paths.config_dir / "dedicated-sessions"
+    database = session_root / "teams" / "wal_team" / "sessions" / "wal_team.db"
+    _create_discovery_database(database, table="wal_team_sessions")
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA journal_mode=wal").fetchone()[0] == "wal"
+    finally:
+        connection.close()
+    database.with_name(f"{database.name}-wal").unlink(missing_ok=True)
+    database.with_name(f"{database.name}-shm").unlink(missing_ok=True)
+    before = _snapshot_database_entries(database)
+
+    def fail_if_opened(_source: UsageStorageSource) -> Iterator[sqlite3.Connection]:
+        message = "discovery opened SQLite"
+        raise AssertionError(message)
+
+    def fail_if_connected(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        message = "discovery connected to SQLite"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(usage_stats_storage, "_open_read_only_database", fail_if_opened)
+    monkeypatch.setattr(usage_stats_storage.sqlite3, "connect", fail_if_connected)
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert "teams/wal_team/sessions/wal_team.db" in _source_labels(sources)
+    assert _snapshot_database_entries(database) == before
+
+
+def test_unreadable_structural_team_candidate_reaches_reader_diagnostics(tmp_path: Path) -> None:
+    """A corrupt team source is discovered so the reader can report bounded partial coverage."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    session_root = runtime_paths.config_dir / "dedicated-sessions"
+    database = session_root / "teams" / "corrupt_team" / "sessions" / "corrupt_team.db"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"not a sqlite database")
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+    source = next(source for source in sources if source.path == database.resolve())
+
+    assert _read(source) == [
+        UsageStorageDiagnostic(
+            path_label="teams/corrupt_team/sessions/corrupt_team.db",
+            status="corrupt",
+            detail="database header invalid",
+        ),
+    ]
 
 
 def test_discovery_admin_uses_fixed_safe_layouts_and_current_config_attribution(tmp_path: Path) -> None:
@@ -698,6 +782,7 @@ def test_discovery_admin_uses_fixed_safe_layouts_and_current_config_attribution(
         bob_database.resolve().relative_to(session_root.resolve()).as_posix(),
         "teams/ad_hoc_store/sessions/ad_hoc_store.db",
         "teams/configured_store/sessions/configured_store.db",
+        "teams/wrong_table/sessions/wrong_table.db",
     ]
     assert all(not source.path.is_symlink() for source in sources)
     assert all(source.path.is_relative_to(session_root.resolve()) for source in sources)

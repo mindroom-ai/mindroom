@@ -18,7 +18,14 @@ from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
-from mindroom.usage_stats import CostCoverage, TokenTotals, UsageBreakdownRow, UsageCoverage, UsageReport
+from mindroom.usage_stats import (
+    CostCoverage,
+    TokenTotals,
+    UsageBreakdownRow,
+    UsageCoverage,
+    UsageReport,
+    UsageStatsSourceUnavailableError,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -197,6 +204,7 @@ async def test_get_my_usage_rejects_missing_context_or_requester_before_identity
     payload = json.loads(await UsageStatsTools().get_my_usage())
 
     assert payload == {
+        "code": "context_unavailable",
         "message": "Usage statistics are unavailable without an active requester context.",
         "status": "error",
         "tool": "usage_stats",
@@ -315,6 +323,7 @@ async def test_get_all_usage_rejects_non_global_requester_before_thread_or_colle
     payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
 
     assert payload == {
+        "code": "authorization_error",
         "message": "Usage statistics admin access is not authorized for this requester.",
         "status": "error",
         "tool": "usage_stats",
@@ -399,3 +408,74 @@ def test_usage_stats_agent_override_reaches_constructor(tmp_path: Path) -> None:
 
     assert isinstance(toolkit, UsageStatsTools)
     assert _registered_function_names(toolkit) == {"get_my_usage", "get_all_usage"}
+
+
+@pytest.mark.asyncio
+async def test_public_group_by_validation_returns_stable_code_before_context_or_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported runtime literal cannot silently become a day breakdown or touch context."""
+    context = Mock()
+    collect_self = Mock()
+    collect_admin = Mock()
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect_self)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect_admin)
+
+    self_payload = json.loads(await UsageStatsTools().get_my_usage(group_by="entity"))  # type: ignore[arg-type]
+    admin_payload = json.loads(
+        await UsageStatsTools(admin_scope=True).get_all_usage(group_by="week"),  # type: ignore[arg-type]
+    )
+
+    expected = {
+        "code": "validation_error",
+        "message": "Unsupported usage statistics grouping.",
+        "status": "error",
+        "tool": "usage_stats",
+    }
+    assert self_payload == expected
+    assert admin_payload == expected
+    context.assert_not_called()
+    collect_self.assert_not_called()
+    collect_admin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_source_unavailable_error_has_stable_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expected unreadable self source maps to its distinct aggregate-only error."""
+    context = _context(tmp_path)
+    collect = Mock(side_effect=UsageStatsSourceUnavailableError("private path must not leak"))
+    to_thread = AsyncMock(side_effect=lambda function, **kwargs: function(**kwargs))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.asyncio.to_thread", to_thread)
+
+    payload = json.loads(await UsageStatsTools().get_my_usage())
+
+    assert payload == {
+        "code": "source_unavailable",
+        "message": "Usage statistics could not read the expected retained-history source.",
+        "status": "error",
+        "tool": "usage_stats",
+    }
+    assert "private path" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_collection_error_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programming defects must reach runtime logging instead of becoming fabricated zero usage."""
+    context = _context(tmp_path)
+    collect = Mock(side_effect=RuntimeError("programming defect"))
+    to_thread = AsyncMock(side_effect=lambda function, **kwargs: function(**kwargs))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.asyncio.to_thread", to_thread)
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        await UsageStatsTools().get_my_usage()

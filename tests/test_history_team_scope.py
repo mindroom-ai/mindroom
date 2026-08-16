@@ -8,13 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.models.metrics import Metrics
 from agno.run import RunContext
+from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 
+from mindroom.agent_storage import get_team_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -417,6 +420,82 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.add_history_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
+
+
+def test_create_team_instance_persists_member_responses_through_agno(tmp_path: Path) -> None:
+    """MindRoom's real Team wiring retains nested member metrics across Agno serialization."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha")},
+            teams={
+                "solo": TeamConfig(
+                    display_name="Solo",
+                    role="Persistence test team",
+                    agents=["alpha"],
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    alpha = _agent(agent_id="alpha", name="Alpha")
+
+    with (
+        open_bound_scope_session_context(
+            agents=[alpha],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="solo",
+        ) as scope_context,
+        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
+    ):
+        assert scope_context is not None
+        team = _create_team_instance(
+            agents=[alpha],
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_display_name="Solo",
+            scope_context=scope_context,
+            execution_identity=None,
+            model_name="default",
+            configured_team_name="solo",
+        )
+        member = RunOutput(
+            run_id="member-run",
+            session_id="session-1",
+            agent_id="alpha",
+            agent_name="Alpha",
+        )
+        member.metrics = Metrics(input_tokens=5, output_tokens=2, total_tokens=7)
+        team.save_session(
+            TeamSession(
+                session_id="session-1",
+                team_id=team.id,
+                created_at=1_786_921_090,
+                runs=[
+                    TeamRunOutput(
+                        run_id="team-run",
+                        session_id="session-1",
+                        team_id=team.id,
+                        member_responses=[member],
+                    ),
+                ],
+            ),
+        )
+
+        persisted = get_team_session(scope_context.storage, "session-1")
+
+    assert persisted is not None
+    assert persisted.runs is not None
+    persisted_run = persisted.runs[0]
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert len(persisted_run.member_responses) == 1
+    assert persisted_run.member_responses[0].metrics.total_tokens == 7
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

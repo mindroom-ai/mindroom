@@ -13,7 +13,12 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage
+from mindroom.usage_stats import (
+    UsageStatsSourceUnavailableError,
+    UsageStatsValidationError,
+    collect_admin_usage,
+    collect_self_usage,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,12 +39,16 @@ class UsageStatsTools(Toolkit):
         return custom_tool_payload("usage_stats", status, **fields)
 
     @classmethod
+    def _error(cls, code: str, message: str) -> str:
+        return cls._payload("error", code=code, message=message)
+
+    @classmethod
     def _context_or_error(cls) -> ToolRuntimeContext | str:
         context = get_tool_runtime_context()
         if context is None:
-            return cls._payload(
-                "error",
-                message="Usage statistics are unavailable without an active requester context.",
+            return cls._error(
+                "context_unavailable",
+                "Usage statistics are unavailable without an active requester context.",
             )
         if (
             not context.agent_name
@@ -47,15 +56,43 @@ class UsageStatsTools(Toolkit):
             or context.config is None
             or context.runtime_paths is None
         ):
-            return cls._payload(
-                "error",
-                message="Usage statistics are unavailable without an active requester context.",
+            return cls._error(
+                "context_unavailable",
+                "Usage statistics are unavailable without an active requester context.",
             )
         return context
 
     @classmethod
-    def _collection_error(cls) -> str:
-        return cls._payload("error", message="Usage statistics could not be retrieved at this time.")
+    def _validation_error(cls, message: str = "Unsupported usage statistics grouping.") -> str:
+        return cls._error("validation_error", message)
+
+    @classmethod
+    def _source_error(cls) -> str:
+        return cls._error(
+            "source_unavailable",
+            "Usage statistics could not read the expected retained-history source.",
+        )
+
+    def _admin_context_or_error(self) -> ToolRuntimeContext | str:
+        if not self._admin_scope:
+            return self._error(
+                "authorization_error",
+                "Usage statistics admin scope is not enabled for this tool.",
+            )
+        resolved = self._context_or_error()
+        if isinstance(resolved, str):
+            return resolved
+        canonical_requester = resolved.config.authorization.resolve_alias(resolved.requester_id)
+        global_users = {
+            resolved.config.authorization.resolve_alias(user_id)
+            for user_id in resolved.config.authorization.global_users
+        }
+        if canonical_requester not in global_users:
+            return self._error(
+                "authorization_error",
+                "Usage statistics admin access is not authorized for this requester.",
+            )
+        return resolved
 
     async def get_my_usage(
         self,
@@ -64,6 +101,8 @@ class UsageStatsTools(Toolkit):
         group_by: Literal["day", "model"] = "day",
     ) -> str:
         """Return retained usage for the current agent and canonical requester."""
+        if group_by not in {"day", "model"}:
+            return self._validation_error()
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
@@ -82,8 +121,10 @@ class UsageStatsTools(Toolkit):
                 end=end,
                 group_by=group_by,
             )
-        except Exception:
-            return self._collection_error()
+        except UsageStatsValidationError as error:
+            return self._validation_error(str(error))
+        except UsageStatsSourceUnavailableError:
+            return self._source_error()
         return self._payload("ok", **report.to_dict())
 
     async def get_all_usage(
@@ -95,21 +136,12 @@ class UsageStatsTools(Toolkit):
         requester_ids: list[str] | None = None,
     ) -> str:
         """Return retained usage for all sources when both admin gates grant access."""
-        if not self._admin_scope:
-            return self._payload("error", message="Usage statistics admin scope is not enabled for this tool.")
-        resolved = self._context_or_error()
+        if group_by not in {"day", "entity", "model", "requester"}:
+            return self._validation_error()
+        resolved = self._admin_context_or_error()
         if isinstance(resolved, str):
             return resolved
         context = resolved
-        canonical_requester = context.config.authorization.resolve_alias(context.requester_id)
-        global_users = {
-            context.config.authorization.resolve_alias(user_id) for user_id in context.config.authorization.global_users
-        }
-        if canonical_requester not in global_users:
-            return self._payload(
-                "error",
-                message="Usage statistics admin access is not authorized for this requester.",
-            )
         try:
             report = await asyncio.to_thread(
                 collect_admin_usage,
@@ -121,6 +153,8 @@ class UsageStatsTools(Toolkit):
                 entity_names=tuple(entity_names) if entity_names is not None else None,
                 requester_ids=tuple(requester_ids) if requester_ids is not None else None,
             )
-        except Exception:
-            return self._collection_error()
+        except UsageStatsValidationError as error:
+            return self._validation_error(str(error))
+        except UsageStatsSourceUnavailableError:
+            return self._source_error()
         return self._payload("ok", **report.to_dict())

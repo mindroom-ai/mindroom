@@ -53,7 +53,7 @@ _NESTED_RESPONSE_DEPTH_LIMIT = "nested response depth exceeds limit"
 _RUN_NODE_COUNT_LIMIT = "run node count exceeds limit"
 _MODEL_METRIC_COUNT_LIMIT = "model metric count exceeds limit"
 
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
 _REQUIRED_SESSION_COLUMNS = frozenset(
     {
@@ -133,7 +133,6 @@ class UsageSessionRow:
     entity_id: str
     entity_kind: Literal["agent", "team"]
     row_key: str
-    session_user_id: str | None
     session_metrics: Mapping[str, UsageMetricValue] | None
     runs: tuple[UsageRunNode, ...]
 
@@ -151,9 +150,21 @@ class _ResourceLimitError(ValueError):
     """A persisted value exceeded a reader allocation limit."""
 
 
+class _DatabasePreflightError(OSError):
+    """A source failed the non-mutating preflight required before SQLite opens."""
+
+    def __init__(self, diagnostic: UsageStorageDiagnostic) -> None:
+        super().__init__(diagnostic.detail)
+        self.diagnostic = diagnostic
+
+
 @contextmanager
-def _open_read_only_database(path: Path) -> Iterator[sqlite3.Connection]:
+def _open_read_only_database(source: UsageStorageSource) -> Iterator[sqlite3.Connection]:
     """Open an existing SQLite database with no write-capable connection path."""
+    diagnostic = _preflight_database(source)
+    if diagnostic is not None:
+        raise _DatabasePreflightError(diagnostic)
+    path = source.path
     connection = sqlite3.connect(
         f"{path.resolve().as_uri()}?mode=ro&cache=private",
         uri=True,
@@ -300,8 +311,6 @@ def _team_usage_sources(session_root: Path, config: Config) -> list[UsageStorage
         if candidate is None or not candidate.is_file():
             continue
         expected_table = f"{storage_name}_sessions"
-        if not _session_table_is_supported(candidate, expected_table):
-            continue
         sources.append(
             _usage_source(
                 path=candidate,
@@ -353,20 +362,6 @@ def _self_source_path(
     return candidate
 
 
-def _session_table_is_supported(path: Path, expected_table: str) -> bool:
-    """Confirm a team candidate has the exact supported session table without opening it writable."""
-    try:
-        with _open_read_only_database(path) as connection:
-            table_names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            if expected_table not in table_names:
-                return False
-            quoted_table = _quote_identifier(expected_table)
-            column_names = {row[1] for row in connection.execute(f"PRAGMA table_info({quoted_table})")}
-    except (OSError, sqlite3.Error):
-        return False
-    return _REQUIRED_SESSION_COLUMNS.issubset(column_names)
-
-
 def _usage_source(
     *,
     path: Path,
@@ -395,13 +390,8 @@ def _sorted_sources(sources: list[UsageStorageSource]) -> tuple[UsageStorageSour
 
 def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Yield field-selective session rows or source-safe diagnostics one at a time."""
-    header_diagnostic = _preflight_database(source)
-    if header_diagnostic is not None:
-        yield header_diagnostic
-        return
-
     try:
-        with _open_read_only_database(source.path) as connection:
+        with _open_read_only_database(source) as connection:
             table_diagnostic = _validate_session_table(connection, source)
             if table_diagnostic is not None:
                 yield table_diagnostic
@@ -410,7 +400,7 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
             table_name = _quote_identifier(source.expected_session_table)
             query = """
                 SELECT
-                    session_id, session_type, agent_id, team_id, user_id,
+                    session_id, session_type, agent_id, team_id,
                     CASE WHEN runs IS NULL OR length(CAST(runs AS BLOB)) <= ? THEN runs END AS runs,
                     CASE WHEN session_data IS NULL OR length(CAST(session_data AS BLOB)) <= ?
                         THEN session_data
@@ -439,6 +429,8 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
                     yield _diagnostic(source, "resource_limit", str(error))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     yield _diagnostic(source, "partial", "malformed session row")
+    except _DatabasePreflightError as error:
+        yield error.diagnostic
     except sqlite3.Error as error:
         yield _sqlite_diagnostic(source, error)
     except OSError:
@@ -514,7 +506,6 @@ def _extract_session_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageS
         entity_id=entity_id,
         entity_kind=entity_kind,
         row_key=row_key,
-        session_user_id=_optional_string(row["user_id"]),
         session_metrics=session_metrics,
         runs=runs,
     )
