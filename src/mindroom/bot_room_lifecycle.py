@@ -93,12 +93,6 @@ class BotRoomLifecycle:
             locks[room_id] = lock
         return lock
 
-    def _client_has_joined_room(self, room_id: str) -> bool:
-        rooms = self._client().rooms
-        if not isinstance(rooms, Mapping):
-            return False
-        return any(joined_room_id == room_id for joined_room_id in rooms)
-
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
         if client is None:
@@ -422,7 +416,7 @@ class BotRoomLifecycle:
             return
 
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
-            if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
+            if room.room_id in self._handled_invite_room_ids:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
                 await self.deps.on_room_joined(room.room_id)
                 self._remember_invited_room(room.room_id)

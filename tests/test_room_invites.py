@@ -847,7 +847,7 @@ async def test_router_departure_allows_fresh_reinvite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A room departure must not let old invite and welcome markers suppress rejoining."""
+    """A room departure must rejoin even when nio keeps the old room cached."""
     config = bind_runtime_paths(
         Config(
             router=RouterConfig(model="default", accept_invites=True),
@@ -882,6 +882,7 @@ async def test_router_departure_allows_fresh_reinvite(
     install_send_response_mock(bot, send_response)
 
     await bot._on_invite(room, event)
+    bot.client.rooms[room_id] = MagicMock()
     bot._room_lifecycle.forget_invited_room(room_id)
     await bot._on_invite(room, event)
 
