@@ -335,7 +335,7 @@ async def test_concurrent_ensure_calls_are_idempotent(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "origin",
     [
-        _lease().clone_url.replace("https://github.com/", "https://GITHUB.com:443/") + "/",
+        _lease().clone_url.replace("https://github.com/", "https://github.com:443/") + "/",
     ],
 )
 async def test_normalized_https_origin_is_idempotent(tmp_path: Path, origin: str) -> None:
@@ -359,6 +359,7 @@ async def test_normalized_https_origin_is_idempotent(tmp_path: Path, origin: str
     "origin",
     [
         _lease().clone_url.removesuffix(".git"),
+        _lease().clone_url.replace("github.com", "GITHUB.com"),
         _lease().clone_url.replace("/example-org/", "/EXAMPLE-ORG/"),
         _lease().clone_url.replace("/MindRoom-", "/mindroom-"),
     ],
@@ -402,16 +403,17 @@ async def test_malformed_canonical_https_origin_is_an_origin_conflict(tmp_path: 
     [
         ("remote.origin.proxy", ""),
         ("remote.origin.proxyAuthMethod", "anyauth"),
+        ("remote.origin.vcs", "ext"),
         ("http.https://github.com/.proxy", ""),
         ("http.https://github.com/.proxyAuthMethod", "anyauth"),
     ],
 )
-async def test_git_proxy_override_cannot_bypass_bound_origin(
+async def test_git_transport_override_cannot_bypass_bound_origin(
     tmp_path: Path,
     key: str,
     value: str,
 ) -> None:
-    """Repository-local proxy policy must not bypass the Agent Vault route."""
+    """Repository-local transport policy must not bypass the Agent Vault route."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _git(workspace, "init", "--initial-branch=main")
