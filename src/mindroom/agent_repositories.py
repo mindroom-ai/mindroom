@@ -931,18 +931,8 @@ def _recover_interrupted_git_config_transaction(git_fd: int, clone_url: str) -> 
         return
 
     if config_exists and stage_exists and not backup_exists:
-        original_fd, replacement_fd = _require_git_config_transaction_pair(
-            git_fd,
-            "config",
-            _GIT_CONFIG_STAGE_NAME,
-            clone_url,
-        )
-        try:
-            os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
-            os.fsync(git_fd)
-        finally:
-            os.close(replacement_fd)
-            os.close(original_fd)
+        os.unlink(_GIT_CONFIG_STAGE_NAME, dir_fd=git_fd)
+        os.fsync(git_fd)
         return
 
     if not config_exists and stage_exists and backup_exists:
@@ -1078,13 +1068,14 @@ def _normalized_github_repository(url: str) -> tuple[str, str, str] | None:
     if len(parts) != 2:
         return None
     organization, repository = parts
-    if repository.casefold().endswith(".git"):
-        repository = repository[:-4]
+    if not repository.endswith(".git"):
+        return None
+    repository = repository[:-4]
     if not organization or not repository:
         return None
     if not all(_GITHUB_REPOSITORY_COMPONENT_PATTERN.fullmatch(component) for component in (organization, repository)):
         return None
-    return transport, organization.casefold(), repository.casefold()
+    return transport, organization, repository
 
 
 def _require_expected_origin(
