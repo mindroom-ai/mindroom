@@ -950,7 +950,7 @@ class TestConsolidatedConfigManager:
 
         query = parse_qs(urlparse(_connect_url_from_result(result)).query)
         assert query["agent_name"] == ["research"]
-        assert query["execution_scope"] == ["user_agent"]
+        assert query["execution_scope"] == ["user"]
         assert "/api/oauth/mcp_demo/authorize" in result
 
     def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:

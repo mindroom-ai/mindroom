@@ -108,6 +108,7 @@ class _FakeClientSession:
     close_exception: ClassVar[BaseException | None] = None
     close_attempt_count: ClassVar[int] = 0
     authorization_rejected: ClassVar[bool] = False
+    reject_authorization_on_tool_error: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -185,6 +186,8 @@ class _FakeClientSession:
                 _FakeClientSession.parallel_call_gate.set()
             await _FakeClientSession.parallel_call_gate.wait()
         if isinstance(next_result, Exception):
+            if _FakeClientSession.reject_authorization_on_tool_error:
+                _FakeClientSession.authorization_rejected = True
             raise next_result
         assert isinstance(next_result, CallToolResult)
         return next_result
@@ -211,6 +214,7 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.close_exception = None
     _FakeClientSession.close_attempt_count = 0
     _FakeClientSession.authorization_rejected = False
+    _FakeClientSession.reject_authorization_on_tool_error = False
     yield
     dynamic_toolkits_module._loaded_tools.clear()
 
@@ -363,6 +367,7 @@ class _FakeMcpOAuthProvider:
     credential_service = "mcp_demo_oauth"
     scopes: tuple[str, ...] = ()
     claim_validator = None
+    requester_scoped_credentials = True
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh
@@ -936,7 +941,7 @@ async def test_mcp_http_401_disconnects_without_replaying_ambiguous_tool_call(
         worker_target=worker_target,
     )
     cached_session = _FakeClientSession.sessions[-1]
-    _FakeClientSession.authorization_rejected = True
+    _FakeClientSession.reject_authorization_on_tool_error = True
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
         await manager.call_tool(
@@ -1186,9 +1191,10 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     """Concurrent refreshes for one credential scope should share one persisted rotation head."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -1236,7 +1242,7 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     stored_credentials = load_scoped_credentials(
         "mcp_demo_oauth",
         credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        worker_target=credential_target,
     )
     assert first_token == ACCESS_1
     assert second_token == ACCESS_1
@@ -1259,9 +1265,10 @@ async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refre
     """A dead refresh token should not retry indefinitely when storage has no newer token."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -1376,9 +1383,10 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
     """Providers that do not rotate refresh tokens should keep the existing token."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -1406,7 +1414,7 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
     stored_credentials = load_scoped_credentials(
         "mcp_demo_oauth",
         credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        worker_target=credential_target,
     )
     assert access_token == ACCESS_0
     assert stored_credentials is not None

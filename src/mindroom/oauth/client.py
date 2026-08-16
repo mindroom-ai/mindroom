@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport import requests as google_requests
-from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
@@ -48,6 +47,7 @@ from mindroom.tool_system.worker_routing import active_tool_execution_identity
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
+    from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
     from structlog.stdlib import BoundLogger
 
     from mindroom.config.auth import AuthorizationConfig
@@ -294,6 +294,8 @@ class ScopedOAuthClientMixin:
 
     def _copy_supplied_google_credentials(self, credentials: Any) -> GoogleOAuthCredentials:  # noqa: ANN401
         """Copy supported caller credentials into private blocking credentials."""
+        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
+
         if type(credentials) is not GoogleOAuthCredentials:
             msg = "Google creds must be an exact google.oauth2.credentials.Credentials instance"
             raise TypeError(msg)
@@ -383,6 +385,8 @@ class ScopedOAuthClientMixin:
 
     def _raw_credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create an unwrapped Google credential adapter from stored token data."""
+        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
+
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:

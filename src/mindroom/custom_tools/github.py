@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github, GithubException
 
+from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
@@ -37,9 +39,7 @@ from mindroom.tool_system.worker_routing import active_tool_execution_identity
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)

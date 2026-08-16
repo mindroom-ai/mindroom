@@ -14,9 +14,9 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 
 
 @pytest.fixture
-def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
+def mock_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Create a mock credentials manager with test data."""
-    manager = CredentialsManager(base_path=tmp_path / "test_creds")
+    manager = get_runtime_credentials_manager(runtime_paths)
 
     # Save test Gmail OAuth credentials
     test_creds = {
@@ -89,6 +89,7 @@ class TestGmailTools:
                     "https://www.googleapis.com/auth/gmail.modify",
                     "https://www.googleapis.com/auth/gmail.compose",
                 ],
+                quota_project_id=None,
                 expiry=None,
             )
 
@@ -102,9 +103,7 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when no credentials are stored."""
-        mock_manager = MagicMock()
-        mock_manager.load_credentials.return_value = None
-        mock_manager.shared_manager.return_value = mock_manager
+        mock_manager = CredentialsManager(runtime_paths.storage_root / "empty_credentials")
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
@@ -238,9 +237,7 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth falls back to original auth when no credentials stored."""
-        mock_manager = MagicMock()
-        mock_manager.load_credentials.return_value = None
-        mock_manager.shared_manager.return_value = mock_manager
+        mock_manager = CredentialsManager(runtime_paths.storage_root / "empty_credentials")
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None

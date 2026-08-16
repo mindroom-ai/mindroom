@@ -137,6 +137,15 @@ class _MCPConfigurationChangedError(RuntimeError):
 class _MCPFunctionValidationError(MCPProtocolError):
     """Signal that one candidate catalog conflicts with the provider-visible surface."""
 
+    def __init__(
+        self,
+        server_id: str,
+        message: str,
+        invalid_states: tuple[MCPServerState, ...],
+    ) -> None:
+        super().__init__(server_id, message)
+        self.invalid_states = invalid_states
+
 
 class MCPServerManager:
     """Own one live MCP session per configured server."""
@@ -200,11 +209,17 @@ class MCPServerManager:
             if retired_states is None:
                 return set()
             await run_coroutine_until_complete(self._drain_retired_states(tuple(retired_states)))
+            async with self._state_lifecycle_lock:
+                if self._shutdown:
+                    return set()
+                desired_states = tuple(
+                    (server_id, server_config, self._states.get(server_id))
+                    for server_id, server_config in desired_servers.items()
+                )
             await self._clear_function_validation_errors()
             changed_server_ids: set[str] = set()
-            for server_id, server_config in desired_servers.items():
-                state = self._states[server_id]
-                if state.retired:
+            for server_id, server_config, state in desired_states:
+                if state is None or state.retired:
                     continue
                 if server_config.auth is not None:
                     state.stale = False
@@ -938,9 +953,11 @@ class MCPServerManager:
     ) -> bool:
         self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
+        changed = False
         should_notify_catalog_change = False
         authorization_rejection: OAuthConnectionRequired | None = None
         authorization_rejection_cause: MCPError | None = None
+        invalid_function_states: tuple[MCPServerState, ...] | None = None
         async with state.lock:
             self._require_desired_oauth_lease(state, authorization_lease)
             self._require_active_state(state)
@@ -969,6 +986,11 @@ class MCPServerManager:
                 except _MCPAuthorizationChangedError:
                     await self._disconnect_state(state)
                     raise
+                except _MCPFunctionValidationError as exc:
+                    await self._record_discovery_failure(state, exc)
+                    invalid_function_states = tuple(
+                        invalid_state for invalid_state in exc.invalid_states if invalid_state is not state
+                    )
                 except MCPError as exc:
                     authorization_rejection = await self._classify_discovery_authorization_rejection(
                         state,
@@ -983,6 +1005,31 @@ class MCPServerManager:
                     state.consecutive_failures = 0
                     changed = previous_hash != catalog.catalog_hash
                     should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+        return await self._finish_catalog_refresh(
+            state,
+            authorization_lease=authorization_lease,
+            authorization_rejection=authorization_rejection,
+            authorization_rejection_cause=authorization_rejection_cause,
+            invalid_function_states=invalid_function_states,
+            should_notify_catalog_change=should_notify_catalog_change,
+            changed=changed,
+        )
+
+    async def _finish_catalog_refresh(
+        self,
+        state: MCPServerState,
+        *,
+        authorization_lease: _MCPAuthorizationLease | None,
+        authorization_rejection: OAuthConnectionRequired | None,
+        authorization_rejection_cause: MCPError | None,
+        invalid_function_states: tuple[MCPServerState, ...] | None,
+        should_notify_catalog_change: bool,
+        changed: bool,
+    ) -> bool:
+        """Finish refresh cleanup and notifications after state locks are released."""
+        if invalid_function_states is not None:
+            await self._disconnect_function_validation_states(invalid_function_states)
+            return False
         await self._raise_discovery_authorization_rejection(
             state,
             authorization_lease,
@@ -1655,35 +1702,66 @@ class MCPServerManager:
             errors_by_server.setdefault(server_id, []).extend(messages)
         return errors_by_server
 
+    def _function_name_collision_errors_by_state(
+        self,
+        *,
+        candidate_state: MCPServerState | None = None,
+        candidate_catalog: MCPServerCatalog | None = None,
+    ) -> dict[int, tuple[MCPServerState, set[str]]]:
+        """Collect every state whose provider-visible function surface conflicts."""
+        visible_server_ids = self._visible_function_server_ids()
+        if candidate_state is not None:
+            visible_server_ids.add(candidate_state.server_id)
+        requester_surface = next(
+            (
+                (key.worker_scope, key.worker_key)
+                for key, scoped_state in self._scoped_states.items()
+                if scoped_state is candidate_state
+            ),
+            None,
+        )
+        requester_surfaces = {
+            (key.worker_scope, key.worker_key)
+            for key, state in self._scoped_states.items()
+            if state.catalog is not None and state.last_error is None
+        }
+        if requester_surface is not None:
+            requester_surfaces.add(requester_surface)
+        errors_by_state: dict[int, tuple[MCPServerState, set[str]]] = {}
+        for surface in (None, *sorted(requester_surfaces)):
+            for agent_name in sorted(self._config.agents) if self._config is not None else ():
+                for server_id, messages in self._agent_collision_messages(
+                    agent_name,
+                    visible_server_ids,
+                    loaded_tools=[],
+                    requester_surface=surface,
+                    candidate_state=candidate_state,
+                    candidate_catalog=candidate_catalog,
+                ).items():
+                    for state in self._function_validation_states_for_surface(server_id, surface):
+                        entry = errors_by_state.setdefault(id(state), (state, set()))
+                        entry[1].update(messages)
+        return errors_by_state
+
     def _candidate_function_validation_error(
         self,
         state: MCPServerState,
         catalog: MCPServerCatalog,
     ) -> _MCPFunctionValidationError | None:
-        """Validate a discovered catalog before publishing it to concurrent callers."""
-        visible_server_ids = self._visible_function_server_ids() | {state.server_id}
-        requester_surface = next(
-            (
-                (key.worker_scope, key.worker_key)
-                for key, scoped_state in self._scoped_states.items()
-                if scoped_state is state
-            ),
-            None,
+        """Atomically invalidate every catalog involved in a candidate collision."""
+        errors_by_state = self._function_name_collision_errors_by_state(
+            candidate_state=state,
+            candidate_catalog=catalog,
         )
-        messages: set[str] = set()
-        for agent_name in sorted(self._config.agents) if self._config is not None else ():
-            errors = self._agent_collision_messages(
-                agent_name,
-                visible_server_ids,
-                loaded_tools=[],
-                requester_surface=requester_surface,
-                candidate_state=state,
-                candidate_catalog=catalog,
-            )
-            messages.update(errors.get(state.server_id, ()))
-        if not messages:
+        candidate_error = errors_by_state.get(id(state))
+        if candidate_error is None:
             return None
-        return _MCPFunctionValidationError(state.server_id, "\n".join(sorted(messages)))
+        marked_states = self._mark_function_name_collision_errors(errors_by_state)
+        return _MCPFunctionValidationError(
+            state.server_id,
+            "\n".join(sorted(candidate_error[1])),
+            marked_states,
+        )
 
     @staticmethod
     def _mark_function_name_collision_errors(
@@ -1726,27 +1804,7 @@ class MCPServerManager:
 
     async def _validate_global_function_names(self) -> set[str]:
         async with self._catalog_validation_lock:
-            visible_function_server_ids = self._visible_function_server_ids()
-            if not visible_function_server_ids:
-                return set()
-
-            requester_surfaces = {
-                (key.worker_scope, key.worker_key)
-                for key, state in self._scoped_states.items()
-                if state.catalog is not None and state.last_error is None
-            }
-            errors_by_state: dict[int, tuple[MCPServerState, set[str]]] = {}
-            for requester_surface in (None, *sorted(requester_surfaces)):
-                for agent_name in sorted(self._config.agents) if self._config is not None else ():
-                    for server_id, messages in self._agent_collision_messages(
-                        agent_name,
-                        visible_function_server_ids,
-                        loaded_tools=[],
-                        requester_surface=requester_surface,
-                    ).items():
-                        for state in self._function_validation_states_for_surface(server_id, requester_surface):
-                            entry = errors_by_state.setdefault(id(state), (state, set()))
-                            entry[1].update(messages)
+            errors_by_state = self._function_name_collision_errors_by_state()
             if not errors_by_state:
                 return set()
             marked_states = self._mark_function_name_collision_errors(errors_by_state)

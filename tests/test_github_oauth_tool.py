@@ -910,6 +910,16 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
         worker_target=oauth_target,
     )
 
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=manager,
+        worker_target=target,
+    )
+    adopted = load_scoped_credentials(
+        "github_oauth",
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
     with (
         patch(
             "mindroom.custom_tools.github.refresh_oauth_credentials_blocking",
@@ -917,11 +927,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
         ),
         pytest.raises(OAuthProviderError) as exc_info,
     ):
-        tool_class(
-            runtime_paths=runtime_paths,
-            credentials_manager=manager,
-            worker_target=target,
-        ).list_repositories()
+        tool.list_repositories()
 
     assert type(exc_info.value) is OAuthProviderError
     assert str(exc_info.value) == "OAuth credential refresh failed"
@@ -933,7 +939,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
             credentials_manager=manager,
             worker_target=oauth_target,
         )
-        == original
+        == adopted
     )
 
 

@@ -36,6 +36,9 @@ from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
+from mindroom.oauth import credential_lifecycle
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
@@ -1916,8 +1919,15 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.for_primary_runtime_agent_scope("general").save_credentials(
-        "google_drive_oauth",
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    credential_context = resolve_oauth_credential_context(
+        google_drive_oauth_provider(),
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+    credential_lifecycle._publish_oauth_credentials_locked(
+        credential_context,
         {
             "token": "drive-token",
             "refresh_token": "drive-refresh-token",
@@ -1930,6 +1940,8 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
             ],
             "_source": "oauth",
         },
+        state=credential_lifecycle._load_oauth_credential_state(credential_context),
+        advance_connection_generation=True,
     )
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),

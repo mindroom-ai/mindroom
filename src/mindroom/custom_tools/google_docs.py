@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -17,7 +18,6 @@ from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 
 if TYPE_CHECKING:
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
