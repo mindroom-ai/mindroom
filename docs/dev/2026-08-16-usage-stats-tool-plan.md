@@ -16,7 +16,8 @@
 - The implementation must never instantiate Agno `SqliteDb`, call Agno `calculate_metrics()`, create a missing file, write a cache, or create an aggregate table.
 - Self-service queries must derive the agent and requester from `ToolRuntimeContext` and must not accept either identity as a function argument.
 - Self-service requester filtering must happen per persisted run, must canonicalize authorization aliases, and must fail closed when the requester cannot be established.
-- Private-agent self-service discovery must use the current execution identity's exact private state root and must never enumerate sibling private instances.
+- Private-agent self-service discovery must use the current execution identity's exact private session state root and must never enumerate sibling private instances.
+- Every source must be derived from the effective session storage root so `MINDROOM_SESSION_STORAGE_PATH` redirection is honored.
 - Admin queries require both an authored `admin_scope: true` setting and a canonical requester listed in `authorization.global_users`.
 - The admin authorization check must complete before any all-agent filesystem or database scan begins.
 - Outputs must contain aggregates and diagnostics only, with no prompts, messages, room IDs, thread IDs, session IDs, event IDs, tool arguments, or raw run metadata.
@@ -81,7 +82,10 @@ UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 class UsageStorageSource:
     path: Path
     scope: UsageStorageScope
-    allowed_entity_ids: frozenset[str]
+    expected_session_table: str
+    source_agent_id: str | None
+    allowed_agent_ids: frozenset[str]
+    allowed_team_ids: frozenset[str]
     requester_isolated: bool
 
 
@@ -158,6 +162,7 @@ Build a temporary `RuntimePaths.storage_root` containing these cases:
 - One configured shared agent database at `agents/<agent>/sessions/<agent>.db`.
 - Two requester-private instances of the same configured agent.
 - One configured team database and one ad hoc team database containing nested member runs.
+- Equivalent sources redirected beneath a dedicated `MINDROOM_SESSION_STORAGE_PATH` root.
 - One removed agent database that is no longer in the current config.
 - One symlinked database and one symlinked private-instance directory.
 - One expected but absent database.
@@ -167,6 +172,10 @@ Assert that self discovery returns the exact current agent database plus every s
 Assert that a private self query returns only the current requester's exact private database plus structurally valid team databases and never returns the sibling requester's private agent database.
 
 Assert that admin discovery returns configured shared agents, configured private instances, and structurally valid configured or ad hoc team databases, while ignoring removed agent entities and all symlinks.
+
+Assert that discovery uses the redirected session root when configured and finds nothing by scanning the corresponding canonical state-root session paths.
+
+Build the private-instance fixture with `worker_dir_name(worker_key)`, assert that discovery finds it, and assert that a raw worker-key directory layout is ignored.
 
 Run:
 
@@ -191,7 +200,7 @@ def discover_self_usage_sources(
     ...
 ```
 
-Call `resolve_agent_runtime()` with the exact execution identity and derive the current agent database from the returned state root.
+Call `resolve_agent_runtime()` with the exact execution identity and derive the current agent database from the returned `session_state_root`.
 
 Mark a private source `requester_isolated=True` and a shared source `requester_isolated=False`.
 
@@ -212,19 +221,19 @@ def discover_admin_usage_sources(
     ...
 ```
 
-Discover only these fixed shapes under `runtime_paths.storage_root`:
+Resolve the effective session storage root with `resolve_session_state_root(runtime_paths.storage_root, runtime_paths)` and discover only these fixed shapes beneath it:
 
 ```text
 agents/<configured-agent>/sessions/<configured-agent>.db
-private_instances/<worker-key>/<configured-agent>/sessions/<configured-agent>.db
+private_instances/<worker-dir-name>/<configured-agent>/sessions/<configured-agent>.db
 teams/<storage-name>/sessions/<storage-name>.db
 ```
 
-Resolve every candidate and require it to remain under the resolved storage root.
+Resolve every candidate and require it to remain under the resolved effective session storage root.
 
 Reject a candidate when any traversed directory or the database itself is a symlink.
 
-Require a team directory, database basename, and table prefix to agree with the canonical storage-name shape before reading it.
+Require a team directory, database basename, and exact `<storage-name>_sessions` table name to agree before reading it.
 
 Use `config.agents` and `config.teams` as the allowed attributed entity sets so removed agent or configured-team records are ignored, while valid nested runs for current agents remain visible inside ad hoc team databases.
 
@@ -316,9 +325,15 @@ class UsageBreakdownRow:
 @dataclass(frozen=True, slots=True)
 class UsageCoverage:
     status: Literal["complete_retained", "partial", "unknown"]
+    scanned_sources: int
+    partial_sources: int
+    scanned_sessions: int
     retained_runs: int
     skipped_runs: int
-    diagnostic_count: int
+    malformed_runs: int
+    missing_requester_runs: int
+    missing_timestamp_runs: int
+    compacted_sessions: int
     note: str
 
 
@@ -337,7 +352,8 @@ class UsageReport:
     last_observed_at: str | None
     status_counts: Mapping[str, int]
     breakdown: tuple[UsageBreakdownRow, ...]
-    breakdown_truncated: int
+    breakdown_truncated: bool
+    breakdown_omitted: int
     coverage: UsageCoverage
 
     def to_dict(self) -> dict[str, object]:
@@ -405,7 +421,7 @@ For self scope, accept only records whose canonical requester equals the canonic
 
 For admin scope, validate entity filters against configured agent and team names before scanning, and canonicalize requester filters before matching.
 
-Sort breakdowns by descending total tokens and then ascending key, retain at most 200 rows, and return the number of omitted rows.
+Sort breakdowns by descending total tokens and then ascending key, retain at most 200 rows, and return both a truncation boolean and the number of omitted rows.
 
 - [ ] **Step 5: Verify direct aggregation.**
 
@@ -469,7 +485,13 @@ class _UsageMetricRecord:
 
 Recursively walk Agno's persisted `member_responses` and nested team responses without deserializing prompts or message content.
 
-Use the source table entity for top-level attribution, use nested `agent_id` or `team_id` for child attribution, and require every attributed ID to be in the source's allowed entity set.
+Use `source_agent_id` for a top-level direct agent run.
+
+For a top-level team run, read the persisted row or run `team_id` and retain leader metrics only when that ID is present in `allowed_team_ids`.
+
+Do not derive a team entity ID from the hashed storage name, and exclude top-level ad hoc team leader metrics in version one.
+
+Use nested `agent_id` or `team_id` for child attribution and require each ID to be in the matching allowed agent or configured-team set.
 
 Deduplicate with `(entity_kind, entity_id, run_id)` when a stable run ID exists and with the source row plus structural key when it does not.
 
@@ -483,6 +505,7 @@ Cover:
 - A shared self source where cumulative metrics and deltas are not exposed and coverage is `unknown`.
 - A corrupt or busy source producing `partial` coverage while other sources still contribute.
 - A query with more than 200 breakdown keys producing deterministic truncation.
+- Exact public counts for scanned and partial sources, scanned sessions, retained and skipped runs, malformed runs, missing requester and timestamp attribution, and compacted sessions.
 
 - [ ] **Step 4: Implement privacy-safe coverage classification.**
 
@@ -628,9 +651,9 @@ If metadata validation rejects the same field in global and agent override lists
 
 Import and export `usage_stats_tools` from `src/mindroom/tools/__init__.py`.
 
-Add `usage_stats` to `_LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES` in `worker_routing.py`.
+Add `usage_stats` to `_LOCAL_ONLY_TOOL_NAMES` in `worker_routing.py`.
 
-Extend the existing local-only sandbox test to prove the tool never proxies to a worker target.
+Extend the existing local-only sandbox test to prove the tool never proxies to a worker target and assert `tool_stays_local("usage_stats")` directly.
 
 - [ ] **Step 4: Verify toolkit and metadata behavior.**
 

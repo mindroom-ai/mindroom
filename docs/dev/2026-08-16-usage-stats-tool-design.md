@@ -13,7 +13,7 @@ The implementation will open SQLite databases in enforced read-only mode, parse 
 
 ## Goals
 
-- Let an agent inspect its own token usage, run counts, model mix, recorded cost, and timing statistics for the current requester.
+- Let an agent inspect its own token usage, run counts, model mix, recorded cost, and observation range for the current requester.
 - Make the self query work for shared agents and requester-private agents.
 - Let an explicitly configured admin agent inspect aggregate usage across configured agents, private instances, and team execution scopes.
 - Keep every tool operation read only at the filesystem and database layers.
@@ -114,17 +114,19 @@ The result serializer exposes only aggregate dimensions and counters.
 
 ## Storage Discovery
 
-The self query resolves the current agent's canonical state root with `resolve_agent_runtime` and the live execution identity.
+The self query resolves the current agent's canonical `session_state_root` with `resolve_agent_runtime` and the live execution identity.
 A shared agent therefore reaches its shared session database, while a private agent reaches only its requester-specific private instance.
 The self query may also read team databases, but it retains only nested runs whose entity and canonical requester both match the current call.
 
-The admin query derives shared agent sources from the configured agent names and canonical state-root helpers.
-It discovers private instance databases only below the fixed `private_instances/<scope>/<agent>/sessions/<database>.db` layout.
+The admin query maps the canonical storage root through `resolve_session_state_root` before deriving shared agent, private instance, and team sources.
+This preserves the relative storage shape when `MINDROOM_SESSION_STORAGE_PATH` redirects Agno sessions away from the main storage root.
+It discovers private instance databases only below the fixed `private_instances/<worker-dir-name>/<agent>/sessions/<agent>.db` layout, where the worker directory is the normalized one-way name produced by existing worker-routing helpers.
 Both queries discover team databases only below the canonical fixed `teams/<storage-name>/sessions/<storage-name>.db` layout because configured and ad hoc team runs can contain the only persisted copy of an agent member run.
-Discovery skips symlinks, requires every resolved candidate to remain below the storage root, and validates persisted entity IDs against the current configuration before aggregation.
+Each team source requires the exact `<storage-name>_sessions` table, but the storage name is never treated as an entity ID because it contains a normalized scope plus a digest.
+Discovery skips symlinks, requires every resolved candidate to remain below the effective session storage root, and validates persisted agent and configured-team IDs against the current configuration before aggregation.
 Orphaned databases for removed entities are ignored in the first version.
 
-Each source is represented by a typed immutable record containing the database path, expected session table, storage scope, and allowed entity IDs.
+Each source is represented by a typed immutable record containing the database path, exact expected session table, storage scope, optional direct-agent identity, and separate allowed agent and configured-team IDs.
 No requester-provided string is interpolated into a filesystem path or SQL identifier.
 
 ## Read-Only Database Access
@@ -148,7 +150,8 @@ The reader streams session rows and parses only the `runs`, `session_data`, and 
 It never deserializes messages, media, summaries, prompts, or tool payloads into the response model.
 
 Each top-level agent run contributes its own metrics to that agent.
-Each top-level team run contributes its leader metrics to the team entity.
+Each top-level team run contributes its leader metrics only when its persisted `team_id` names a currently configured team.
+Top-level leader metrics for ad hoc teams are excluded from version one because their hashed storage name is not a configured entity identity.
 Nested member responses are traversed recursively and contribute their metrics to their own agent or nested team entity.
 The traversal deduplicates records by entity kind, entity ID, and stable run ID so a member response stored in more than one structural location is counted once.
 Records without a stable run ID use a source-local structural key and increment a diagnostic.
@@ -169,7 +172,7 @@ The output never labels a partial recorded-cost subtotal as a complete bill.
 
 One request may return at most 200 breakdown rows.
 Rows are sorted by descending total tokens with a stable dimension tie-breaker.
-The response reports `truncated: true` and the omitted row count when the cap applies.
+The response reports `breakdown_truncated: true` and `breakdown_omitted` when the cap applies.
 
 ## Completeness Contract
 
@@ -224,10 +227,19 @@ A successful response has this conceptual shape:
   "breakdown": [],
   "coverage": {
     "status": "complete_retained",
-    "compacted_history_detected": false,
-    "partial_sources": 0
+    "scanned_sources": 1,
+    "partial_sources": 0,
+    "scanned_sessions": 7,
+    "retained_runs": 42,
+    "skipped_runs": 0,
+    "malformed_runs": 0,
+    "missing_requester_runs": 0,
+    "missing_timestamp_runs": 0,
+    "compacted_sessions": 0,
+    "note": "No retained-history gap was detected."
   },
-  "breakdown_truncated": 0
+  "breakdown_truncated": false,
+  "breakdown_omitted": 0
 }
 ```
 
@@ -259,7 +271,7 @@ Unexpected programming errors are logged by the runtime and are not converted in
 - Build minimal Agno-compatible SQLite fixtures with agent, team, nested member, and cumulative session metrics.
 - Assert that self queries include only the current canonical requester and current entity across direct and team-owned runs.
 - Assert that aliases resolve to the canonical requester on both the live and persisted sides.
-- Assert that private Alice resolves only Alice's state root and cannot observe Bob's private instance.
+- Assert that private Alice resolves only Alice's session state root and cannot observe Bob's private instance.
 - Assert that an admin-enabled agent still rejects a requester outside `authorization.global_users` before any database open.
 - Assert that an authorized admin sees configured shared agents, private instances, and team-member usage without receiving message or session identifiers.
 - Assert recursive team attribution and stable-run deduplication.
