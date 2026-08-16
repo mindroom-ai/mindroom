@@ -720,13 +720,22 @@ path = "mindroom.credential_policy"
 depends_on = []
 
 [[modules]]
+path = "mindroom.oauth.credential_store"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.logging_config",
+    "mindroom.oauth.providers",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.oauth.credential_lifecycle"]
+
+[[modules]]
 path = "mindroom.oauth.credential_lifecycle"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.credentials",
-    "mindroom.durable_write",
-    "mindroom.file_locks",
     "mindroom.logging_config",
+    "mindroom.oauth.credential_store",
     "mindroom.oauth.providers",
     "mindroom.tool_system.worker_routing",
 ]

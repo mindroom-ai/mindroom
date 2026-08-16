@@ -23,7 +23,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
-    load_scoped_credentials,
     save_scoped_credentials,
 )
 from mindroom.custom_tools import google_service
@@ -39,6 +38,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialsRefreshResult,
     exchange_and_store_oauth_credentials,
+    load_oauth_credentials,
     oauth_connection_generation,
     oauth_credential_generation,
     reset_oauth_credentials,
@@ -488,11 +488,7 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
         payload = json.loads(result)
         assert payload["oauth_connection_required"] is True
         assert payload.get("reason") == expected_reason
-    stored = load_scoped_credentials(
-        GoogleDriveTools._oauth_provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
+    stored = load_oauth_credentials(tool._oauth_credential_context())
     assert (stored is not None) is credential_remains
 
 
@@ -672,11 +668,7 @@ def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
     assert "provider-controlled" not in json.dumps(payload)
     assert tool.creds is None
     assert tool.service is None
-    stored = load_scoped_credentials(
-        service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
+    stored = load_oauth_credentials(tool._oauth_credential_context())
     assert stored is not None
     assert stored["token"] == "retained-access-token"  # noqa: S105
 
@@ -910,11 +902,7 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
     with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
         tool.creds.refresh(object())
 
-    stored = load_scoped_credentials(
-        GoogleDriveTools._oauth_provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
+    stored = load_oauth_credentials(tool._oauth_credential_context())
     assert stored is not None
     assert stored["token"] == "rejected-readonly-token"  # noqa: S105
     assert stored["refresh_token"] == rotated_refresh_token
@@ -990,14 +978,7 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
     assert payload["reason"] == "refresh_rejected"
     assert captured_log_messages == ["OAuth credential refresh failed"]
     assert provider_detail not in repr(captured_log_messages)
-    assert (
-        load_scoped_credentials(
-            GoogleDriveTools._oauth_provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        is None
-    )
+    assert load_oauth_credentials(tool._oauth_credential_context()) is None
 
 
 def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
@@ -1836,14 +1817,7 @@ async def test_google_wrapper_replaces_swallowed_async_upload_refresh_rejection(
 
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "refresh_rejected"
-    assert (
-        load_scoped_credentials(
-            GoogleDriveTools._oauth_provider.credential_service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        is None
-    )
+    assert load_oauth_credentials(tool._oauth_credential_context()) is None
 
 
 def test_google_wrapper_keeps_refresh_rejection_state_per_call(

@@ -83,7 +83,7 @@ Providers that define requester-scoped credentials, such as GitHub, may resolve 
 - Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
 - Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
 - If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
-- If the process restarts with a pending reset, the credential lifecycle finishes that exact stable operation before any credential can be used or published.
+- Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
 - The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]

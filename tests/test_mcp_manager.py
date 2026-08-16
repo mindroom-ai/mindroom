@@ -23,19 +23,20 @@ from mindroom.agents import create_agent
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPConnectionError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds, _MCPAuthorizationChangedError
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
-from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
+    load_oauth_credentials_snapshot,
     oauth_connection_generation,
     refresh_oauth_credentials,
 )
+from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
@@ -68,6 +69,18 @@ CHAIN_0 = "refresh-0"
 CHAIN_1 = "refresh-1"
 CHAIN_2 = "refresh-2"
 ALICE_ACCESS_0 = "access-alice-refresh-0"
+
+
+async def _publish_oauth_credentials(
+    context: OAuthCredentialContext,
+    credentials: Mapping[str, Any],
+) -> None:
+    """Publish test credentials through the SQLite transaction owner."""
+    async with oauth_credential_transaction(context) as transaction:
+        transaction.publish(credentials, advance_connection_generation=True)
+        await transaction.commit()
+
+
 ALICE_ACCESS_1 = "access-alice-refresh-1"
 ALICE_CHAIN_0 = "alice-refresh-0"
 BOB_ACCESS_0 = "access-bob-refresh-0"
@@ -604,8 +617,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
         return catalog
 
     async def replace_credentials() -> None:
-        current = credential_lifecycle._load_oauth_credential_state(credential_context)
-        credential_lifecycle._publish_oauth_credentials_locked(
+        await _publish_oauth_credentials(
             credential_context,
             {
                 "token": "account-b-token",
@@ -614,8 +626,6 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
                 "_source": "oauth",
                 "_oauth_provider": "mcp_demo",
             },
-            state=current,
-            advance_connection_generation=True,
         )
 
     async def call_after_authorization_change(
@@ -704,8 +714,7 @@ async def test_mcp_manager_does_not_replay_ambiguous_call_after_authorization_ch
         nonlocal replaced
         if expected_refresh_revision is not None and not replaced:
             replaced = True
-            current = credential_lifecycle._load_oauth_credential_state(credential_context)
-            credential_lifecycle._publish_oauth_credentials_locked(
+            await _publish_oauth_credentials(
                 credential_context,
                 {
                     "token": "account-b-token",
@@ -714,8 +723,6 @@ async def test_mcp_manager_does_not_replay_ambiguous_call_after_authorization_ch
                     "_source": "oauth",
                     "_oauth_provider": "mcp_demo",
                 },
-                state=current,
-                advance_connection_generation=True,
             )
         return await original_refresh(
             state,
@@ -872,14 +879,7 @@ async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
     assert type(exc_info.value) is OAuthProviderError
     assert str(exc_info.value) == "OAuth credential refresh failed"
     assert leaked_detail not in str(exc_info.value)
-    assert (
-        load_scoped_credentials(
-            "mcp_demo_oauth",
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-        is not None
-    )
+    assert (await load_oauth_credentials_snapshot(credential_context)).credentials is not None
 
 
 @pytest.mark.asyncio
@@ -1135,11 +1135,12 @@ async def test_mcp_manager_logs_successful_oauth_refresh_and_persists_credential
             worker_target=worker_target,
         )
 
-    refreshed_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
         worker_target=worker_target,
+        credentials_manager=credentials_manager,
     )
+    refreshed_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert refreshed_credentials is not None
     assert refreshed_credentials["token"] == "refreshed-access-token"  # noqa: S105
     assert refreshed_credentials["refresh_token"] == "refreshed-refresh-token"  # noqa: S105
@@ -1239,11 +1240,7 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     first_token, _first_generation = first_result
     second_token, _second_generation = second_result
 
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=credential_target,
-    )
+    stored_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert first_token == ACCESS_1
     assert second_token == ACCESS_1
     assert stored_credentials is not None
@@ -1330,7 +1327,7 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
     )
     assert missing_credentials is None
 
-    credential_lifecycle._publish_oauth_credentials_locked(
+    await _publish_oauth_credentials(
         context,
         {
             "token": ACCESS_0,
@@ -1341,8 +1338,6 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
             "_oauth_provider": "mcp_demo",
             "expires_at": 900.0,
         },
-        state=credential_lifecycle._load_oauth_credential_state(context),
-        advance_connection_generation=True,
     )
     unusable_credentials = await asyncio.wait_for(
         refresh_oauth_credentials(context),
@@ -1351,7 +1346,7 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
     assert unusable_credentials is not None
     assert unusable_credentials["client_id"] == "wrong-client"
 
-    credential_lifecycle._publish_oauth_credentials_locked(
+    await _publish_oauth_credentials(
         context,
         {
             "token": ACCESS_0,
@@ -1362,8 +1357,6 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
             "_oauth_provider": "mcp_demo",
             "expires_at": 900.0,
         },
-        state=credential_lifecycle._load_oauth_credential_state(context),
-        advance_connection_generation=True,
     )
     refreshed_credentials = await asyncio.wait_for(
         refresh_oauth_credentials(context),
@@ -1402,20 +1395,17 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
 
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
     access_token, _generation = await manager._oauth_authorization_material(
         manager._require_state("demo"),
-        credential_context=manager._oauth_credential_context(
-            manager._require_state("demo"),
-            worker_target=worker_target,
-            credentials_manager=credentials_manager,
-        ),
+        credential_context=credential_context,
     )
 
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=credential_target,
-    )
+    stored_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert access_token == ACCESS_0
     assert stored_credentials is not None
     assert stored_credentials["refresh_token"] == CHAIN_0

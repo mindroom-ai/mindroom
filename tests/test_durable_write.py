@@ -11,7 +11,6 @@ import pytest
 from mindroom import durable_write
 from mindroom.durable_write import (
     create_directory_durable,
-    delete_file_durable,
     load_cached_override_records,
     replace_file_durable,
     write_json_file_durable,
@@ -73,20 +72,6 @@ def test_durable_directory_creation_retries_failed_parent_publication(
     assert fsynced == [target, tmp_path, target, tmp_path]
 
 
-def test_durable_delete_fsyncs_parent_after_unlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A successful delete must durably publish the parent-directory update."""
-    target = tmp_path / "credential.json"
-    target.write_text("secret", encoding="utf-8")
-    fsynced: list[Path] = []
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fsynced.append)
-
-    assert delete_file_durable(target) is True
-    assert not target.exists()
-    assert fsynced == [tmp_path]
-    assert delete_file_durable(target) is False
-    assert fsynced == [tmp_path, tmp_path]
-
-
 def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An atomic replacement must durably publish the parent-directory update."""
     source = tmp_path / "credential.tmp"
@@ -101,51 +86,6 @@ def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyP
     assert target.read_text(encoding="utf-8") == "new"
     assert not source.exists()
     assert fsynced == [tmp_path]
-
-
-def test_durable_delete_propagates_directory_fsync_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A caller must not report deletion committed when directory durability is unknown."""
-    target = tmp_path / "credential.json"
-    target.write_text("secret", encoding="utf-8")
-
-    def fail_fsync(_directory: Path) -> None:
-        msg = "directory fsync failed"
-        raise OSError(msg)
-
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fail_fsync)
-
-    with pytest.raises(OSError, match="directory fsync failed"):
-        delete_file_durable(target)
-
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", lambda _directory: None)
-    assert delete_file_durable(target) is False
-
-
-def test_durable_delete_retries_parent_fsync_after_unlink_commit_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An absent retry must finish the directory publication that a prior call could not prove."""
-    target = tmp_path / "credential.json"
-    target.write_text("secret", encoding="utf-8")
-    calls = 0
-
-    def fail_once(_directory: Path) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            msg = "directory fsync failed"
-            raise OSError(msg)
-
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fail_once)
-
-    with pytest.raises(OSError, match="directory fsync failed"):
-        delete_file_durable(target)
-    assert delete_file_durable(target) is False
-    assert calls == 2
 
 
 def test_strict_directory_flush_is_explicitly_unsupported_on_windows(

@@ -36,8 +36,8 @@ from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
-from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -1926,23 +1926,27 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
         manager,
         worker_target,
     )
-    credential_lifecycle._publish_oauth_credentials_locked(
-        credential_context,
-        {
-            "token": "drive-token",
-            "refresh_token": "drive-refresh-token",
-            "client_id": "client-id",
-            "scopes": [
-                "openid",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive",
-            ],
-            "_source": "oauth",
-        },
-        state=credential_lifecycle._load_oauth_credential_state(credential_context),
-        advance_connection_generation=True,
-    )
+
+    async def publish_oauth_credentials() -> None:
+        async with oauth_credential_transaction(credential_context) as transaction:
+            transaction.publish(
+                {
+                    "token": "drive-token",
+                    "refresh_token": "drive-refresh-token",
+                    "client_id": "client-id",
+                    "scopes": [
+                        "openid",
+                        "https://www.googleapis.com/auth/userinfo.email",
+                        "https://www.googleapis.com/auth/userinfo.profile",
+                        "https://www.googleapis.com/auth/drive",
+                    ],
+                    "_source": "oauth",
+                },
+                advance_connection_generation=True,
+            )
+            await transaction.commit()
+
+    asyncio.run(publish_oauth_credentials())
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),

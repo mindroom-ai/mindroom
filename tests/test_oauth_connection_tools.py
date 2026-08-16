@@ -14,15 +14,20 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import (
     get_runtime_credentials_manager,
-    load_scoped_credentials,
     save_scoped_credentials,
     scoped_credentials_path,
 )
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import reset as oauth_reset
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials_snapshot,
+)
+from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -149,11 +154,13 @@ async def test_reset_oauth_connection_issues_browser_confirmation_without_mutati
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
 
-    stored = load_scoped_credentials(
-        provider.credential_service,
+    lifecycle_context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=context.runtime_paths,
         credentials_manager=get_runtime_credentials_manager(context.runtime_paths),
         worker_target=worker_target,
     )
+    stored = (await load_oauth_credentials_snapshot(lifecycle_context)).credentials
     assert stored is not None
     assert stored["refresh_token"] == credentials["refresh_token"]
     intent = _reset_intent(result, provider=provider, context=context)
@@ -183,7 +190,15 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable
 
     intent = _reset_intent(result, provider=provider, context=context)
     assert intent.connection_generation == "initial"
-    assert credentials_path.read_bytes() == corrupt_payload
+    lifecycle_context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=context.runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    with pytest.raises(OAuthProviderError, match="could not be loaded"):
+        await load_oauth_credentials_snapshot(lifecycle_context)
+    assert _oauth_credential_database_path(lifecycle_context).exists()
 
 
 @pytest.mark.asyncio

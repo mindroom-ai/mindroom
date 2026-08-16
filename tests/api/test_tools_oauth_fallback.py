@@ -11,8 +11,6 @@ import pytest
 from mindroom.api import tools as tools_api
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.oauth import credential_lifecycle
-from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -141,56 +139,3 @@ async def test_environment_oauth_fallback_status_is_available_and_secret_free(tm
     assert tool["manual_auth_configured"] is False
     assert tool["environment_auth_configured"] is True
     assert environment_secret not in repr(tool)
-
-
-@pytest.mark.asyncio
-async def test_pending_oauth_reset_is_unavailable_even_before_credential_unlink(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dashboard status must enter the lifecycle owner instead of reading a stale token file."""
-    runtime_paths = _runtime_paths(tmp_path)
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "github_oauth_client",
-        {"client_id": "github-client-id", "client_secret": "github-client-secret"},
-    )
-    target = _worker_target("@alice:example.test")
-    provider = github_oauth_provider()
-    provider_context = resolve_oauth_credential_context(
-        provider,
-        runtime_paths,
-        manager,
-        target,
-    )
-    save_scoped_credentials(
-        provider.credential_service,
-        {
-            "token": "stale-oauth-token",
-            "refresh_token": "stale-refresh-token",
-            "client_id": "github-client-id",
-            "scopes": [],
-            "expires_at": 4_102_444_800.0,
-            "_source": "oauth",
-            "_oauth_provider": provider.id,
-        },
-        credentials_manager=manager,
-        worker_target=provider_context.worker_target,
-    )
-    credential_lifecycle.oauth_connection_generation(provider_context)
-    real_delete = credential_lifecycle.delete_scoped_credentials
-
-    def crash_before_delete(*_args: object, **_kwargs: object) -> bool:
-        message = "simulated host interruption"
-        raise OSError(message)
-
-    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", crash_before_delete)
-    with pytest.raises(OSError, match="simulated host interruption"):
-        await credential_lifecycle.reset_oauth_credentials(provider_context)
-    monkeypatch.setattr(credential_lifecycle, "delete_scoped_credentials", real_delete)
-    tool = _github_tool()
-
-    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
-
-    assert tool["status"] == "requires_config"
-    assert credential_lifecycle.load_oauth_credentials(provider_context) is None

@@ -42,17 +42,6 @@ def create_directory_durable(path: Path, *, mode: int) -> None:
             _durable_directory_identities.popitem(last=False)
 
 
-def delete_file_durable(path: Path) -> bool:
-    """Unlink one file and durably publish it when directory fsync is available."""
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        _fsync_directory_durable(path.parent)
-        return False
-    _fsync_directory_durable(path.parent)
-    return True
-
-
 def replace_file_durable(source: Path, target: Path) -> None:
     """Atomically replace one file and durably publish it when directory fsync is available."""
     source.replace(target)

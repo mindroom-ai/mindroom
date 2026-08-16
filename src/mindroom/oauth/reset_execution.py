@@ -27,7 +27,7 @@ async def retire_and_reset_oauth_credentials(
 ) -> bool:
     """Fence the exact MCP session and commit its credential reset once."""
     if operation_id is not None:
-        completed = oauth_reset_operation_result(context, operation_id)
+        completed = await oauth_reset_operation_result(context, operation_id)
         if completed is not None:
             return completed
     reset_started = False

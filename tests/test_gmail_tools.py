@@ -10,6 +10,7 @@ from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
+from mindroom.oauth.credential_lifecycle import load_oauth_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired
 
 
@@ -226,7 +227,7 @@ class TestGmailTools:
 
             gmail_tools._auth()
             refresh.assert_called_once_with(mock_request)
-            saved_creds = mock_credentials_manager.load_credentials("google_gmail_oauth")
+            saved_creds = load_oauth_credentials(gmail_tools._oauth_credential_context())
             assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105
 

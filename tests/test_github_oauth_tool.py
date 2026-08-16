@@ -20,11 +20,11 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
-    load_scoped_credentials,
     save_scoped_credentials,
 )
 from mindroom.custom_tools.github import GithubTools
-from mindroom.oauth import credential_lifecycle
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials
+from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
@@ -39,6 +39,20 @@ MANUAL_ACCESS_TOKEN = "manual-access"  # noqa: S105
 OLD_REFRESH_TOKEN = "old-refresh"  # noqa: S105
 ROTATED_REFRESH_TOKEN = "rotated-refresh"  # noqa: S105
 ENV_ACCESS_TOKEN = "environment-access"  # noqa: S105
+
+
+def _publish_oauth_credentials(
+    context: OAuthCredentialContext,
+    credentials: dict[str, object],
+) -> None:
+    """Publish test credentials through the SQLite transaction owner."""
+
+    async def publish() -> None:
+        async with oauth_credential_transaction(context) as transaction:
+            transaction.publish(credentials, advance_connection_generation=True)
+            await transaction.commit()
+
+    asyncio.run(publish())
 
 
 @dataclass(frozen=True)
@@ -411,12 +425,7 @@ def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: P
         old_future = old_worker.submit(old_call)
         assert old_ready.wait(timeout=5)
         credential_context = tool._oauth_credential_context()
-        credential_lifecycle._publish_oauth_credentials_locked(
-            credential_context,
-            _oauth_credentials("account-b-token"),
-            state=credential_lifecycle._load_oauth_credential_state(credential_context),
-            advance_connection_generation=True,
-        )
+        _publish_oauth_credentials(credential_context, _oauth_credentials("account-b-token"))
         new_state = new_worker.submit(current_state).result(timeout=5)
         release_old.set()
         old_state = old_future.result(timeout=5)
@@ -805,12 +814,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     refreshed = _oauth_credentials("rotated-access", refresh_token=ROTATED_REFRESH_TOKEN)
 
     def refresh_credentials(*_args: object, **_kwargs: object) -> dict[str, object]:
-        save_scoped_credentials(
-            "github_oauth",
-            refreshed,
-            credentials_manager=manager,
-            worker_target=oauth_target,
-        )
+        _publish_oauth_credentials(tool._oauth_credential_context(), refreshed)
         return refreshed
 
     with (
@@ -824,11 +828,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
         )
         result = json.loads(tool.list_repositories())
 
-    stored = load_scoped_credentials(
-        "github_oauth",
-        credentials_manager=manager,
-        worker_target=oauth_target,
-    )
+    stored = load_oauth_credentials(tool._oauth_credential_context())
     assert result == ["example/project"]
     assert stored is not None
     assert stored["token"] == "rotated-access"  # noqa: S105
@@ -915,11 +915,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
         credentials_manager=manager,
         worker_target=target,
     )
-    adopted = load_scoped_credentials(
-        "github_oauth",
-        credentials_manager=manager,
-        worker_target=oauth_target,
-    )
+    adopted = load_oauth_credentials(tool._oauth_credential_context())
     with (
         patch(
             "mindroom.custom_tools.github.refresh_oauth_credentials_blocking",
@@ -933,14 +929,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
     assert str(exc_info.value) == "OAuth credential refresh failed"
     assert leaked_detail not in str(exc_info.value)
     assert "/api/oauth/" not in str(exc_info.value)
-    assert (
-        load_scoped_credentials(
-            "github_oauth",
-            credentials_manager=manager,
-            worker_target=oauth_target,
-        )
-        == adopted
-    )
+    assert load_oauth_credentials(tool._oauth_credential_context()) == adopted
 
 
 def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path) -> None:
