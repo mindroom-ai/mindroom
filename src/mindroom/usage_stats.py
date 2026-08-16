@@ -219,6 +219,24 @@ class _DirectRunEntity:
     entity_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _UsageMetricRecord:
+    """One normalized retained metric contribution with no raw persisted payload."""
+
+    entity_kind: Literal["agent", "team"]
+    entity_id: str
+    requester_id: str | None
+    created_at: datetime
+    model_type: str
+    provider: str
+    model_id: str
+    run_id: str | None
+    structural_key: str
+    status: str
+    totals: TokenTotals
+    cost: Decimal | None
+
+
 @dataclass(slots=True)
 class _Aggregate:
     totals: TokenTotals = TokenTotals()
@@ -252,6 +270,13 @@ class _CollectionState:
     included_sessions: set[tuple[str, str]]
     observed_at: list[datetime]
     partial_source_labels: set[str]
+    unreadable_source_labels: set[str]
+    readable_source_labels: set[str]
+    stable_run_ids: set[tuple[str, str, str]]
+    structural_run_ids: set[tuple[str, str, str]]
+    row_retained_totals: dict[tuple[str, str], TokenTotals]
+    row_session_metrics: dict[tuple[str, str], TokenTotals | None]
+    row_comparison_allowed: dict[tuple[str, str], bool]
     scanned_sources: int = 0
     scanned_sessions: int = 0
     retained_runs: int = 0
@@ -396,14 +421,24 @@ def _collect(
         included_sessions=set(),
         observed_at=[],
         partial_source_labels=set(),
+        unreadable_source_labels=set(),
+        readable_source_labels=set(),
+        stable_run_ids=set(),
+        structural_run_ids=set(),
+        row_retained_totals={},
+        row_session_metrics={},
+        row_comparison_allowed={},
     )
     timezone = _usage_timezone(config.timezone)
     for source in sources:
         state.scanned_sources += 1
         for outcome in iter_usage_storage_rows(source):
             if isinstance(outcome, UsageStorageDiagnostic):
-                state.partial_source_labels.add(outcome.path_label)
+                if outcome.status != "absent":
+                    state.partial_source_labels.add(outcome.path_label)
+                    state.unreadable_source_labels.add(outcome.path_label)
                 continue
+            state.readable_source_labels.add(source.path_label)
             _collect_row(
                 state=state,
                 row=outcome,
@@ -418,6 +453,9 @@ def _collect(
                 entity_filter=entity_filter,
                 requester_filter=requester_filter,
             )
+    if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
+        msg = "Usage source unavailable"
+        raise ValueError(msg)
     return state
 
 
@@ -437,69 +475,202 @@ def _collect_row(
     requester_filter: frozenset[str] | None,
 ) -> None:
     state.scanned_sessions += 1
-    for run in row.runs:
-        entity = _direct_run_entity(run)
-        if entity is None and (scope == "self" or group_by == "entity" or entity_filter is not None):
-            state.malformed_runs += 1
-            state.skipped_runs += 1
-            continue
-        timestamp = _run_timestamp(run.created_at)
-        if timestamp is None:
-            state.missing_timestamp_runs += 1
-            state.skipped_runs += 1
-            continue
-        requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
-        if requester is None:
-            state.missing_requester_runs += 1
-        if not _accept_run(
-            entity=entity,
-            requester=requester,
-            timestamp=timestamp,
+    row_key = (row.source.path_label, row.row_key)
+    state.row_retained_totals[row_key] = TokenTotals()
+    state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
+    state.row_comparison_allowed[row_key] = scope == "admin" or row.source.requester_isolated
+    for index, run in enumerate(row.runs):
+        _collect_run_tree(
+            state=state,
+            row=row,
+            run=run,
+            is_top_level=True,
+            parent_requester=None,
+            structural_key=str(index),
+            config=config,
             scope=scope,
+            group_by=group_by,
+            timezone=timezone,
+            window_start=window_start,
+            window_end=window_end,
             expected_agent=expected_agent,
             expected_requester=expected_requester,
             entity_filter=entity_filter,
             requester_filter=requester_filter,
+        )
+
+
+def _collect_run_tree(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    is_top_level: bool,
+    parent_requester: str | None,
+    structural_key: str,
+    config: Config,
+    scope: Literal["self", "admin"],
+    group_by: _UsageGroupBy,
+    timezone: ZoneInfo,
+    window_start: datetime | None,
+    window_end: datetime,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> None:
+    requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else parent_requester
+    entity = _run_entity(row=row, run=run, is_top_level=is_top_level)
+    timestamp = _run_timestamp(run.created_at)
+    entity_required = scope == "self" or group_by == "entity" or entity_filter is not None
+    if (entity is None and entity_required) or timestamp is None:
+        state.malformed_runs += entity is None
+        state.missing_timestamp_runs += timestamp is None
+        state.skipped_runs += 1
+    else:
+        effective_entity = entity or _DirectRunEntity(kind="agent", entity_id="")
+        _collect_normalized_run(
+            state=state,
+            row=row,
+            run=run,
+            entity=effective_entity,
+            requester=requester,
+            timestamp=timestamp,
+            structural_key=structural_key,
+            scope=scope,
+            group_by=group_by,
+            timezone=timezone,
             window_start=window_start,
             window_end=window_end,
-        ):
-            state.skipped_runs += 1
-            continue
-        contributions = _run_contributions(run)
-        if contributions is None:
-            state.malformed_runs += 1
-            state.skipped_runs += 1
-            continue
-        state.retained_runs += 1
-        state.included_sessions.add((row.source.path_label, row.row_key))
-        state.observed_at.append(timestamp)
-        state.status_counts[run.status] += 1
-        run_totals = TokenTotals()
-        run_cost = Decimal(0)
-        has_cost = False
-        per_breakdown: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate] = {}
-        for contribution in contributions:
-            run_totals = _add_totals(run_totals, contribution.totals)
-            if contribution.cost is not None:
-                run_cost += contribution.cost
-                has_cost = True
-            key = _breakdown_key(
-                group_by=group_by,
-                entity=entity,
-                requester=requester,
-                timestamp=timestamp,
-                timezone=timezone,
-                contribution=contribution,
-            )
-            aggregate = per_breakdown.setdefault(key, _Aggregate())
-            aggregate.add(totals=contribution.totals, cost=contribution.cost)
-        for key, aggregate in per_breakdown.items():
-            breakdown = state.breakdowns.setdefault(key, _Aggregate())
-            breakdown.add(
-                totals=aggregate.totals,
-                cost=aggregate.known_cost if aggregate.runs_with_cost else None,
-            )
-        state.aggregate.add(totals=run_totals, cost=run_cost if has_cost else None)
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            entity_filter=entity_filter,
+            requester_filter=requester_filter,
+        )
+    for index, child in enumerate(run.member_responses):
+        _collect_run_tree(
+            state=state,
+            row=row,
+            run=child,
+            is_top_level=False,
+            parent_requester=requester,
+            structural_key=f"{structural_key}.{index}",
+            config=config,
+            scope=scope,
+            group_by=group_by,
+            timezone=timezone,
+            window_start=window_start,
+            window_end=window_end,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            entity_filter=entity_filter,
+            requester_filter=requester_filter,
+        )
+
+
+def _collect_normalized_run(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    entity: _DirectRunEntity,
+    requester: str | None,
+    timestamp: datetime,
+    structural_key: str,
+    scope: Literal["self", "admin"],
+    group_by: _UsageGroupBy,
+    timezone: ZoneInfo,
+    window_start: datetime | None,
+    window_end: datetime,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> None:
+    is_nested = "." in structural_key
+    dedup_key = (entity.kind, entity.entity_id, run.run_id) if run.run_id and is_nested else None
+    structural_dedup = (row.source.path_label, row.row_key, structural_key)
+    if (dedup_key is not None and dedup_key in state.stable_run_ids) or (
+        run.run_id is None and structural_dedup in state.structural_run_ids
+    ):
+        return
+    if dedup_key is not None:
+        state.stable_run_ids.add(dedup_key)
+    if run.run_id is None:
+        state.structural_run_ids.add(structural_dedup)
+    if requester is None:
+        state.missing_requester_runs += 1
+    if not _accept_run(
+        entity=entity,
+        requester=requester,
+        timestamp=timestamp,
+        scope=scope,
+        expected_agent=expected_agent,
+        expected_requester=expected_requester,
+        entity_filter=entity_filter,
+        requester_filter=requester_filter,
+        window_start=window_start,
+        window_end=window_end,
+    ):
+        state.skipped_runs += 1
+        return
+    contributions = _run_contributions(run)
+    if contributions is None:
+        state.malformed_runs += 1
+        state.skipped_runs += 1
+        return
+    records = tuple(
+        _UsageMetricRecord(
+            entity_kind=entity.kind,
+            entity_id=entity.entity_id,
+            requester_id=requester,
+            created_at=timestamp,
+            model_type=contribution.model_type,
+            provider=contribution.provider,
+            model_id=contribution.model_id,
+            run_id=run.run_id,
+            structural_key=structural_key,
+            status=run.status,
+            totals=contribution.totals,
+            cost=contribution.cost,
+        )
+        for contribution in contributions
+    )
+    _aggregate_records(state=state, row=row, records=records, group_by=group_by, timezone=timezone)
+
+
+def _aggregate_records(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    records: tuple[_UsageMetricRecord, ...],
+    group_by: _UsageGroupBy,
+    timezone: ZoneInfo,
+) -> None:
+    record = records[0]
+    state.retained_runs += 1
+    state.included_sessions.add((row.source.path_label, row.row_key))
+    state.observed_at.append(record.created_at)
+    state.status_counts[record.status] += 1
+    run_totals = TokenTotals()
+    run_cost = Decimal(0)
+    has_cost = False
+    per_breakdown: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate] = {}
+    for record in records:
+        run_totals = _add_totals(run_totals, record.totals)
+        if record.cost is not None:
+            run_cost += record.cost
+            has_cost = True
+        key = _record_breakdown_key(group_by=group_by, record=record, timezone=timezone)
+        per_breakdown.setdefault(key, _Aggregate()).add(totals=record.totals, cost=record.cost)
+    for key, aggregate in per_breakdown.items():
+        state.breakdowns.setdefault(key, _Aggregate()).add(
+            totals=aggregate.totals,
+            cost=aggregate.known_cost if aggregate.runs_with_cost else None,
+        )
+    state.aggregate.add(totals=run_totals, cost=run_cost if has_cost else None)
+    row_key = (row.source.path_label, row.row_key)
+    state.row_retained_totals[row_key] = _add_totals(state.row_retained_totals[row_key], run_totals)
 
 
 def _accept_run(
@@ -532,10 +703,51 @@ def _accept_run(
     return requester_filter is None or requester in requester_filter
 
 
-def _direct_run_entity(run: UsageRunNode) -> _DirectRunEntity | None:
-    if run.agent_id:
+def _record_breakdown_key(
+    *,
+    group_by: _UsageGroupBy,
+    record: _UsageMetricRecord,
+    timezone: ZoneInfo,
+) -> tuple[str, str, str | None, str | None, str | None]:
+    if group_by == "model":
+        return ("model", record.model_id, record.model_type, record.provider, record.model_id)
+    if group_by == "entity":
+        return ("entity", record.entity_id, None, None, None)
+    if group_by == "requester":
+        return ("requester", record.requester_id or "unknown", None, None, None)
+    return ("day", record.created_at.astimezone(timezone).date().isoformat(), None, None, None)
+
+
+def _metrics_totals(metrics: Mapping[str, object] | None) -> TokenTotals | None:
+    if metrics is None:
+        return None
+    values: dict[str, int] = {}
+    for field in _TOKEN_FIELDS:
+        value = _token_value(metrics.get(field))
+        if value is None and metrics.get(field) is not None:
+            return None
+        values[field] = value or 0
+    return TokenTotals(**values)
+
+
+def _run_entity(  # noqa: PLR0911
+    *,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    is_top_level: bool,
+) -> _DirectRunEntity | None:
+    if is_top_level and row.source.scope in {"shared_agent", "private_agent"}:
+        if row.source.source_agent_id in row.source.allowed_agent_ids:
+            return _DirectRunEntity(kind="agent", entity_id=row.source.source_agent_id)
+        return None
+    if is_top_level:
+        team_id = run.team_id or (row.entity_id if row.entity_kind == "team" else None)
+        if team_id in row.source.allowed_team_ids:
+            return _DirectRunEntity(kind="team", entity_id=team_id)
+        return None
+    if run.agent_id in row.source.allowed_agent_ids:
         return _DirectRunEntity(kind="agent", entity_id=run.agent_id)
-    if run.team_id:
+    if run.team_id in row.source.allowed_team_ids:
         return _DirectRunEntity(kind="team", entity_id=run.team_id)
     return None
 
@@ -672,9 +884,10 @@ def _report(
     retained_rows = sorted_rows[:_MAX_BREAKDOWN_ROWS]
     coverage_status: Literal["complete_retained", "partial", "unknown"]
     partial_sources = len(state.partial_source_labels)
-    if partial_sources:
+    compacted_sessions, comparison_unknown = _coverage_comparison(state)
+    if partial_sources or compacted_sessions:
         coverage_status = "partial"
-    elif not state.scanned_sources:
+    elif comparison_unknown or not state.scanned_sources:
         coverage_status = "unknown"
     else:
         coverage_status = "complete_retained"
@@ -705,10 +918,26 @@ def _report(
             malformed_runs=state.malformed_runs,
             missing_requester_runs=state.missing_requester_runs,
             missing_timestamp_runs=state.missing_timestamp_runs,
-            compacted_sessions=0,
+            compacted_sessions=compacted_sessions,
             note="Retained run usage only; session compaction can make retained history incomplete.",
         ),
     )
+
+
+def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
+    compacted_sessions = 0
+    unknown = not state.row_session_metrics
+    for row_key, retained in state.row_retained_totals.items():
+        if not state.row_comparison_allowed[row_key]:
+            unknown = True
+            continue
+        cumulative = state.row_session_metrics[row_key]
+        if cumulative is None:
+            unknown = True
+            continue
+        if cumulative.total_tokens > retained.total_tokens:
+            compacted_sessions += 1
+    return compacted_sessions, unknown
 
 
 def _validate_entity_filter(entity_names: tuple[str, ...] | None, config: Config) -> frozenset[str] | None:

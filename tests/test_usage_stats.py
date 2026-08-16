@@ -16,6 +16,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage, parse_usage_window
 from mindroom.usage_stats_storage import (
     UsageSessionRow,
+    UsageStorageDiagnostic,
     UsageStorageSource,
     _extract_run_node,
 )
@@ -54,16 +55,23 @@ def _identity(*, requester_id: str = "@alice:example.test") -> ToolExecutionIden
     )
 
 
-def _source() -> UsageStorageSource:
+def _source(
+    *,
+    scope: str = "shared_agent",
+    source_agent_id: str | None = "code",
+    allowed_agents: frozenset[str] = frozenset({"code", "other"}),
+    allowed_teams: frozenset[str] = frozenset(),
+    requester_isolated: bool = False,
+) -> UsageStorageSource:
     return UsageStorageSource(
         path=Path("/not-a-real-storage-path.db"),
         path_label="agents/code/sessions/code.db",
-        scope="shared_agent",
+        scope=scope,  # type: ignore[arg-type]
         expected_session_table="code_sessions",
-        source_agent_id="code",
-        allowed_agent_ids=frozenset({"code", "other"}),
-        allowed_team_ids=frozenset(),
-        requester_isolated=False,
+        source_agent_id=source_agent_id,
+        allowed_agent_ids=allowed_agents,
+        allowed_team_ids=allowed_teams,
+        requester_isolated=requester_isolated,
     )
 
 
@@ -77,6 +85,8 @@ def _raw_run(
     metrics: dict[str, object] | None = None,
     model: str = "gpt-5.6",
     provider: str = "openai",
+    run_id: str | None = "event-secret",
+    nested: list[dict[str, object]] | None = None,
     sensitive_text: str = "never expose this prompt",
 ) -> dict[str, object]:
     metadata = (
@@ -85,7 +95,7 @@ def _raw_run(
         else {"prompt": sensitive_text}
     )
     return {
-        "run_id": "event-secret",
+        "run_id": run_id,
         "agent_id": agent_id,
         "team_id": team_id,
         "user_id": user_id,
@@ -100,17 +110,25 @@ def _raw_run(
         "thread_id": "$secret-thread",
         "session_id": "secret-session",
         "tools": [{"arguments": {"token": "sensitive-value"}}],
+        "member_responses": nested or [],
     }
 
 
-def _row(raw_run: dict[str, object], *, entity_id: str = "code") -> UsageSessionRow:
+def _row(
+    raw_run: dict[str, object],
+    *,
+    entity_id: str = "code",
+    entity_kind: str = "agent",
+    source: UsageStorageSource | None = None,
+    session_metrics: dict[str, object] | None = None,
+) -> UsageSessionRow:
     return UsageSessionRow(
-        source=_source(),
+        source=source or _source(),
         entity_id=entity_id,
-        entity_kind="agent",
+        entity_kind=entity_kind,  # type: ignore[arg-type]
         row_key="storage-row-secret",
         session_user_id="@session-secret:example.test",
-        session_metrics={"total_tokens": 1_000_000},
+        session_metrics=session_metrics,
         runs=(_extract_run_node(raw_run, depth=0, extracted_nodes=[0], extracted_model_metrics=[0]),),
     )
 
@@ -132,7 +150,7 @@ def test_self_usage_uses_storage_requester_precedence_and_canonical_aliases(tmp_
         (
             _row(_raw_run(requester_id="@alice:example.test", user_id="@wrong:example.test")),
             _row(_raw_run(requester_id=None, user_id="@telegram-alice:example.test")),
-            _row(_raw_run(requester_id="@alice:example.test", agent_id="other")),
+            _row(_raw_run(requester_id="@alice:example.test", agent_id="other"), source=_source(source_agent_id="other")),
             _row(_raw_run(requester_id=None, user_id=None)),
         ),
     )
@@ -231,8 +249,12 @@ def test_admin_entity_grouping_and_filters_use_direct_run_attribution(
     _wire_admin(
         monkeypatch,
         (
-            _row(_raw_run(agent_id="other", metrics={"total_tokens": 7}), entity_id="code"),
-            _row(_raw_run(agent_id=None, team_id="engineering", metrics={"total_tokens": 5}), entity_id="code"),
+            _row(_raw_run(agent_id="other", metrics={"total_tokens": 7}), entity_id="code", source=_source(source_agent_id="other")),
+            _row(
+                _raw_run(agent_id=None, team_id="engineering", metrics={"total_tokens": 5}),
+                entity_id="code",
+                source=_source(scope="team", source_agent_id=None, allowed_teams=frozenset({"engineering"})),
+            ),
         ),
     )
 
@@ -261,7 +283,10 @@ def test_unfiltered_admin_non_entity_grouping_retains_entityless_direct_runs(
     breakdown_key: str,
 ) -> None:
     """A changed entity requirement would discard valid admin usage outside entity semantics."""
-    _wire_admin(monkeypatch, (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11})),))
+    _wire_admin(
+        monkeypatch,
+        (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11}), source=_source(source_agent_id=None)),),
+    )
 
     report = collect_admin_usage(
         config=_config(),
@@ -291,7 +316,10 @@ def test_entityless_direct_runs_are_skipped_when_admin_entity_semantics_require_
     entity_names: tuple[str, ...] | None,
 ) -> None:
     """A changed missing-entity policy would admit an ungroupable or unfilterable direct run."""
-    _wire_admin(monkeypatch, (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11})),))
+    _wire_admin(
+        monkeypatch,
+        (_row(_raw_run(agent_id=None, team_id=None, metrics={"total_tokens": 11}), source=_source(source_agent_id=None)),),
+    )
 
     report = collect_admin_usage(
         config=_config(),
@@ -529,3 +557,220 @@ def test_breakdown_retains_top_200_rows_with_stable_total_token_order(tmp_path: 
     assert report.breakdown_omitted == 1
     assert report.breakdown[0].model_id == "model-200"
     assert report.breakdown[-1].model_id == "model-001"
+
+
+def test_team_nested_runs_inherit_requester_and_deduplicate_stable_member_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing traversal, requester inheritance, or stable dedup would change retained team usage."""
+    source = _source(
+        scope="team",
+        source_agent_id=None,
+        allowed_teams=frozenset({"engineering", "nested"}),
+    )
+    member = _raw_run(agent_id="code", run_id="member-1", requester_id=None, user_id=None, metrics={"total_tokens": 3})
+    root = _raw_run(
+        agent_id=None,
+        team_id="engineering",
+        run_id="leader-1",
+        metrics={"total_tokens": 10},
+        nested=[
+            member,
+            member,
+            _raw_run(agent_id=None, team_id="nested", run_id="nested-1", requester_id=None, user_id=None, metrics={"total_tokens": 4}),
+            _raw_run(agent_id="other", run_id="other-1", requester_id="@bob:example.test", metrics={"total_tokens": 9}),
+        ],
+    )
+    _wire_admin(monkeypatch, (_row(root, entity_id="engineering", entity_kind="team", source=source),))
+
+    report = collect_admin_usage(
+        config=_config(team_names=("engineering", "nested")),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=("@alice:example.test",),
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {
+        ("engineering", 10),
+        ("code", 3),
+        ("nested", 4),
+    }
+    assert report.run_count == 3
+
+
+def test_self_usage_finds_nested_team_member_without_leader_or_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed self admission rule would include team leader or sibling retained metrics."""
+    source = _source(scope="team", source_agent_id=None, allowed_teams=frozenset({"engineering"}))
+    root = _raw_run(
+        agent_id=None,
+        team_id="engineering",
+        metrics={"total_tokens": 10},
+        nested=[
+            _raw_run(agent_id="code", run_id="code-member", requester_id=None, user_id=None, metrics={"total_tokens": 3}),
+            _raw_run(agent_id="other", run_id="other-member", requester_id=None, user_id=None, metrics={"total_tokens": 8}),
+        ],
+    )
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: (source,))
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", lambda _: iter((_row(root, entity_id="engineering", entity_kind="team", source=source),)))
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(team_names=("engineering",)),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        start=None,
+        end=None,
+        group_by="model",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.totals.total_tokens == 3
+
+
+def test_nested_runs_without_ids_count_once_per_structural_location(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A changed structural dedup key would collapse distinct anonymous nested runs."""
+    source = _source(scope="team", source_agent_id=None, allowed_teams=frozenset({"engineering"}))
+    root = _raw_run(
+        agent_id=None,
+        team_id="engineering",
+        run_id="leader",
+        metrics={"total_tokens": 0},
+        nested=[
+            _raw_run(agent_id="code", run_id=None, requester_id=None, user_id=None, metrics={"total_tokens": 3}),
+            _raw_run(agent_id="code", run_id=None, requester_id=None, user_id=None, metrics={"total_tokens": 3}),
+        ],
+    )
+    _wire_admin(monkeypatch, (_row(root, entity_id="engineering", entity_kind="team", source=source),))
+
+    report = collect_admin_usage(
+        config=_config(team_names=("engineering",)),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 3
+    assert report.totals.total_tokens == 6
+
+
+def test_coverage_compaction_and_source_diagnostics_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A changed coverage classifier would hide compaction or unreadable-source partial results."""
+    source = _source()
+    readable = _row(_raw_run(metrics={"total_tokens": 10}), source=source, session_metrics={"total_tokens": 20})
+    busy = UsageStorageDiagnostic(path_label="safe-label", status="busy", detail="database busy")
+    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: (source,))
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", lambda _: iter((readable, busy)))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.coverage.status == "partial"
+    assert report.coverage.compacted_sessions == 1
+    assert report.coverage.partial_sources == 1
+
+
+def test_self_coverage_uses_private_cumulative_evidence_but_keeps_shared_evidence_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed privacy gate would expose or trust shared cumulative session metrics."""
+    private_source = _source(scope="private_agent", requester_isolated=True)
+    private_row = _row(_raw_run(metrics={"total_tokens": 10}), source=private_source, session_metrics={"total_tokens": 10})
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: (private_source,))
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", lambda _: iter((private_row,)))
+
+    private_report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        start=None,
+        end=None,
+        group_by="day",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert private_report.coverage.status == "complete_retained"
+
+    shared_source = _source()
+    shared_row = _row(_raw_run(metrics={"total_tokens": 10}), source=shared_source, session_metrics={"total_tokens": 10})
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: (shared_source,))
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", lambda _: iter((shared_row,)))
+    shared_report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        start=None,
+        end=None,
+        group_by="day",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert shared_report.coverage.status == "unknown"
+    assert "session_metrics" not in repr(shared_report.to_dict())
+
+
+def test_self_coverage_distinguishes_unavailable_sources_from_absent_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed diagnostic policy would silently treat an unreadable self source as empty history."""
+    source = _source()
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: (source,))
+    monkeypatch.setattr(
+        "mindroom.usage_stats.iter_usage_storage_rows",
+        lambda _: iter((UsageStorageDiagnostic(path_label="safe", status="busy", detail="database busy"),)),
+    )
+
+    with pytest.raises(ValueError, match="Usage source unavailable"):
+        collect_self_usage(
+            agent_name="code",
+            requester_id="@alice:example.test",
+            config=_config(),
+            runtime_paths=_paths(tmp_path),
+            execution_identity=_identity(),
+            start=None,
+            end=None,
+            group_by="day",
+            as_of=datetime(2026, 1, 3, tzinfo=UTC),
+        )
+
+    monkeypatch.setattr(
+        "mindroom.usage_stats.iter_usage_storage_rows",
+        lambda _: iter((UsageStorageDiagnostic(path_label="safe", status="absent", detail="database absent"),)),
+    )
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        start=None,
+        end=None,
+        group_by="day",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert report.run_count == 0
