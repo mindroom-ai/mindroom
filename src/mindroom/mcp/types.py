@@ -87,6 +87,14 @@ class MCPServerCatalog:
     catalog_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class MCPOAuthLeaseVersion:
+    """Immutable identity of one authoritative OAuth credential version."""
+
+    token_hash: str
+    credential_generation: str
+
+
 @dataclass
 class MCPServerState:
     """Live connection state for one configured server."""
@@ -111,10 +119,8 @@ class MCPServerState:
     consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
-    oauth_access_token_hash: str | None = None
-    oauth_session_access_token_hash: str | None = None
-    oauth_credential_generation: str | None = None
-    oauth_session_credential_generation: str | None = None
+    oauth_lease_version: MCPOAuthLeaseVersion | None = None
+    oauth_session_lease_version: MCPOAuthLeaseVersion | None = None
     oauth_transport_authorization_rejected: Callable[[], bool] | None = None
     function_validation_error: bool = False
     retired: bool = False

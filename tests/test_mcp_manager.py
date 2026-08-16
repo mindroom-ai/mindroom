@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 from unittest.mock import patch
 
@@ -678,9 +679,9 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
     ]
     assert _FakeClientSession.sessions[0].closed is True
     assert _FakeClientSession.call_tool_invocation_count == 1
-    assert request_state.oauth_access_token_hash == account_b_hash
-    assert request_state.oauth_session_access_token_hash == account_b_hash
-    assert request_state.oauth_credential_generation == request_state.oauth_session_credential_generation
+    assert request_state.oauth_lease_version is not None
+    assert request_state.oauth_lease_version.token_hash == account_b_hash
+    assert request_state.oauth_session_lease_version == request_state.oauth_lease_version
 
 
 @pytest.mark.asyncio
@@ -1551,7 +1552,7 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     assert first_result[0] is second_result[0]
     assert first_result[1].headers == {"Authorization": "Bearer alice-token"}
     assert second_result[1].headers == {"Authorization": "Bearer alice-token"}
-    assert first_result[1].token_hash == second_result[1].token_hash
+    assert first_result[1].version == second_result[1].version
     assert max_active_token_resolutions == 1
 
 
@@ -2245,7 +2246,11 @@ async def test_mcp_manager_retires_stale_cached_session_for_current_connection_g
         credentials_manager=credentials_manager,
     )
     approved_connection_generation = oauth_connection_generation(credential_context)
-    state.oauth_credential_generation = "stale-cached-generation"
+    assert state.oauth_lease_version is not None
+    state.oauth_lease_version = replace(
+        state.oauth_lease_version,
+        credential_generation="stale-cached-generation",
+    )
 
     async with manager.retire_request_session(
         credential_context=credential_context,
@@ -2278,7 +2283,7 @@ async def test_mcp_manager_does_not_retire_session_from_later_connection_generat
     )
     state = next(iter(manager._scoped_states.values()))
     session = _FakeClientSession.sessions[0]
-    assert state.oauth_credential_generation is not None
+    assert state.oauth_lease_version is not None
     credential_context = manager._oauth_credential_context(
         manager._states["demo"],
         worker_target=worker_target,

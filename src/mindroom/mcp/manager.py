@@ -36,7 +36,12 @@ from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.mcp.transports import build_transport_handle
-from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
+from mindroom.mcp.types import (
+    MCPDiscoveredTool,
+    MCPOAuthLeaseVersion,
+    MCPServerCatalog,
+    MCPServerState,
+)
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
@@ -120,9 +125,8 @@ class _MCPAuthorizationLease:
     """Authorization material and identity for one requester operation."""
 
     headers: Mapping[str, str]
-    token_hash: str
+    version: MCPOAuthLeaseVersion
     credential_context: OAuthCredentialContext
-    credential_generation: str
     session_key: _MCPSessionKey
 
 
@@ -721,26 +725,24 @@ class MCPServerManager:
                     state,
                     credential_context=credential_context,
                 )
-                token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
-                if (
-                    state.oauth_access_token_hash != token_hash
-                    or state.oauth_credential_generation != credential_generation
-                ):
+                lease_version = MCPOAuthLeaseVersion(
+                    token_hash=hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
+                    credential_generation=credential_generation,
+                )
+                if state.oauth_lease_version != lease_version:
                     async with state.call_lock.write():
                         await self._disconnect_state(state)
                         state.catalog = None
                         state.last_error = None
                         state.stale = True
-                        state.oauth_access_token_hash = token_hash
-                        state.oauth_credential_generation = credential_generation
+                        state.oauth_lease_version = lease_version
         except OAuthConnectionRequired:
             await run_coroutine_until_complete(self._disconnect_rejected_oauth_request_state(key, state))
             raise
         return state, _MCPAuthorizationLease(
             headers={"Authorization": f"Bearer {access_token}"},
-            token_hash=token_hash,
+            version=lease_version,
             credential_context=credential_context,
-            credential_generation=credential_generation,
             session_key=key,
         )
 
@@ -792,8 +794,7 @@ class MCPServerManager:
                     state.catalog = None
                     state.last_error = None
                     state.stale = True
-                    state.oauth_access_token_hash = None
-                    state.oauth_credential_generation = None
+                    state.oauth_lease_version = None
             drained = True
         finally:
             if drained:
@@ -1099,11 +1100,8 @@ class MCPServerManager:
                 collision_error = self._candidate_function_validation_error(state, catalog)
                 if collision_error is not None:
                     raise collision_error  # noqa: TRY301
-                state.oauth_session_access_token_hash = (
-                    authorization_lease.token_hash if authorization_lease is not None else None
-                )
-                state.oauth_session_credential_generation = (
-                    authorization_lease.credential_generation if authorization_lease is not None else None
+                state.oauth_session_lease_version = (
+                    authorization_lease.version if authorization_lease is not None else None
                 )
                 state.catalog = catalog
                 state.connected = True
@@ -1456,8 +1454,7 @@ class MCPServerManager:
             )
         state.session = None
         state.connected = False
-        state.oauth_session_access_token_hash = None
-        state.oauth_session_credential_generation = None
+        state.oauth_session_lease_version = None
         state.oauth_transport_authorization_rejected = None
         if close_error is not None:
             raise close_error
@@ -1508,8 +1505,7 @@ class MCPServerManager:
             raise _MCPAuthorizationChangedError
         if authorization_lease is not None and (
             state.retired
-            or state.oauth_access_token_hash != authorization_lease.token_hash
-            or state.oauth_credential_generation != authorization_lease.credential_generation
+            or state.oauth_lease_version != authorization_lease.version
             or state.config_generation != authorization_lease.session_key.config_generation
             or state.oauth_provider_id != authorization_lease.session_key.provider_id
             or state.oauth_request_scope
@@ -1528,10 +1524,7 @@ class MCPServerManager:
         authorization_lease: _MCPAuthorizationLease | None,
     ) -> None:
         self._require_desired_oauth_lease(state, authorization_lease)
-        if authorization_lease is not None and (
-            state.oauth_session_access_token_hash != authorization_lease.token_hash
-            or state.oauth_session_credential_generation != authorization_lease.credential_generation
-        ):
+        if authorization_lease is not None and (state.oauth_session_lease_version != authorization_lease.version):
             raise _MCPAuthorizationChangedError
 
     async def _validate_authoritative_oauth_lease(
@@ -1550,11 +1543,13 @@ class MCPServerManager:
         self._require_desired_oauth_lease(state, authorization_lease)
         credentials = snapshot.credentials or {}
         access_token = credentials.get("token") or credentials.get("access_token")
-        if (
-            snapshot.generation != authorization_lease.credential_generation
-            or not isinstance(access_token, str)
-            or hashlib.sha256(access_token.encode("utf-8")).hexdigest() != authorization_lease.token_hash
-        ):
+        if not isinstance(access_token, str):
+            raise _MCPAuthorizationChangedError
+        authoritative_version = MCPOAuthLeaseVersion(
+            token_hash=hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
+            credential_generation=snapshot.generation,
+        )
+        if authoritative_version != authorization_lease.version:
             raise _MCPAuthorizationChangedError
 
     @staticmethod
