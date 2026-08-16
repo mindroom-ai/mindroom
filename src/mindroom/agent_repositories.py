@@ -745,11 +745,14 @@ def _origin_urls_from_config(
         key == "include.path"
         or key.startswith("includeif.")
         or (key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof")))
-        or key in {"remote.origin.proxy", "remote.origin.proxyauthmethod"}
+        or (
+            key.startswith("remote.origin.")
+            and key not in {"remote.origin.url", "remote.origin.pushurl", "remote.origin.fetch"}
+        )
         or (key.startswith("http.") and key.endswith((".proxy", ".proxyauthmethod")))
         for key, _value in normalized_entries
     ):
-        msg = "Agent repository workspace has URL rewriting, proxy overrides, or included Git configuration"
+        msg = "Agent repository workspace has URL rewriting, transport overrides, or included Git configuration"
         raise RepositoryOriginConflictError(msg)
 
     origin_entries = tuple((key, value) for key, value in entries if key.startswith("remote.origin."))
@@ -1051,7 +1054,13 @@ def _github_transport_and_path(url: str) -> tuple[str, str] | None:
     except ValueError:
         return None
     scheme = parsed.scheme.casefold()
-    valid_https = scheme == "https" and parsed.username is None and parsed.password is None and port in {None, 443}
+    valid_https = (
+        scheme == "https"
+        and parsed.netloc in {"github.com", "github.com:443"}
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+    )
     valid_ssh = scheme == "ssh" and parsed.username == "git" and parsed.password is None and port in {None, 22}
     if (
         not (valid_https or valid_ssh)
