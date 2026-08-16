@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from functools import wraps
 from html import unescape
 from typing import TYPE_CHECKING, Protocol, cast
 
+from agno.tools import github as agno_github_module
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github, GithubException
 
@@ -45,6 +47,42 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
+_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
+
+
+def _github_exception_status_code(exc: GithubException) -> int | None:
+    status_code = exc.status
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return status_code
+    return None
+
+
+class _SanitizeAgnoGithubExceptionFilter(logging.Filter):
+    """Remove provider-controlled GitHub exception text before log rendering."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info is None:
+            return True
+        _exception_type, exception, _traceback = record.exc_info
+        if not isinstance(exception, GithubException):
+            return True
+        status_code = _github_exception_status_code(exception)
+        record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
+        record.args = (status_code if status_code is not None else "unknown",)
+        record.exc_info = None
+        record.__dict__["exc_text"] = None
+        record.__dict__["stack_info"] = None
+        return True
+
+
+def _install_agno_github_exception_filter() -> None:
+    upstream_logger = agno_github_module.logger
+    if any(isinstance(log_filter, _SanitizeAgnoGithubExceptionFilter) for log_filter in upstream_logger.filters):
+        return
+    upstream_logger.addFilter(_SanitizeAgnoGithubExceptionFilter())
+
+
+_install_agno_github_exception_filter()
 
 
 class _GithubThreadState(threading.local):
@@ -73,17 +111,30 @@ def _normalized_access_token(value: object) -> str | None:
     return normalized or None
 
 
-def _is_github_authentication_error(result: object) -> bool:
+def _github_error_status_code(result: object) -> int | None:
     if not isinstance(result, str):
-        return False
+        return None
     try:
         payload = json.loads(result)
     except json.JSONDecodeError:
-        return False
+        return None
     if not isinstance(payload, dict):
-        return False
+        return None
     error = payload.get("error")
-    return isinstance(error, str) and error.lstrip().startswith("401 ")
+    if not isinstance(error, str):
+        return None
+    status_text, separator, _detail = error.lstrip().partition(" ")
+    if not separator or not status_text.isascii() or not status_text.isdigit():
+        return None
+    status_code = int(status_text)
+    return status_code if 100 <= status_code <= 599 else None
+
+
+def _sanitized_github_exception_result(exc: GithubException) -> str:
+    status_code = _github_exception_status_code(exc)
+    if status_code is None:
+        return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+    return json.dumps({"error": f"{status_code} {_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE}"})
 
 
 class GithubTools(AgnoGithubTools):
@@ -232,14 +283,23 @@ class GithubTools(AgnoGithubTools):
                 except OAuthConnectionRequired as exc:
                     return json.dumps(oauth_connection_required_payload(exc))
                 result = _entrypoint(*args, **kwargs)
-                if not self._explicit_access_token and _is_github_authentication_error(result):
+                status_code = _github_error_status_code(result)
+                if status_code is None:
+                    return result
+                logger.warning(
+                    "github_tool_call_failed",
+                    provider_id=self._oauth_provider.id,
+                    error_type="GithubException",
+                    status_code=status_code,
+                )
+                if not self._explicit_access_token and status_code == 401:
                     self.access_token = None
                     return json.dumps(
                         oauth_connection_required_payload(
                             self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
-                return result
+                return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
@@ -273,8 +333,7 @@ class GithubTools(AgnoGithubTools):
                     branch=branch,
                 )
         except GithubException as exc:
-            logger.exception("github_file_update_failed", repo_name=repo_name, path=path)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
 
         content_result = cast(_ContentWriteResult, result["content"])  # noqa: TC006
         commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
@@ -309,8 +368,7 @@ class GithubTools(AgnoGithubTools):
             else:
                 result = repo.delete_file(path=path, message=message, sha=sha, branch=branch)
         except GithubException as exc:
-            logger.exception("github_file_delete_failed", repo_name=repo_name, path=path)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
 
         commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
         return json.dumps(
@@ -347,8 +405,7 @@ class GithubTools(AgnoGithubTools):
             else:
                 issue.edit(title=title, body=body)
         except GithubException as exc:
-            logger.exception("github_issue_edit_failed", repo_name=repo_name, issue_number=issue_number)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
         return json.dumps({"message": f"Issue #{issue_number} updated."}, indent=2)
 
     @wraps(AgnoGithubTools.get_pull_request_count)
@@ -376,8 +433,7 @@ class GithubTools(AgnoGithubTools):
                 if count is None:
                     count = sum(1 for _pull in pulls)
         except GithubException as exc:
-            logger.exception("github_pull_request_count_failed", repo_name=repo_name)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
         return json.dumps({"count": count}, indent=2)
 
     @wraps(AgnoGithubTools.search_issues_and_prs)

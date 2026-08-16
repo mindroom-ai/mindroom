@@ -5,16 +5,20 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never
 from unittest.mock import patch
 
 import pytest
-from github import BadCredentialsException, Github
+from agno.tools import github as agno_github_module
+from github import BadCredentialsException, Github, GithubException
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -262,12 +266,44 @@ class _RevokedTokenGithub:
         raise BadCredentialsException(401, {"message": "Bad credentials"})
 
 
+class _ProviderControlledFailureGithub:
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+
+    def _raise_provider_error(self) -> Never:
+        raise GithubException(self.status_code, {"message": self.sentinel})
+
+    def get_user(self) -> _FakeUser:
+        self._raise_provider_error()
+
+    def get_repo(self, _repo_name: str) -> _ProviderControlledFailureGithub:
+        return self
+
+    def update_file(self, **_kwargs: object) -> dict[str, object]:
+        self._raise_provider_error()
+
+    def delete_file(self, **_kwargs: object) -> dict[str, object]:
+        self._raise_provider_error()
+
+    def get_issue(self, *, number: int) -> _FakeEditableIssue:
+        _ = number
+        self._raise_provider_error()
+
+    def get_pulls(self, **_kwargs: object) -> _FakePullsWithoutTotal:
+        self._raise_provider_error()
+
+
 class _CapturingLogger:
     def __init__(self) -> None:
         self.warning_calls: list[tuple[str, dict[str, object]]] = []
+        self.exception_calls: list[tuple[str, dict[str, object], str]] = []
 
     def warning(self, event: str, **kwargs: object) -> None:
         self.warning_calls.append((event, kwargs))
+
+    def exception(self, event: str, **kwargs: object) -> None:
+        self.exception_calls.append((event, kwargs, repr(sys.exception())))
 
 
 def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -956,6 +992,72 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
     assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
     assert revoked_token not in result
     assert tool.access_token is None
+
+
+@pytest.mark.parametrize("status_code", [401, 500])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "list_repositories",
+        "update_file",
+        "delete_file",
+        "edit_issue",
+        "get_pull_request_count",
+    ],
+)
+def test_github_provider_failures_do_not_expose_provider_controlled_text(
+    tmp_path: Path,
+    status_code: int,
+    operation: str,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = f"provider-controlled-secret-{operation}-{status_code}"
+    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    mindroom_logger = _CapturingLogger()
+    agno_log_output = io.StringIO()
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_handler.setFormatter(logging.Formatter("%(message)s"))
+    agno_github_module.logger.addHandler(agno_handler)
+
+    try:
+        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+            if operation == "list_repositories":
+                result = tool.list_repositories()
+            elif operation == "update_file":
+                result = tool.update_file("example/project", "notes.txt", "body", "Update", "old-sha")
+            elif operation == "delete_file":
+                result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
+            elif operation == "edit_issue":
+                result = tool.edit_issue("example/project", 7, title="Updated")
+            else:
+                result = tool.get_pull_request_count("example/project")
+    finally:
+        agno_github_module.logger.removeHandler(agno_handler)
+        agno_handler.close()
+
+    payload = json.loads(result)
+    if status_code == 401:
+        assert payload["oauth_connection_required"] is True
+        assert payload["reason"] == "access_rejected"
+    else:
+        assert payload == {"error": "GitHub request failed"}
+    captured_logs = (
+        agno_log_output.getvalue(),
+        repr(mindroom_logger.warning_calls),
+        repr(mindroom_logger.exception_calls),
+    )
+    assert all(sentinel not in output for output in captured_logs)
+    assert sentinel not in result
+    assert any(kwargs.get("status_code") == status_code for _event, kwargs in mindroom_logger.warning_calls)
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:
