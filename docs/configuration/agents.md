@@ -179,6 +179,7 @@ Teams do not currently expose a separate `accept_invites` option, but accepted t
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
+The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
 The router accepts and persists that authorized internal invite when `router.accept_invites` is enabled.
 
 MindRoom compacts in one visible lifecycle.

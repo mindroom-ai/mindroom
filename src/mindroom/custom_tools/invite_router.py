@@ -2,12 +2,45 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import nio
 from agno.tools import Toolkit
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+_ROUTER_JOIN_POLL_SECONDS = 0.25
+_ROUTER_JOIN_TIMEOUT_SECONDS = 5.0
+
+
+def _membership(response: object) -> str | None:
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return None
+    membership = response.content.get("membership")
+    return membership if isinstance(membership, str) else None
+
+
+async def _wait_for_join(client: nio.AsyncClient, room_id: str, router_id: str) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _ROUTER_JOIN_TIMEOUT_SECONDS
+    while loop.time() < deadline:
+        response = await client.room_get_state_event(room_id, "m.room.member", router_id)
+        if _membership(response) == "join":
+            return True
+        await asyncio.sleep(_ROUTER_JOIN_POLL_SECONDS)
+    return False
+
+
+async def _invite_and_wait(client: nio.AsyncClient, room_id: str, router_id: str) -> str:
+    response = await client.room_invite(room_id, router_id)
+    if not isinstance(response, nio.RoomInviteResponse):
+        return "Error: Router invite failed; current agent may lack invite permission."
+    if await _wait_for_join(client, room_id, router_id):
+        return "Router joined."
+    return "Router invited; join still pending. Retry after it joins."
 
 
 class InviteRouterTools(Toolkit):
@@ -15,6 +48,7 @@ class InviteRouterTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="invite_router", tools=[self.invite_router])
+        self.async_functions["invite_router"].approval_type = MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
 
     async def invite_router(self) -> str:
         """Invite router to current Matrix room."""
@@ -35,11 +69,7 @@ class InviteRouterTools(Toolkit):
             "m.room.member",
             router_id,
         )
-        membership = (
-            membership_response.content.get("membership")
-            if isinstance(membership_response, nio.RoomGetStateEventResponse)
-            else None
-        )
+        membership = _membership(membership_response)
         if membership == "join":
             return "Router already joined."
         if not context.current_config.router.accept_invites:
@@ -47,7 +77,4 @@ class InviteRouterTools(Toolkit):
         if membership == "invite":
             return "Router invite pending; retry after it joins."
 
-        response = await context.client.room_invite(context.room_id, router_id)
-        if isinstance(response, nio.RoomInviteResponse):
-            return "Router invited; it will auto-join."
-        return "Error: Router invite failed; current agent may lack invite permission."
+        return await _invite_and_wait(context.client, context.room_id, router_id)

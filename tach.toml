@@ -433,6 +433,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.timing",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
@@ -2720,6 +2721,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.session_ids",
     "mindroom.tool_approval",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3350,6 +3352,7 @@ path = "mindroom.tool_system.dynamic_toolkits"
 depends_on = [
     "mindroom.custom_tools.delegate",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.declarations",
 ]
 
 [[modules]]
@@ -4288,6 +4291,8 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConfigField",
+    "MATRIX_ROOM_RUNTIME_APPROVAL_TYPE",
+    "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
@@ -4704,7 +4709,6 @@ from = ["mindroom.tool_system.skills"]
 expose = [
     "LoadToolResult",
     "LoadToolValidationFailure",
-    "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "VisibleToolSurface",
     "deferred_tool_catalog_entries",
     "get_loaded_tools_for_session",

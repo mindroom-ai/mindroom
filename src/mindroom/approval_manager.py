@@ -44,7 +44,10 @@ _ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | N
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
 _EVENT_TYPE = "io.mindroom.tool_approval"
-DEFAULT_ROUTER_MANAGED_ROOM_REASON = "Tool approval needs the router in this room. Call `invite_router`, then retry."
+DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
+    "Tool approval needs the router in this room. If `router.accept_invites` is enabled, call `invite_router` "
+    "and wait for the router to join; otherwise enable it or add the router manually, then retry."
+)
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "

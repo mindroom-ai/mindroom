@@ -100,6 +100,7 @@ The router creates and manages rooms:
 Every Matrix agent also receives a built-in zero-argument `invite_router` recovery tool.
 The tool can invite only the persisted router identity and only into the agent's current room.
 The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
+The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 
 By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.

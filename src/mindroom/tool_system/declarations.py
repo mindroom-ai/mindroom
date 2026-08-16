@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
+MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
+
+
 class ToolAuthoredOverrideValidator(str, Enum):
     """Explicit authored-override validation modes for a tool."""
 

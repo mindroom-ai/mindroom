@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -112,6 +113,44 @@ def test_matrix_agents_always_get_zero_argument_invite_router_tool(tmp_path: Pat
     assert "## Tool Execution Environment" not in agent.role
 
 
+def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path: Path) -> None:
+    """Authored filters must not remove the runtime-owned recovery function."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Write code",
+                    tools=[{"invite_router": {"exclude_tools": ["invite_router"]}}],
+                    include_default_tools=False,
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!project:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!project:example.org",
+    )
+
+    agent = create_agent(
+        "code",
+        config,
+        runtime_paths_for(config),
+        execution_identity=identity,
+        session_id=identity.session_id,
+    )
+
+    toolkit = next(tool for tool in agent.tools if tool.name == "invite_router")
+    assert set(toolkit.get_async_functions()) == {"invite_router"}
+
+
 def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) -> None:
     """Non-Matrix callers should not pay for or call a room-only recovery tool."""
     config = bind_runtime_paths(
@@ -150,7 +189,7 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
 
     class _CollidingToolkit(Toolkit):
         def __init__(self) -> None:
-            super().__init__(name="colliding", tools=[self.invite_router])
+            super().__init__(name="invite_router", tools=[self.invite_router])
 
         def invite_router(self) -> str:
             return "external"
@@ -201,13 +240,64 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
 async def test_invite_router_targets_persisted_router_in_current_room(tmp_path: Path) -> None:
     """A wrong room or configurable user target would widen the recovery tool's authority."""
     context, client = _tool_context(tmp_path)
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(
+            "Not found",
+            status_code="M_NOT_FOUND",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
     client.room_invite.return_value = nio.RoomInviteResponse()
 
     with tool_runtime_context(context):
         result = await InviteRouterTools().invite_router()
 
-    assert result == "Router invited; it will auto-join."
+    assert result == "Router joined."
     client.room_invite.assert_awaited_once_with("!project:localhost", "@mindroom_router:localhost")
+
+
+@pytest.mark.asyncio
+async def test_invite_router_waits_for_delayed_router_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recovery must not report readiness while router membership is still pending."""
+    context, client = _tool_context(tmp_path)
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(
+            "Not found",
+            status_code="M_NOT_FOUND",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "invite"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    assert result == "Router joined."
+    assert client.room_get_state_event.await_count == 3
+    sleep.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -283,6 +373,7 @@ async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Pat
         InviteRouterTools(),
         config,
         supports_native_tool_approval=True,
+        registered_tool_name="invite_router",
     )
     assert toolkit is not None
     assert toolkit.get_async_functions()["invite_router"].requires_confirmation is not True
@@ -303,9 +394,10 @@ async def test_same_named_external_function_does_not_bypass_approval(tmp_path: P
         return "external"
 
     toolkit = apply_tool_approval_capability(
-        Toolkit(name="external", tools=[invite_router]),
+        Toolkit(name="invite_router", tools=[invite_router]),
         config,
         supports_native_tool_approval=True,
+        registered_tool_name="external",
     )
 
     assert toolkit is not None

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
+from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -19,7 +20,6 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
-MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
 
 _loaded_tools: dict[tuple[str, str], list[str]] = {}
 _loaded_tools_lock = RLock()
@@ -262,6 +262,11 @@ def _append_injected_special_tool_configs(
     enable_dynamic_tools_manager: bool,
     include_matrix_room_runtime_tools: bool,
 ) -> list[EffectiveToolConfig]:
+    matrix_room_runtime_tool_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
+    if include_matrix_room_runtime_tools:
+        resolved_tool_configs = [
+            entry for entry in resolved_tool_configs if entry.name not in matrix_room_runtime_tool_names
+        ]
     tool_names = [entry.name for entry in resolved_tool_configs]
     injected_tool_names = _special_tool_names(
         agent_name=agent_name,
@@ -274,7 +279,10 @@ def _append_injected_special_tool_configs(
     for tool_name in injected_tool_names:
         if tool_name in tool_names:
             continue
-        if config.resolve_entity(agent_name).authored_deferred_tool_config(tool_name) is not None:
+        if (
+            tool_name not in matrix_room_runtime_tool_names
+            and config.resolve_entity(agent_name).authored_deferred_tool_config(tool_name) is not None
+        ):
             continue
         resolved_tool_configs.append(
             EffectiveToolConfig(
