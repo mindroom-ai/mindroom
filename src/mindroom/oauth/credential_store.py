@@ -248,7 +248,7 @@ async def oauth_credential_transaction(
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA busy_timeout = 0")
-        connection.execute("PRAGMA synchronous = EXTRA")
+        await _set_synchronous_extra(connection)
         connection.execute("PRAGMA foreign_keys = ON")
         await _enter_delete_journal(connection)
         await _begin_immediate(connection)
@@ -363,6 +363,18 @@ async def _begin_immediate(connection: sqlite3.Connection) -> None:
             return
 
 
+async def _set_synchronous_extra(connection: sqlite3.Connection) -> None:
+    while True:
+        try:
+            connection.execute("PRAGMA synchronous = EXTRA")
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_lock_error(exc):
+                raise
+            await asyncio.sleep(_LOCK_RETRY_SECONDS)
+        else:
+            return
+
+
 async def _enter_delete_journal(connection: sqlite3.Connection) -> None:
     while True:
         try:
@@ -380,20 +392,17 @@ async def _enter_delete_journal(connection: sqlite3.Connection) -> None:
 
 def _prepare_database_path(database_path: Path) -> None:
     database_path.parent.chmod(0o700)
-    if database_path.is_symlink():
-        msg = "OAuth credential database path cannot be a symlink"
-        raise OAuthProviderError(msg)
-    if database_path.exists():
-        mode = database_path.stat().st_mode
-        if not stat.S_ISREG(mode):
-            msg = "OAuth credential database path must be a regular file"
-            raise OAuthProviderError(msg)
-        database_path.chmod(0o600)
+    if database_path.is_symlink() or database_path.exists():
+        _validate_existing_database_path(database_path)
         return
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(database_path, flags, 0o600)
+    try:
+        descriptor = os.open(database_path, flags, 0o600)
+    except FileExistsError:
+        _validate_existing_database_path(database_path)
+        return
     try:
         os.fsync(descriptor)
     finally:
@@ -403,6 +412,21 @@ def _prepare_database_path(database_path: Path) -> None:
         os.fsync(directory_descriptor)
     finally:
         os.close(directory_descriptor)
+
+
+def _validate_existing_database_path(database_path: Path) -> None:
+    if database_path.is_symlink():
+        msg = "OAuth credential database path cannot be a symlink"
+        raise OAuthProviderError(msg)
+    try:
+        mode = database_path.stat().st_mode
+    except FileNotFoundError as exc:
+        msg = "OAuth credential database path disappeared during creation"
+        raise OAuthProviderError(msg) from exc
+    if not stat.S_ISREG(mode):
+        msg = "OAuth credential database path must be a regular file"
+        raise OAuthProviderError(msg)
+    database_path.chmod(0o600)
 
 
 def _legacy_credential_payload(context: _OAuthCredentialStoreContext) -> tuple[bytes | None, bool, bool]:
@@ -435,6 +459,7 @@ def _cleanup_legacy_files(context: _OAuthCredentialStoreContext) -> None:
         credential_path,
         credential_path.with_name(f"{credential_path.name}.oauth-generation.json"),
         credential_path.with_name(f"{credential_path.name}.oauth-operation.lock"),
+        credential_path.with_name(f"{credential_path.name}.oauth-refresh.lock"),
     )
     for path in paths:
         try:

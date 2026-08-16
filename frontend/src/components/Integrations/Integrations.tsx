@@ -617,7 +617,8 @@ export function Integrations() {
     setLoading(true);
     try {
       if (
-        integration.manual_auth_configured !== true &&
+        (integration.oauth_reset_required === true ||
+          integration.manual_auth_configured !== true) &&
         provider?.getConfig(scope).onDisconnect
       ) {
         // Use provider's disconnect method if available

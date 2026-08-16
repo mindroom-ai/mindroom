@@ -559,6 +559,37 @@ describe("Integrations", () => {
   });
 
   it("offers a reset action when OAuth credentials are unreadable", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "google_drive",
+          display_name: "Google Drive",
+          description: "Google Drive with a manual fallback",
+          icon: "Google Drive Icon",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: [
+            {
+              name: "credentials_json",
+              label: "Credentials JSON",
+              type: "password",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["credentials_json"],
+          manual_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
     mockGoogleDriveLoadStatus.mockResolvedValueOnce({
       status: "not_connected",
       connected: false,
@@ -581,6 +612,7 @@ describe("Integrations", () => {
     await waitFor(() => {
       expect(mockGoogleDriveOnDisconnect).toHaveBeenCalledOnce();
     });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("opens OAuth client config dialog when client config is missing", async () => {

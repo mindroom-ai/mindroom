@@ -7,7 +7,9 @@ import base64
 import multiprocessing
 import shutil
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -19,8 +21,7 @@ from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
-    from multiprocessing.synchronize import Event
-    from pathlib import Path
+    from multiprocessing.synchronize import Barrier, Event
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -47,6 +48,29 @@ def _hold_sqlite_transaction(
         connection.execute("ROLLBACK")
     finally:
         connection.close()
+
+
+def _open_cold_store_after_absence_barrier(storage_path: str, barrier: Barrier) -> None:
+    """Force concurrent creators past the database absence check before either creates it."""
+    context = _context(Path(storage_path))
+    database_path = _oauth_credential_database_path(context)
+    original_exists = Path.exists
+    observed_absence = False
+
+    def synchronized_exists(path: Path) -> bool:
+        nonlocal observed_absence
+        exists = original_exists(path)
+        if path == database_path and not exists and not observed_absence:
+            observed_absence = True
+            barrier.wait(timeout=5)
+        return exists
+
+    async def open_store() -> None:
+        async with oauth_credential_transaction(context) as transaction:
+            await transaction.commit()
+
+    with patch.object(Path, "exists", synchronized_exists):
+        asyncio.run(open_store())
 
 
 def _runtime_paths(tmp_path: Path, *, encryption_key: str | None = None) -> RuntimePaths:
@@ -119,6 +143,29 @@ async def test_encrypted_credentials_are_atomic_and_private(tmp_path: Path) -> N
     assert snapshot.credentials == {"token": "secret-access", "refresh_token": "refresh-secret-access"}
     assert snapshot.generation == generation
     assert snapshot.connection_generation == connection_generation
+
+
+def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -> None:
+    """Two processes may create the same new credential scope without a losing-creator error."""
+    process_context = multiprocessing.get_context("spawn")
+    barrier = process_context.Barrier(2)
+    creators = [
+        process_context.Process(
+            target=_open_cold_store_after_absence_barrier,
+            args=(str(tmp_path), barrier),
+        )
+        for _ in range(2)
+    ]
+
+    for creator in creators:
+        creator.start()
+    for creator in creators:
+        creator.join(timeout=10)
+        if creator.is_alive():
+            creator.terminate()
+            creator.join()
+
+    assert [creator.exitcode for creator in creators] == [0, 0]
 
 
 @pytest.mark.asyncio
@@ -204,6 +251,36 @@ async def test_corrupt_encrypted_legacy_credential_can_be_reset_without_plaintex
             is True
         )
         await transaction.commit()
+
+
+@pytest.mark.asyncio
+async def test_legacy_adoption_removes_every_obsolete_sidecar(tmp_path: Path) -> None:
+    """SQLite adoption removes the credential plus every lock and generation sidecar."""
+    context = _context(tmp_path)
+    save_scoped_credentials(
+        context.provider.credential_service,
+        {"token": "legacy"},
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
+    legacy_path = context.credentials_manager.for_primary_runtime_scope(
+        "@alice:example.test",
+        None,
+    ).get_credentials_path(context.provider.credential_service)
+    sidecars = (
+        legacy_path.with_name(f"{legacy_path.name}.oauth-generation.json"),
+        legacy_path.with_name(f"{legacy_path.name}.oauth-operation.lock"),
+        legacy_path.with_name(f"{legacy_path.name}.oauth-refresh.lock"),
+    )
+    for sidecar in sidecars:
+        sidecar.write_text("legacy", encoding="utf-8")
+
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.snapshot().credentials == {"token": "legacy"}
+        await transaction.commit()
+
+    assert not legacy_path.exists()
+    assert all(not sidecar.exists() for sidecar in sidecars)
 
 
 @pytest.mark.asyncio
