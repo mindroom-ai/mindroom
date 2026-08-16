@@ -1891,6 +1891,8 @@ class MCPServerManager:
         self,
         agent_name: str,
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+        *,
+        worker_target: ResolvedWorkerTarget | None = None,
     ) -> list[str]:
         """Return collision messages for a candidate loaded dynamic-tool state."""
         if not any(
@@ -1899,7 +1901,18 @@ class MCPServerManager:
             for state in (*self._states.values(), *self._scoped_states.values())
         ):
             return []
-        snapshot = self._agent_function_surface_snapshot(agent_name, loaded_tools=loaded_tools)
+        requester_surface = (
+            (worker_target.worker_scope, worker_target.worker_key)
+            if worker_target is not None
+            and worker_target.worker_scope is not None
+            and worker_target.worker_key is not None
+            else None
+        )
+        snapshot = self._agent_function_surface_snapshot(
+            agent_name,
+            loaded_tools=loaded_tools,
+            requester_surface=requester_surface,
+        )
         reports = analyze_mcp_function_collisions((snapshot,))
         return sorted(
             {message for report in reports for _function_name, message in report.function_name_collisions},

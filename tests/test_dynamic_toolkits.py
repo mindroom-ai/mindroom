@@ -945,7 +945,10 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
             self,
             _agent_name: str,
             loaded_tools: list[str],
+            *,
+            worker_target: object | None = None,
         ) -> list[str]:
+            del worker_target
             if {"mcp_demo", "shell"} <= set(loaded_tools):
                 return ["MCP/local collision"]
             return []

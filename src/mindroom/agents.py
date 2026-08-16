@@ -835,6 +835,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name=agent_name,
                 config=config,
                 session_id=session_id,
+                worker_target=build_agent_toolkit_worker_target(
+                    agent_runtime.execution.execution_scope,
+                    agent_name,
+                    is_private=agent_runtime.execution.is_private,
+                    execution_identity=execution_identity,
+                    runtime_paths=runtime_paths,
+                ),
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),

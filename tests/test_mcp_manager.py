@@ -3363,6 +3363,77 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
 
 
 @pytest.mark.asyncio
+async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Deferred tools should collide with the active requester's discovered OAuth MCP catalog."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    **_oauth_mcp_config().model_dump(exclude_none=True),
+                    "tool_prefix": "run",
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    bind_mcp_server_manager(manager)
+    try:
+        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="thread-a",
+                include_interactive_questions=False,
+            )
+        dynamic_manager = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
+        payload = json.loads(dynamic_manager.load_tool("shell"))
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "function_name_collision"
+    assert payload["collision_messages"] == [
+        "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
+    ]
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_uses_deferred_tool_overrides_for_load_time_collision_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
