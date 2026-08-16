@@ -3544,6 +3544,54 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 
 @pytest.mark.asyncio
+async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: Path) -> None:
+    """A room-default change during locked preparation must wait for the next turn."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    original_begin_locked_turn = coordinator._begin_locked_turn
+    active_models: list[str | None] = []
+
+    async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+        set_room_model_override(
+            coordinator.deps.runtime_paths,
+            room_id="!room:localhost",
+            model_name="default",
+            set_by="@admin:localhost",
+        )
+        return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    with (
+        patch.object(coordinator, "_begin_locked_turn", new=change_room_default_during_preparation),
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+
+    assert active_models == ["large"]
+
+
+@pytest.mark.asyncio
 async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
     """A failed final delivery must not turn a thinking placeholder into a substantive reply."""
     bot = _bot(tmp_path)

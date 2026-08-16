@@ -386,6 +386,13 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
+def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
+    """Return the thread root used for this response's model and delivery context."""
+    if request.existing_event_id and not request.existing_event_is_placeholder:
+        return request.thread_id
+    return resolved_target.resolved_thread_id
+
+
 class PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts."""
 
@@ -2964,6 +2971,18 @@ class ResponseRunner:
                 execution_identity=retry_execution_identity,
                 reply_entity_names=tuple(agent_names),
             )
+        turn_models = (
+            None
+            if team_request.resolution_reason is not None
+            else resolve_team_turn_models(
+                self.deps.agent_name,
+                agent_names,
+                request.room_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                thread_id=resolved_target.resolved_thread_id,
+            )
+        )
         prepared_request = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -3019,14 +3038,7 @@ class ResponseRunner:
                 model_prompt=request.model_prompt,
             )
         )
-        turn_models = resolve_team_turn_models(
-            self.deps.agent_name,
-            agent_names,
-            request.room_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            thread_id=resolved_target.resolved_thread_id,
-        )
+        assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
         use_streaming = await should_use_streaming(
@@ -3494,28 +3506,27 @@ class ResponseRunner:
     async def prepare_response_runtime(
         self,
         request: ResponseRequest,
+        *,
+        active_model_name: str | None = None,
     ) -> _PreparedResponseRuntime:
         """Resolve shared runtime context for one streaming or non-streaming response."""
         resolved_target = request.response_envelope.target
-        response_thread_id = (
-            request.thread_id
-            if request.existing_event_id and not request.existing_event_is_placeholder
-            else request.response_envelope.target.resolved_thread_id
-        )
+        response_thread_id = _response_thread_id(request, resolved_target)
         resolved_target = resolved_target.with_thread_root(response_thread_id)
         media_inputs = request.media or MediaInputs()
         session_id = resolved_target.session_id
         resolved_model_prompt = request.model_prompt or request.prompt
-        runtime_model = self.deps.runtime.config.resolve_runtime_model(
-            entity_name=self.deps.agent_name,
-            room_id=resolved_target.room_id,
-            thread_id=response_thread_id,
-            runtime_paths=self.deps.runtime_paths,
-        )
+        if active_model_name is None:
+            active_model_name = self.deps.runtime.config.resolve_runtime_model(
+                entity_name=self.deps.agent_name,
+                room_id=resolved_target.room_id,
+                thread_id=response_thread_id,
+                runtime_paths=self.deps.runtime_paths,
+            ).model_name
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
-            active_model_name=runtime_model.model_name,
+            active_model_name=active_model_name,
             attachment_ids=request.attachment_ids,
             correlation_id=request.correlation_id,
             source_envelope=request.response_envelope,
@@ -3526,7 +3537,7 @@ class ResponseRunner:
             media_inputs=media_inputs,
             session_id=session_id,
             model_prompt=resolved_model_prompt,
-            active_model_name=runtime_model.model_name,
+            active_model_name=active_model_name,
             tool_dispatch=tool_dispatch,
         )
 
@@ -4081,6 +4092,13 @@ class ResponseRunner:
                 history_scope=history_scope,
                 execution_identity=execution_identity,
             )
+        response_thread_id = _response_thread_id(request, resolved_target)
+        active_model_name = self.deps.runtime.config.resolve_runtime_model(
+            entity_name=self.deps.agent_name,
+            room_id=resolved_target.room_id,
+            thread_id=response_thread_id,
+            runtime_paths=self.deps.runtime_paths,
+        ).model_name
         prepared_request = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -4120,7 +4138,10 @@ class ResponseRunner:
 
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
-        runtime = await self.prepare_response_runtime(normalized_request)
+        runtime = await self.prepare_response_runtime(
+            normalized_request,
+            active_model_name=active_model_name,
+        )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         use_streaming = await should_use_streaming(
