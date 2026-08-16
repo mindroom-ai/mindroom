@@ -211,6 +211,14 @@ class _MetricContribution:
     cost: Decimal | None
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectRunEntity:
+    """The one attributed entity for a direct retained run."""
+
+    kind: Literal["agent", "team"]
+    entity_id: str
+
+
 @dataclass(slots=True)
 class _Aggregate:
     totals: TokenTotals = TokenTotals()
@@ -430,6 +438,11 @@ def _collect_row(
 ) -> None:
     state.scanned_sessions += 1
     for run in row.runs:
+        entity = _direct_run_entity(run)
+        if entity is None:
+            state.malformed_runs += 1
+            state.skipped_runs += 1
+            continue
         timestamp = _run_timestamp(run.created_at)
         if timestamp is None:
             state.missing_timestamp_runs += 1
@@ -439,7 +452,7 @@ def _collect_row(
         if requester is None:
             state.missing_requester_runs += 1
         if not _accept_run(
-            run=run,
+            entity=entity,
             requester=requester,
             timestamp=timestamp,
             scope=scope,
@@ -472,7 +485,7 @@ def _collect_row(
                 has_cost = True
             key = _breakdown_key(
                 group_by=group_by,
-                row=row,
+                entity=entity,
                 requester=requester,
                 timestamp=timestamp,
                 timezone=timezone,
@@ -491,7 +504,7 @@ def _collect_row(
 
 def _accept_run(
     *,
-    run: UsageRunNode,
+    entity: _DirectRunEntity,
     requester: str | None,
     timestamp: datetime,
     scope: Literal["self", "admin"],
@@ -507,11 +520,18 @@ def _accept_run(
     if timestamp >= window_end:
         return False
     if scope == "self":
-        return requester is not None and requester == expected_requester and run.agent_id == expected_agent
-    entity_id = run.agent_id or run.team_id
-    if entity_filter is not None and entity_id not in entity_filter:
+        return requester is not None and requester == expected_requester and entity.kind == "agent" and entity.entity_id == expected_agent
+    if entity_filter is not None and entity.entity_id not in entity_filter:
         return False
     return requester_filter is None or requester in requester_filter
+
+
+def _direct_run_entity(run: UsageRunNode) -> _DirectRunEntity | None:
+    if run.agent_id:
+        return _DirectRunEntity(kind="agent", entity_id=run.agent_id)
+    if run.team_id:
+        return _DirectRunEntity(kind="team", entity_id=run.team_id)
+    return None
 
 
 def _run_contributions(run: UsageRunNode) -> tuple[_MetricContribution, ...] | None:
@@ -592,7 +612,7 @@ def _cost_value(value: object) -> Decimal | None:
 def _breakdown_key(
     *,
     group_by: _UsageGroupBy,
-    row: UsageSessionRow,
+    entity: _DirectRunEntity,
     requester: str | None,
     timestamp: datetime,
     timezone: ZoneInfo,
@@ -601,7 +621,7 @@ def _breakdown_key(
     if group_by == "model":
         return ("model", contribution.model_id, contribution.model_type, contribution.provider, contribution.model_id)
     if group_by == "entity":
-        return ("entity", row.entity_id, None, None, None)
+        return ("entity", entity.entity_id, None, None, None)
     if group_by == "requester":
         return ("requester", requester or "unknown", None, None, None)
     return ("day", timestamp.astimezone(timezone).date().isoformat(), None, None, None)

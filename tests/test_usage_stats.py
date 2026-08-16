@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -24,10 +24,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
-def _config(*, timezone: str = "UTC") -> Config:
+def _config(*, timezone: str = "UTC", team_names: tuple[str, ...] = ()) -> Config:
     return Config(
         agents={"code": AgentConfig(display_name="Code"), "other": AgentConfig(display_name="Other")},
-        teams={},
+        teams={
+            team_name: TeamConfig(display_name=team_name.title(), role="Test team", agents=["code"])
+            for team_name in team_names
+        },
         timezone=timezone,
         authorization=AuthorizationConfig(
             aliases={"@alice:example.test": ["@telegram-alice:example.test"]},
@@ -68,7 +71,8 @@ def _raw_run(
     *,
     requester_id: str | None = "@alice:example.test",
     user_id: str | None = "@alice:example.test",
-    agent_id: str = "code",
+    agent_id: str | None = "code",
+    team_id: str | None = None,
     created_at: str = "2026-01-02T12:00:00Z",
     metrics: dict[str, object] | None = None,
     model: str = "gpt-5.6",
@@ -83,6 +87,7 @@ def _raw_run(
     return {
         "run_id": "event-secret",
         "agent_id": agent_id,
+        "team_id": team_id,
         "user_id": user_id,
         "created_at": created_at,
         "model_provider": provider,
@@ -216,6 +221,33 @@ def test_admin_validates_entity_filters_before_scanning(tmp_path: Path, monkeypa
         )
 
     assert not scanned
+
+
+def test_admin_entity_grouping_and_filters_use_direct_run_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed attribution source would report a row owner instead of direct run entities."""
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(_raw_run(agent_id="other", metrics={"total_tokens": 7}), entity_id="code"),
+            _row(_raw_run(agent_id=None, team_id="engineering", metrics={"total_tokens": 5}), entity_id="code"),
+        ),
+    )
+
+    report = collect_admin_usage(
+        config=_config(team_names=("engineering",)),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=("other", "engineering"),
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {("other", 7), ("engineering", 5)}
 
 
 def test_usage_window_uses_configured_timezone_and_exclusive_date_end() -> None:
