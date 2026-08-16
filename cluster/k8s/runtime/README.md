@@ -389,7 +389,7 @@ A shared agent receives `MindRoom-<agent-slug>`, while a `private.per=user_agent
 MindRoom persists the immutable worker-to-repository-ID binding under `repository_bindings` inside `MINDROOM_STORAGE_PATH`, so that directory must use retained storage and normal backups.
 The tool initializes a missing local Git repository and adds the broker's canonical credential-free GitHub HTTPS URL as `origin`.
 An existing harmlessly normalized HTTPS origin for the exact bound repository succeeds without mutation.
-Any SSH origin or different fetch or push origin returns `origin_conflict` and leaves Git config unchanged.
+Any SSH origin, different fetch or push URL, URL rewrite, transport override, included Git config, or indirect worktree/common config returns `origin_conflict` and leaves Git config unchanged.
 The ensure call performs no clone, fetch, commit, or push, and it exposes no repository management operations such as delete, rename, transfer, visibility changes, or collaborator invites.
 MindRoom allows the bounded broker request to run for slightly longer than Agent Vault's five-minute ensure lifecycle, avoiding a client disconnect while provisioning continues server-side.
 Subsequent Git pushes use Agent Vault's repository-scoped Contents-write capability through the existing HTTPS proxy path.
