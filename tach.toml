@@ -1731,6 +1731,7 @@ visibility = [
 path = "mindroom.routing"
 depends_on = [
     "mindroom.agent_descriptions",
+    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",

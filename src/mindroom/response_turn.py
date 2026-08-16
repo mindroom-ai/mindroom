@@ -361,6 +361,7 @@ class PausedAttempt:
     tools: tuple[ToolExecution, ...]
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
+    team_member_model_names: tuple[tuple[str, str], ...] = ()
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818

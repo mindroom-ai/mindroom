@@ -14,9 +14,11 @@ from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom import teams as teams_module
+from mindroom.config.models import ModelConfig
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -27,6 +29,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
@@ -115,6 +118,65 @@ async def test_team_response_continues_after_member_dynamic_tool_load() -> None:
     assert "Used the loaded tool." in recorder.assistant_text
     # The turn-level trace still carries the first attempt's dynamic tool call.
     assert any(entry.tool_name == "load_tool" for entry in recorder.completed_tools)
+
+
+@pytest.mark.asyncio
+async def test_team_dynamic_continuation_pins_member_model_for_whole_turn() -> None:
+    """A room-default change mid-turn must not switch rebuilt team members."""
+    orchestrator, config = _make_orchestrator()
+    config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    runtime_paths = runtime_paths_for(config)
+    room_id = "!room:localhost"
+    set_room_model_override(
+        runtime_paths,
+        room_id=room_id,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=room_id,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    attempt = 0
+
+    async def run_team(_prompt: object, **_kwargs: object) -> TeamRunOutput:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            set_room_model_override(
+                runtime_paths,
+                room_id=room_id,
+                model_name="default",
+                set_by="@admin:localhost",
+            )
+            return _dynamic_tool_team_output()
+        return TeamRunOutput(content="Used the loaded tool.")
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(side_effect=run_team)
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent) as mock_create,
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Load the sleep tool and use it.",
+            turn_recorder=TurnRecorder(user_message="Load the sleep tool and use it."),
+            orchestrator=orchestrator,
+            execution_identity=identity,
+            ctx=make_turn_context(session_id=None, room_id=room_id),
+        )
+
+    assert "Used the loaded tool." in response
+    assert [call.kwargs["active_model_name"] for call in mock_create.call_args_list] == ["large", "large"]
 
 
 @pytest.mark.asyncio

@@ -2764,6 +2764,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
+        model_names={"general": "large"},
     )
     tool = ToolExecution(
         tool_call_id="call-team-stream-approval",
@@ -2811,6 +2812,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
 
     assert raised.value.paused.run_id == "run-paused"
     assert raised.value.paused.tools == (tool,)
+    assert raised.value.paused.team_member_model_names == (("general", "large"),)
 
 
 @pytest.mark.asyncio

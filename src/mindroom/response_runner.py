@@ -870,6 +870,7 @@ class ResponseRunner:
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
+                    team_member_model_names=paused.team_member_model_names,
                     team_mode=team_mode,
                     request_body=request.response_envelope.body,
                     transport_sender_id=request.response_envelope.sender_id,
@@ -1416,6 +1417,7 @@ class ResponseRunner:
                         decisions=decisions,
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
+                        member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
                         tool_trace_collector=tool_trace_collector,
                     )

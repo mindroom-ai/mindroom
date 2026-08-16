@@ -220,6 +220,7 @@ Show or switch the model that every agent, team, and the router uses by default 
 
 `!room_model` and `!room_model list` show the current runtime override and available model names.
 `!room_model opus` stores a durable room override without modifying `config.yaml`.
+The new default applies to subsequent turns; an in-progress or approval-paused turn keeps the model choices it started with.
 `!room_model reset` removes the runtime override so the configured `room_models` choice or each entity's configured model applies again.
 Thread-level `!model` overrides and explicit per-run model choices take precedence over the room default.
 Set and reset are Matrix room-admin-only actions, while status is available to authorized room members.

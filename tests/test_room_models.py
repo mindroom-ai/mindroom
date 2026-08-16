@@ -6,11 +6,12 @@ import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+import mindroom.routing
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
@@ -324,6 +325,42 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         ).model_name
         == "large"
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> None:
+    """Router selection must not bypass the room's runtime model default."""
+    context = _room_model_context(tmp_path, AsyncMock())
+    set_room_model_override(
+        context.runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    selected_models: list[str] = []
+
+    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> MagicMock:
+        selected_models.append(model_name)
+        return MagicMock(id=f"{model_name}-model")
+
+    router = AsyncMock()
+    router.arun.return_value = SimpleNamespace(
+        content={"entity_name": "assistant", "reasoning": "Only candidate"},
+    )
+    with (
+        patch("mindroom.routing.model_loading.get_model_instance", side_effect=load_model),
+        patch("mindroom.routing.Agent", return_value=router),
+    ):
+        result = await mindroom.routing.suggest_responder(
+            "Help me",
+            ["assistant"],
+            context.config,
+            context.runtime_paths,
+            room_id=ROOM_ID,
+        )
+
+    assert result == "assistant"
+    assert selected_models == ["large"]
 
 
 def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path: Path) -> None:
