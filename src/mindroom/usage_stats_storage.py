@@ -8,12 +8,19 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.constants import RuntimePaths, resolve_session_state_root
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import worker_dir_name
+
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
-    from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 UsageMetricValue = int | float | str | None
@@ -29,6 +36,7 @@ _RUN_NODE_COUNT_LIMIT = "run node count exceeds limit"
 _MODEL_METRIC_COUNT_LIMIT = "model metric count exceeds limit"
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
 _REQUIRED_SESSION_COLUMNS = frozenset(
     {
         "session_id",
@@ -140,6 +148,235 @@ def _open_read_only_database(path: Path) -> Iterator[sqlite3.Connection]:
         yield connection
     finally:
         connection.close()
+
+
+def discover_self_usage_sources(
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> tuple[UsageStorageSource, ...]:
+    """Discover the current execution's database and every valid team database."""
+    session_root = _effective_session_root(runtime_paths)
+    resolved_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
+    database = resolved_runtime.session_state_root / "sessions" / f"{agent_name}.db"
+    source_path = _self_source_path(
+        session_root=session_root,
+        agent_name=agent_name,
+        database=database,
+        is_private=resolved_runtime.execution.is_private,
+        worker_key=resolved_runtime.execution.worker_key,
+    )
+    sources = _team_usage_sources(session_root, config)
+    if source_path is not None:
+        sources.append(
+            _usage_source(
+                path=source_path,
+                session_root=session_root,
+                scope="private_agent" if resolved_runtime.execution.is_private else "shared_agent",
+                expected_session_table=f"{agent_name}_sessions",
+                source_agent_id=agent_name,
+                config=config,
+                requester_isolated=resolved_runtime.execution.is_private,
+            ),
+        )
+    return _sorted_sources(sources)
+
+
+def discover_admin_usage_sources(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[UsageStorageSource, ...]:
+    """Discover fixed-layout current-config session databases for an admin query."""
+    session_root = _effective_session_root(runtime_paths)
+    sources = _configured_shared_agent_sources(session_root, config)
+    sources.extend(_private_agent_sources(session_root, config))
+    sources.extend(_team_usage_sources(session_root, config))
+    return _sorted_sources(sources)
+
+
+def _effective_session_root(runtime_paths: RuntimePaths) -> Path:
+    return resolve_session_state_root(runtime_paths.storage_root, runtime_paths).expanduser().resolve()
+
+
+def _configured_shared_agent_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
+    sources: list[UsageStorageSource] = []
+    for agent_name, agent_config in config.agents.items():
+        if agent_config.private is not None:
+            continue
+        candidate = _safe_relative_candidate(
+            session_root,
+            Path("agents") / agent_name / "sessions" / f"{agent_name}.db",
+        )
+        if candidate is None:
+            continue
+        sources.append(
+            _usage_source(
+                path=candidate,
+                session_root=session_root,
+                scope="shared_agent",
+                expected_session_table=f"{agent_name}_sessions",
+                source_agent_id=agent_name,
+                config=config,
+                requester_isolated=False,
+            ),
+        )
+    return sources
+
+
+def _private_agent_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
+    private_root = session_root / "private_instances"
+    if private_root.is_symlink() or not private_root.is_dir():
+        return []
+
+    sources: list[UsageStorageSource] = []
+    for worker_directory in sorted(private_root.iterdir(), key=lambda path: path.name):
+        if worker_directory.is_symlink() or not worker_directory.is_dir():
+            continue
+        if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
+            continue
+        for agent_name, agent_config in config.agents.items():
+            if agent_config.private is None:
+                continue
+            candidate = _safe_relative_candidate(
+                session_root,
+                Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db",
+            )
+            if candidate is None or not candidate.is_file():
+                continue
+            sources.append(
+                _usage_source(
+                    path=candidate,
+                    session_root=session_root,
+                    scope="private_agent",
+                    expected_session_table=f"{agent_name}_sessions",
+                    source_agent_id=agent_name,
+                    config=config,
+                    requester_isolated=True,
+                ),
+            )
+    return sources
+
+
+def _team_usage_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
+    teams_root = session_root / "teams"
+    if teams_root.is_symlink() or not teams_root.is_dir():
+        return []
+
+    sources: list[UsageStorageSource] = []
+    for team_directory in sorted(teams_root.iterdir(), key=lambda path: path.name):
+        storage_name = team_directory.name
+        if team_directory.is_symlink() or not team_directory.is_dir() or _IDENTIFIER.fullmatch(storage_name) is None:
+            continue
+        candidate = _safe_relative_candidate(
+            session_root,
+            Path("teams") / storage_name / "sessions" / f"{storage_name}.db",
+        )
+        if candidate is None or not candidate.is_file():
+            continue
+        expected_table = f"{storage_name}_sessions"
+        if not _session_table_is_supported(candidate, expected_table):
+            continue
+        sources.append(
+            _usage_source(
+                path=candidate,
+                session_root=session_root,
+                scope="team",
+                expected_session_table=expected_table,
+                source_agent_id=None,
+                config=config,
+                requester_isolated=False,
+            ),
+        )
+    return sources
+
+
+def _safe_relative_candidate(session_root: Path, relative_path: Path) -> Path | None:
+    """Resolve one fixed candidate while rejecting symlinks in every traversed component."""
+    candidate = session_root / relative_path
+    current = session_root
+    for part in relative_path.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return None
+    if candidate.is_symlink():
+        return None
+    resolved_candidate = candidate.resolve()
+    return resolved_candidate if resolved_candidate.is_relative_to(session_root) else None
+
+
+def _self_source_path(
+    *,
+    session_root: Path,
+    agent_name: str,
+    database: Path,
+    is_private: bool,
+    worker_key: str | None,
+) -> Path | None:
+    """Validate the execution-resolved database against its one permitted fixed layout."""
+    if is_private:
+        if worker_key is None:
+            return None
+        relative_path = (
+            Path("private_instances")
+            / worker_dir_name(worker_key)
+            / agent_name
+            / "sessions"
+            / f"{agent_name}.db"
+        )
+    else:
+        relative_path = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+    candidate = _safe_relative_candidate(session_root, relative_path)
+    if candidate is None or candidate != database.expanduser().resolve():
+        return None
+    return candidate
+
+
+def _session_table_is_supported(path: Path, expected_table: str) -> bool:
+    """Confirm a team candidate has the exact supported session table without opening it writable."""
+    try:
+        with _open_read_only_database(path) as connection:
+            table_names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if expected_table not in table_names:
+                return False
+            quoted_table = _quote_identifier(expected_table)
+            column_names = {row[1] for row in connection.execute(f"PRAGMA table_info({quoted_table})")}
+    except (OSError, sqlite3.Error):
+        return False
+    return _REQUIRED_SESSION_COLUMNS.issubset(column_names)
+
+
+def _usage_source(
+    *,
+    path: Path,
+    session_root: Path,
+    scope: UsageStorageScope,
+    expected_session_table: str,
+    source_agent_id: str | None,
+    config: Config,
+    requester_isolated: bool,
+) -> UsageStorageSource:
+    return UsageStorageSource(
+        path=path,
+        path_label=path.relative_to(session_root).as_posix(),
+        scope=scope,
+        expected_session_table=expected_session_table,
+        source_agent_id=source_agent_id,
+        allowed_agent_ids=frozenset(config.agents),
+        allowed_team_ids=frozenset(config.teams),
+        requester_isolated=requester_isolated,
+    )
+
+
+def _sorted_sources(sources: list[UsageStorageSource]) -> tuple[UsageStorageSource, ...]:
+    return tuple(sorted(sources, key=lambda source: source.path_label))
 
 
 def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:

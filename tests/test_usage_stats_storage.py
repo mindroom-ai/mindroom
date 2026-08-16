@@ -9,12 +9,18 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import usage_stats_storage
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage_stats_storage import (
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
     _open_read_only_database,
+    discover_admin_usage_sources,
+    discover_self_usage_sources,
     iter_usage_storage_rows,
 )
 
@@ -46,6 +52,75 @@ def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
         allowed_team_ids=frozenset({"team-engineering"}),
         requester_isolated=False,
     )
+
+
+def _create_discovery_database(path: Path, *, table: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _create_database(path, table=table)
+
+
+def _discovery_config() -> Config:
+    return Config(
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                private=AgentPrivateConfig(per="user"),
+            ),
+            "shared": AgentConfig(display_name="Shared"),
+            "linked": AgentConfig(display_name="Linked"),
+            "absent": AgentConfig(display_name="Absent"),
+        },
+        teams={
+            "configured": TeamConfig(
+                display_name="Configured",
+                role="Configured test team",
+                agents=["shared"],
+            ),
+        },
+    )
+
+
+def _discovery_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "primary-storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "dedicated-sessions")},
+    )
+
+
+def _identity(*, requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=requester_id,
+        room_id="!room:example.test",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session",
+    )
+
+
+def _private_database_path(
+    runtime_paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+    *,
+    agent_name: str = "code",
+) -> Path:
+    worker_key = resolve_worker_key("user", identity, agent_name=agent_name)
+    assert worker_key is not None
+    return (
+        runtime_paths.config_dir
+        / "dedicated-sessions"
+        / "private_instances"
+        / worker_dir_name(worker_key)
+        / agent_name
+        / "sessions"
+        / f"{agent_name}.db"
+    )
+
+
+def _source_labels(sources: tuple[UsageStorageSource, ...]) -> list[str]:
+    return [source.path_label for source in sources]
 
 
 def _run(*, nested: list[dict[str, object]] | None = None) -> dict[str, object]:
@@ -508,3 +583,119 @@ def test_reader_uses_only_the_expected_session_table(tmp_path: Path) -> None:
     assert rejected == [
         UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail="session table unavailable"),
     ]
+
+
+def test_discovery_self_uses_exact_runtime_database_and_team_sources(tmp_path: Path) -> None:
+    """Self discovery cannot enumerate another requester's private agent database."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    alice = _identity(requester_id="@alice:example.test")
+    bob = _identity(requester_id="@bob:example.test")
+    alice_database = _private_database_path(runtime_paths, alice)
+    bob_database = _private_database_path(runtime_paths, bob)
+    _create_discovery_database(alice_database, table="code_sessions")
+    _create_discovery_database(bob_database, table="code_sessions")
+    session_root = runtime_paths.config_dir / "dedicated-sessions"
+    configured_team_database = session_root / "teams" / "configured_store" / "sessions" / "configured_store.db"
+    ad_hoc_team_database = session_root / "teams" / "ad_hoc_store" / "sessions" / "ad_hoc_store.db"
+    _create_discovery_database(configured_team_database, table="configured_store_sessions")
+    _create_discovery_database(ad_hoc_team_database, table="ad_hoc_store_sessions")
+
+    sources = discover_self_usage_sources(
+        agent_name="code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=alice,
+    )
+
+    assert _source_labels(sources) == [
+        alice_database.resolve().relative_to(session_root.resolve()).as_posix(),
+        "teams/ad_hoc_store/sessions/ad_hoc_store.db",
+        "teams/configured_store/sessions/configured_store.db",
+    ]
+    private_source = sources[0]
+    assert private_source.requester_isolated is True
+    assert private_source.path == alice_database.resolve()
+    assert all(source.path != bob_database.resolve() for source in sources)
+    assert all(source.path.is_relative_to(session_root.resolve()) for source in sources)
+
+
+def test_discovery_admin_uses_fixed_safe_layouts_and_current_config_attribution(tmp_path: Path) -> None:
+    """Admin discovery accepts only configured agent layouts and valid fixed-depth team databases."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    session_root = runtime_paths.config_dir / "dedicated-sessions"
+    shared_database = session_root / "agents" / "shared" / "sessions" / "shared.db"
+    _create_discovery_database(shared_database, table="shared_sessions")
+    removed_database = session_root / "agents" / "removed" / "sessions" / "removed.db"
+    _create_discovery_database(removed_database, table="removed_sessions")
+    linked_target = session_root / "outside.db"
+    _create_discovery_database(linked_target, table="linked_sessions")
+    linked_database = session_root / "agents" / "linked" / "sessions" / "linked.db"
+    linked_database.parent.mkdir(parents=True)
+    linked_database.symlink_to(linked_target)
+
+    alice = _identity(requester_id="@alice:example.test")
+    bob = _identity(requester_id="@bob:example.test")
+    alice_database = _private_database_path(runtime_paths, alice)
+    bob_database = _private_database_path(runtime_paths, bob)
+    _create_discovery_database(alice_database, table="code_sessions")
+    _create_discovery_database(bob_database, table="code_sessions")
+    bob_worker_key = resolve_worker_key("user", bob, agent_name="code")
+    assert bob_worker_key is not None
+    raw_worker_database = (
+        session_root
+        / "private_instances"
+        / bob_worker_key
+        / "code"
+        / "sessions"
+        / "code.db"
+    )
+    _create_discovery_database(raw_worker_database, table="code_sessions")
+    charlie = _identity(requester_id="@charlie:example.test")
+    charlie_worker_key = resolve_worker_key("user", charlie, agent_name="code")
+    assert charlie_worker_key is not None
+    symlinked_private_instance = session_root / "private_instances" / worker_dir_name(charlie_worker_key)
+    symlinked_private_instance.parent.mkdir(parents=True, exist_ok=True)
+    symlinked_private_instance.symlink_to(alice_database.parents[2], target_is_directory=True)
+
+    configured_team_database = session_root / "teams" / "configured_store" / "sessions" / "configured_store.db"
+    ad_hoc_team_database = session_root / "teams" / "ad_hoc_store" / "sessions" / "ad_hoc_store.db"
+    invalid_team_database = session_root / "teams" / "wrong_table" / "sessions" / "wrong_table.db"
+    _create_discovery_database(configured_team_database, table="configured_store_sessions")
+    _create_discovery_database(ad_hoc_team_database, table="ad_hoc_store_sessions")
+    _create_discovery_database(invalid_team_database, table="other_sessions")
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert _source_labels(sources) == [
+        "agents/absent/sessions/absent.db",
+        "agents/shared/sessions/shared.db",
+        alice_database.resolve().relative_to(session_root.resolve()).as_posix(),
+        bob_database.resolve().relative_to(session_root.resolve()).as_posix(),
+        "teams/ad_hoc_store/sessions/ad_hoc_store.db",
+        "teams/configured_store/sessions/configured_store.db",
+    ]
+    assert all(not source.path.is_symlink() for source in sources)
+    assert all(source.path.is_relative_to(session_root.resolve()) for source in sources)
+    assert sources[0].requester_isolated is False
+    assert sources[2].requester_isolated is True
+    assert all(source.source_agent_id != "removed" for source in sources)
+    assert all(bob_worker_key not in source.path_label for source in sources)
+
+
+def test_discovery_does_not_scan_canonical_state_root_when_sessions_are_redirected(tmp_path: Path) -> None:
+    """An explicit session root is the sole discovery root for every source shape."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    canonical_database = runtime_paths.storage_root / "agents" / "shared" / "sessions" / "shared.db"
+    _create_discovery_database(canonical_database, table="shared_sessions")
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert _source_labels(sources) == [
+        "agents/absent/sessions/absent.db",
+        "agents/linked/sessions/linked.db",
+        "agents/shared/sessions/shared.db",
+    ]
+    assert all(source.path != canonical_database.resolve() for source in sources)
