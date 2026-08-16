@@ -97,7 +97,7 @@ The router creates and manages rooms:
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
 
-Every Matrix agent also receives a built-in zero-argument `invite_router` recovery tool.
+Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
 The tool can invite only the persisted router identity and only into the agent's current room.
 The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
 The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
