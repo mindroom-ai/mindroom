@@ -441,6 +441,37 @@ async def test_public_group_by_validation_returns_stable_code_before_context_or_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("end", "message"),
+    [
+        ("9999-12-31", "Invalid date"),
+        ("0001-01-01T00:00:00+14:00", "Invalid timestamp"),
+    ],
+)
+async def test_public_boundary_overflow_returns_validation_error_before_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    end: str,
+    message: str,
+) -> None:
+    """Caller-controlled boundary overflow must remain a coded validation error without scanning storage."""
+    context = _context(tmp_path, global_users=["@alice:example.test"])
+    discover = Mock()
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", discover)
+
+    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage(end=end))
+
+    assert payload == {
+        "code": "validation_error",
+        "message": message,
+        "status": "error",
+        "tool": "usage_stats",
+    }
+    discover.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_source_unavailable_error_has_stable_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

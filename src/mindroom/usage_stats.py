@@ -1112,12 +1112,16 @@ def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime
     if _DATE_ONLY.fullmatch(value):
         try:
             local_date = date.fromisoformat(value)
+            if is_end:
+                local_date += timedelta(days=1)
         except ValueError as error:
             msg = "Invalid date"
             raise UsageStatsValidationError(msg) from error
-        if is_end:
-            local_date += timedelta(days=1)
-        return datetime.combine(local_date, datetime.min.time(), tzinfo=timezone).astimezone(UTC)
+        except OverflowError as error:
+            msg = "Invalid date"
+            raise UsageStatsValidationError(msg) from error
+        boundary = datetime.combine(local_date, datetime.min.time(), tzinfo=timezone)
+        return _as_utc(boundary, error="Invalid date")
     if _TIMESTAMP_OFFSET.fullmatch(value) is None:
         msg = "Timestamp must include Z or an explicit offset"
         raise UsageStatsValidationError(msg)
@@ -1126,7 +1130,7 @@ def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime
     except ValueError as error:
         msg = "Invalid timestamp"
         raise UsageStatsValidationError(msg) from error
-    return _as_utc(parsed, error="Timestamp must include Z or an explicit offset")
+    return _as_utc(parsed, error="Invalid timestamp")
 
 
 def _run_timestamp(value: str | None) -> datetime | None:  # noqa: PLR0911
@@ -1147,14 +1151,21 @@ def _run_timestamp(value: str | None) -> datetime | None:  # noqa: PLR0911
         return None
     try:
         return _as_utc(datetime.fromisoformat(value), error="timestamp")
-    except ValueError:
+    except (UsageStatsValidationError, ValueError):
         return None
 
 
 def _as_utc(value: datetime, *, error: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
+    try:
+        utc_offset = value.utcoffset()
+    except (OverflowError, ValueError) as cause:
+        raise UsageStatsValidationError(error) from cause
+    if value.tzinfo is None or utc_offset is None:
         raise UsageStatsValidationError(error)
-    return value.astimezone(UTC)
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError) as cause:
+        raise UsageStatsValidationError(error) from cause
 
 
 def _add_totals(left: TokenTotals, right: TokenTotals) -> TokenTotals:
