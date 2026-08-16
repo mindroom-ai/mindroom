@@ -1217,7 +1217,6 @@ class MCPServerManager:
                 raise MCPTimeoutError(state.server_id, msg) from exc
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
 
-        state.exit_stack = None
         state.session = session
         state.session_owner_task = owner_task
         state.session_close_event = close_event
@@ -1440,13 +1439,6 @@ class MCPServerManager:
                         await owner_task
                 except BaseException as exc:
                     close_error = exc
-        elif state.exit_stack is not None:
-            try:
-                await state.exit_stack.aclose()
-            except BaseException as exc:
-                close_error = exc
-            finally:
-                state.exit_stack = None
         if state.connected:
             logger.info(
                 "MCP server disconnected",

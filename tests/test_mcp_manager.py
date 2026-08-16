@@ -3804,7 +3804,6 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
 
     assert state.session_owner_task is None
     assert state.session_close_event is None
-    assert state.exit_stack is None
     assert state.session is None
     assert state.connected is False
 

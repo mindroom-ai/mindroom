@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-    from contextlib import AsyncExitStack
 
     from mcp import ClientSession
 
@@ -109,7 +108,6 @@ class MCPServerState:
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None
     session: ClientSession | None = None
-    exit_stack: AsyncExitStack | None = None
     session_owner_task: asyncio.Task[None] | None = None
     session_close_event: asyncio.Event | None = None
     semaphore: asyncio.Semaphore = field(init=False)
