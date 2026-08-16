@@ -104,7 +104,6 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
-_TOOL_ENVIRONMENT_PROMPT_HIDDEN_NAMES = frozenset({"invite_router"})
 
 
 @dataclass
@@ -1664,16 +1663,12 @@ def _build_agent_role_context(
     full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
-        prompt_local_tool_names = tuple(
-            name for name in local_tool_names if name not in _TOOL_ENVIRONMENT_PROMPT_HIDDEN_NAMES
+        full_context += "\n\n" + _render_tool_execution_environment(
+            runtime_paths=runtime_paths,
+            local_tool_names=local_tool_names,
+            worker_routed_tool_names=worker_routed_tool_names,
+            worker_scope=agent_runtime.execution.execution_scope,
         )
-        if prompt_local_tool_names or worker_routed_tool_names or not local_tool_names:
-            full_context += "\n\n" + _render_tool_execution_environment(
-                runtime_paths=runtime_paths,
-                local_tool_names=prompt_local_tool_names,
-                worker_routed_tool_names=worker_routed_tool_names,
-                worker_scope=agent_runtime.execution.execution_scope,
-            )
         workspace = agent_runtime.workspace
         full_context += _build_additional_context(
             agent_name,

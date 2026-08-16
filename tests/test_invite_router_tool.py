@@ -68,8 +68,8 @@ def _tool_context(tmp_path: Path, *, accept_invites: bool = True) -> tuple[ToolR
     return context, client
 
 
-def test_matrix_agents_always_get_zero_argument_invite_router_tool(tmp_path: Path) -> None:
-    """Removing automatic injection would strand agents in rooms without the router."""
+def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environment(tmp_path: Path) -> None:
+    """The normal execution inventory must describe every available local tool."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -110,7 +110,8 @@ def test_matrix_agents_always_get_zero_argument_invite_router_tool(tmp_path: Pat
     assert function.parameters.get("required", []) == []
     assert prompt_surface.definition_tokens <= 36
     assert prompt_surface.tool_instructions == ()
-    assert "## Tool Execution Environment" not in agent.role
+    assert "## Tool Execution Environment" in agent.role
+    assert "`invite_router`" in agent.role
 
 
 def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path: Path) -> None:
