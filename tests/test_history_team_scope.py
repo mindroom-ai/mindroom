@@ -3,14 +3,19 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
+from agno.media import Image
+from agno.models.message import Message
 from agno.models.metrics import Metrics
+from agno.models.response import ToolExecution
 from agno.run import RunContext
-from agno.run.agent import RunOutput
+from agno.run.agent import RunInput, RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team
@@ -423,7 +428,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
 
 
 def test_create_team_instance_persists_member_responses_through_agno(tmp_path: Path) -> None:
-    """MindRoom's real Team wiring retains nested member metrics across Agno serialization."""
+    """Team storage retains nested metrics without persisting complete member outputs."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -470,6 +475,16 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
             session_id="session-1",
             agent_id="alpha",
             agent_name="Alpha",
+            user_id="@alice:example.test",
+            input=RunInput(input_content="member-input-canary"),
+            content="member-content-canary",
+            messages=[Message(role="assistant", content="member-message-canary")],
+            tools=[ToolExecution(tool_name="secret", result="member-tool-canary")],
+            images=[Image(url="https://example.test/member-media-canary.png")],
+            metadata={"requester_id": "@alice:example.test", "secret": "member-metadata-canary"},
+            model="member-model",
+            model_provider="member-provider",
+            created_at=1_786_921_091,
         )
         member.metrics = Metrics(input_tokens=5, output_tokens=2, total_tokens=7)
         team.save_session(
@@ -489,13 +504,46 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
         )
 
         persisted = get_team_session(scope_context.storage, "session-1")
+        assert isinstance(scope_context.storage, SqliteDb)
+        database_path = scope_context.storage.db_file
+        session_table_name = scope_context.storage.session_table.name
 
     assert persisted is not None
     assert persisted.runs is not None
     persisted_run = persisted.runs[0]
     assert isinstance(persisted_run, TeamRunOutput)
     assert len(persisted_run.member_responses) == 1
-    assert persisted_run.member_responses[0].metrics.total_tokens == 7
+    persisted_member = persisted_run.member_responses[0]
+    assert isinstance(persisted_member, RunOutput)
+    assert persisted_member.metrics.total_tokens == 7
+    assert persisted_member.user_id == "@alice:example.test"
+    assert persisted_member.model == "member-model"
+    assert persisted_member.model_provider == "member-provider"
+    assert persisted_member.created_at == 1_786_921_091
+    assert persisted_member.input is None
+    assert persisted_member.content is None
+    assert persisted_member.messages is None
+    assert persisted_member.tools is None
+    assert persisted_member.images is None
+    assert persisted_member.metadata is None
+
+    quoted_session_table = session_table_name.replace('"', '""')
+    with sqlite3.connect(database_path) as connection:
+        raw_runs = connection.execute(
+            f'SELECT runs FROM "{quoted_session_table}" WHERE session_id = ?',  # noqa: S608
+            ("session-1",),
+        ).fetchone()
+    assert raw_runs is not None
+    raw_run_json = str(raw_runs[0])
+    for canary in (
+        "member-input-canary",
+        "member-content-canary",
+        "member-message-canary",
+        "member-tool-canary",
+        "member-media-canary",
+        "member-metadata-canary",
+    ):
+        assert canary not in raw_run_json
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

@@ -461,6 +461,42 @@ def test_unfiltered_admin_rejects_removed_nested_entity_ids(
     assert report.coverage.status == "partial"
 
 
+def test_malformed_metrics_still_count_missing_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed metrics must not hide an independent requester-attribution gap."""
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(
+                _raw_run(
+                    requester_id=None,
+                    user_id=None,
+                    metrics={"total_tokens": "not-a-number"},
+                ),
+            ),
+        ),
+    )
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="day",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.malformed_runs == 1
+    assert report.coverage.missing_requester_runs == 1
+    assert report.coverage.skipped_runs == 1
+    assert report.coverage.status == "partial"
+
+
 def test_usage_window_uses_configured_timezone_and_exclusive_date_end() -> None:
     """A changed timezone conversion or end boundary would include the following local midnight."""
     start, end = parse_usage_window(

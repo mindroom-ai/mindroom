@@ -88,7 +88,7 @@ def _create_sqlite_state_storage(
     db_file = str(db_dir / f"{storage_name}.db")
     engine = _state_engine(db_file)
     if prompt_roles is not None:
-        return _PromptSanitizingSqliteDb(
+        return _SessionSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
@@ -142,8 +142,8 @@ def _create_agent_session_db(
     )
 
 
-class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips prompt messages before durable persistence."""
+class _SessionSanitizingSqliteDb(SqliteDb):
+    """SQLite session DB that strips sensitive nested and prompt payloads."""
 
     def __init__(
         self,
@@ -162,7 +162,7 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         deserialize: bool | None = True,
     ) -> Session | dict[str, Any] | None:
         return super().upsert_session(
-            _session_without_prompt_messages(session, self._prompt_roles),
+            _session_for_storage(session, self._prompt_roles),
             deserialize=deserialize,
         )
 
@@ -173,17 +173,18 @@ class _PromptSanitizingSqliteDb(SqliteDb):
         preserve_updated_at: bool = False,
     ) -> list[Session | dict[str, Any]]:
         return super().upsert_sessions(
-            [_session_without_prompt_messages(session, self._prompt_roles) for session in sessions],
+            [_session_for_storage(session, self._prompt_roles) for session in sessions],
             deserialize=deserialize,
             preserve_updated_at=preserve_updated_at,
         )
 
 
-def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:
-    if not _session_has_prompt_messages(session, prompt_roles):
+def _session_for_storage(session: Session, prompt_roles: frozenset[str]) -> Session:
+    if not _session_has_prompt_messages(session, prompt_roles) and not _session_has_member_responses(session):
         return session
     sanitized_session = deepcopy(session)
     _strip_prompt_messages_from_session(sanitized_session, prompt_roles)
+    _retain_member_usage_only(sanitized_session)
     return sanitized_session
 
 
@@ -206,6 +207,54 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
         if not isinstance(run, (RunOutput, TeamRunOutput)) or run.status == RunStatus.paused or not run.messages:
             continue
         run.messages = [message for message in run.messages if message.role not in prompt_roles]
+
+
+def _session_has_member_responses(session: Session) -> bool:
+    if not isinstance(session, TeamSession) or not session.runs:
+        return False
+    return any(
+        isinstance(run, TeamRunOutput) and run.status != RunStatus.paused and bool(run.member_responses)
+        for run in session.runs
+    )
+
+
+def _retain_member_usage_only(session: Session) -> None:
+    if not isinstance(session, TeamSession) or not session.runs:
+        return
+    for run in session.runs:
+        if isinstance(run, TeamRunOutput) and run.status != RunStatus.paused:
+            run.member_responses = [_usage_only_run(member) for member in run.member_responses]
+
+
+def _usage_only_run(run: RunOutput | TeamRunOutput) -> RunOutput | TeamRunOutput:
+    if isinstance(run, TeamRunOutput):
+        return TeamRunOutput(
+            run_id=run.run_id,
+            team_id=run.team_id,
+            team_name=run.team_name,
+            session_id=run.session_id,
+            parent_run_id=run.parent_run_id,
+            user_id=run.user_id,
+            metrics=run.metrics,
+            model=run.model,
+            model_provider=run.model_provider,
+            member_responses=[_usage_only_run(member) for member in run.member_responses],
+            created_at=run.created_at,
+            status=run.status,
+        )
+    return RunOutput(
+        run_id=run.run_id,
+        agent_id=run.agent_id,
+        agent_name=run.agent_name,
+        session_id=run.session_id,
+        parent_run_id=run.parent_run_id,
+        user_id=run.user_id,
+        metrics=run.metrics,
+        model=run.model,
+        model_provider=run.model_provider,
+        created_at=run.created_at,
+        status=run.status,
+    )
 
 
 def create_culture_storage(culture_name: str, storage_path: Path) -> BaseDb:

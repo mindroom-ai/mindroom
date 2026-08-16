@@ -658,6 +658,7 @@ def _collect_normalized_run(
     contributions = _run_contributions(run)
     if contributions is None:
         state.malformed_runs += 1
+        state.missing_requester_runs += requester is None
         state.skipped_runs += 1
         state.coverage_exclusions += 1
         _mark_row_history_incomplete(state, row)
