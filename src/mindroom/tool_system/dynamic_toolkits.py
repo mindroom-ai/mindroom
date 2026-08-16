@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
 
 _loaded_tools: dict[tuple[str, str], list[str]] = {}
 _loaded_tools_lock = RLock()
@@ -259,14 +260,18 @@ def _append_injected_special_tool_configs(
     config: Config,
     delegation_depth: int,
     enable_dynamic_tools_manager: bool,
+    include_matrix_room_runtime_tools: bool,
 ) -> list[EffectiveToolConfig]:
     tool_names = [entry.name for entry in resolved_tool_configs]
-    for tool_name in _special_tool_names(
+    injected_tool_names = _special_tool_names(
         agent_name=agent_name,
         config=config,
         delegation_depth=delegation_depth,
         enable_dynamic_tools_manager=enable_dynamic_tools_manager,
-    ):
+    )
+    if include_matrix_room_runtime_tools:
+        injected_tool_names.extend(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
+    for tool_name in injected_tool_names:
         if tool_name in tool_names:
             continue
         if config.resolve_entity(agent_name).authored_deferred_tool_config(tool_name) is not None:
@@ -291,6 +296,7 @@ def visible_tool_surface(
     loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     delegation_depth: int = 0,
     enable_dynamic_tools_manager: bool | None = None,
+    include_matrix_room_runtime_tools: bool = False,
 ) -> VisibleToolSurface:
     """Return the canonical provider-visible runtime tool surface for one agent/session."""
     if loaded_tools is None:
@@ -333,6 +339,7 @@ def visible_tool_surface(
         config=config,
         delegation_depth=delegation_depth,
         enable_dynamic_tools_manager=manager_enabled,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
     return VisibleToolSurface(
         loaded_tools=tuple(loaded_tool_names),
@@ -550,6 +557,7 @@ def resolve_dynamic_tool_selection(
     config: Config,
     session_id: str | None,
     delegation_depth: int = 0,
+    include_matrix_room_runtime_tools: bool = False,
 ) -> VisibleToolSurface:
     """Return the current loaded tools and final runtime tool selection for one session."""
     return visible_tool_surface(
@@ -557,4 +565,5 @@ def resolve_dynamic_tool_selection(
         config=config,
         session_id=session_id,
         delegation_depth=delegation_depth,
+        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )

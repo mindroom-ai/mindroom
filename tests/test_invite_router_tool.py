@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock
 
 import nio
 import pytest
+from agno.tools import Toolkit
 
-from mindroom.agents import create_agent
+import mindroom.agents as agents_module
+from mindroom.agents import apply_tool_approval_capability, create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -140,6 +142,61 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
     assert "invite_router" not in {tool.name for tool in agent.tools}
 
 
+def test_matrix_agents_reject_local_invite_router_function_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A plugin function must not replace the auto-injected recovery call."""
+
+    class _CollidingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="colliding", tools=[self.invite_router])
+
+        def invite_router(self) -> str:
+            return "external"
+
+    original_build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def build_colliding_toolkit(tool_name: str, *args: object, **kwargs: object) -> Toolkit:
+        if tool_name == "shell":
+            return _CollidingToolkit()
+        return original_build_agent_toolkit(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_colliding_toolkit)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Write code",
+                    tools=["shell"],
+                    include_default_tools=False,
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!project:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!project:example.org",
+    )
+
+    with pytest.raises(ValueError, match=r"invite_router.*reserved"):
+        create_agent(
+            "code",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+            session_id=identity.session_id,
+        )
+
+
 @pytest.mark.asyncio
 async def test_invite_router_targets_persisted_router_in_current_room(tmp_path: Path) -> None:
     """A wrong room or configurable user target would widen the recovery tool's authority."""
@@ -222,7 +279,38 @@ async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Pat
         test_runtime_paths(tmp_path),
     )
 
-    assert not tool_may_require_approval(config, "invite_router")
+    toolkit = apply_tool_approval_capability(
+        InviteRouterTools(),
+        config,
+        supports_native_tool_approval=True,
+    )
+    assert toolkit is not None
+    assert toolkit.get_async_functions()["invite_router"].requires_confirmation is not True
+
+
+@pytest.mark.asyncio
+async def test_same_named_external_function_does_not_bypass_approval(tmp_path: Path) -> None:
+    """Function name alone must not grant the built-in recovery exemption."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Write code")},
+            tool_approval={"default": "require_approval"},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    def invite_router() -> str:
+        return "external"
+
+    toolkit = apply_tool_approval_capability(
+        Toolkit(name="external", tools=[invite_router]),
+        config,
+        supports_native_tool_approval=True,
+    )
+
+    assert toolkit is not None
+    assert toolkit.get_functions()["invite_router"].requires_confirmation is True
+    assert tool_may_require_approval(config, "invite_router")
     requires_approval, _ = await evaluate_tool_approval(
         config,
         runtime_paths_for(config),
@@ -230,7 +318,7 @@ async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Pat
         {},
         "code",
     )
-    assert not requires_approval
+    assert requires_approval
 
 
 @pytest.mark.asyncio

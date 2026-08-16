@@ -4704,6 +4704,7 @@ from = ["mindroom.tool_system.skills"]
 expose = [
     "LoadToolResult",
     "LoadToolValidationFailure",
+    "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "VisibleToolSurface",
     "deferred_tool_catalog_entries",
     "get_loaded_tools_for_session",

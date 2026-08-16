@@ -1939,6 +1939,47 @@ async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_fail
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_reserves_matrix_runtime_invite_router_function(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An MCP function must not replace the auto-injected router recovery call."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("router")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "invite",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == set()
+    assert manager.failed_server_ids() == {"demo"}
+    error = manager._states["demo"].last_error
+    assert isinstance(error, MCPProtocolError)
+    assert "invite_router" in str(error)
+    assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_allows_memory_mcp_function_when_memory_backend_none(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -46,7 +46,6 @@ __all__ = [
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
-_APPROVAL_RECOVERY_TOOL_NAMES = frozenset({"invite_router"})
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
@@ -132,8 +131,6 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:
     """Return whether one tool must use Agno's persisted confirmation boundary."""
-    if tool_name in _APPROVAL_RECOVERY_TOOL_NAMES:
-        return False
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
         return config.tool_approval.default == "require_approval"
@@ -165,8 +162,6 @@ async def evaluate_tool_approval(
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
 
-    if tool_name in _APPROVAL_RECOVERY_TOOL_NAMES:
-        return False, timeout_seconds
     if tool_call_is_approval_exempt(tool_name, arguments):
         return False, timeout_seconds
 
