@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,9 @@ from mindroom.usage_stats_storage import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+
+_ROW_KEYS = count()
 
 
 def _config(*, timezone: str = "UTC", team_names: tuple[str, ...] = ()) -> Config:
@@ -85,7 +90,7 @@ def _raw_run(
     metrics: dict[str, object] | None = None,
     model: str = "gpt-5.6",
     provider: str = "openai",
-    run_id: str | None = "event-secret",
+    run_id: str | None = None,
     nested: list[dict[str, object]] | None = None,
     sensitive_text: str = "never expose this prompt",
 ) -> dict[str, object]:
@@ -126,7 +131,7 @@ def _row(
         source=source or _source(),
         entity_id=entity_id,
         entity_kind=entity_kind,  # type: ignore[arg-type]
-        row_key="storage-row-secret",
+        row_key=f"test-row-{next(_ROW_KEYS)}",
         session_user_id="@session-secret:example.test",
         session_metrics=session_metrics,
         runs=(_extract_run_node(raw_run, depth=0, extracted_nodes=[0], extracted_model_metrics=[0]),),
@@ -774,3 +779,95 @@ def test_self_coverage_distinguishes_unavailable_sources_from_absent_history(
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
     assert report.run_count == 0
+
+
+@pytest.mark.parametrize(
+    ("start", "entity_names", "requester_ids"),
+    [("2026-01-03", None, None), (None, ("other",), None), (None, None, ("@bob:example.test",))],
+)
+def test_coverage_history_comparison_is_independent_of_query_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start: str | None,
+    entity_names: tuple[str, ...] | None,
+    requester_ids: tuple[str, ...] | None,
+) -> None:
+    """A filtered query must not compare session totals to its filtered report subtotal."""
+    source = _source()
+    row = _row(_raw_run(metrics={"total_tokens": 10}), source=source, session_metrics={"total_tokens": 10})
+    _wire_admin(monkeypatch, (row,))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=start,
+        end=None,
+        group_by="day",
+        entity_names=entity_names,
+        requester_ids=requester_ids,
+        as_of=datetime(2026, 1, 4, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.status == "complete_retained"
+
+
+@pytest.mark.parametrize(
+    "session_metrics",
+    [{"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}, {"total_tokens": 9}],
+)
+def test_coverage_unequal_or_lower_cumulative_tokens_are_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_metrics: dict[str, object],
+) -> None:
+    """A non-equal cumulative token vector cannot establish complete retained history."""
+    source = _source()
+    row = _row(
+        _raw_run(metrics={"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}),
+        source=source,
+        session_metrics=session_metrics,
+    )
+    _wire_admin(monkeypatch, (row,))
+
+    report = collect_admin_usage(
+        config=_config(), runtime_paths=_paths(tmp_path), start=None, end=None, group_by="day", entity_names=None, requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert report.coverage.status == "unknown"
+
+
+def test_top_level_stable_run_ids_deduplicate_without_collapsing_anonymous_locations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed stable key would count repeated top-level identities more than once."""
+    source = _source()
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(_raw_run(run_id="same-run", metrics={"total_tokens": 10}), source=source),
+            _row(_raw_run(run_id="same-run", metrics={"total_tokens": 10}), source=source),
+        ),
+    )
+    report = collect_admin_usage(
+        config=_config(), runtime_paths=_paths(tmp_path), start=None, end=None, group_by="day", entity_names=None, requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert report.run_count == 1
+
+
+def test_empty_readable_self_source_makes_mixed_unreadable_sources_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clean empty source must prevent a mixed self scan from becoming source-unavailable."""
+    readable = _source()
+    busy = replace(_source(), path_label="busy-source")
+    monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: (readable, busy))
+    monkeypatch.setattr(
+        "mindroom.usage_stats.iter_usage_storage_rows",
+        lambda source: iter(()) if source.path_label == readable.path_label else iter((UsageStorageDiagnostic(path_label="busy-source", status="busy", detail="database busy"),)),
+    )
+    report = collect_self_usage(
+        agent_name="code", requester_id="@alice:example.test", config=_config(), runtime_paths=_paths(tmp_path), execution_identity=_identity(),
+        start=None, end=None, group_by="day", as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert report.coverage.status == "partial"

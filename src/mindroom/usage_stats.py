@@ -274,7 +274,7 @@ class _CollectionState:
     readable_source_labels: set[str]
     stable_run_ids: set[tuple[str, str, str]]
     structural_run_ids: set[tuple[str, str, str]]
-    row_retained_totals: dict[tuple[str, str], TokenTotals]
+    row_history_totals: dict[tuple[str, str], TokenTotals]
     row_session_metrics: dict[tuple[str, str], TokenTotals | None]
     row_comparison_allowed: dict[tuple[str, str], bool]
     scanned_sources: int = 0
@@ -425,14 +425,16 @@ def _collect(
         readable_source_labels=set(),
         stable_run_ids=set(),
         structural_run_ids=set(),
-        row_retained_totals={},
+        row_history_totals={},
         row_session_metrics={},
         row_comparison_allowed={},
     )
     timezone = _usage_timezone(config.timezone)
     for source in sources:
         state.scanned_sources += 1
+        source_had_outcome = False
         for outcome in iter_usage_storage_rows(source):
+            source_had_outcome = True
             if isinstance(outcome, UsageStorageDiagnostic):
                 if outcome.status != "absent":
                     state.partial_source_labels.add(outcome.path_label)
@@ -453,6 +455,8 @@ def _collect(
                 entity_filter=entity_filter,
                 requester_filter=requester_filter,
             )
+        if not source_had_outcome:
+            state.readable_source_labels.add(source.path_label)
     if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
         msg = "Usage source unavailable"
         raise ValueError(msg)
@@ -476,7 +480,7 @@ def _collect_row(
 ) -> None:
     state.scanned_sessions += 1
     row_key = (row.source.path_label, row.row_key)
-    state.row_retained_totals[row_key] = TokenTotals()
+    state.row_history_totals[row_key] = TokenTotals()
     state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
     state.row_comparison_allowed[row_key] = scope == "admin" or row.source.requester_isolated
     for index, run in enumerate(row.runs):
@@ -587,8 +591,7 @@ def _collect_normalized_run(
     entity_filter: frozenset[str] | None,
     requester_filter: frozenset[str] | None,
 ) -> None:
-    is_nested = "." in structural_key
-    dedup_key = (entity.kind, entity.entity_id, run.run_id) if run.run_id and is_nested else None
+    dedup_key = (entity.kind, entity.entity_id, run.run_id) if run.run_id else None
     structural_dedup = (row.source.path_label, row.row_key, structural_key)
     if (dedup_key is not None and dedup_key in state.stable_run_ids) or (
         run.run_id is None and structural_dedup in state.structural_run_ids
@@ -598,22 +601,6 @@ def _collect_normalized_run(
         state.stable_run_ids.add(dedup_key)
     if run.run_id is None:
         state.structural_run_ids.add(structural_dedup)
-    if requester is None:
-        state.missing_requester_runs += 1
-    if not _accept_run(
-        entity=entity,
-        requester=requester,
-        timestamp=timestamp,
-        scope=scope,
-        expected_agent=expected_agent,
-        expected_requester=expected_requester,
-        entity_filter=entity_filter,
-        requester_filter=requester_filter,
-        window_start=window_start,
-        window_end=window_end,
-    ):
-        state.skipped_runs += 1
-        return
     contributions = _run_contributions(run)
     if contributions is None:
         state.malformed_runs += 1
@@ -636,6 +623,27 @@ def _collect_normalized_run(
         )
         for contribution in contributions
     )
+    row_key = (row.source.path_label, row.row_key)
+    state.row_history_totals[row_key] = _add_totals(
+        state.row_history_totals[row_key],
+        _records_totals(records),
+    )
+    if requester is None:
+        state.missing_requester_runs += 1
+    if not _accept_run(
+        entity=entity,
+        requester=requester,
+        timestamp=timestamp,
+        scope=scope,
+        expected_agent=expected_agent,
+        expected_requester=expected_requester,
+        entity_filter=entity_filter,
+        requester_filter=requester_filter,
+        window_start=window_start,
+        window_end=window_end,
+    ):
+        state.skipped_runs += 1
+        return
     _aggregate_records(state=state, row=row, records=records, group_by=group_by, timezone=timezone)
 
 
@@ -669,8 +677,6 @@ def _aggregate_records(
             cost=aggregate.known_cost if aggregate.runs_with_cost else None,
         )
     state.aggregate.add(totals=run_totals, cost=run_cost if has_cost else None)
-    row_key = (row.source.path_label, row.row_key)
-    state.row_retained_totals[row_key] = _add_totals(state.row_retained_totals[row_key], run_totals)
 
 
 def _accept_run(
@@ -728,6 +734,13 @@ def _metrics_totals(metrics: Mapping[str, object] | None) -> TokenTotals | None:
             return None
         values[field] = value or 0
     return TokenTotals(**values)
+
+
+def _records_totals(records: tuple[_UsageMetricRecord, ...]) -> TokenTotals:
+    totals = TokenTotals()
+    for record in records:
+        totals = _add_totals(totals, record.totals)
+    return totals
 
 
 def _run_entity(  # noqa: PLR0911
@@ -927,7 +940,7 @@ def _report(
 def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
     compacted_sessions = 0
     unknown = not state.row_session_metrics
-    for row_key, retained in state.row_retained_totals.items():
+    for row_key, retained in state.row_history_totals.items():
         if not state.row_comparison_allowed[row_key]:
             unknown = True
             continue
@@ -935,9 +948,24 @@ def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
         if cumulative is None:
             unknown = True
             continue
-        if cumulative.total_tokens > retained.total_tokens:
+        if _totals_dominate(cumulative, retained):
             compacted_sessions += 1
+        elif not _totals_equal(cumulative, retained):
+            unknown = True
     return compacted_sessions, unknown
+
+
+def _totals_equal(left: TokenTotals, right: TokenTotals) -> bool:
+    return left == right
+
+
+def _totals_dominate(left: TokenTotals, right: TokenTotals) -> bool:
+    left_values = left.to_dict().values()
+    right_values = right.to_dict().values()
+    pairs = tuple(zip(left_values, right_values, strict=True))
+    return all(left_value >= right_value for left_value, right_value in pairs) and any(
+        left_value > right_value for left_value, right_value in pairs
+    )
 
 
 def _validate_entity_filter(entity_names: tuple[str, ...] | None, config: Config) -> frozenset[str] | None:
