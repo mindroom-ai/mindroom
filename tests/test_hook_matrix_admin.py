@@ -181,7 +181,12 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
     ):
         admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths)
 
-        room_id = await admin.create_room(name="Personal Room", alias_localpart="personal-user", topic="Hello")
+        room_id = await admin.create_room(
+            name="Personal Room",
+            alias_localpart="personal-user",
+            topic="Hello",
+            admin_user_ids=["@user:localhost"],
+        )
         invited = await admin.invite_user("!created:localhost", "@user:localhost")
         client.room_kick.return_value = nio.RoomKickResponse()
         kicked = await admin.kick_user(
@@ -214,6 +219,7 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
         alias="personal-user",
         topic="Hello",
         power_users=None,
+        admin_users=["@user:localhost"],
     )
     mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
     client.room_kick.assert_awaited_once_with(

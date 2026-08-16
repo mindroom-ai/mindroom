@@ -127,6 +127,7 @@ class HookMatrixAdmin(Protocol):
         alias_localpart: str | None = None,
         topic: str | None = None,
         power_user_ids: list[str] | None = None,
+        admin_user_ids: list[str] | None = None,
     ) -> str | None:
         """Create one room and return the room ID on success."""
 

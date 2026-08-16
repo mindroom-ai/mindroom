@@ -48,6 +48,7 @@ class _BoundHookMatrixAdmin:
         alias_localpart: str | None = None,
         topic: str | None = None,
         power_user_ids: list[str] | None = None,
+        admin_user_ids: list[str] | None = None,
     ) -> str | None:
         """Create one room and record it so lifecycle cleanup preserves it for the creator."""
         room_id = await create_room(
@@ -56,6 +57,7 @@ class _BoundHookMatrixAdmin:
             alias=alias_localpart,
             topic=topic,
             power_users=power_user_ids,
+            admin_users=admin_user_ids,
         )
         if room_id is not None:
             self._persist_created_room_for_creator(room_id)
