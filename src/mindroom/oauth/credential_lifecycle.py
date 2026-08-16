@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
-from mindroom.oauth.credential_store import OAuthCredentialTransaction, oauth_credential_transaction
+from mindroom.oauth.credential_store import (
+    OAuthCredentialTransaction,
+    OAuthCredentialUnreadableError,
+    oauth_credential_transaction,
+)
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthProviderError,
@@ -273,6 +277,14 @@ class OAuthCredentialsSnapshot:
     connection_generation: str
 
 
+@dataclass(frozen=True, slots=True)
+class _OAuthCredentialsStatus:
+    """Credential data plus whether recovery requires a decode-free reset."""
+
+    credentials: dict[str, Any] | None
+    reset_required: bool
+
+
 class OAuthCredentialConflictError(OAuthProviderError):
     """Signal that an OAuth mutation lost its connection-lineage compare-and-swap."""
 
@@ -379,6 +391,15 @@ def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAu
 async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load credentials and revision through the shared async transaction owner."""
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_transaction(context))
+
+
+async def load_oauth_credentials_status(context: OAuthCredentialContext) -> _OAuthCredentialsStatus:
+    """Load credentials or classify an unreadable payload as requiring reset."""
+    try:
+        snapshot = await load_oauth_credentials_snapshot(context)
+    except OAuthCredentialUnreadableError:
+        return _OAuthCredentialsStatus(credentials=None, reset_required=True)
+    return _OAuthCredentialsStatus(credentials=snapshot.credentials, reset_required=False)
 
 
 async def load_oauth_reset_connection_generation(context: OAuthCredentialContext) -> str:

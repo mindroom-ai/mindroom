@@ -852,6 +852,26 @@ export function Integrations() {
     }
 
     if (
+      integration.setup_type === "oauth" &&
+      integration.oauth_reset_required === true
+    ) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Button
+            onClick={() => handleDisconnect(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Reset connection
+          </Button>
+          {oauthClientConfigButton}
+          {manualFallbackButton}
+        </div>
+      );
+    }
+
+    if (
       manualFallbackAvailable &&
       integration.environment_auth_configured === true &&
       integration.manual_auth_configured !== true

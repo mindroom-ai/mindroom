@@ -2130,6 +2130,74 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
     assert not credentials_path.exists()
 
 
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+def test_unreadable_oauth_status_can_be_reset_and_reconnected(
+    tmp_path: Path,
+    unreadable_kind: str,
+) -> None:
+    """Dashboard status must expose the decode-free reset path for unreadable OAuth state."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key,
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
+        "@alice:example.org",
+        "general",
+    )
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            scoped_manager.base_path,
+            shared_base_path=scoped_manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        wrong_key_manager.save_credentials(
+            provider.credential_service,
+            {
+                "token": "unreadable-access-token",
+                "refresh_token": "unreadable-refresh-token",
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+        )
+    else:
+        scoped_manager.get_credentials_path(provider.credential_service).write_bytes(b"corrupt-plaintext-secret")
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            unreadable_status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+            disconnect_response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+            reset_status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+            connected_status = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert unreadable_status.status_code == 200
+    assert unreadable_status.json()["connected"] is False
+    assert unreadable_status.json()["reset_required"] is True
+    assert disconnect_response.status_code == 200
+    assert reset_status.status_code == 200
+    assert reset_status.json()["reset_required"] is False
+    assert connect_response.status_code == 200
+    assert callback_response.status_code == 307
+    assert connected_status.status_code == 200
+    assert connected_status.json()["connected"] is True
+    assert connected_status.json()["reset_required"] is False
+
+
 @pytest.mark.asyncio
 async def test_callback_maps_locked_connection_generation_race_to_conflict(
     tmp_path: Path,

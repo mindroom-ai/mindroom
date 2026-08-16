@@ -558,6 +558,31 @@ describe("Integrations", () => {
     });
   });
 
+  it("offers a reset action when OAuth credentials are unreadable", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_reset_required: true,
+    });
+
+    render(<Integrations />);
+
+    const resetButton = await screen.findByRole("button", {
+      name: "Reset connection",
+    });
+    expect(
+      screen.queryByRole("button", { name: "Connect with Google Drive" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(resetButton);
+
+    await waitFor(() => {
+      expect(mockGoogleDriveOnDisconnect).toHaveBeenCalledOnce();
+    });
+  });
+
   it("opens OAuth client config dialog when client config is missing", async () => {
     mockGoogleDriveLoadStatus.mockResolvedValueOnce({
       status: "not_connected",

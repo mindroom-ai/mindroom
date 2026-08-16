@@ -35,6 +35,10 @@ _LOCK_RETRY_SECONDS = 0.05
 _LEGACY_PUBLICATION_KEY = "_mindroom_oauth_publication"
 
 
+class OAuthCredentialUnreadableError(OAuthProviderError):
+    """Signal that a stored OAuth credential exists but cannot be decoded."""
+
+
 class _OAuthCredentialStoreContext(Protocol):
     """Fields the store needs from the lifecycle's canonical scope."""
 
@@ -201,7 +205,7 @@ class OAuthCredentialTransaction:
         payload = row["credential_payload"]
         if payload is None:
             msg = "Stored OAuth credentials could not be loaded"
-            raise OAuthProviderError(msg)
+            raise OAuthCredentialUnreadableError(msg)
         try:
             credentials = self._context.credentials_manager.decode_credentials(
                 self._context.provider.credential_service,
@@ -209,7 +213,7 @@ class OAuthCredentialTransaction:
             )
         except (OSError, TypeError, ValueError, InvalidTag) as exc:
             msg = "Stored OAuth credentials could not be loaded"
-            raise OAuthProviderError(msg) from exc
+            raise OAuthCredentialUnreadableError(msg) from exc
         normalized = _without_legacy_publication(credentials)
         if bool(row["credential_unreadable"]) or normalized != credentials:
             encoded = self._context.credentials_manager.encode_credentials(

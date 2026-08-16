@@ -36,6 +36,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
+    load_oauth_credentials_status,
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
@@ -90,6 +91,7 @@ class OAuthStatusResponse(BaseModel):
     has_client_config: bool
     has_custom_client_config: bool = False
     has_service_account_config: bool = False
+    reset_required: bool = False
     email: str | None = None
     hosted_domain: str | None = None
     capabilities: list[str] = Field(default_factory=list)
@@ -645,7 +647,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
-    credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
+    credential_status = await load_oauth_credentials_status(context)
+    credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
         provider.client_config_resolution(runtime_paths)
@@ -694,6 +697,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         has_client_config=has_client_config,
         has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),
         has_service_account_config=has_service_account_config,
+        reset_required=credential_status.reset_required,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),
         capabilities=list(provider.status_capabilities),
