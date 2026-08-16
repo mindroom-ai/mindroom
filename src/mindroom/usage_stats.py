@@ -1,0 +1,774 @@
+"""Privacy-safe aggregation of retained direct run usage."""
+
+from __future__ import annotations
+
+import math
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from mindroom.usage_stats_storage import (
+    UsageModelMetric,
+    UsageRunNode,
+    UsageSessionRow,
+    UsageStorageDiagnostic,
+    UsageStorageSource,
+    discover_admin_usage_sources,
+    discover_self_usage_sources,
+    iter_usage_storage_rows,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+SelfGroupBy = Literal["day", "model"]
+AdminGroupBy = Literal["entity", "requester", "model", "day"]
+_UsageGroupBy = SelfGroupBy | AdminGroupBy
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "audio_total_tokens",
+)
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_TIMESTAMP_OFFSET = re.compile(r".*(?:Z|[+-]\d{2}:\d{2})\Z")
+_MAX_BREAKDOWN_ROWS = 200
+
+
+@dataclass(frozen=True, slots=True)
+class TokenTotals:
+    """Independent retained-run token counters."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    audio_total_tokens: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        """Serialize only the named aggregate counters."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "audio_input_tokens": self.audio_input_tokens,
+            "audio_output_tokens": self.audio_output_tokens,
+            "audio_total_tokens": self.audio_total_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CostCoverage:
+    """Known retained-run cost subtotal and coverage counts."""
+
+    known_cost: str
+    runs_with_cost: int
+    runs_without_cost: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the cost subtotal and coverage counts."""
+        return {
+            "known_cost": self.known_cost,
+            "runs_with_cost": self.runs_with_cost,
+            "runs_without_cost": self.runs_without_cost,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageBreakdownRow:
+    """One bounded aggregate breakdown row."""
+
+    dimension: Literal["day", "model", "entity", "requester"]
+    key: str
+    model_type: str | None
+    provider: str | None
+    model_id: str | None
+    totals: TokenTotals
+    cost: CostCoverage
+    run_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize aggregate dimensions without persisted identifiers."""
+        payload: dict[str, object] = {
+            "dimension": self.dimension,
+            "key": self.key,
+            "totals": self.totals.to_dict(),
+            "cost": self.cost.to_dict(),
+            "run_count": self.run_count,
+        }
+        if self.dimension == "model":
+            payload["model"] = {
+                "type": self.model_type,
+                "provider": self.provider,
+                "id": self.model_id,
+            }
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class UsageCoverage:
+    """Coverage information for a retained-run scan."""
+
+    status: Literal["complete_retained", "partial", "unknown"]
+    scanned_sources: int
+    partial_sources: int
+    scanned_sessions: int
+    retained_runs: int
+    skipped_runs: int
+    malformed_runs: int
+    missing_requester_runs: int
+    missing_timestamp_runs: int
+    compacted_sessions: int
+    note: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize bounded scan coverage."""
+        return {
+            "status": self.status,
+            "scanned_sources": self.scanned_sources,
+            "partial_sources": self.partial_sources,
+            "scanned_sessions": self.scanned_sessions,
+            "retained_runs": self.retained_runs,
+            "skipped_runs": self.skipped_runs,
+            "malformed_runs": self.malformed_runs,
+            "missing_requester_runs": self.missing_requester_runs,
+            "missing_timestamp_runs": self.missing_timestamp_runs,
+            "compacted_sessions": self.compacted_sessions,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageReport:
+    """One aggregate-only retained-run usage report."""
+
+    scope: Literal["self", "admin"]
+    start: str | None
+    end: str
+    timezone: str
+    as_of: str
+    totals: TokenTotals
+    cost: CostCoverage
+    turn_count: int
+    run_count: int
+    session_count: int
+    first_observed_at: str | None
+    last_observed_at: str | None
+    status_counts: Mapping[str, int]
+    breakdown: tuple[UsageBreakdownRow, ...]
+    breakdown_truncated: bool
+    breakdown_omitted: int
+    coverage: UsageCoverage
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the public aggregate report shape."""
+        return {
+            "scope": self.scope,
+            "window": {"start": self.start, "end": self.end, "timezone": self.timezone},
+            "as_of": self.as_of,
+            "totals": self.totals.to_dict(),
+            "cost": self.cost.to_dict(),
+            "turn_count": self.turn_count,
+            "run_count": self.run_count,
+            "session_count": self.session_count,
+            "first_observed_at": self.first_observed_at,
+            "last_observed_at": self.last_observed_at,
+            "status_counts": dict(self.status_counts),
+            "breakdown": [row.to_dict() for row in self.breakdown],
+            "breakdown_truncated": self.breakdown_truncated,
+            "breakdown_omitted": self.breakdown_omitted,
+            "coverage": self.coverage.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _MetricContribution:
+    model_type: str
+    provider: str
+    model_id: str
+    totals: TokenTotals
+    cost: Decimal | None
+
+
+@dataclass(slots=True)
+class _Aggregate:
+    totals: TokenTotals = TokenTotals()
+    known_cost: Decimal = Decimal(0)
+    runs_with_cost: int = 0
+    runs_without_cost: int = 0
+    run_count: int = 0
+
+    def add(self, *, totals: TokenTotals, cost: Decimal | None) -> None:
+        self.totals = _add_totals(self.totals, totals)
+        if cost is None:
+            self.runs_without_cost += 1
+        else:
+            self.known_cost += cost
+            self.runs_with_cost += 1
+        self.run_count += 1
+
+    def cost_coverage(self) -> CostCoverage:
+        return CostCoverage(
+            known_cost=str(self.known_cost),
+            runs_with_cost=self.runs_with_cost,
+            runs_without_cost=self.runs_without_cost,
+        )
+
+
+@dataclass(slots=True)
+class _CollectionState:
+    aggregate: _Aggregate
+    breakdowns: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate]
+    status_counts: dict[str, int]
+    included_sessions: set[tuple[str, str]]
+    observed_at: list[datetime]
+    partial_source_labels: set[str]
+    scanned_sources: int = 0
+    scanned_sessions: int = 0
+    retained_runs: int = 0
+    skipped_runs: int = 0
+    malformed_runs: int = 0
+    missing_requester_runs: int = 0
+    missing_timestamp_runs: int = 0
+
+
+def parse_usage_window(
+    *,
+    start: str | None,
+    end: str | None,
+    timezone_name: str,
+    as_of: datetime,
+) -> tuple[datetime | None, datetime]:
+    """Parse an inclusive UTC start and exclusive UTC end for a usage query."""
+    timezone = _usage_timezone(timezone_name)
+    normalized_as_of = _as_utc(as_of, error="as_of must include a timezone")
+    parsed_start = _parse_boundary(start, timezone=timezone, is_end=False) if start is not None else None
+    parsed_end = _parse_boundary(end, timezone=timezone, is_end=True) if end is not None else normalized_as_of
+    if parsed_start is not None and parsed_start >= parsed_end:
+        msg = "start must be before end"
+        raise ValueError(msg)
+    return parsed_start, parsed_end
+
+
+def collect_self_usage(
+    *,
+    agent_name: str,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    start: str | None,
+    end: str | None,
+    group_by: SelfGroupBy,
+    as_of: datetime | None = None,
+) -> UsageReport:
+    """Collect direct retained usage for one agent and requester without session totals."""
+    query_as_of = _query_as_of(as_of)
+    window_start, window_end = parse_usage_window(
+        start=start,
+        end=end,
+        timezone_name=config.timezone,
+        as_of=query_as_of,
+    )
+    expected_requester = config.authorization.resolve_alias(requester_id)
+    sources = discover_self_usage_sources(
+        agent_name=agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    state = _collect(
+        sources=sources,
+        config=config,
+        scope="self",
+        group_by=group_by,
+        window_start=window_start,
+        window_end=window_end,
+        expected_agent=agent_name,
+        expected_requester=expected_requester,
+        entity_filter=None,
+        requester_filter=None,
+    )
+    return _report(
+        state=state,
+        scope="self",
+        start=window_start,
+        end=window_end,
+        timezone_name=config.timezone,
+        as_of=query_as_of,
+    )
+
+
+def collect_admin_usage(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    start: str | None,
+    end: str | None,
+    group_by: AdminGroupBy,
+    entity_names: tuple[str, ...] | None,
+    requester_ids: tuple[str, ...] | None,
+    as_of: datetime | None = None,
+) -> UsageReport:
+    """Collect direct retained usage from current configured agent and team sources."""
+    entity_filter = _validate_entity_filter(entity_names, config)
+    requester_filter = (
+        frozenset(config.authorization.resolve_alias(requester_id) for requester_id in requester_ids)
+        if requester_ids is not None
+        else None
+    )
+    query_as_of = _query_as_of(as_of)
+    window_start, window_end = parse_usage_window(
+        start=start,
+        end=end,
+        timezone_name=config.timezone,
+        as_of=query_as_of,
+    )
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+    state = _collect(
+        sources=sources,
+        config=config,
+        scope="admin",
+        group_by=group_by,
+        window_start=window_start,
+        window_end=window_end,
+        expected_agent=None,
+        expected_requester=None,
+        entity_filter=entity_filter,
+        requester_filter=requester_filter,
+    )
+    return _report(
+        state=state,
+        scope="admin",
+        start=window_start,
+        end=window_end,
+        timezone_name=config.timezone,
+        as_of=query_as_of,
+    )
+
+
+def _collect(
+    *,
+    sources: Iterable[UsageStorageSource],
+    config: Config,
+    scope: Literal["self", "admin"],
+    group_by: _UsageGroupBy,
+    window_start: datetime | None,
+    window_end: datetime,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> _CollectionState:
+    state = _CollectionState(
+        aggregate=_Aggregate(),
+        breakdowns={},
+        status_counts=defaultdict(int),
+        included_sessions=set(),
+        observed_at=[],
+        partial_source_labels=set(),
+    )
+    timezone = _usage_timezone(config.timezone)
+    for source in sources:
+        state.scanned_sources += 1
+        for outcome in iter_usage_storage_rows(source):
+            if isinstance(outcome, UsageStorageDiagnostic):
+                state.partial_source_labels.add(outcome.path_label)
+                continue
+            _collect_row(
+                state=state,
+                row=outcome,
+                config=config,
+                scope=scope,
+                group_by=group_by,
+                timezone=timezone,
+                window_start=window_start,
+                window_end=window_end,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+                entity_filter=entity_filter,
+                requester_filter=requester_filter,
+            )
+    return state
+
+
+def _collect_row(
+    *,
+    state: _CollectionState,
+    row: UsageSessionRow,
+    config: Config,
+    scope: Literal["self", "admin"],
+    group_by: _UsageGroupBy,
+    timezone: ZoneInfo,
+    window_start: datetime | None,
+    window_end: datetime,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> None:
+    state.scanned_sessions += 1
+    for run in row.runs:
+        timestamp = _run_timestamp(run.created_at)
+        if timestamp is None:
+            state.missing_timestamp_runs += 1
+            state.skipped_runs += 1
+            continue
+        requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+        if requester is None:
+            state.missing_requester_runs += 1
+        if not _accept_run(
+            run=run,
+            requester=requester,
+            timestamp=timestamp,
+            scope=scope,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            entity_filter=entity_filter,
+            requester_filter=requester_filter,
+            window_start=window_start,
+            window_end=window_end,
+        ):
+            state.skipped_runs += 1
+            continue
+        contributions = _run_contributions(run)
+        if contributions is None:
+            state.malformed_runs += 1
+            state.skipped_runs += 1
+            continue
+        state.retained_runs += 1
+        state.included_sessions.add((row.source.path_label, row.row_key))
+        state.observed_at.append(timestamp)
+        state.status_counts[run.status] += 1
+        run_totals = TokenTotals()
+        run_cost = Decimal(0)
+        has_cost = False
+        per_breakdown: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate] = {}
+        for contribution in contributions:
+            run_totals = _add_totals(run_totals, contribution.totals)
+            if contribution.cost is not None:
+                run_cost += contribution.cost
+                has_cost = True
+            key = _breakdown_key(
+                group_by=group_by,
+                row=row,
+                requester=requester,
+                timestamp=timestamp,
+                timezone=timezone,
+                contribution=contribution,
+            )
+            aggregate = per_breakdown.setdefault(key, _Aggregate())
+            aggregate.add(totals=contribution.totals, cost=contribution.cost)
+        for key, aggregate in per_breakdown.items():
+            breakdown = state.breakdowns.setdefault(key, _Aggregate())
+            breakdown.add(
+                totals=aggregate.totals,
+                cost=aggregate.known_cost if aggregate.runs_with_cost else None,
+            )
+        state.aggregate.add(totals=run_totals, cost=run_cost if has_cost else None)
+
+
+def _accept_run(
+    *,
+    run: UsageRunNode,
+    requester: str | None,
+    timestamp: datetime,
+    scope: Literal["self", "admin"],
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+    window_start: datetime | None,
+    window_end: datetime,
+) -> bool:
+    if window_start is not None and timestamp < window_start:
+        return False
+    if timestamp >= window_end:
+        return False
+    if scope == "self":
+        return requester is not None and requester == expected_requester and run.agent_id == expected_agent
+    entity_id = run.agent_id or run.team_id
+    if entity_filter is not None and entity_id not in entity_filter:
+        return False
+    return requester_filter is None or requester in requester_filter
+
+
+def _run_contributions(run: UsageRunNode) -> tuple[_MetricContribution, ...] | None:
+    model_metrics = run.model_metrics
+    if model_metrics:
+        contributions = tuple(_model_metric_contribution(metric) for metric in model_metrics)
+    else:
+        contribution = _metric_contribution(
+            model_type="model",
+            provider=run.model_provider or "unknown",
+            model_id=run.model_id or "unknown",
+            metrics=run.metrics,
+        )
+        contributions = (contribution,)
+    return contributions if all(contribution is not None for contribution in contributions) else None
+
+
+def _model_metric_contribution(metric: UsageModelMetric) -> _MetricContribution | None:
+    return _metric_contribution(
+        model_type=metric.model_type,
+        provider=metric.provider,
+        model_id=metric.model_id,
+        metrics=metric.metrics,
+    )
+
+
+def _metric_contribution(
+    *,
+    model_type: str,
+    provider: str,
+    model_id: str,
+    metrics: Mapping[str, object],
+) -> _MetricContribution | None:
+    values: dict[str, int] = {}
+    for field in _TOKEN_FIELDS:
+        value = _token_value(metrics.get(field))
+        if value is None and metrics.get(field) is not None:
+            return None
+        values[field] = value or 0
+    cost = _cost_value(metrics.get("cost"))
+    if cost is None and metrics.get("cost") is not None:
+        return None
+    return _MetricContribution(
+        model_type=model_type or "unknown",
+        provider=provider or "unknown",
+        model_id=model_id or "unknown",
+        totals=TokenTotals(**values),
+        cost=cost,
+    )
+
+
+def _token_value(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value >= 0 and value.is_integer() else None
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
+
+
+def _cost_value(value: object) -> Decimal | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    try:
+        cost = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return cost if cost.is_finite() and cost >= 0 else None
+
+
+def _breakdown_key(
+    *,
+    group_by: _UsageGroupBy,
+    row: UsageSessionRow,
+    requester: str | None,
+    timestamp: datetime,
+    timezone: ZoneInfo,
+    contribution: _MetricContribution,
+) -> tuple[str, str, str | None, str | None, str | None]:
+    if group_by == "model":
+        return ("model", contribution.model_id, contribution.model_type, contribution.provider, contribution.model_id)
+    if group_by == "entity":
+        return ("entity", row.entity_id, None, None, None)
+    if group_by == "requester":
+        return ("requester", requester or "unknown", None, None, None)
+    return ("day", timestamp.astimezone(timezone).date().isoformat(), None, None, None)
+
+
+def _report(
+    *,
+    state: _CollectionState,
+    scope: Literal["self", "admin"],
+    start: datetime | None,
+    end: datetime,
+    timezone_name: str,
+    as_of: datetime,
+) -> UsageReport:
+    rows = tuple(
+        UsageBreakdownRow(
+            dimension=dimension,  # type: ignore[arg-type]
+            key=key,
+            model_type=model_type if dimension == "model" else None,
+            provider=provider if dimension == "model" else None,
+            model_id=model_id if dimension == "model" else None,
+            totals=aggregate.totals,
+            cost=aggregate.cost_coverage(),
+            run_count=aggregate.run_count,
+        )
+        for (dimension, key, model_type, provider, model_id), aggregate in state.breakdowns.items()
+    )
+    sorted_rows = tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                -row.totals.total_tokens,
+                row.dimension,
+                row.key,
+                row.model_type or "",
+                row.provider or "",
+                row.model_id or "",
+            ),
+        ),
+    )
+    retained_rows = sorted_rows[:_MAX_BREAKDOWN_ROWS]
+    coverage_status: Literal["complete_retained", "partial", "unknown"]
+    partial_sources = len(state.partial_source_labels)
+    if partial_sources:
+        coverage_status = "partial"
+    elif not state.scanned_sources:
+        coverage_status = "unknown"
+    else:
+        coverage_status = "complete_retained"
+    return UsageReport(
+        scope=scope,
+        start=_format_timestamp(start) if start is not None else None,
+        end=_format_timestamp(end),
+        timezone=timezone_name,
+        as_of=_format_timestamp(as_of),
+        totals=state.aggregate.totals,
+        cost=state.aggregate.cost_coverage(),
+        turn_count=state.aggregate.run_count,
+        run_count=state.aggregate.run_count,
+        session_count=len(state.included_sessions),
+        first_observed_at=_format_timestamp(min(state.observed_at)) if state.observed_at else None,
+        last_observed_at=_format_timestamp(max(state.observed_at)) if state.observed_at else None,
+        status_counts=MappingProxyType(dict(sorted(state.status_counts.items()))),
+        breakdown=retained_rows,
+        breakdown_truncated=len(sorted_rows) > _MAX_BREAKDOWN_ROWS,
+        breakdown_omitted=max(0, len(sorted_rows) - _MAX_BREAKDOWN_ROWS),
+        coverage=UsageCoverage(
+            status=coverage_status,
+            scanned_sources=state.scanned_sources,
+            partial_sources=partial_sources,
+            scanned_sessions=state.scanned_sessions,
+            retained_runs=state.retained_runs,
+            skipped_runs=state.skipped_runs,
+            malformed_runs=state.malformed_runs,
+            missing_requester_runs=state.missing_requester_runs,
+            missing_timestamp_runs=state.missing_timestamp_runs,
+            compacted_sessions=0,
+            note="Retained run usage only; session compaction can make retained history incomplete.",
+        ),
+    )
+
+
+def _validate_entity_filter(entity_names: tuple[str, ...] | None, config: Config) -> frozenset[str] | None:
+    if entity_names is None:
+        return None
+    known_entities = frozenset(config.agents) | frozenset(config.teams)
+    unknown = sorted(set(entity_names) - known_entities)
+    if unknown:
+        msg = "Unknown entity filter"
+        raise ValueError(msg)
+    return frozenset(entity_names)
+
+
+def _query_as_of(as_of: datetime | None) -> datetime:
+    return _as_utc(as_of or datetime.now(UTC), error="as_of must include a timezone")
+
+
+def _usage_timezone(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        msg = "Unknown timezone"
+        raise ValueError(msg) from error
+
+
+def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime:
+    if _DATE_ONLY.fullmatch(value):
+        try:
+            local_date = date.fromisoformat(value)
+        except ValueError as error:
+            msg = "Invalid date"
+            raise ValueError(msg) from error
+        if is_end:
+            local_date += timedelta(days=1)
+        return datetime.combine(local_date, datetime.min.time(), tzinfo=timezone).astimezone(UTC)
+    if _TIMESTAMP_OFFSET.fullmatch(value) is None:
+        msg = "Timestamp must include Z or an explicit offset"
+        raise ValueError(msg)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        msg = "Invalid timestamp"
+        raise ValueError(msg) from error
+    return _as_utc(parsed, error="Timestamp must include Z or an explicit offset")
+
+
+def _run_timestamp(value: str | None) -> datetime | None:  # noqa: PLR0911
+    if value is None:
+        return None
+    try:
+        numeric = Decimal(value)
+    except InvalidOperation:
+        numeric = None
+    if numeric is not None:
+        if not numeric.is_finite():
+            return None
+        try:
+            return datetime.fromtimestamp(float(numeric), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if _TIMESTAMP_OFFSET.fullmatch(value) is None:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value), error="timestamp")
+    except ValueError:
+        return None
+
+
+def _as_utc(value: datetime, *, error: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(error)
+    return value.astimezone(UTC)
+
+
+def _add_totals(left: TokenTotals, right: TokenTotals) -> TokenTotals:
+    return TokenTotals(
+        input_tokens=left.input_tokens + right.input_tokens,
+        output_tokens=left.output_tokens + right.output_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+        cache_read_tokens=left.cache_read_tokens + right.cache_read_tokens,
+        cache_write_tokens=left.cache_write_tokens + right.cache_write_tokens,
+        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
+        audio_input_tokens=left.audio_input_tokens + right.audio_input_tokens,
+        audio_output_tokens=left.audio_output_tokens + right.audio_output_tokens,
+        audio_total_tokens=left.audio_total_tokens + right.audio_total_tokens,
+    )
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
