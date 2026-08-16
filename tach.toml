@@ -720,6 +720,18 @@ path = "mindroom.credential_policy"
 depends_on = []
 
 [[modules]]
+path = "mindroom.oauth.credential_binding"
+depends_on = [
+    "mindroom.oauth.providers",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.api.oauth",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.service",
+]
+
+[[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
     "mindroom.credentials",
@@ -755,6 +767,7 @@ visibility = [
 path = "mindroom.oauth.reset"
 depends_on = [
     "mindroom.credentials",
+    "mindroom.oauth.credential_binding",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.oauth.registry",
     "mindroom.oauth.service",
@@ -1002,6 +1015,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.credentials",
     "mindroom.oauth",
+    "mindroom.oauth.credential_binding",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",

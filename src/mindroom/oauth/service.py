@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
+from mindroom.oauth.credential_binding import (
+    OAuthCredentialBinding,
+    OAuthCredentialBindingParseError,
+    oauth_credential_binding,
+    oauth_credential_binding_payload,
+    parse_oauth_credential_binding_payload,
+)
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
@@ -46,40 +53,18 @@ __all__ = [
     "lookup_oauth_connect_token",
     "oauth_connect_url",
     "oauth_connection_required",
-    "oauth_credential_target_payload",
     "oauth_provider_service_account_configured",
     "oauth_public_base_url",
     "oauth_success_redirect_url",
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OAuthConnectTarget:
     """Server-side credential target for a conversation-issued OAuth link."""
 
-    provider_id: str
-    credential_service: str
-    agent_name: str | None
-    worker_scope: str
-    worker_key: str
+    binding: OAuthCredentialBinding
     requester_id: str | None
-
-
-def oauth_credential_target_payload(
-    provider: OAuthProvider,
-    worker_target: ResolvedWorkerTarget | None,
-) -> dict[str, str]:
-    """Return serializable OAuth state payload for one credential target."""
-    agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    worker_scope = worker_target.worker_scope if worker_target is not None else None
-    worker_key = worker_target.worker_key if worker_target is not None else None
-    return {
-        "provider": provider.id,
-        "credential_service": provider.credential_service,
-        "agent_name": agent_name or "",
-        "worker_scope": worker_scope or "unscoped",
-        "worker_key": worker_key or "",
-    }
 
 
 def _issue_oauth_connect_token(
@@ -92,7 +77,8 @@ def _issue_oauth_connect_token(
         return None
     requester_id = worker_target.execution_identity.requester_id
 
-    payload = oauth_credential_target_payload(provider, worker_target)
+    binding = oauth_credential_binding(provider, worker_target)
+    payload = oauth_credential_binding_payload(binding)
     payload["requester_id"] = requester_id or ""
     return issue_opaque_oauth_state(
         runtime_paths,
@@ -103,25 +89,21 @@ def _issue_oauth_connect_token(
 
 
 def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, object]) -> OAuthConnectTarget:
-    if payload.get("provider") != provider.id:
-        msg = "OAuth connect link does not match this provider"
-        raise OAuthProviderError(msg)
-    if payload.get("credential_service") != provider.credential_service:
-        msg = "OAuth connect link does not match this provider"
-        raise OAuthProviderError(msg)
-    worker_scope = str(payload.get("worker_scope") or "")
-    worker_key = str(payload.get("worker_key") or "")
-    if worker_scope not in {"shared", "user", "user_agent", "unscoped"} or not worker_key:
-        msg = "OAuth connect link target is invalid"
-        raise OAuthProviderError(msg)
-    return OAuthConnectTarget(
-        provider_id=provider.id,
-        credential_service=provider.credential_service,
-        agent_name=str(payload.get("agent_name") or "") or None,
-        worker_scope=worker_scope,
-        worker_key=worker_key,
-        requester_id=str(payload.get("requester_id") or "") or None,
-    )
+    try:
+        binding = parse_oauth_credential_binding_payload(
+            provider,
+            payload,
+            allowed_worker_scopes=frozenset({"shared", "user", "user_agent", "unscoped"}),
+            require_agent_name=False,
+            require_worker_key=True,
+        )
+    except OAuthCredentialBindingParseError as exc:
+        if exc.reason == "provider_mismatch":
+            msg = "OAuth connect link does not match this provider"
+        else:
+            msg = "OAuth connect link target is invalid"
+        raise OAuthProviderError(msg) from exc
+    return OAuthConnectTarget(binding=binding, requester_id=str(payload.get("requester_id") or "") or None)
 
 
 def lookup_oauth_connect_token(provider: OAuthProvider, runtime_paths: RuntimePaths, token: str) -> OAuthConnectTarget:

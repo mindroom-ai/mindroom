@@ -20,6 +20,12 @@ from mindroom.credentials import (
     scoped_credentials_path,
 )
 from mindroom.oauth import credential_lifecycle, credential_store, reset_execution
+from mindroom.oauth.credential_binding import (
+    OAuthCredentialBindingParseError,
+    oauth_credential_binding,
+    oauth_credential_binding_payload,
+    parse_oauth_credential_binding_payload,
+)
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -205,6 +211,132 @@ def _assert_no_token_values_logged(logger: _CapturingLogger) -> None:
     logged_payload = repr(logger.debug_calls + logger.info_calls + logger.warning_calls)
     for token_value in (ACCESS_0, CHAIN_0, CHAIN_1, f"access-{CHAIN_1}"):
         assert token_value not in logged_payload
+
+
+def test_oauth_credential_binding_round_trips_scoped_target() -> None:
+    """A scoped workflow target should have one canonical serialized binding."""
+    provider = cast("OAuthProvider", _FakeOAuthProvider(lambda _credentials: asyncio.sleep(0)))
+    worker_target = _worker_target(worker_scope="user")
+
+    binding = oauth_credential_binding(provider, worker_target)
+
+    assert oauth_credential_binding_payload(binding) == {
+        "provider": "demo_provider",
+        "credential_service": "demo_oauth",
+        "agent_name": "code",
+        "worker_scope": "user",
+        "worker_key": worker_target.worker_key,
+    }
+    assert (
+        parse_oauth_credential_binding_payload(
+            provider,
+            oauth_credential_binding_payload(binding),
+            allowed_worker_scopes=frozenset({"user", "user_agent"}),
+            require_agent_name=True,
+            require_worker_key=True,
+        )
+        == binding
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (
+            {
+                "provider": "untrusted-provider-value",
+                "credential_service": "demo_oauth",
+                "agent_name": "code",
+                "worker_scope": "user",
+                "worker_key": "worker-key",
+            },
+            "provider_mismatch",
+        ),
+        (
+            {
+                "provider": "demo_provider",
+                "credential_service": "untrusted-service-value",
+                "agent_name": "code",
+                "worker_scope": "user",
+                "worker_key": "worker-key",
+            },
+            "provider_mismatch",
+        ),
+        (
+            {
+                "provider": "demo_provider",
+                "credential_service": "demo_oauth",
+                "agent_name": "code",
+                "worker_scope": "untrusted-scope-value",
+                "worker_key": "worker-key",
+            },
+            "invalid_target",
+        ),
+        (
+            {
+                "provider": "demo_provider",
+                "credential_service": "demo_oauth",
+                "agent_name": "",
+                "worker_scope": "user",
+                "worker_key": "worker-key",
+            },
+            "invalid_target",
+        ),
+        (
+            {
+                "provider": "demo_provider",
+                "credential_service": "demo_oauth",
+                "agent_name": "code",
+                "worker_scope": "user",
+                "worker_key": "",
+            },
+            "invalid_target",
+        ),
+    ],
+)
+def test_parse_oauth_credential_binding_payload_rejects_malformed_target(
+    payload: dict[str, object],
+    reason: str,
+) -> None:
+    """Malformed workflow targets should have sanitized, classified errors."""
+    provider = cast("OAuthProvider", _FakeOAuthProvider(lambda _credentials: asyncio.sleep(0)))
+
+    with pytest.raises(OAuthCredentialBindingParseError) as exc_info:
+        parse_oauth_credential_binding_payload(
+            provider,
+            payload,
+            allowed_worker_scopes=frozenset({"user", "user_agent"}),
+            require_agent_name=True,
+            require_worker_key=True,
+        )
+
+    assert exc_info.value.reason == reason
+    assert "untrusted" not in str(exc_info.value)
+
+
+def test_unscoped_oauth_credential_binding_serializes_but_is_not_requester_bound() -> None:
+    """An unscoped payload should serialize without becoming a valid connect target."""
+    provider = cast("OAuthProvider", _FakeOAuthProvider(lambda _credentials: asyncio.sleep(0)))
+    binding = oauth_credential_binding(provider, None)
+    payload = oauth_credential_binding_payload(binding)
+
+    assert payload == {
+        "provider": "demo_provider",
+        "credential_service": "demo_oauth",
+        "agent_name": "",
+        "worker_scope": "unscoped",
+        "worker_key": "",
+    }
+    with pytest.raises(OAuthCredentialBindingParseError) as exc_info:
+        parse_oauth_credential_binding_payload(
+            provider,
+            payload,
+            allowed_worker_scopes=frozenset({"shared", "user", "user_agent", "unscoped"}),
+            require_agent_name=False,
+            require_worker_key=True,
+        )
+
+    assert exc_info.value.reason == "invalid_target"
 
 
 @pytest.mark.asyncio

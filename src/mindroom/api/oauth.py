@@ -31,6 +31,11 @@ from mindroom.oauth import (
     OAuthProviderError,
     is_oauth_loopback_hostname,
 )
+from mindroom.oauth.credential_binding import (
+    OAuthCredentialBinding,
+    oauth_credential_binding,
+    oauth_credential_binding_payload,
+)
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -51,10 +56,8 @@ from mindroom.oauth.reset import (
 )
 from mindroom.oauth.reset_execution import OAuthResetPreparationError, retire_and_reset_oauth_credentials
 from mindroom.oauth.service import (
-    OAuthConnectTarget,
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
-    oauth_credential_target_payload,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
@@ -200,60 +203,18 @@ async def _issue_authorization_url(
     agent_name: str | None,
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
-    await _client_config_resolution_for_request(
-        request,
-        provider,
-        runtime_paths,
-        reject_remote_provisioned=True,
-    )
+    await _client_config_resolution_for_request(request, provider, runtime_paths, reject_remote_provisioned=True)
+    connect_target = None
     if connect_token:
         try:
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _verify_connect_target_authorized(request, connect_target, runtime_paths)
-        _verify_connect_target_query(connect_target, agent_name, request.query_params.get("execution_scope"))
-        target = _resolve_oauth_credentials_target(
-            request,
-            provider,
-            agent_name=agent_name,
-        )
-        _verify_connect_target_binding(
-            provider,
-            connect_target,
-            worker_target_for_credentials_target(target),
-        )
-        code_verifier = provider.issue_pkce_code_verifier()
-        state = issue_pending_oauth_state(
-            request,
-            provider.id,
-            agent_name,
-            payload=await _target_binding_payload(provider, target),
-            code_verifier=code_verifier,
-        )
-        try:
-            auth_url = await provider.authorization_uri_async(
-                target.runtime_paths,
-                state=state,
-                code_verifier=code_verifier,
-            )
-        except OAuthProviderError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        try:
-            consume_oauth_connect_token(provider, runtime_paths, connect_token, expected_target=connect_target)
-        except OAuthProviderError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return OAuthConnectResponse(
-            provider=provider.id,
-            auth_url=auth_url,
-            completion_origin=_oauth_success_origin(provider, runtime_paths),
-        )
-
-    target = _resolve_oauth_credentials_target(
-        request,
-        provider,
-        agent_name=agent_name,
-    )
+        _verify_connect_target_authorized(request, connect_target.requester_id, runtime_paths)
+        _verify_connect_target_query(connect_target.binding, agent_name, request.query_params.get("execution_scope"))
+    target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
+    if connect_target is not None:
+        _verify_connect_target_binding(connect_target.binding, provider, worker_target_for_credentials_target(target))
     try:
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
@@ -270,64 +231,55 @@ async def _issue_authorization_url(
         )
     except OAuthProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return OAuthConnectResponse(
-        provider=provider.id,
-        auth_url=auth_url,
-        completion_origin=_oauth_success_origin(provider, runtime_paths),
-    )
+    if connect_token and connect_target is not None:
+        try:
+            consume_oauth_connect_token(provider, runtime_paths, connect_token, expected_target=connect_target)
+        except OAuthProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    completion_origin = _oauth_success_origin(provider, runtime_paths)
+    return OAuthConnectResponse(provider=provider.id, auth_url=auth_url, completion_origin=completion_origin)
 
 
 async def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    snapshot = await load_oauth_credentials_snapshot(
-        _credential_context(provider, target.runtime_paths, target),
-    )
-    return {
-        **oauth_credential_target_payload(provider, worker_target_for_credentials_target(target)),
-        "connection_generation": snapshot.connection_generation,
-    }
+    snapshot = await load_oauth_credentials_snapshot(_credential_context(provider, target.runtime_paths, target))
+    binding = oauth_credential_binding(provider, worker_target_for_credentials_target(target))
+    payload = oauth_credential_binding_payload(binding)
+    payload["connection_generation"] = snapshot.connection_generation
+    return payload
 
 
 def _verify_connect_target_authorized(
     request: Request,
-    connect_target: OAuthConnectTarget,
+    requester_id: str | None,
     runtime_paths: RuntimePaths,
 ) -> None:
-    dashboard_identity = build_dashboard_execution_identity(
-        request,
-        "oauth",
-        runtime_paths=runtime_paths,
-    )
+    dashboard_identity = build_dashboard_execution_identity(request, "oauth", runtime_paths=runtime_paths)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if dashboard_identity.requester_id and snapshot.runtime_config is not None:
         dashboard_identity = replace(
             dashboard_identity,
             requester_id=snapshot.runtime_config.authorization.resolve_alias(dashboard_identity.requester_id),
         )
-    if connect_target.requester_id and connect_target.requester_id != dashboard_identity.requester_id:
+    if requester_id and requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
 
 
 def _verify_connect_target_query(
-    connect_target: OAuthConnectTarget,
+    binding: OAuthCredentialBinding,
     agent_name: str | None,
     execution_scope: str | None,
 ) -> None:
-    expected_scope = "" if connect_target.worker_scope == "unscoped" else connect_target.worker_scope
-    if (agent_name or "") != (connect_target.agent_name or "") or (execution_scope or "") != expected_scope:
+    expected_scope = "" if binding.worker_scope == "unscoped" else binding.worker_scope
+    if (agent_name or "") != (binding.requested_agent_name or "") or (execution_scope or "") != expected_scope:
         raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
 
 
 def _verify_connect_target_binding(
+    binding: OAuthCredentialBinding,
     provider: OAuthProvider,
-    connect_target: OAuthConnectTarget,
     worker_target: ResolvedWorkerTarget | None,
 ) -> None:
-    expected = oauth_credential_target_payload(provider, worker_target)
-    if (
-        connect_target.agent_name != (expected["agent_name"] or None)
-        or connect_target.worker_scope != expected["worker_scope"]
-        or connect_target.worker_key != expected["worker_key"]
-    ):
+    if binding != oauth_credential_binding(provider, worker_target):
         raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
 
 
@@ -341,16 +293,8 @@ def _verify_browser_reset_intent(
     execution_scope: str | None,
 ) -> OAuthCredentialContext:
     """Reauthorize and resolve the exact browser reset target."""
-    connect_target = OAuthConnectTarget(
-        provider_id=intent.provider_id,
-        credential_service=intent.credential_service,
-        agent_name=intent.agent_name,
-        worker_scope=intent.worker_scope,
-        worker_key=intent.worker_key,
-        requester_id=intent.requester_id,
-    )
-    _verify_connect_target_authorized(request, connect_target, runtime_paths)
-    _verify_connect_target_query(connect_target, agent_name, execution_scope)
+    _verify_connect_target_authorized(request, intent.requester_id, runtime_paths)
+    _verify_connect_target_query(intent.binding, agent_name, execution_scope)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
@@ -369,7 +313,7 @@ def _verify_browser_reset_intent(
         )
     except OAuthResetTargetError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _verify_connect_target_binding(provider, connect_target, target.worker_target)
+    _verify_connect_target_binding(intent.binding, provider, target.worker_target)
     return target.credential_context
 
 

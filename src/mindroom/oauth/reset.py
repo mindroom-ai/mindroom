@@ -8,13 +8,20 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.credential_binding import (
+    OAuthCredentialBinding,
+    OAuthCredentialBindingParseError,
+    oauth_credential_binding,
+    oauth_credential_binding_payload,
+    parse_oauth_credential_binding_payload,
+)
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_reset_connection_generation,
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credential_target_payload, oauth_public_base_url
+from mindroom.oauth.service import oauth_public_base_url
 from mindroom.oauth.state import issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -25,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _BROWSER_OAUTH_RESET_KIND = "browser_oauth_reset"
 _BROWSER_OAUTH_RESET_TTL_SECONDS = 10 * 60
@@ -39,19 +46,10 @@ class OAuthResetTargetError(ValueError):
 class BrowserOAuthResetIntent:
     """One requester-bound browser reset action."""
 
-    provider_id: str
-    credential_service: str
-    agent_name: str
-    worker_scope: WorkerScope
-    worker_key: str
+    binding: OAuthCredentialBinding
     requester_id: str
     connection_generation: str
     operation_id: str
-
-    @property
-    def execution_scope(self) -> WorkerScope:
-        """Return the worker scope carried in the reset URL."""
-        return self.worker_scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,41 +146,23 @@ def _browser_oauth_reset_intent_from_payload(
     payload: Mapping[str, object],
 ) -> BrowserOAuthResetIntent:
     """Parse one strict browser reset intent payload."""
-    provider_id = payload.get("provider")
-    credential_service = payload.get("credential_service")
-    agent_name = payload.get("agent_name")
-    worker_scope = payload.get("worker_scope")
-    worker_key = payload.get("worker_key")
-    requester_id = payload.get("requester_id")
-    connection_generation = payload.get("connection_generation")
-    operation_id = payload.get("operation_id")
-    if (
-        provider_id != provider.id
-        or credential_service != provider.credential_service
-        or not isinstance(agent_name, str)
-        or not agent_name
-        or worker_scope not in {"user", "user_agent"}
-        or not isinstance(worker_key, str)
-        or not worker_key
-        or not isinstance(requester_id, str)
-        or not requester_id
-        or not isinstance(connection_generation, str)
-        or not connection_generation
-        or not isinstance(operation_id, str)
-        or not operation_id
-    ):
+    try:
+        binding = parse_oauth_credential_binding_payload(
+            provider,
+            payload,
+            allowed_worker_scopes=frozenset({"user", "user_agent"}),
+            require_agent_name=True,
+            require_worker_key=True,
+        )
+    except OAuthCredentialBindingParseError as exc:
+        msg = "OAuth reset link target is invalid"
+        raise OAuthResetTargetError(msg) from exc
+    values = tuple(payload.get(key) for key in ("requester_id", "connection_generation", "operation_id"))
+    if any(not isinstance(value, str) or not value for value in values):
         msg = "OAuth reset link target is invalid"
         raise OAuthResetTargetError(msg)
-    return BrowserOAuthResetIntent(
-        provider_id=provider.id,
-        credential_service=provider.credential_service,
-        agent_name=agent_name,
-        worker_scope=cast("WorkerScope", worker_scope),
-        worker_key=worker_key,
-        requester_id=requester_id,
-        connection_generation=connection_generation,
-        operation_id=operation_id,
-    )
+    requester_id, connection_generation, operation_id = cast("tuple[str, str, str]", values)
+    return BrowserOAuthResetIntent(binding, requester_id, connection_generation, operation_id)
 
 
 async def issue_browser_oauth_reset_url(target: _ResolvedOAuthResetTarget) -> str:
@@ -194,8 +174,9 @@ async def issue_browser_oauth_reset_url(target: _ResolvedOAuthResetTarget) -> st
         raise OAuthResetTargetError(msg)
     connection_generation = await load_oauth_reset_connection_generation(target.credential_context)
     provider = target.provider
+    binding = oauth_credential_binding(provider, worker_target)
     payload: dict[str, str] = {
-        **oauth_credential_target_payload(provider, worker_target),
+        **oauth_credential_binding_payload(binding),
         "requester_id": execution_identity.requester_id,
         "connection_generation": connection_generation,
         "operation_id": f"browser:{secrets.token_hex(32)}",

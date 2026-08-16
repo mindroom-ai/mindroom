@@ -738,10 +738,10 @@ class TestConsolidatedConfigManager:
             resolved_thread_id="$thread",
             session_id="!room:example.org:$thread",
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == worker_scope
-        assert connect_target.worker_key == resolve_worker_key(
+        assert connect_target.binding.worker_scope == worker_scope
+        assert connect_target.binding.worker_key == resolve_worker_key(
             worker_scope,
             expected_identity,
             agent_name="research",
@@ -787,9 +787,9 @@ class TestConsolidatedConfigManager:
             cm.runtime_paths,
             query["connect_token"][0],
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == private_scope
+        assert connect_target.binding.worker_scope == private_scope
 
     def test_manage_agent_update_does_not_mint_caller_link_when_requester_cannot_manage_target(
         self,

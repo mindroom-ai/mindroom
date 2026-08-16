@@ -164,9 +164,9 @@ async def test_reset_oauth_connection_issues_browser_confirmation_without_mutati
     assert stored is not None
     assert stored["refresh_token"] == credentials["refresh_token"]
     intent = _reset_intent(result, provider=provider, context=context)
-    assert intent.agent_name == "research"
+    assert intent.binding.requested_agent_name == "research"
     assert intent.requester_id == "@alice:example.org"
-    assert intent.worker_scope == "user_agent"
+    assert intent.binding.worker_scope == "user_agent"
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ async def test_reset_oauth_connection_uses_team_member_ownership(tmp_path: Path)
         result = await tool.reset_oauth_connection(provider.id)
 
     intent = _reset_intent(result, provider=provider, context=context)
-    assert intent.agent_name == "research"
+    assert intent.binding.requested_agent_name == "research"
     assert intent.requester_id == "@alice:example.org"
 
 
@@ -242,7 +242,7 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
 
     intent = _reset_intent(result, provider=provider, context=context)
     assert intent.requester_id == "@alice:example.org"
-    assert intent.worker_key == canonical_target.worker_key
+    assert intent.binding.worker_key == canonical_target.worker_key
 
 
 @pytest.mark.asyncio

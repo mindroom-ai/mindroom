@@ -40,6 +40,7 @@ from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.credential_binding import oauth_credential_binding, oauth_credential_binding_payload
 from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError, oauth_credentials_satisfy_identity_policy
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
@@ -335,7 +336,7 @@ def _worker_key_for_matrix_user_scope(requester_id: str, worker_scope: WorkerSco
     return worker_key
 
 
-def test_oauth_credential_target_payload_matches_worker_target_fields() -> None:
+def test_oauth_credential_binding_payload_matches_worker_target_fields() -> None:
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -349,7 +350,7 @@ def test_oauth_credential_target_payload_matches_worker_target_fields() -> None:
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
     assert worker_target is not None
 
-    payload = oauth_service.oauth_credential_target_payload(provider, worker_target)
+    payload = oauth_credential_binding_payload(oauth_credential_binding(provider, worker_target))
 
     assert payload == {
         "provider": "google_drive",
@@ -360,10 +361,10 @@ def test_oauth_credential_target_payload_matches_worker_target_fields() -> None:
     }
 
 
-def test_oauth_credential_target_payload_represents_unscoped_target() -> None:
+def test_oauth_credential_binding_payload_represents_unscoped_target() -> None:
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
 
-    payload = oauth_service.oauth_credential_target_payload(provider, None)
+    payload = oauth_credential_binding_payload(oauth_credential_binding(provider, None))
 
     assert payload == {
         "provider": "google_drive",
