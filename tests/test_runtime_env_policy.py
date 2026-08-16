@@ -11,6 +11,7 @@ from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
 
 _POLICY_OWNED_ENV_PREFIXES = (
+    "MINDROOM_AGENT_REPOSITORY_",
     "MINDROOM_CREDENTIAL_SEEDS_",
     "MINDROOM_KUBERNETES_WORKER_",
     "MINDROOM_SANDBOX_",
@@ -27,6 +28,7 @@ _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
 _PROJECTION_MATRIX_ENV_NAMES = (
+    *runtime_env_policy.AGENT_REPOSITORY_ENV_BY_KEY.values(),
     runtime_env_policy.CONTROL_STATE_PATH_ENV,
     runtime_env_policy.SESSION_STORAGE_PATH_ENV,
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -44,6 +46,20 @@ _PROJECTION_MATRIX_ENV_NAMES = (
     "OPENAI_API_KEY",
 )
 _PROJECTION_MATRIX_EXPECTATIONS = {
+    runtime_env_policy.AGENT_REPOSITORY_ENV_BY_KEY["broker_url"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.AGENT_REPOSITORY_ENV_BY_KEY["broker_token_file"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
     runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
@@ -305,6 +321,8 @@ def test_public_runtime_paths_do_not_reintroduce_worker_local_file_secret_paths(
 def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
     """Explicit broad shell passthrough still denies runtime control material."""
     env = {
+        "MINDROOM_AGENT_REPOSITORY_BROKER_URL": "http://agent-vault:14321",
+        "MINDROOM_AGENT_REPOSITORY_BROKER_TOKEN_FILE": "/var/run/secrets/repository-broker/token",
         "MINDROOM_CONFIG_PATH": "/app/config.yaml",
         "MINDROOM_STORAGE_PATH": "/app/storage",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",

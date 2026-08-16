@@ -439,11 +439,24 @@ app.kubernetes.io/component: event-cache-postgres
 {{- define "mindroom-runtime.defaultConfig" -}}
 agents: {}
 models: {}
+{{- if .Values.agentRepositories.enabled }}
+agent_repositories:
+  organization: {{ .Values.agentRepositories.organization | quote }}
+  prefix: {{ .Values.agentRepositories.prefix | quote }}
+{{- end }}
 event_journal:
   backend: {{ .Values.eventCache.backend | quote }}
 {{- if eq .Values.eventCache.backend "postgres" }}
   database_url_env: {{ .Values.eventCache.databaseUrlEnv | quote }}
 {{- end }}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentRepositoryBrokerVolumeName" -}}
+agent-repository-broker
+{{- end -}}
+
+{{- define "mindroom-runtime.agentRepositoryBrokerMountPath" -}}
+/etc/agent-repository-broker
 {{- end -}}
 
 {{- define "mindroom-runtime.agentVaultServerName" -}}

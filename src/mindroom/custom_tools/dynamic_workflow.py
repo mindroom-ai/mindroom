@@ -45,7 +45,16 @@ if TYPE_CHECKING:
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
-    {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "invite_router", "memory", "self_config"},
+    {
+        "agent_repository",
+        "compact_context",
+        "delegate",
+        "dynamic_tools",
+        "dynamic_workflow",
+        "invite_router",
+        "memory",
+        "self_config",
+    },
 )
 
 # Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create

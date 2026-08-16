@@ -179,6 +179,12 @@ spec:
             - name: MINDROOM_TIMING
               value: "1"
             {{- end }}
+            {{- if .Values.agentRepositories.enabled }}
+            - name: MINDROOM_AGENT_REPOSITORY_BROKER_URL
+              value: {{ .Values.agentRepositories.brokerUrl | quote }}
+            - name: MINDROOM_AGENT_REPOSITORY_BROKER_TOKEN_FILE
+              value: {{ printf "%s/%s" (include "mindroom-runtime.agentRepositoryBrokerMountPath" .) .Values.agentRepositories.brokerTokenSecret.key | quote }}
+            {{- end }}
             {{- if and (eq .Values.eventCache.backend "postgres") $eventCacheDatabaseUrlSecretName }}
             - name: {{ .Values.eventCache.databaseUrlEnv }}
               valueFrom:
@@ -473,6 +479,11 @@ spec:
               mountPath: /etc/agent-vault-access
               readOnly: true
             {{- end }}
+            {{- if .Values.agentRepositories.enabled }}
+            - name: {{ include "mindroom-runtime.agentRepositoryBrokerVolumeName" . }}
+              mountPath: {{ include "mindroom-runtime.agentRepositoryBrokerMountPath" . }}
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -572,6 +583,14 @@ spec:
             # Optional: lets the control plane start before the first
             # bootstrap publishes the token; the tool errors cleanly until then.
             optional: true
+        {{- end }}
+        {{- if .Values.agentRepositories.enabled }}
+        - name: {{ include "mindroom-runtime.agentRepositoryBrokerVolumeName" . }}
+          secret:
+            secretName: {{ .Values.agentRepositories.brokerTokenSecret.name | quote }}
+            items:
+              - key: {{ .Values.agentRepositories.brokerTokenSecret.key | quote }}
+                path: {{ .Values.agentRepositories.brokerTokenSecret.key | quote }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

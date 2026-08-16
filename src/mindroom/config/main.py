@@ -30,6 +30,7 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME, AgentRepositoriesConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile
@@ -392,6 +393,10 @@ class Config(BaseModel):
     }
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
+    agent_repositories: AgentRepositoriesConfig | None = Field(
+        default=None,
+        description="Trusted global policy for constrained agent-owned GitHub repositories",
+    )
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
@@ -530,6 +535,52 @@ class Config(BaseModel):
                 ):
                     raise ValueError(msg)
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_agent_repository_assignments(self) -> Config:
+        """Restrict repository capability to explicit shared or private-user-agent owners."""
+        if any(entry.name == AGENT_REPOSITORY_TOOL_NAME for entry in self.defaults.tools):
+            msg = "Tool 'agent_repository' must be assigned directly to an agent, not through defaults.tools"
+            raise ValueError(msg)
+
+        assigned_agents: list[str] = []
+        for agent_name, agent_config in self.agents.items():
+            entries = [entry for entry in agent_config.tools if entry.name == AGENT_REPOSITORY_TOOL_NAME]
+            if not entries:
+                continue
+            assigned_agents.append(agent_name)
+            entry = entries[0]
+            if entry.overrides:
+                msg = "Tool 'agent_repository' does not accept per-agent overrides"
+                raise ValueError(msg)
+
+            policy = resolve_agent_policy_from_data(
+                agent_name,
+                agent_config,
+                default_worker_scope=self.defaults.worker_scope,
+                private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+            )
+            if policy.is_private:
+                if policy.effective_execution_scope != "user_agent":
+                    msg = (
+                        "Tool 'agent_repository' private agents must use private.per=user_agent; "
+                        f"invalid assignment: {agent_name} ({policy.scope_label})"
+                    )
+                    raise ValueError(msg)
+            elif policy.effective_execution_scope != "shared":
+                msg = (
+                    "Tool 'agent_repository' non-private agents must use worker_scope=shared; "
+                    f"invalid assignment: {agent_name} ({policy.scope_label})"
+                )
+                raise ValueError(msg)
+
+        if assigned_agents and self.agent_repositories is None:
+            msg = (
+                "Tool 'agent_repository' requires the global agent_repositories policy; "
+                f"assigned agents: {', '.join(sorted(assigned_agents))}"
+            )
+            raise ValueError(msg)
         return self
 
     @field_validator("plugins", mode="before")
@@ -1607,6 +1658,20 @@ class Config(BaseModel):
 
     def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
         """Return runtime kwargs derived from one agent's authored tool overrides."""
+        if tool_name == AGENT_REPOSITORY_TOOL_NAME:
+            policy = self.agent_repositories
+            agent_config = self.agents.get(agent_name)
+            if (
+                policy is None
+                or agent_config is None
+                or not any(entry.name == AGENT_REPOSITORY_TOOL_NAME for entry in agent_config.tools)
+            ):
+                return None
+            return {
+                "organization": policy.organization,
+                "prefix": policy.prefix,
+            }
+
         from mindroom.tool_system.catalog import authored_tool_overrides_to_runtime  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)

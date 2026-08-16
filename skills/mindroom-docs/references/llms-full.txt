@@ -3443,6 +3443,7 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 - [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, and text file export helpers.
 - [`visualization`] - Matplotlib-backed chart generation.
 - [`sleep`] - Intentional delays and pauses.
+- [`agent_repository`] - Argument-free provisioning of one private repository bound to the current agent worker.
 
 ## Common Setup Notes
 
@@ -3471,6 +3472,36 @@ No extra configuration is required beyond that workspace root.
 
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, `python-docx`, and `matplotlib`.
+
+## [`agent_repository`]
+
+`agent_repository` exposes only `ensure_my_repository()` and accepts no model-supplied arguments.
+The trusted global `agent_repositories` policy supplies the organization and fixed `MindRoom` prefix, while the current worker identity determines the repository name.
+Shared agents use `MindRoom-<agent-slug>` and private `per: user_agent` agents use `MindRoom-<agent-slug>-<matrix-localpart>`.
+
+```yaml
+agent_repositories:
+  organization: example-org
+  prefix: MindRoom
+
+agents:
+  redwood:
+    display_name: Redwood
+    worker_scope: shared
+    tools: [agent_repository]
+
+  mind:
+    display_name: Mind
+    private:
+      per: user_agent
+    tools: [agent_repository]
+```
+
+The tool asks the configured trusted broker to create or recover exactly one private repository, persists an immutable worker-to-repository-ID binding under the configured MindRoom storage root, and initializes the agent workspace with a credential-free HTTPS `origin`.
+An existing normalized HTTPS origin for the bound repository is accepted unchanged.
+Any SSH origin, different fetch or push URL, URL rewrite, transport override, included Git config, or indirect worktree/common config returns `origin_conflict` without rewriting Git configuration.
+The broker token remains in the control plane, and worker Git authentication uses the separately configured Agent Vault HTTPS proxy with repository-scoped Contents-write access.
+The capability does not expose repository deletion, rename, transfer, visibility changes, invitations, or arbitrary repository management.
 
 ```yaml
 defaults:

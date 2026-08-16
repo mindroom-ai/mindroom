@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
+from mindroom.config.agent_repository import AGENT_REPOSITORY_TOOL_NAME
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
@@ -21,8 +22,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
+_SELF_CONFIG_BLOCKED_TOOLS = {"config_manager", AGENT_REPOSITORY_TOOL_NAME}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+
+
+def _changed_privileged_tools(current_tools: list[str], requested_tools: list[str]) -> list[str]:
+    current = {tool for tool in current_tools if tool in _SELF_CONFIG_BLOCKED_TOOLS}
+    requested = {tool for tool in requested_tools if tool in _SELF_CONFIG_BLOCKED_TOOLS}
+    return sorted(current ^ requested)
 
 
 class SelfConfigTools(Toolkit):
@@ -120,6 +127,8 @@ class SelfConfigTools(Toolkit):
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
+        agent = config.agents[self.agent_name]
+
         # Validate tools against known tool metadata
         if tools is not None:
             tool_metadata = resolved_tool_metadata_for_runtime(
@@ -130,9 +139,9 @@ class SelfConfigTools(Toolkit):
             invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
                 return f"Error: Unknown tools: {', '.join(invalid_tools)}"
-            blocked_tools = sorted({t for t in tools if t in _SELF_CONFIG_BLOCKED_TOOLS})
-            if blocked_tools:
-                return f"Error: Self-config cannot assign privileged tools: {', '.join(blocked_tools)}"
+            changed_privileged_tools = _changed_privileged_tools(agent.tool_names, tools)
+            if changed_privileged_tools:
+                return f"Error: Self-config cannot change privileged tools: {', '.join(changed_privileged_tools)}"
 
         # Block include_default_tools if defaults.tools contains privileged tools
         if include_default_tools is True:
@@ -149,7 +158,6 @@ class SelfConfigTools(Toolkit):
             if kb_error:
                 return kb_error
 
-        agent = config.agents[self.agent_name]
         requested_updates: list[tuple[str, object]] = [
             ("display_name", display_name),
             ("role", role),
