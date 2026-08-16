@@ -31,6 +31,7 @@ git_credentials_service  # unused variable (src/mindroom/config/main.py)
 git_lfs  # unused variable (src/mindroom/config/main.py)
 accepted  # unused variable (src/mindroom/external_triggers/models.py)
 duplicate  # unused variable (src/mindroom/external_triggers/models.py)
+session_user_id  # typed usage storage boundary intentionally excludes session identity from aggregation
 REPO  # unused variable (src/mindroom/custom_tools/todo.py)
 N_REVIEWERS  # unused variable (src/mindroom/custom_tools/todo.py)
 IMPLEMENTER_AGENT  # unused variable (src/mindroom/custom_tools/todo.py)

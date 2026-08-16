@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -21,6 +21,24 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+__all__ = [
+    "MAX_EXTRACTED_MODEL_METRICS",
+    "MAX_EXTRACTED_RUN_NODES",
+    "MAX_JSON_BYTES",
+    "MAX_JSON_NESTING_DEPTH",
+    "MAX_NESTED_RESPONSE_DEPTH",
+    "UsageMetricValue",
+    "UsageModelMetric",
+    "UsageRunNode",
+    "UsageSessionRow",
+    "UsageStorageDiagnostic",
+    "UsageStorageScope",
+    "UsageStorageSource",
+    "discover_admin_usage_sources",
+    "discover_self_usage_sources",
+    "iter_usage_storage_rows",
+]
 
 UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 UsageMetricValue = int | float | str | None
@@ -325,11 +343,7 @@ def _self_source_path(
         if worker_key is None:
             return None
         relative_path = (
-            Path("private_instances")
-            / worker_dir_name(worker_key)
-            / agent_name
-            / "sessions"
-            / f"{agent_name}.db"
+            Path("private_instances") / worker_dir_name(worker_key) / agent_name / "sessions" / f"{agent_name}.db"
         )
     else:
         relative_path = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
@@ -458,7 +472,8 @@ def _preflight_database(source: UsageStorageSource) -> UsageStorageDiagnostic | 
 
 
 def _validate_session_table(
-    connection: sqlite3.Connection, source: UsageStorageSource,
+    connection: sqlite3.Connection,
+    source: UsageStorageSource,
 ) -> UsageStorageDiagnostic | None:
     """Confirm the one expected Agno table and its required columns."""
     table_names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
@@ -547,7 +562,8 @@ def _extract_session_metrics(session_data: object) -> Mapping[str, UsageMetricVa
         return None
     if not isinstance(session_data, dict):
         raise TypeError
-    metrics = session_data.get("session_metrics")
+    session_mapping = cast("dict[str, object]", session_data)
+    metrics = session_mapping.get("session_metrics")
     if metrics is None:
         return None
     return _extract_metric_values(metrics)
@@ -580,28 +596,34 @@ def _extract_run_node(
         raise _ResourceLimitError(_NESTED_RESPONSE_DEPTH_LIMIT)
     if not isinstance(raw_run, dict):
         raise TypeError
+    run_mapping = cast("dict[str, object]", raw_run)
     extracted_nodes[0] += 1
     if extracted_nodes[0] > MAX_EXTRACTED_RUN_NODES:
         raise _ResourceLimitError(_RUN_NODE_COUNT_LIMIT)
 
-    metadata = raw_run.get("metadata")
-    requester_id = _optional_string(metadata.get("requester_id")) if isinstance(metadata, dict) else None
+    metadata = run_mapping.get("metadata")
+    requester_id = (
+        _optional_string(cast("dict[str, object]", metadata).get("requester_id"))
+        if isinstance(metadata, dict)
+        else None
+    )
     if requester_id is None:
-        requester_id = _optional_string(raw_run.get("user_id"))
-    nested = raw_run.get("member_responses", [])
+        requester_id = _optional_string(run_mapping.get("user_id"))
+    nested = run_mapping.get("member_responses", [])
     if not isinstance(nested, list):
         raise TypeError
+    raw_metrics = run_mapping.get("metrics", {})
     return UsageRunNode(
-        agent_id=_optional_string(raw_run.get("agent_id")),
-        team_id=_optional_string(raw_run.get("team_id")),
+        agent_id=_optional_string(run_mapping.get("agent_id")),
+        team_id=_optional_string(run_mapping.get("team_id")),
         requester_id=requester_id,
-        created_at=_timestamp_string(raw_run.get("created_at")),
-        model_provider=_optional_string(raw_run.get("model_provider")),
-        model_id=_optional_string(raw_run.get("model")),
-        run_id=_optional_string(raw_run.get("run_id")),
-        status=_optional_string(raw_run.get("status")) or "unknown",
-        metrics=_extract_metric_values(raw_run.get("metrics", {})),
-        model_metrics=_extract_model_metrics(raw_run.get("metrics", {}), extracted_model_metrics),
+        created_at=_timestamp_string(run_mapping.get("created_at")),
+        model_provider=_optional_string(run_mapping.get("model_provider")),
+        model_id=_optional_string(run_mapping.get("model")),
+        run_id=_optional_string(run_mapping.get("run_id")),
+        status=_optional_string(run_mapping.get("status")) or "unknown",
+        metrics=_extract_metric_values(raw_metrics),
+        model_metrics=_extract_model_metrics(raw_metrics, extracted_model_metrics),
         member_responses=tuple(
             _extract_run_node(
                 response,
@@ -617,11 +639,12 @@ def _extract_run_node(
 def _extract_metric_values(raw_metrics: object) -> Mapping[str, UsageMetricValue]:
     if not isinstance(raw_metrics, dict):
         raise TypeError
+    raw_metric_mapping = cast("dict[str, object]", raw_metrics)
     metrics: dict[str, UsageMetricValue] = {}
     for field in _METRIC_FIELDS:
-        if field not in raw_metrics:
+        if field not in raw_metric_mapping:
             continue
-        value = raw_metrics[field]
+        value = raw_metric_mapping[field]
         if isinstance(value, bool) or not isinstance(value, (int, float, str, type(None))):
             raise TypeError
         if isinstance(value, float) and not math.isfinite(value):
@@ -633,23 +656,26 @@ def _extract_metric_values(raw_metrics: object) -> Mapping[str, UsageMetricValue
 def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[int]) -> tuple[UsageModelMetric, ...]:
     if not isinstance(raw_metrics, dict):
         raise TypeError
-    details = raw_metrics.get("details")
+    raw_metric_mapping = cast("dict[str, object]", raw_metrics)
+    details = raw_metric_mapping.get("details")
     if details is None:
         return ()
     if not isinstance(details, dict):
         raise TypeError
+    details_mapping = cast("dict[str, object]", details)
     metrics: list[UsageModelMetric] = []
-    for model_type, model_entries in details.items():
+    for model_type, model_entries in details_mapping.items():
         if not isinstance(model_type, str) or not isinstance(model_entries, list):
             raise TypeError
         for entry in model_entries:
             if not isinstance(entry, dict):
                 raise TypeError
+            entry_mapping = cast("dict[str, object]", entry)
             extracted_model_metrics[0] += 1
             if extracted_model_metrics[0] > MAX_EXTRACTED_MODEL_METRICS:
                 raise _ResourceLimitError(_MODEL_METRIC_COUNT_LIMIT)
-            model_id = entry.get("id", "")
-            provider = entry.get("provider", "")
+            model_id = entry_mapping.get("id", "")
+            provider = entry_mapping.get("provider", "")
             if not isinstance(model_id, str) or not isinstance(provider, str):
                 raise TypeError
             metrics.append(
@@ -657,7 +683,7 @@ def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[in
                     model_type=model_type,
                     provider=provider,
                     model_id=model_id,
-                    metrics=_extract_metric_values(entry),
+                    metrics=_extract_metric_values(entry_mapping),
                 ),
             )
     return tuple(metrics)

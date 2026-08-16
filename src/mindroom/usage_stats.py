@@ -30,9 +30,24 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+__all__ = [
+    "AdminGroupBy",
+    "CostCoverage",
+    "SelfGroupBy",
+    "TokenTotals",
+    "UsageBreakdownRow",
+    "UsageCoverage",
+    "UsageReport",
+    "collect_admin_usage",
+    "collect_self_usage",
+    "parse_usage_window",
+]
+
 SelfGroupBy = Literal["day", "model"]
 AdminGroupBy = Literal["entity", "requester", "model", "day"]
 _UsageGroupBy = SelfGroupBy | AdminGroupBy
+type _BreakdownDimension = Literal["day", "model", "entity", "requester"]
+type _BreakdownKey = tuple[_BreakdownDimension, str, str | None, str | None, str | None]
 _TOKEN_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -265,7 +280,7 @@ class _Aggregate:
 @dataclass(slots=True)
 class _CollectionState:
     aggregate: _Aggregate
-    breakdowns: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate]
+    breakdowns: dict[_BreakdownKey, _Aggregate]
     status_counts: dict[str, int]
     included_sessions: set[tuple[str, str]]
     observed_at: list[datetime]
@@ -674,7 +689,7 @@ def _aggregate_records(
     run_totals = TokenTotals()
     run_cost = Decimal(0)
     has_cost = False
-    per_breakdown: dict[tuple[str, str, str | None, str | None, str | None], _Aggregate] = {}
+    per_breakdown: dict[_BreakdownKey, _Aggregate] = {}
     for record in records:
         run_totals = _add_totals(run_totals, record.totals)
         if record.cost is not None:
@@ -725,7 +740,7 @@ def _record_breakdown_key(
     group_by: _UsageGroupBy,
     record: _UsageMetricRecord,
     timezone: ZoneInfo,
-) -> tuple[str, str, str | None, str | None, str | None]:
+) -> _BreakdownKey:
     if group_by == "model":
         return ("model", record.model_id, record.model_type, record.provider, record.model_id)
     if group_by == "entity":
@@ -788,7 +803,9 @@ def _run_contributions(run: UsageRunNode) -> tuple[_MetricContribution, ...] | N
             metrics=run.metrics,
         )
         contributions = (contribution,)
-    return contributions if all(contribution is not None for contribution in contributions) else None
+    if any(contribution is None for contribution in contributions):
+        return None
+    return tuple(contribution for contribution in contributions if contribution is not None)
 
 
 def _model_metric_contribution(metric: UsageModelMetric) -> _MetricContribution | None:
@@ -851,25 +868,6 @@ def _cost_value(value: object) -> Decimal | None:
     return cost if cost.is_finite() and cost >= 0 else None
 
 
-def _breakdown_key(
-    *,
-    group_by: _UsageGroupBy,
-    entity: _DirectRunEntity | None,
-    requester: str | None,
-    timestamp: datetime,
-    timezone: ZoneInfo,
-    contribution: _MetricContribution,
-) -> tuple[str, str, str | None, str | None, str | None]:
-    if group_by == "model":
-        return ("model", contribution.model_id, contribution.model_type, contribution.provider, contribution.model_id)
-    if group_by == "entity":
-        assert entity is not None
-        return ("entity", entity.entity_id, None, None, None)
-    if group_by == "requester":
-        return ("requester", requester or "unknown", None, None, None)
-    return ("day", timestamp.astimezone(timezone).date().isoformat(), None, None, None)
-
-
 def _report(
     *,
     state: _CollectionState,
@@ -881,7 +879,7 @@ def _report(
 ) -> UsageReport:
     rows = tuple(
         UsageBreakdownRow(
-            dimension=dimension,  # type: ignore[arg-type]
+            dimension=dimension,
             key=key,
             model_type=model_type if dimension == "model" else None,
             provider=provider if dimension == "model" else None,

@@ -264,7 +264,8 @@ def test_missing_database_is_absent_without_creating_a_file(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
 def test_read_preserves_durable_entries_and_allows_existing_wal_shm_coordination_updates(
-    tmp_path: Path, journal_mode: str,
+    tmp_path: Path,
+    journal_mode: str,
 ) -> None:
     """Durable SQLite entries stay stable; an existing WAL-index may coordinate readers."""
     database = tmp_path / f"{journal_mode}.db"
@@ -274,9 +275,20 @@ def test_read_preserves_durable_entries_and_allows_existing_wal_shm_coordination
         assert holder.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()[0] == journal_mode
         if journal_mode == "wal":
             holder.execute("PRAGMA wal_autocheckpoint=0")
-            holder.execute("INSERT INTO code_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-                "live-session", "agent", "agent-code", None, "@alice:example.test", "{}", "[]", 1, 1,
-            ))
+            holder.execute(
+                "INSERT INTO code_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "live-session",
+                    "agent",
+                    "agent-code",
+                    None,
+                    "@alice:example.test",
+                    "{}",
+                    "[]",
+                    1,
+                    1,
+                ),
+            )
             holder.commit()
             assert database.with_name(f"{database.name}-wal").exists()
             assert database.with_name(f"{database.name}-shm").exists()
@@ -341,7 +353,9 @@ def test_read_only_connection_rejects_insert(tmp_path: Path) -> None:
     ],
 )
 def test_unreadable_or_malformed_storage_returns_bounded_diagnostics(
-    tmp_path: Path, setup: str, expected_status: str,
+    tmp_path: Path,
+    setup: str,
+    expected_status: str,
 ) -> None:
     """Corrupt, unsupported, and malformed sources return safe diagnostics."""
     database = tmp_path / "code.db"
@@ -389,7 +403,11 @@ def test_locked_database_returns_busy_diagnostic(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("column", ["runs", "session_data"])
-def test_oversized_json_cell_returns_resource_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str) -> None:
+def test_oversized_json_cell_returns_resource_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+) -> None:
     """SQL length guards keep oversized JSON cells out of the decoder."""
     database = tmp_path / "code.db"
     _create_database(database)
@@ -425,7 +443,11 @@ def test_excessive_nested_responses_returns_resource_limit(tmp_path: Path, monke
     result = _read(_source(database))
 
     assert result == [
-        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="nested response depth exceeds limit"),
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="nested response depth exceeds limit",
+        ),
     ]
 
 
@@ -466,7 +488,11 @@ def test_deep_ignored_json_returns_resource_limit(tmp_path: Path, column: str) -
 
 
 @pytest.mark.parametrize("column", ["runs", "session_data"])
-def test_json_parser_recursion_error_returns_resource_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str) -> None:
+def test_json_parser_recursion_error_returns_resource_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+) -> None:
     """The decoder contains a recursion escape even if its preflight limit is raised."""
     database = tmp_path / "code.db"
     _create_database(database)
@@ -515,7 +541,11 @@ def test_excessive_model_metric_records_return_resource_limit(tmp_path: Path, mo
     result = _read(_source(database))
 
     assert result == [
-        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="model metric count exceeds limit"),
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="model metric count exceeds limit",
+        ),
     ]
 
 
@@ -643,14 +673,7 @@ def test_discovery_admin_uses_fixed_safe_layouts_and_current_config_attribution(
     _create_discovery_database(bob_database, table="code_sessions")
     bob_worker_key = resolve_worker_key("user", bob, agent_name="code")
     assert bob_worker_key is not None
-    raw_worker_database = (
-        session_root
-        / "private_instances"
-        / bob_worker_key
-        / "code"
-        / "sessions"
-        / "code.db"
-    )
+    raw_worker_database = session_root / "private_instances" / bob_worker_key / "code" / "sessions" / "code.db"
     _create_discovery_database(raw_worker_database, table="code_sessions")
     charlie = _identity(requester_id="@charlie:example.test")
     charlie_worker_key = resolve_worker_key("user", charlie, agent_name="code")
