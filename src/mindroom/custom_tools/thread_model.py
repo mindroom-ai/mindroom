@@ -50,7 +50,7 @@ class ThreadModelTools(Toolkit):
         if override.stale is not None:
             stale_fields["stale_override"] = override.stale
             stale_fields["note"] = (
-                "The stored override names a model that is no longer configured, so agents use their configured models."
+                "The stored override names a model that is no longer configured, so room-level model selection applies."
             )
         return self._payload(
             "ok",
@@ -103,7 +103,7 @@ class ThreadModelTools(Toolkit):
         )
 
     async def reset_thread_model(self) -> str:
-        """Remove the model override for the current thread, restoring configured models."""
+        """Remove the thread override, restoring room-level model selection."""
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved

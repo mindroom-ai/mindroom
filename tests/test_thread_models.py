@@ -13,13 +13,14 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.commands.model_commands import handle_model_command
-from mindroom.commands.parsing import CommandType, command_parser
+from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.message_target import MessageTarget
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
@@ -310,7 +311,15 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
     )
     assert "✅" in response
     assert "`large`" in response
+    assert "room-level model selection" in response
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "large"
+
+    set_room_model_override(
+        runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
 
     response = handle_model_command(
         "reset",
@@ -321,7 +330,17 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "✅" in response
+    assert "room-level model selection" in response
     assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
+    assert (
+        config.resolve_runtime_model(
+            entity_name="test_agent",
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            runtime_paths=runtime_paths,
+        ).model_name
+        == "large"
+    )
 
     response = handle_model_command(
         "reset",
@@ -348,6 +367,7 @@ def test_model_command_show(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "No thread model override" in response
+    assert "room-level model selection" in response
     assert "`default`" in response
     assert "`large`" in response
 
@@ -367,6 +387,13 @@ def test_model_command_show(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "`large` override" in response
+
+
+def test_model_help_describes_room_level_fallback() -> None:
+    """Reset help must describe the room-level fallback that actually runs."""
+    help_text = get_command_help("model")
+
+    assert "room-level model selection" in help_text
 
 
 def test_model_command_list_alias_shows_models(tmp_path: Path) -> None:
@@ -566,6 +593,12 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         room_id=ROOM_ID,
         set_by="@user:localhost",
     )
+    set_room_model_override(
+        context.runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
 
     with tool_runtime_context(context):
         payload = json.loads(await ThreadModelTools().get_thread_model())
@@ -574,6 +607,16 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
     assert payload["override"] is None
     assert payload["stale_override"] == "removed-model"
     assert "no longer configured" in payload["note"]
+    assert "room-level model selection" in payload["note"]
+    assert (
+        context.config.resolve_runtime_model(
+            entity_name="test_agent",
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            runtime_paths=context.runtime_paths,
+        ).model_name
+        == "large"
+    )
 
 
 def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:

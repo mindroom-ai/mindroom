@@ -33,7 +33,10 @@ def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) 
     elif state.stale is not None:
         current = f"Stored room model override `{state.stale}` is unavailable and ignored."
     else:
-        current = "No room model override is set; agents use configured room or entity models."
+        current = (
+            "No room model override is set; configured room or entity models define the room default. "
+            "Thread model overrides still take precedence."
+        )
     return (
         f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
         "Use `!room_model <name>` to switch this room, or `!room_model reset` to remove the override."
@@ -64,7 +67,10 @@ async def handle_room_model_command(
 
     if requested not in config.models:
         if clear_room_model_override(runtime_paths, room_id):
-            return "✅ Room model override removed. Agents use their configured room or entity models again."
+            return (
+                "✅ Room model override removed. Room default returns to configured room or entity models. "
+                "Thread model overrides still take precedence."
+            )
         return "This room has no model override."
 
     set_room_model_override(

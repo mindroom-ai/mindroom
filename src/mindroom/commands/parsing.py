@@ -408,7 +408,7 @@ Usage: `!model [name|list|reset]` - Show or switch the model used in the current
 **Examples:**
 - `!model` or `!model list` - Show the current thread's model override and the available models
 - `!model opus` - Make every agent and team in this thread use the `opus` model
-- `!model reset` - Remove the override so agents use their configured models again
+- `!model reset` - Remove the override so room-level model selection applies again
 
 How it works:
 - The override applies to all agents, teams, and the router from the next message in the thread
@@ -424,7 +424,7 @@ Usage: `!room_model [name|list|reset]` - Show or switch the default model used i
 **Examples:**
 - `!room_model` or `!room_model list` - Show the current room override and available models
 - `!room_model opus` - Make `opus` the default for every agent, team, and the router in this room
-- `!room_model reset` - Remove the runtime override and restore configured room or entity models
+- `!room_model reset` - Remove the runtime override so the room default returns to configured room or entity models
 
 How it works:
 - The override applies from the next model run and survives restarts without changing config.yaml

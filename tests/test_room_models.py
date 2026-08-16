@@ -117,6 +117,7 @@ def test_room_model_help_accepts_supported_spellings(topic: str) -> None:
 
     assert "**Room Model Command**" in help_text
     assert "room admin" in help_text.lower()
+    assert "room default returns to configured room or entity models" in help_text.lower()
     assert "Thread overrides take precedence" in help_text
 
 
@@ -183,7 +184,10 @@ async def test_room_model_command_reset_restores_configured_default(tmp_path: Pa
         runtime_paths=context.runtime_paths,
     )
     assert runtime_model.model_name == "default"
-    assert "override removed" in context.send_response.await_args.args[0]
+    response = context.send_response.await_args.args[0]
+    assert "override removed" in response
+    assert "Room default returns to configured room or entity models" in response
+    assert "Thread model overrides still take precedence" in response
 
 
 @pytest.mark.asyncio
@@ -202,6 +206,8 @@ async def test_room_model_command_show_lists_state_and_available_models(tmp_path
 
     response = context.send_response.await_args.args[0]
     assert "No room model override" in response
+    assert "configured room or entity models define the room default" in response
+    assert "Thread model overrides still take precedence" in response
     assert "`default` (openai default-model)" in response
     assert "`large` (openai large-model)" in response
 
