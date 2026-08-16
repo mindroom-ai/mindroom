@@ -23,12 +23,12 @@ from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
+    oauth_credentials_worker_target,
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,

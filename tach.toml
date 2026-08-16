@@ -741,12 +741,12 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.oauth",
+    "mindroom.api.tools",
     "mindroom.custom_tools.github",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
-    "mindroom.oauth.service",
 ]
 
 [[modules]]
@@ -1109,6 +1109,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.credential_policy",
     "mindroom.credentials",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
 ]
@@ -4711,6 +4712,38 @@ expose = [
     "build_oauth_connect_instruction",
 ]
 from = ["mindroom.oauth.service"]
+
+[[interfaces]]
+expose = [
+    "OAuthCredentialConflictError",
+    "OAuthCredentialContext",
+    "OAuthCredentialsRefreshResult",
+    "OAuthCredentialsSnapshot",
+    "OAuthCredentialsStatus",
+    "exchange_and_store_oauth_credentials",
+    "load_oauth_credentials",
+    "load_oauth_credentials_snapshot",
+    "load_oauth_credentials_snapshot_sync",
+    "load_oauth_credentials_status",
+    "load_oauth_reset_connection_generation",
+    "oauth_connection_generation",
+    "oauth_credential_generation",
+    "oauth_credentials_have_required_scopes",
+    "oauth_credentials_have_scopes",
+    "oauth_credentials_match_client_id",
+    "oauth_credentials_satisfy_identity_policy",
+    "oauth_credentials_usable",
+    "oauth_credentials_worker_target",
+    "oauth_reset_operation_result",
+    "refresh_oauth_credentials",
+    "refresh_oauth_credentials_blocking",
+    "refresh_oauth_credentials_sync",
+    "refresh_oauth_credentials_with_result",
+    "reset_oauth_credentials",
+    "resolve_oauth_credential_context",
+    "sanitized_oauth_token_result",
+]
+from = ["mindroom.oauth.credential_lifecycle"]
 
 [[interfaces]]
 expose = [

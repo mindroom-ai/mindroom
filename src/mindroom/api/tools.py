@@ -24,13 +24,13 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
 )
 from mindroom.oauth import OAuthProviderError
-from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import (
+from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
     oauth_credentials_usable,
-    oauth_provider_service_account_configured,
     resolve_oauth_credential_context,
 )
+from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,

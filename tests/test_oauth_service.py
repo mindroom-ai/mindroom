@@ -20,6 +20,7 @@ from mindroom.credentials import (
     scoped_credentials_path,
 )
 from mindroom.oauth import credential_lifecycle, credential_store, reset_execution
+from mindroom.oauth import service as oauth_service
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -51,6 +52,35 @@ CHAIN_0 = "refresh-0"
 CHAIN_1 = "refresh-1"
 INVALID_ROTATION = "invalid_refresh_token"
 FUTURE_EXPIRES_AT = 4_102_444_800.0
+
+
+def test_connection_service_does_not_reexport_credential_lifecycle() -> None:
+    """Keep credential lifecycle APIs owned by their defining module."""
+    lifecycle_exports = {
+        "OAuthCredentialContext",
+        "OAuthCredentialsRefreshResult",
+        "OAuthCredentialsSnapshot",
+        "load_oauth_credentials",
+        "load_oauth_credentials_snapshot",
+        "load_oauth_credentials_snapshot_sync",
+        "oauth_connection_generation",
+        "oauth_credential_generation",
+        "oauth_credentials_have_required_scopes",
+        "oauth_credentials_have_scopes",
+        "oauth_credentials_match_client_id",
+        "oauth_credentials_satisfy_identity_policy",
+        "oauth_credentials_usable",
+        "oauth_credentials_worker_target",
+        "refresh_oauth_credentials",
+        "refresh_oauth_credentials_blocking",
+        "refresh_oauth_credentials_sync",
+        "refresh_oauth_credentials_with_result",
+        "reset_oauth_credentials",
+        "resolve_oauth_credential_context",
+        "sanitized_oauth_token_result",
+    }
+
+    assert lifecycle_exports.isdisjoint(oauth_service.__all__)
 
 
 class _CapturingLogger:

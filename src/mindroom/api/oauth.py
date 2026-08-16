@@ -38,6 +38,7 @@ from mindroom.oauth.credential_lifecycle import (
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
     load_oauth_credentials_status,
+    oauth_credentials_usable,
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
@@ -54,7 +55,6 @@ from mindroom.oauth.service import (
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
     oauth_credential_target_payload,
-    oauth_credentials_usable,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )

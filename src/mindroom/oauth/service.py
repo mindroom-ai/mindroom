@@ -6,29 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
-from mindroom.oauth.credential_lifecycle import (
-    OAuthCredentialContext,
-    OAuthCredentialsRefreshResult,
-    OAuthCredentialsSnapshot,
-    load_oauth_credentials,
-    load_oauth_credentials_snapshot,
-    load_oauth_credentials_snapshot_sync,
-    oauth_connection_generation,
-    oauth_credential_generation,
-    oauth_credentials_have_required_scopes,
-    oauth_credentials_have_scopes,
-    oauth_credentials_match_client_id,
-    oauth_credentials_satisfy_identity_policy,
-    oauth_credentials_usable,
-    oauth_credentials_worker_target,
-    refresh_oauth_credentials,
-    refresh_oauth_credentials_blocking,
-    refresh_oauth_credentials_sync,
-    refresh_oauth_credentials_with_result,
-    reset_oauth_credentials,
-    resolve_oauth_credential_context,
-    sanitized_oauth_token_result,
-)
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
@@ -38,6 +15,7 @@ from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -62,37 +40,16 @@ __all__ = [
     "OAUTH_MISSING_WRITE_SCOPE_REASON",
     "OAUTH_REFRESH_REJECTED_REASON",
     "OAuthConnectTarget",
-    "OAuthCredentialContext",
-    "OAuthCredentialsRefreshResult",
-    "OAuthCredentialsSnapshot",
     "build_oauth_connect_instruction",
     "build_oauth_reconnect_instruction",
     "consume_oauth_connect_token",
-    "load_oauth_credentials",
-    "load_oauth_credentials_snapshot",
-    "load_oauth_credentials_snapshot_sync",
     "lookup_oauth_connect_token",
     "oauth_connect_url",
-    "oauth_connection_generation",
     "oauth_connection_required",
-    "oauth_credential_generation",
     "oauth_credential_target_payload",
-    "oauth_credentials_have_required_scopes",
-    "oauth_credentials_have_scopes",
-    "oauth_credentials_match_client_id",
-    "oauth_credentials_satisfy_identity_policy",
-    "oauth_credentials_usable",
-    "oauth_credentials_worker_target",
     "oauth_provider_service_account_configured",
     "oauth_public_base_url",
     "oauth_success_redirect_url",
-    "refresh_oauth_credentials",
-    "refresh_oauth_credentials_blocking",
-    "refresh_oauth_credentials_sync",
-    "refresh_oauth_credentials_with_result",
-    "reset_oauth_credentials",
-    "resolve_oauth_credential_context",
-    "sanitized_oauth_token_result",
 ]
 
 

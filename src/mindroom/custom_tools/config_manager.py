@@ -30,8 +30,9 @@ from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
+from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_connect_url, oauth_credentials_worker_target
+from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import (

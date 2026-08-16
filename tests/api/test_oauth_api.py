@@ -34,12 +34,13 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
+from mindroom.oauth import credential_lifecycle as oauth_lifecycle
 from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
-from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError
+from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError, oauth_credentials_satisfy_identity_policy
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
@@ -52,7 +53,6 @@ from mindroom.oauth.providers import (
     _OAuthClaimValidationContext,
 )
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -116,13 +116,13 @@ def _stored_oauth_credentials(
         if worker_scope is not None
         else None
     )
-    context = oauth_service.resolve_oauth_credential_context(
+    context = oauth_lifecycle.resolve_oauth_credential_context(
         provider,
         runtime_paths,
         get_runtime_credentials_manager(runtime_paths),
         worker_target,
     )
-    return oauth_service.load_oauth_credentials_snapshot_sync(context).credentials
+    return oauth_lifecycle.load_oauth_credentials_snapshot_sync(context).credentials
 
 
 def _config_payload(
@@ -2537,7 +2537,7 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
         session_id=None,
     )
     runtime_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    oauth_target = oauth_service.oauth_credentials_worker_target(provider, runtime_target)
+    oauth_target = oauth_lifecycle.oauth_credentials_worker_target(provider, runtime_target)
     assert oauth_target is not None
     assert oauth_target.worker_scope == "user"
     connect_url = urlparse(oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=oauth_target))
@@ -2604,7 +2604,7 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
     raw_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
     config = main._app_context(api_app).runtime_config
     assert config is not None
-    context = oauth_service.resolve_oauth_credential_context(
+    context = oauth_lifecycle.resolve_oauth_credential_context(
         provider,
         runtime_paths,
         get_runtime_credentials_manager(runtime_paths),
@@ -2618,7 +2618,7 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
         provider.credential_service,
         {"refresh_token": "old-refresh-token"},
     )
-    asyncio.run(oauth_service.reset_oauth_credentials(context))
+    asyncio.run(oauth_lifecycle.reset_oauth_credentials(context))
     connect_url = urlparse(
         oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=context.worker_target),
     )
@@ -4737,7 +4737,7 @@ def test_oauth_credentials_usable_rejects_refresh_only_without_expiry(tmp_path: 
     provider = _fake_provider()
 
     assert (
-        oauth_service.oauth_credentials_usable(
+        oauth_lifecycle.oauth_credentials_usable(
             provider,
             runtime_paths,
             {
@@ -4789,7 +4789,7 @@ def test_oauth_credentials_usable_accepts_access_token_without_expiry(tmp_path: 
     )
     provider = _fake_provider()
 
-    assert oauth_service.oauth_credentials_usable(
+    assert oauth_lifecycle.oauth_credentials_usable(
         provider,
         runtime_paths,
         {
@@ -4810,7 +4810,7 @@ def test_oauth_credentials_usable_rejects_missing_client_id(tmp_path: Path) -> N
     provider = _fake_provider()
 
     assert (
-        oauth_service.oauth_credentials_usable(
+        oauth_lifecycle.oauth_credentials_usable(
             provider,
             runtime_paths,
             {
@@ -4832,7 +4832,7 @@ def test_oauth_credentials_usable_rejects_mismatched_client_id(tmp_path: Path) -
     provider = _fake_provider()
 
     assert (
-        oauth_service.oauth_credentials_usable(
+        oauth_lifecycle.oauth_credentials_usable(
             provider,
             runtime_paths,
             {
@@ -4854,7 +4854,7 @@ def test_oauth_credentials_usable_accepts_expired_access_token_with_refresh(tmp_
     )
     provider = _fake_provider()
 
-    assert oauth_service.oauth_credentials_usable(
+    assert oauth_lifecycle.oauth_credentials_usable(
         provider,
         runtime_paths,
         {
@@ -5016,19 +5016,19 @@ def test_required_scope_check_accepts_google_scope_supersets() -> None:
     drive_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/drive.file",))
     sheets_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/spreadsheets.readonly",))
 
-    assert oauth_service.oauth_credentials_have_required_scopes(
+    assert oauth_lifecycle.oauth_credentials_have_required_scopes(
         calendar_provider,
         {"scopes": ["https://www.googleapis.com/auth/calendar"]},
     )
-    assert oauth_service.oauth_credentials_have_required_scopes(
+    assert oauth_lifecycle.oauth_credentials_have_required_scopes(
         gmail_provider,
         {"scope": "https://www.googleapis.com/auth/gmail.modify"},
     )
-    assert oauth_service.oauth_credentials_have_required_scopes(
+    assert oauth_lifecycle.oauth_credentials_have_required_scopes(
         drive_provider,
         {"scopes": ["https://www.googleapis.com/auth/drive"]},
     )
-    assert oauth_service.oauth_credentials_have_required_scopes(
+    assert oauth_lifecycle.oauth_credentials_have_required_scopes(
         sheets_provider,
         {"scope": "https://www.googleapis.com/auth/spreadsheets"},
     )
@@ -5037,19 +5037,19 @@ def test_required_scope_check_accepts_google_scope_supersets() -> None:
 def test_required_scope_check_accepts_refresh_token_for_offline_access() -> None:
     provider = _fake_provider(scopes=("scope.read", "offline_access"))
 
-    assert oauth_service.oauth_credentials_have_required_scopes(
+    assert oauth_lifecycle.oauth_credentials_have_required_scopes(
         provider,
         {"scopes": ["scope.read"], "refresh_token": "refresh-token"},
     )
-    assert not oauth_service.oauth_credentials_have_required_scopes(
+    assert not oauth_lifecycle.oauth_credentials_have_required_scopes(
         provider,
         {"scopes": ["scope.read"]},
     )
-    assert not oauth_service.oauth_credentials_have_required_scopes(
+    assert not oauth_lifecycle.oauth_credentials_have_required_scopes(
         provider,
         {"refresh_token": "refresh-token"},
     )
-    assert not oauth_service.oauth_credentials_have_required_scopes(
+    assert not oauth_lifecycle.oauth_credentials_have_required_scopes(
         provider,
         {"scopes": ["scope.read"], "refresh_token": ""},
     )

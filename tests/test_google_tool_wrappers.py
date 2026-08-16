@@ -44,11 +44,11 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials,
     oauth_connection_generation,
     oauth_credential_generation,
+    oauth_credentials_worker_target,
     reset_oauth_credentials,
 )
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthTokenResult
-from mindroom.oauth.service import oauth_credentials_worker_target
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 

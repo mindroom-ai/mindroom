@@ -21,6 +21,7 @@ from googleapiclient.http import MediaFileUpload
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
 from mindroom.oauth.google_drive import (
     GOOGLE_DRIVE_READ_OAUTH_SCOPES,
     GOOGLE_DRIVE_WRITE_SCOPE,
@@ -29,7 +30,6 @@ from mindroom.oauth.google_drive import (
 from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
-    oauth_credentials_have_scopes,
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
