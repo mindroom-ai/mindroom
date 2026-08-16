@@ -150,12 +150,21 @@ class DelegateTools(Toolkit):
                 runtime_context=runtime_context,
                 execution_identity=execution_identity,
             )
+            thread_id = _resolve_delegated_thread_id(
+                runtime_context=runtime_context,
+                execution_identity=execution_identity,
+            )
+            active_model_name = active_config.resolve_runtime_model(
+                entity_name=agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+                runtime_paths=self._runtime_paths,
+            ).model_name
             delegated_runtime_context = self._build_delegated_runtime_context(
                 agent_name=agent_name,
                 session_id=session_id,
-                room_id=room_id,
                 runtime_context=runtime_context,
-                config=active_config,
+                active_model_name=active_model_name,
             )
             delegated_correlation_id = (
                 delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
@@ -167,9 +176,10 @@ class DelegateTools(Toolkit):
                 correlation_id=delegated_correlation_id or uuid4().hex,
                 reply_to_event_id=None,
                 room_id=room_id,
-                thread_id=None,
+                thread_id=thread_id,
                 requester_id=execution_identity.requester_id if execution_identity is not None else None,
                 matrix_run_metadata=None,
+                active_model_name=active_model_name,
                 transient_enrichment_items=tuple(transient_enrichment_items),
             )
             with tool_runtime_context(delegated_runtime_context):
@@ -203,23 +213,16 @@ class DelegateTools(Toolkit):
         *,
         agent_name: str,
         session_id: str,
-        room_id: str | None,
         runtime_context: ToolRuntimeContext | None,
-        config: Config,
+        active_model_name: str,
     ) -> ToolRuntimeContext | None:
         """Return the child tool runtime context for one delegated run."""
         if runtime_context is None:
             return None
-        runtime_model = config.resolve_runtime_model(
-            entity_name=agent_name,
-            room_id=room_id,
-            thread_id=runtime_context.resolved_thread_id,
-            runtime_paths=self._runtime_paths,
-        )
         return replace(
             runtime_context,
             agent_name=agent_name,
-            active_model_name=runtime_model.model_name,
+            active_model_name=active_model_name,
             target=replace(runtime_context.target, session_id=session_id),
         )
 
@@ -234,4 +237,17 @@ def _resolve_delegated_room_id(
         return runtime_context.room_id
     if execution_identity is not None:
         return execution_identity.room_id
+    return None
+
+
+def _resolve_delegated_thread_id(
+    *,
+    runtime_context: ToolRuntimeContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str | None:
+    """Resolve the thread context that should apply to a delegated child run."""
+    if runtime_context is not None:
+        return runtime_context.resolved_thread_id
+    if execution_identity is not None:
+        return execution_identity.resolved_thread_id
     return None
