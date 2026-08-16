@@ -6,6 +6,7 @@ credentials stored in MindRoom's unified credentials location.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.sheets import GoogleSheetsTools as AgnoGoogleSheetsTools
@@ -18,6 +19,8 @@ from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -30,6 +33,50 @@ _CONFIG_FIELD_INIT_ARG_ALIASES = {
     "create": "create_sheet",
     "update": "update_sheet",
 }
+
+
+def _copied_spreadsheet_id(new_file: Mapping[str, object]) -> str:
+    """Return the required Drive ID from one successful copy response."""
+    spreadsheet_id = new_file.get("id")
+    if not isinstance(spreadsheet_id, str) or not spreadsheet_id:
+        msg = "Drive copy response did not include a spreadsheet ID"
+        raise ValueError(msg)
+    return spreadsheet_id
+
+
+def _copy_drive_permissions(drive_service: Any, source_id: str, new_spreadsheet_id: str) -> None:  # noqa: ANN401
+    """Copy every non-owner Drive permission to a duplicated spreadsheet."""
+    permissions = (
+        drive_service.permissions()
+        .list(fileId=source_id, fields="permissions(emailAddress,role,type)")
+        .execute()
+        .get("permissions", [])
+    )
+    for permission in permissions:
+        if permission.get("role") == "owner":
+            continue
+        drive_service.permissions().create(
+            fileId=new_spreadsheet_id,
+            body={
+                "role": permission.get("role"),
+                "type": permission.get("type"),
+                "emailAddress": permission.get("emailAddress"),
+            },
+        ).execute()
+
+
+def _partial_duplicate_result(new_spreadsheet_id: str) -> str:
+    """Describe a completed copy whose permission replication failed."""
+    return json.dumps(
+        {
+            "error": "Spreadsheet duplicated, but permission copying did not complete",
+            "spreadsheetId": new_spreadsheet_id,
+            "spreadsheetUrl": f"https://docs.google.com/spreadsheets/d/{new_spreadsheet_id}",
+            "permissionsCopyComplete": False,
+            "partial_success": True,
+            "retry_safe": False,
+        },
+    )
 
 
 class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleSheetsTools):
@@ -98,6 +145,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         if not self.service:
             return "Service not initialized"
 
+        new_spreadsheet_id: str | None = None
         try:
             drive_scope = "https://www.googleapis.com/auth/drive"
             if drive_scope not in self.scopes:
@@ -110,28 +158,14 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
                 new_title = source_sheet["properties"]["title"]
 
             new_file = drive_service.files().copy(fileId=source_id, body={"name": new_title}).execute()
-            new_spreadsheet_id = new_file.get("id")
+            new_spreadsheet_id = _copied_spreadsheet_id(new_file)
             if copy_permissions:
-                permissions = (
-                    drive_service.permissions()
-                    .list(fileId=source_id, fields="permissions(emailAddress,role,type)")
-                    .execute()
-                    .get("permissions", [])
-                )
-                for permission in permissions:
-                    if permission.get("role") == "owner":
-                        continue
-                    drive_service.permissions().create(
-                        fileId=new_spreadsheet_id,
-                        body={
-                            "role": permission.get("role"),
-                            "type": permission.get("type"),
-                            "emailAddress": permission.get("emailAddress"),
-                        },
-                    ).execute()
+                _copy_drive_permissions(drive_service, source_id, new_spreadsheet_id)
 
-        except Exception as exc:
-            return f"Error duplicating spreadsheet via Drive API: {exc}"
+        except Exception:
+            if new_spreadsheet_id is not None:
+                return _partial_duplicate_result(new_spreadsheet_id)
+            return "Error duplicating spreadsheet via Drive API"
         else:
             return f"Spreadsheet duplicated successfully: https://docs.google.com/spreadsheets/d/{new_spreadsheet_id}"
 

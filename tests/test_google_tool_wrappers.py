@@ -667,6 +667,109 @@ def test_google_sheets_duplicate_initializes_primary_service(
     assert result.endswith("/new-sheet")
 
 
+@pytest.mark.parametrize("rejection_stage", ["permission_list", "permission_create"])
+def test_google_sheets_partial_duplicate_401_preserves_non_retryable_result(  # noqa: C901
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection_stage: str,
+) -> None:
+    """A post-copy rejection must preserve the created spreadsheet without recommending replay."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    provider = GoogleSheetsTools._oauth_provider
+    save_scoped_credentials(
+        provider.credential_service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = GoogleSheetsTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        create_duplicate_sheet=True,
+    )
+    tracked_http = tool._google_authorized_http(tool.creds)
+    sentinel = b'{"error":{"message":"provider-controlled-sheet-permission-secret"}}'
+    rejected_response = SimpleNamespace(status=401, reason="Unauthorized")
+
+    def rejected_request(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
+        return rejected_response, sentinel
+
+    class StaticRequest:
+        def __init__(self, result: dict[str, object]) -> None:
+            self.result = result
+
+        def execute(self) -> dict[str, object]:
+            return self.result
+
+    class RejectedRequest:
+        @staticmethod
+        def execute() -> Never:
+            response, content = tracked_http.request("https://www.googleapis.com/drive/v3/permissions")
+            raise HttpError(response, content)
+
+    class Files:
+        @staticmethod
+        def copy(**_kwargs: object) -> StaticRequest:
+            return StaticRequest({"id": "created-sheet"})
+
+    class Permissions:
+        @staticmethod
+        def list(**_kwargs: object) -> StaticRequest | RejectedRequest:
+            if rejection_stage == "permission_list":
+                return RejectedRequest()
+            return StaticRequest(
+                {
+                    "permissions": [
+                        {
+                            "emailAddress": "writer@example.test",
+                            "role": "writer",
+                            "type": "user",
+                        },
+                    ],
+                },
+            )
+
+        @staticmethod
+        def create(**_kwargs: object) -> RejectedRequest:
+            return RejectedRequest()
+
+    class DriveService:
+        @staticmethod
+        def files() -> Files:
+            return Files()
+
+        @staticmethod
+        def permissions() -> Permissions:
+            return Permissions()
+
+    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
+    monkeypatch.setattr(tool, "_build_drive_service", DriveService)
+    tool.service = object()
+
+    result = tool.create_duplicate_sheet("source-sheet", new_title="Copy", copy_permissions=True)
+    payload = json.loads(result)
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert payload["partial_success"] is True
+    assert payload["retry_safe"] is False
+    assert payload["partial_result"]["spreadsheetId"] == "created-sheet"
+    assert payload["partial_result"]["spreadsheetUrl"].endswith("/created-sheet")
+    assert payload["partial_result"]["permissionsCopyComplete"] is False
+    assert "do not automatically retry" in payload["error"].lower()
+    assert "provider-controlled-sheet-permission-secret" not in result
+
+
 def test_gmail_batch_tracks_final_item_401() -> None:
     """A batch-level HTTP 200 must not hide a final per-item authorization rejection."""
     tool = object.__new__(GmailTools)
