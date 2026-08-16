@@ -642,6 +642,8 @@ Demote stale Space admins manually in a Matrix client when needed.
 MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
 Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
 Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+OAuth token services whose names end with `_oauth` cannot use credential seeds; connect them through the OAuth lifecycle instead.
+OAuth client configuration services whose names end with `_oauth_client` remain seedable.
 
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
 Relative file paths resolve from the config directory.

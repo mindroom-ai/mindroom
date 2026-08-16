@@ -97,7 +97,8 @@ It returns the canonical credential context plus the invoking agent name and iss
 `src/mindroom/mcp/manager.py` owns requester sessions and performs short durable credential-revision checks immediately before connection publication and admitted remote calls.
 
 `src/mindroom/custom_tools/oauth_connections.py` owns live-request authorization and returns the confirmation URL.
-It never deletes credentials, retires MCP sessions, or enters an Agno approval continuation.
+It never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy may still place the non-destructive tool call in an Agno approval continuation before URL issuance.
 
 `src/mindroom/api/oauth.py` owns authenticated browser confirmation.
 The GET revalidates the exact requester and target but never mutates state.

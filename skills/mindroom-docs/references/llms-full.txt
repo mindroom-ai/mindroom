@@ -1530,6 +1530,8 @@ Demote stale Space admins manually in a Matrix client when needed.
 MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
 Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
 Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+OAuth token services whose names end with `_oauth` cannot use credential seeds; connect them through the OAuth lifecycle instead.
+OAuth client configuration services whose names end with `_oauth_client` remain seedable.
 
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
 Relative file paths resolve from the config directory.
@@ -9690,7 +9692,8 @@ agents:
 
 ### Browser Confirmation And Requester Scope
 
-The tool is not a destructive Matrix action, so it does not create a tool-approval continuation or stop the agent run.
+The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
 The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.

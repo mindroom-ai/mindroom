@@ -284,7 +284,7 @@ Return the dashboard disconnect receipt only after successful cleanup and deleti
 Resolve provider-specific requester credential identity once.
 Construct the context with the primary runtime credential manager.
 Issue an opaque time-limited browser URL that freezes provider ID, credential service, worker scope, worker key, routing agent, canonical requester, connection generation, and random stable operation ID.
-Keep the agent tool non-destructive and outside generic Agno approval continuation handling.
+Keep the agent tool non-destructive and let generic Agno approval policy apply normally before URL issuance.
 Make GET revalidate and display the exact target without changing credentials.
 
 - [ ] **Step 6: Make browser POST cancellation-safe by ordering**

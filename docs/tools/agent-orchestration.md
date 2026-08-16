@@ -71,7 +71,8 @@ agents:
 
 ### Browser Confirmation And Requester Scope
 
-The tool is not a destructive Matrix action, so it does not create a tool-approval continuation or stop the agent run.
+The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
 The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.
