@@ -379,6 +379,52 @@ async def test_uncredentialed_https_origin_is_an_origin_conflict(tmp_path: Path,
     assert (workspace / ".git" / "config").read_bytes() == config_before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["?", "#", "\n", " "])
+async def test_malformed_canonical_https_origin_is_an_origin_conflict(tmp_path: Path, suffix: str) -> None:
+    """URL parsing must not normalize malformed raw origin syntax into readiness."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    origin = _lease().clone_url + suffix
+    _git(workspace, "remote", "add", "origin", origin)
+    config_before = (workspace / ".git" / "config").read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "origin_conflict"
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("remote.origin.proxy", ""),
+        ("remote.origin.proxyAuthMethod", "anyauth"),
+        ("http.https://github.com/.proxy", ""),
+        ("http.https://github.com/.proxyAuthMethod", "anyauth"),
+    ],
+)
+async def test_git_proxy_override_cannot_bypass_bound_origin(
+    tmp_path: Path,
+    key: str,
+    value: str,
+) -> None:
+    """Repository-local proxy policy must not bypass the Agent Vault route."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--initial-branch=main")
+    _git(workspace, "remote", "add", "origin", _lease().clone_url)
+    _git(workspace, "config", "--local", key, value)
+    config_before = (workspace / ".git" / "config").read_bytes()
+
+    payload = json.loads(await _tool(tmp_path, broker=_FakeBroker(), workspace=workspace).ensure_my_repository())
+
+    assert payload["status"] == "origin_conflict"
+    assert (workspace / ".git" / "config").read_bytes() == config_before
+
+
 def test_differently_cased_remote_name_does_not_replace_lowercase_origin(tmp_path: Path) -> None:
     """A distinct `Origin` remote must not satisfy the required lowercase `origin`."""
     workspace = tmp_path / "workspace"
