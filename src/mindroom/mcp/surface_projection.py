@@ -86,6 +86,12 @@ def _catalog_function_names_for_tool_config(
     }
 
 
+def _scoped_state_is_visible_to_agent(scoped: MCPScopedFunctionState, agent_name: str) -> bool:
+    """Return whether one credential-scoped catalog belongs on an agent surface."""
+    worker_scope, _worker_key = scoped.credential_surface
+    return worker_scope not in {"shared", "user_agent"} or scoped.state.oauth_routing_agent_name == agent_name
+
+
 def _configured_tool_configs(
     context: MCPFunctionSurfaceContext,
     agent_name: str,
@@ -232,6 +238,7 @@ def _agent_function_surface_snapshot(
             if scoped.state.server_id == server_id
             and credential_surface is not None
             and scoped.credential_surface == credential_surface
+            and _scoped_state_is_visible_to_agent(scoped, agent_name)
             and (scoped.state.last_error is None or scoped.state is candidate_state)
         )
         function_sources.extend(

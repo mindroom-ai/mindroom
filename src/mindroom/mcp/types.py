@@ -104,6 +104,7 @@ class MCPServerState:
     oauth_provider_id: str | None = None
     oauth_authorization: AuthorizationConfig | None = None
     oauth_credential_scope: tuple[str, str] | None = None
+    oauth_routing_agent_name: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None

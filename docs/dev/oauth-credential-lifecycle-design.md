@@ -66,7 +66,7 @@ Synchronous provider work runs in a worker thread while the owner loop retains t
 
 `src/mindroom/mcp/manager.py` treats the credential revision and token hash as an authorization lease.
 It revalidates that lease before publishing a session catalog and before admitting a remote tool call.
-Requester sessions are fenced during reset so captured stale state cannot reconnect before the SQLite reset commits.
+Credential-scope sessions are fenced during reset so captured stale state cannot reconnect before the SQLite reset commits.
 
 ### Browser reset
 

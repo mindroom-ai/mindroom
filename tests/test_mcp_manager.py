@@ -2026,6 +2026,37 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """A scoped OAuth MCP toolkit without request identity should remain constructible."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    worker_target = resolve_worker_target(worker_scope, "code", None)
+    assert worker_target.worker_key is None
+
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+
+    assert set(toolkit.get_async_functions()) == {
+        "demo_call_tool",
+        "demo_connection_status",
+        "demo_list_tools",
+    }
+
+
+@pytest.mark.asyncio
 async def test_oauth_mcp_user_scope_reuses_account_across_agents(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4611,6 +4642,70 @@ async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents
 
     assert changed == {"demo"}
     assert manager.failed_server_ids() == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+async def test_agent_owned_oauth_catalog_ignores_local_collisions_on_other_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """An agent-owned OAuth catalog should be projected only onto its owning agent."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target(
+        "@alice:example.test",
+        worker_scope=worker_scope,
+        agent_name="code",
+    )
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
+
+    class _FakeToolkit:
+        def __init__(self, tool_name: str) -> None:
+            self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr(
+        "mindroom.mcp.surface_projection.get_tool_by_name",
+        lambda tool_name, *_args, **_kwargs: _FakeToolkit(tool_name),
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": worker_scope,
+                },
+                "research": {
+                    "display_name": "Research",
+                    "role": "Use local and MCP tools",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": worker_scope,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+
+    assert [tool.function_name for tool in catalog.tools] == ["demo_echo"]
+    assert next(iter(manager._scoped_states.values())).last_error is None
 
 
 @pytest.mark.asyncio
