@@ -2363,16 +2363,16 @@ async def _finish_runtime_shutdown(
     """Finish one runtime cleanup sequence without duplicating partial teardown."""
     await _cancel_task_if_pending(shutdown_wait_task)
     await _cancel_task_if_pending(api_task)
-    await _cancel_task_if_pending(orchestrator_task)
-    for task in auxiliary_tasks:
-        task.cancel()
-    for task in auxiliary_tasks:
-        with suppress(asyncio.CancelledError):
-            await task
     try:
         if orchestrator is not None:
             await orchestrator.stop()
     finally:
+        await _cancel_task_if_pending(orchestrator_task)
+        for task in auxiliary_tasks:
+            task.cancel()
+        for task in auxiliary_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         if stall_detector is not None:
             stall_detector.stop()
         reset_matrix_sync_health()

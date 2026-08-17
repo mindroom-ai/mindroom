@@ -53,6 +53,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     _EmbeddedApiServerContext,
+    _finish_runtime_shutdown,
     _MultiAgentOrchestrator,
     _run_api_server,
     _run_auxiliary_task_forever,
@@ -639,6 +640,52 @@ class TestAgentBot(AgentBotTestBase):
         await asyncio.wait_for(wait_task, timeout=1)
 
         assert cleanup_task.done()
+
+    @pytest.mark.asyncio
+    async def test_runtime_shutdown_stops_core_before_waiting_for_auxiliary_tasks(
+        self,
+    ) -> None:
+        """A stuck watcher cannot delay Matrix quiesce and owned cleanup."""
+        auxiliary_started = asyncio.Event()
+        auxiliary_cancelled = asyncio.Event()
+        core_stop_started = asyncio.Event()
+
+        async def stubborn_auxiliary() -> None:
+            auxiliary_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                auxiliary_cancelled.set()
+                await core_stop_started.wait()
+                raise
+
+        auxiliary_task = asyncio.create_task(stubborn_auxiliary())
+        await asyncio.wait_for(auxiliary_started.wait(), timeout=1)
+        orchestrator = MagicMock()
+
+        async def stop_core() -> None:
+            core_stop_started.set()
+
+        orchestrator.stop = AsyncMock(side_effect=stop_core)
+
+        finishing = asyncio.create_task(
+            _finish_runtime_shutdown(
+                shutdown_wait_task=None,
+                api_task=None,
+                orchestrator_task=None,
+                auxiliary_tasks=[auxiliary_task],
+                orchestrator=orchestrator,
+                stall_detector=None,
+            ),
+        )
+        try:
+            await asyncio.wait_for(core_stop_started.wait(), timeout=0.1)
+        finally:
+            core_stop_started.set()
+            await finishing
+
+        assert auxiliary_cancelled.is_set()
+        orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
