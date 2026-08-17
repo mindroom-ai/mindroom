@@ -7,8 +7,13 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.metrics import RunMetrics
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
 
 import mindroom.usage_stats_storage as usage_storage
+from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -114,6 +119,28 @@ def _create_database(
         connection.close()
 
 
+def _insert_runs_row(path: Path, *, session_id: str, runs: object) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            'INSERT INTO "code_sessions" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                session_id,
+                "agent",
+                "code",
+                None,
+                "@alice:example.test",
+                "{}",
+                json.dumps(runs),
+                1_723_837_600,
+                1_723_837_600,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _config() -> Config:
     return Config(
         agents={
@@ -179,6 +206,48 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert "999" not in repr(row)
 
 
+def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -> None:
+    """The adapter reads the exact JSON representation written by MindRoom's Agno storage."""
+    storage = create_state_storage(
+        "code",
+        tmp_path,
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    try:
+        storage.upsert_session(
+            AgentSession(
+                session_id="session-1",
+                agent_id="code",
+                user_id="@alice:example.test",
+                runs=[
+                    RunOutput(
+                        run_id="run-1",
+                        agent_id="code",
+                        user_id="@alice:example.test",
+                        created_at=1_723_837_600,
+                        model_provider="openai",
+                        model="gpt-5.6",
+                        status=RunStatus.completed,
+                        metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+                    ),
+                ],
+                created_at=1_723_837_600,
+                updated_at=1_723_837_600,
+            ),
+        )
+    finally:
+        storage.close()
+
+    result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert len(row.runs) == 1
+    assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+
+
 def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
     """Delegated sibling runs must not be counted as top-level usage."""
     database = tmp_path / "code.db"
@@ -207,6 +276,34 @@ def test_reader_reports_run_node_limit(tmp_path: Path, monkeypatch: pytest.Monke
             detail="run node limit exceeded",
         ),
     ]
+
+
+def test_oversized_rows_still_consume_request_run_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejected rows still count their raw nodes toward the shared request bound."""
+    database = tmp_path / "code.db"
+    _create_database(database, runs=[_run(), _run()])
+    _insert_runs_row(database, session_id="session-2", runs=[_run(), _run()])
+    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_RUNS_PER_ROW", 1)
+    budget = usage_storage.UsageReadBudget(row_limit=10, byte_limit=1_000_000, run_limit=3)
+
+    result = list(iter_usage_storage_rows(_source(database), budget=budget))
+
+    assert result == [
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="run node limit exceeded",
+        ),
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="request work limit exceeded",
+        ),
+    ]
+    assert budget.exhausted is True
 
 
 def test_reader_charges_byte_budget_before_json_decode(tmp_path: Path) -> None:

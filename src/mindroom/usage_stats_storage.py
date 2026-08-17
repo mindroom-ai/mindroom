@@ -472,20 +472,15 @@ def _extract_row(
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    raw_value = row["runs"]
-    raw_runs = None if raw_value is None else json.loads(raw_value)
-    if raw_runs is None:
-        raw_runs = []
-    elif not isinstance(raw_runs, list):
-        raise TypeError
+    raw_runs = _decode_runs(row["runs"])
     payload_bytes = row["payload_bytes"] or 0
     if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
         raise TypeError
-    if len(raw_runs) > _MAX_RUNS_PER_ROW:
-        message = "run node limit exceeded"
-        raise _UsageResourceLimitError(message)
     if not budget.consume_runs(len(raw_runs)):
         message = "request work limit exceeded"
+        raise _UsageResourceLimitError(message)
+    if len(raw_runs) > _MAX_RUNS_PER_ROW:
+        message = "run node limit exceeded"
         raise _UsageResourceLimitError(message)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
@@ -500,6 +495,21 @@ def _extract_row(
         runs=tuple(runs),
         payload_bytes=payload_bytes,
     )
+
+
+def _decode_runs(raw_value: object) -> list[object]:
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, (str, bytes, bytearray)):
+        raise TypeError
+    decoded = json.loads(raw_value)
+    if isinstance(decoded, str):
+        decoded = json.loads(decoded)
+    if decoded is None:
+        return []
+    if not isinstance(decoded, list):
+        raise TypeError
+    return decoded
 
 
 def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:
