@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -66,6 +67,11 @@ _TIMESTAMP_OFFSET = re.compile(r".*(?:Z|[+-]\d{2}:\d{2})\Z")
 _MAX_BREAKDOWN_ROWS = 200
 _MAX_PERSISTED_NUMERIC_TEXT_LENGTH = 128
 _MAX_PERSISTED_INTEGER = 10**_MAX_PERSISTED_NUMERIC_TEXT_LENGTH - 1
+_MAX_SCANNED_SOURCES = 1_000
+_MAX_SCANNED_STORAGE_ROWS = 10_000
+_MAX_SCANNED_RUN_NODES = 100_000
+_MAX_METRIC_RECORDS = 100_000
+_QUERY_TIME_BUDGET_SECONDS = 5.0
 _SELF_GROUPS = frozenset({"day", "model"})
 _ADMIN_GROUPS = frozenset({"day", "entity", "model", "requester"})
 
@@ -76,6 +82,10 @@ class UsageStatsValidationError(ValueError):
 
 class UsageStatsSourceUnavailableError(RuntimeError):
     """No expected retained-history source could be read safely."""
+
+
+class _CollectionResourceLimitError(RuntimeError):
+    """A request-wide aggregation work budget was exhausted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,7 +316,11 @@ class _CollectionState:
     row_comparison_allowed: dict[tuple[str, str], bool]
     row_history_complete: dict[tuple[str, str], bool]
     top_level_turn_ids: set[tuple[str, str, str]]
+    deadline: float
     scanned_sources: int = 0
+    scanned_storage_rows: int = 0
+    scanned_run_nodes: int = 0
+    metric_records: int = 0
     scanned_sessions: int = 0
     retained_runs: int = 0
     turn_count: int = 0
@@ -436,7 +450,7 @@ def collect_admin_usage(
 
 def _collect(
     *,
-    sources: Iterable[UsageStorageSource],
+    sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
     config: Config,
     scope: Literal["self", "admin"],
     group_by: _UsageGroupBy,
@@ -464,18 +478,66 @@ def _collect(
         row_comparison_allowed={},
         row_history_complete={},
         top_level_turn_ids=set(),
+        deadline=monotonic() + _QUERY_TIME_BUDGET_SECONDS,
     )
     timezone = _usage_timezone(config.timezone)
     for source in sources:
+        if state.scanned_sources >= _MAX_SCANNED_SOURCES:
+            if scope == "self":
+                msg = "Usage source unavailable"
+                raise UsageStatsSourceUnavailableError(msg)
+            state.coverage_exclusions += 1
+            break
         state.scanned_sources += 1
-        source_had_outcome = False
+        if isinstance(source, UsageStorageDiagnostic):
+            _record_source_diagnostic(state, source)
+            continue
+        if not _collect_source(
+            state=state,
+            source=source,
+            config=config,
+            scope=scope,
+            group_by=group_by,
+            timezone=timezone,
+            window_start=window_start,
+            window_end=window_end,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            entity_filter=entity_filter,
+            requester_filter=requester_filter,
+        ):
+            break
+    if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
+        msg = "Usage source unavailable"
+        raise UsageStatsSourceUnavailableError(msg)
+    return state
+
+
+def _collect_source(
+    *,
+    state: _CollectionState,
+    source: UsageStorageSource,
+    config: Config,
+    scope: Literal["self", "admin"],
+    group_by: _UsageGroupBy,
+    timezone: ZoneInfo,
+    window_start: datetime | None,
+    window_end: datetime,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> bool:
+    source_had_outcome = False
+    try:
+        _check_collection_time(state)
         for outcome in iter_usage_storage_rows(source):
+            _check_collection_time(state)
             source_had_outcome = True
             if isinstance(outcome, UsageStorageDiagnostic):
-                if outcome.status != "absent":
-                    state.partial_source_labels.add(outcome.path_label)
-                    state.unreadable_source_labels.add(outcome.path_label)
+                _record_source_diagnostic(state, outcome)
                 continue
+            _reserve_storage_row(state)
             state.readable_source_labels.add(source.path_label)
             _collect_row(
                 state=state,
@@ -491,12 +553,47 @@ def _collect(
                 entity_filter=entity_filter,
                 requester_filter=requester_filter,
             )
-        if not source_had_outcome:
-            state.readable_source_labels.add(source.path_label)
-    if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
-        msg = "Usage source unavailable"
-        raise UsageStatsSourceUnavailableError(msg)
-    return state
+    except _CollectionResourceLimitError:
+        state.partial_source_labels.add(source.path_label)
+        if scope == "self":
+            msg = "Usage source unavailable"
+            raise UsageStatsSourceUnavailableError(msg) from None
+        return False
+    if not source_had_outcome:
+        state.readable_source_labels.add(source.path_label)
+    return True
+
+
+def _record_source_diagnostic(state: _CollectionState, diagnostic: UsageStorageDiagnostic) -> None:
+    if diagnostic.status == "absent":
+        return
+    state.partial_source_labels.add(diagnostic.path_label)
+    state.unreadable_source_labels.add(diagnostic.path_label)
+
+
+def _check_collection_time(state: _CollectionState) -> None:
+    if monotonic() > state.deadline:
+        raise _CollectionResourceLimitError
+
+
+def _reserve_storage_row(state: _CollectionState) -> None:
+    state.scanned_storage_rows += 1
+    if state.scanned_storage_rows > _MAX_SCANNED_STORAGE_ROWS:
+        raise _CollectionResourceLimitError
+
+
+def _reserve_run_node(state: _CollectionState) -> None:
+    _check_collection_time(state)
+    state.scanned_run_nodes += 1
+    if state.scanned_run_nodes > _MAX_SCANNED_RUN_NODES:
+        raise _CollectionResourceLimitError
+
+
+def _reserve_metric_records(state: _CollectionState, count: int) -> None:
+    _check_collection_time(state)
+    if state.metric_records + count > _MAX_METRIC_RECORDS:
+        raise _CollectionResourceLimitError
+    state.metric_records += count
 
 
 def _collect_row(
@@ -574,6 +671,7 @@ def _collect_run_tree(
     entity_filter: frozenset[str] | None,
     requester_filter: frozenset[str] | None,
 ) -> None:
+    _reserve_run_node(state)
     requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else parent_requester
     entity = _run_entity(row=row, run=run, is_top_level=is_top_level)
     timestamp = parent_timestamp if run.created_at is None else _run_timestamp(run.created_at)
@@ -708,6 +806,7 @@ def _collect_normalized_run(
         state.coverage_exclusions += 1
         _mark_row_history_incomplete(state, row)
         return
+    _reserve_metric_records(state, len(contributions))
     records = tuple(
         _UsageMetricRecord(
             entity_id=entity.entity_id,

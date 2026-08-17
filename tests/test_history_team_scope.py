@@ -14,7 +14,7 @@ from agno.media import Image
 from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.response import ToolExecution
-from agno.run import RunContext
+from agno.run import RunContext, RunStatus
 from agno.run.agent import RunInput, RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
@@ -22,7 +22,7 @@ from agno.team import Team
 from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 
-from mindroom.agent_storage import get_team_session
+from mindroom.agent_storage import create_state_storage, get_team_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -544,6 +544,71 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
         "member-metadata-canary",
     ):
         assert canary not in raw_run_json
+
+
+def test_paused_team_storage_does_not_retain_nested_member_payloads(tmp_path: Path) -> None:
+    """Enabling terminal member metrics must not expand paused-run sensitive persistence."""
+    storage = create_state_storage(
+        "paused-team",
+        tmp_path,
+        subdir="sessions",
+        session_table="paused_team_sessions",
+        prompt_roles=frozenset({"system"}),
+    )
+    assert isinstance(storage, SqliteDb)
+    member = RunOutput(
+        run_id="paused-member",
+        session_id="paused-session",
+        agent_id="alpha",
+        input=RunInput(input_content="paused-input-canary"),
+        content="paused-content-canary",
+        messages=[Message(role="assistant", content="paused-message-canary")],
+        tools=[ToolExecution(tool_name="secret", result="paused-tool-canary")],
+        metadata={"secret": "paused-metadata-canary"},
+        status=RunStatus.paused,
+    )
+    session = TeamSession(
+        session_id="paused-session",
+        team_id="paused-team",
+        created_at=1_786_926_316,
+        runs=[
+            TeamRunOutput(
+                run_id="paused-team-run",
+                session_id="paused-session",
+                team_id="paused-team",
+                member_responses=[member],
+                status=RunStatus.paused,
+            ),
+        ],
+    )
+
+    try:
+        storage.upsert_session(session)
+        persisted = get_team_session(storage, "paused-session")
+        with sqlite3.connect(storage.db_file) as connection:
+            raw_runs = connection.execute(
+                'SELECT runs FROM "paused_team_sessions" WHERE session_id = ?',
+                ("paused-session",),
+            ).fetchone()
+    finally:
+        storage.db_engine.dispose()
+
+    assert len(member.tools or []) == 1
+    assert persisted is not None
+    assert persisted.runs is not None
+    persisted_run = persisted.runs[0]
+    assert isinstance(persisted_run, TeamRunOutput)
+    assert persisted_run.member_responses == []
+    assert raw_runs is not None
+    raw_json = str(raw_runs[0])
+    for canary in (
+        "paused-input-canary",
+        "paused-content-canary",
+        "paused-message-canary",
+        "paused-tool-canary",
+        "paused-metadata-canary",
+    ):
+        assert canary not in raw_json
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

@@ -187,6 +187,8 @@ Cumulative-versus-retained comparisons are permitted only for an authorized admi
 A shared-agent self query does not read or expose cumulative deltas because those session totals are not requester-attributable.
 
 The response contains a `coverage` object with scanned source, session, and run counts; malformed record counts; missing requester and timestamp counts; and compacted-history information where it can be established without crossing the requester boundary.
+Discovery candidates, database rows, decoded run nodes, metric records, selected strings, and request wall-clock work are bounded before they can create unbounded aggregate state.
+An exhausted per-source bound marks retained coverage partial when safe records remain, while a request-wide budget returns a partial admin result and a source-unavailable self result.
 The primary totals are explicitly named retained usage.
 If cumulative metrics exceed retained metrics, the response states that time-series and requester attribution before compaction are unavailable from the read-only source.
 A shared-agent self query reports historical completeness as unknown instead of exposing a cross-requester comparison.

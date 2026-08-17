@@ -1122,6 +1122,154 @@ def test_non_text_numeric_limits_skip_hostile_runs_and_keep_independent_usage(
     assert report.coverage.status == "partial"
 
 
+def test_request_row_budget_returns_bounded_partial_admin_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request stops after its global row budget instead of retaining an unbounded all-history scan."""
+    rows = tuple(_row(_raw_run(run_id=f"run-{index}", metrics={"total_tokens": 1})) for index in range(3))
+    _wire_admin(monkeypatch, rows)
+    monkeypatch.setattr("mindroom.usage_stats._MAX_SCANNED_STORAGE_ROWS", 2)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.totals.total_tokens == 2
+    assert report.run_count == 2
+    assert report.coverage.partial_sources == 1
+    assert report.coverage.status == "partial"
+
+
+def test_request_metric_budget_bounds_breakdown_cardinality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-detail fanout cannot grow aggregation maps beyond the request budget."""
+    detailed = {
+        "details": {
+            "chat": [
+                {"id": "model-a", "provider": "provider", "total_tokens": 2},
+                {"id": "model-b", "provider": "provider", "total_tokens": 3},
+            ],
+        },
+    }
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(_raw_run(run_id="kept", metrics={"total_tokens": 7})),
+            _row(_raw_run(run_id="limited", metrics=detailed)),
+        ),
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_METRIC_RECORDS", 2)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="model",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.totals.total_tokens == 7
+    assert report.run_count == 1
+    assert len(report.breakdown) == 1
+    assert report.coverage.partial_sources == 1
+    assert report.coverage.status == "partial"
+
+
+def test_request_source_budget_bounds_discovery_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even diagnostic-only discovery outcomes cannot create unbounded request work."""
+    diagnostics = tuple(
+        UsageStorageDiagnostic(path_label=f"source-{index}", status="partial", detail="unavailable")
+        for index in range(3)
+    )
+    monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: diagnostics)
+    monkeypatch.setattr("mindroom.usage_stats._MAX_SCANNED_SOURCES", 1)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.coverage.scanned_sources == 1
+    assert report.coverage.partial_sources == 1
+    assert report.coverage.status == "partial"
+
+
+def test_request_run_node_budget_stops_recursive_aggregation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decoded run trees cannot grow aggregate state beyond the request-wide node budget."""
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(_raw_run(run_id="kept", metrics={"total_tokens": 7})),
+            _row(_raw_run(run_id="limited", metrics={"total_tokens": 9})),
+        ),
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_SCANNED_RUN_NODES", 1)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.totals.total_tokens == 7
+    assert report.run_count == 1
+    assert report.coverage.partial_sources == 1
+
+
+def test_request_time_budget_returns_bounded_partial_admin_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exhausted wall-clock budget stops before persisted rows are accumulated."""
+    _wire_admin(monkeypatch, (_row(_raw_run(metrics={"total_tokens": 7})),))
+    monkeypatch.setattr("mindroom.usage_stats._QUERY_TIME_BUDGET_SECONDS", -1.0)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.partial_sources == 1
+    assert report.coverage.status == "partial"
+
+
 def test_self_coverage_uses_private_cumulative_evidence_but_keeps_shared_evidence_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

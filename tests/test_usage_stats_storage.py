@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -27,7 +28,6 @@ from mindroom.usage_stats_storage import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 SESSION_COLUMNS = """
     session_id TEXT PRIMARY KEY,
@@ -458,6 +458,44 @@ def test_oversized_json_cell_returns_resource_limit(
     ]
 
 
+def test_session_row_count_limit_stops_the_reader_with_a_bounded_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid but enormous session table must not create an unbounded reader stream."""
+    database = tmp_path / "code.db"
+    _create_database(database, row_count=3)
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_SESSION_ROWS_PER_SOURCE", 2)
+
+    result = _read(_source(database))
+
+    assert len(result) == 3
+    assert all(isinstance(row, UsageSessionRow) for row in result[:2])
+    assert result[2] == UsageStorageDiagnostic(
+        path_label="code.db",
+        status="resource_limit",
+        detail="session row count exceeds limit",
+    )
+
+
+def test_selected_string_length_limit_rejects_unbounded_breakdown_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted identifiers used by grouping and dedup cannot retain arbitrary-length strings."""
+    database = tmp_path / "code.db"
+    run = _run()
+    run["model"] = "oversized-model"
+    _create_database(database, runs=[run])
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_EXTRACTED_STRING_LENGTH", 8)
+
+    result = _read(_source(database))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code.db", status="resource_limit", detail="selected string exceeds limit"),
+    ]
+
+
 def test_excessive_nested_responses_returns_resource_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nested member responses are bounded before full tree retention."""
     database = tmp_path / "code.db"
@@ -818,6 +856,85 @@ def test_discovery_admin_uses_fixed_safe_layouts_and_current_config_attribution(
     assert sources[2].requester_isolated is True
     assert all(source.source_agent_id != "removed" for source in sources)
     assert all(bob_worker_key not in source.path_label for source in sources)
+
+
+def test_admin_discovery_turns_directory_errors_into_bounded_partial_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private-root permission or removal race must not discard independently discoverable sources."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    private_root = runtime_paths.config_dir / "dedicated-sessions" / "private_instances"
+    private_root.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path) -> Iterator[Path]:
+        if path == private_root:
+            raise PermissionError
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+
+    outcomes = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert any(isinstance(outcome, UsageStorageSource) for outcome in outcomes)
+    assert (
+        UsageStorageDiagnostic(
+            path_label="private_instances",
+            status="partial",
+            detail="source discovery unavailable",
+        )
+        in outcomes
+    )
+
+
+def test_discovery_directory_entry_limit_returns_resource_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory enumeration has a hard request-independent entry bound."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    teams_root = runtime_paths.config_dir / "dedicated-sessions" / "teams"
+    (teams_root / "one").mkdir(parents=True)
+    (teams_root / "two").mkdir()
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_DISCOVERY_DIRECTORY_ENTRIES", 1)
+
+    outcomes = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert (
+        UsageStorageDiagnostic(
+            path_label="teams",
+            status="resource_limit",
+            detail="source discovery entry count exceeds limit",
+        )
+        in outcomes
+    )
+
+
+def test_discovery_candidate_limit_bounds_fixed_path_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate validation remains bounded even when directory entries are independently valid."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    teams_root = runtime_paths.config_dir / "dedicated-sessions" / "teams"
+    (teams_root / "one").mkdir(parents=True)
+    (teams_root / "two").mkdir()
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_DISCOVERY_CANDIDATES", 1)
+
+    outcomes = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert (
+        UsageStorageDiagnostic(
+            path_label="teams",
+            status="resource_limit",
+            detail="source candidate count exceeds limit",
+        )
+        in outcomes
+    )
 
 
 def test_discovery_does_not_scan_canonical_state_root_when_sessions_are_redirected(tmp_path: Path) -> None:

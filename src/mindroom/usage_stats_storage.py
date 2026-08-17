@@ -23,11 +23,16 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
+    "MAX_DISCOVERED_SOURCES",
+    "MAX_DISCOVERY_CANDIDATES",
+    "MAX_DISCOVERY_DIRECTORY_ENTRIES",
     "MAX_EXTRACTED_MODEL_METRICS",
     "MAX_EXTRACTED_RUN_NODES",
+    "MAX_EXTRACTED_STRING_LENGTH",
     "MAX_JSON_BYTES",
     "MAX_JSON_NESTING_DEPTH",
     "MAX_NESTED_RESPONSE_DEPTH",
+    "MAX_SESSION_ROWS_PER_SOURCE",
     "UsageMetricValue",
     "UsageModelMetric",
     "UsageRunNode",
@@ -49,10 +54,16 @@ MAX_JSON_NESTING_DEPTH = 64
 MAX_NESTED_RESPONSE_DEPTH = 16
 MAX_EXTRACTED_RUN_NODES = 1_000
 MAX_EXTRACTED_MODEL_METRICS = 1_000
+MAX_EXTRACTED_STRING_LENGTH = 512
+MAX_SESSION_ROWS_PER_SOURCE = 10_000
+MAX_DISCOVERY_DIRECTORY_ENTRIES = 1_000
+MAX_DISCOVERY_CANDIDATES = 10_000
+MAX_DISCOVERED_SOURCES = 1_000
 _JSON_NESTING_LIMIT = "JSON nesting exceeds limit"
 _NESTED_RESPONSE_DEPTH_LIMIT = "nested response depth exceeds limit"
 _RUN_NODE_COUNT_LIMIT = "run node count exceeds limit"
 _MODEL_METRIC_COUNT_LIMIT = "model metric count exceeds limit"
+_SELECTED_STRING_LENGTH_LIMIT = "selected string exceeds limit"
 _RUN_STATUSES = frozenset({"pending", "running", "completed", "paused", "cancelled", "error"})
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
@@ -187,7 +198,7 @@ def discover_self_usage_sources(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-) -> tuple[UsageStorageSource, ...]:
+) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
     """Discover the current execution's database and every valid team database."""
     session_root = _effective_session_root(runtime_paths)
     resolved_runtime = resolve_agent_runtime(
@@ -197,14 +208,18 @@ def discover_self_usage_sources(
         execution_identity=execution_identity,
     )
     database = resolved_runtime.session_state_root / "sessions" / f"{agent_name}.db"
-    source_path = _self_source_path(
-        session_root=session_root,
-        agent_name=agent_name,
-        database=database,
-        is_private=resolved_runtime.execution.is_private,
-        worker_key=resolved_runtime.execution.worker_key,
-    )
     sources = _team_usage_sources(session_root, config)
+    try:
+        source_path = _self_source_path(
+            session_root=session_root,
+            agent_name=agent_name,
+            database=database,
+            is_private=resolved_runtime.execution.is_private,
+            worker_key=resolved_runtime.execution.worker_key,
+        )
+    except OSError:
+        sources.append(_discovery_diagnostic("self", "partial", "source discovery unavailable"))
+        source_path = None
     if source_path is not None:
         sources.append(
             _usage_source(
@@ -224,7 +239,7 @@ def discover_admin_usage_sources(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> tuple[UsageStorageSource, ...]:
+) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
     """Discover fixed-layout current-config session databases for an admin query."""
     session_root = _effective_session_root(runtime_paths)
     sources = _configured_shared_agent_sources(session_root, config)
@@ -237,15 +252,30 @@ def _effective_session_root(runtime_paths: RuntimePaths) -> Path:
     return resolve_session_state_root(runtime_paths.storage_root, runtime_paths).expanduser().resolve()
 
 
-def _configured_shared_agent_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
-    sources: list[UsageStorageSource] = []
+def _configured_shared_agent_sources(
+    session_root: Path,
+    config: Config,
+) -> list[UsageStorageSource | UsageStorageDiagnostic]:
+    sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    candidate_checks = 0
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is not None:
             continue
-        candidate = _safe_relative_candidate(
-            session_root,
-            Path("agents") / agent_name / "sessions" / f"{agent_name}.db",
-        )
+        if candidate_checks >= MAX_DISCOVERY_CANDIDATES:
+            sources.append(_discovery_diagnostic("agents", "resource_limit", "source candidate count exceeds limit"))
+            break
+        candidate_checks += 1
+        if _source_count(sources) >= MAX_DISCOVERED_SOURCES:
+            sources.append(_discovery_diagnostic("agents", "resource_limit", "source count exceeds limit"))
+            break
+        try:
+            candidate = _safe_relative_candidate(
+                session_root,
+                Path("agents") / agent_name / "sessions" / f"{agent_name}.db",
+            )
+        except OSError:
+            sources.append(_discovery_diagnostic("agents", "partial", "source discovery unavailable"))
+            break
         if candidate is None:
             continue
         sources.append(
@@ -262,55 +292,119 @@ def _configured_shared_agent_sources(session_root: Path, config: Config) -> list
     return sources
 
 
-def _private_agent_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
+def _private_agent_sources(
+    session_root: Path,
+    config: Config,
+) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     private_root = session_root / "private_instances"
     if private_root.is_symlink() or not private_root.is_dir():
         return []
 
-    sources: list[UsageStorageSource] = []
-    for worker_directory in sorted(private_root.iterdir(), key=lambda path: path.name):
-        if worker_directory.is_symlink() or not worker_directory.is_dir():
+    entries = _bounded_directory_entries(private_root, path_label="private_instances")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [entries]
+    sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    candidate_checks = 0
+    private_agent_names = tuple(name for name, agent in config.agents.items() if agent.private is not None)
+    for worker_directory in entries:
+        if (
+            worker_directory.is_symlink()
+            or not worker_directory.is_dir()
+            or _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None
+        ):
             continue
-        if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
-            continue
-        for agent_name, agent_config in config.agents.items():
-            if agent_config.private is None:
-                continue
-            candidate = _safe_relative_candidate(
-                session_root,
-                Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db",
+        for agent_name in private_agent_names:
+            if candidate_checks >= MAX_DISCOVERY_CANDIDATES:
+                sources.append(
+                    _discovery_diagnostic(
+                        "private_instances",
+                        "resource_limit",
+                        "source candidate count exceeds limit",
+                    ),
+                )
+                return sources
+            candidate_checks += 1
+            if _source_count(sources) >= MAX_DISCOVERED_SOURCES:
+                sources.append(
+                    _discovery_diagnostic("private_instances", "resource_limit", "source count exceeds limit"),
+                )
+                return sources
+            outcome = _private_source_candidate(
+                session_root=session_root,
+                worker_directory_name=worker_directory.name,
+                agent_name=agent_name,
+                config=config,
             )
-            if candidate is None or not candidate.is_file():
+            if isinstance(outcome, UsageStorageDiagnostic):
+                sources.append(outcome)
+                return sources
+            if outcome is None:
                 continue
-            sources.append(
-                _usage_source(
-                    path=candidate,
-                    session_root=session_root,
-                    scope="private_agent",
-                    expected_session_table=f"{agent_name}_sessions",
-                    source_agent_id=agent_name,
-                    config=config,
-                    requester_isolated=True,
-                ),
-            )
+            sources.append(outcome)
     return sources
 
 
-def _team_usage_sources(session_root: Path, config: Config) -> list[UsageStorageSource]:
+def _private_source_candidate(
+    *,
+    session_root: Path,
+    worker_directory_name: str,
+    agent_name: str,
+    config: Config,
+) -> UsageStorageSource | UsageStorageDiagnostic | None:
+    try:
+        candidate = _safe_relative_candidate(
+            session_root,
+            Path("private_instances") / worker_directory_name / agent_name / "sessions" / f"{agent_name}.db",
+        )
+        if candidate is None or not candidate.is_file():
+            return None
+    except OSError:
+        return _discovery_diagnostic("private_instances", "partial", "source discovery unavailable")
+    return _usage_source(
+        path=candidate,
+        session_root=session_root,
+        scope="private_agent",
+        expected_session_table=f"{agent_name}_sessions",
+        source_agent_id=agent_name,
+        config=config,
+        requester_isolated=True,
+    )
+
+
+def _team_usage_sources(
+    session_root: Path,
+    config: Config,
+) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     teams_root = session_root / "teams"
     if teams_root.is_symlink() or not teams_root.is_dir():
         return []
 
-    sources: list[UsageStorageSource] = []
-    for team_directory in sorted(teams_root.iterdir(), key=lambda path: path.name):
+    entries = _bounded_directory_entries(teams_root, path_label="teams")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [entries]
+    sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    candidate_checks = 0
+    for team_directory in entries:
+        if _source_count(sources) >= MAX_DISCOVERED_SOURCES:
+            sources.append(_discovery_diagnostic("teams", "resource_limit", "source count exceeds limit"))
+            break
         storage_name = team_directory.name
         if team_directory.is_symlink() or not team_directory.is_dir() or _IDENTIFIER.fullmatch(storage_name) is None:
             continue
-        candidate = _safe_relative_candidate(
-            session_root,
-            Path("teams") / storage_name / "sessions" / f"{storage_name}.db",
-        )
-        if candidate is None or not candidate.is_file():
+        if candidate_checks >= MAX_DISCOVERY_CANDIDATES:
+            sources.append(_discovery_diagnostic("teams", "resource_limit", "source candidate count exceeds limit"))
+            break
+        candidate_checks += 1
+        try:
+            candidate = _safe_relative_candidate(
+                session_root,
+                Path("teams") / storage_name / "sessions" / f"{storage_name}.db",
+            )
+            candidate_is_file = candidate is not None and candidate.is_file()
+        except OSError:
+            sources.append(_discovery_diagnostic("teams", "partial", "source discovery unavailable"))
+            break
+        if not candidate_is_file or candidate is None:
             continue
         expected_table = f"{storage_name}_sessions"
         sources.append(
@@ -386,11 +480,55 @@ def _usage_source(
     )
 
 
-def _sorted_sources(sources: list[UsageStorageSource]) -> tuple[UsageStorageSource, ...]:
-    return tuple(sorted(sources, key=lambda source: source.path_label))
+def _bounded_directory_entries(root: Path, *, path_label: str) -> tuple[Path, ...] | UsageStorageDiagnostic:
+    try:
+        entries: list[Path] = []
+        for entry in root.iterdir():
+            if len(entries) >= MAX_DISCOVERY_DIRECTORY_ENTRIES:
+                return _discovery_diagnostic(
+                    path_label,
+                    "resource_limit",
+                    "source discovery entry count exceeds limit",
+                )
+            entries.append(entry)
+    except OSError:
+        return _discovery_diagnostic(path_label, "partial", "source discovery unavailable")
+    return tuple(sorted(entries, key=lambda path: path.name))
 
 
-def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+def _source_count(sources: list[UsageStorageSource | UsageStorageDiagnostic]) -> int:
+    return sum(isinstance(source, UsageStorageSource) for source in sources)
+
+
+def _sorted_sources(
+    sources: list[UsageStorageSource | UsageStorageDiagnostic],
+) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
+    sorted_sources = sorted(sources, key=lambda source: source.path_label)
+    if _source_count(sorted_sources) <= MAX_DISCOVERED_SOURCES:
+        return tuple(sorted_sources)
+    bounded: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    retained_sources = 0
+    for source in sorted_sources:
+        if isinstance(source, UsageStorageSource) and retained_sources < MAX_DISCOVERED_SOURCES:
+            bounded.append(source)
+            retained_sources += 1
+        elif isinstance(source, UsageStorageDiagnostic):
+            bounded.append(source)
+    bounded.append(_discovery_diagnostic("sources", "resource_limit", "source count exceeds limit"))
+    return tuple(sorted(bounded, key=lambda source: source.path_label))
+
+
+def _discovery_diagnostic(
+    path_label: str,
+    status: Literal["resource_limit", "partial"],
+    detail: str,
+) -> UsageStorageDiagnostic:
+    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail)
+
+
+def iter_usage_storage_rows(  # noqa: C901
+    source: UsageStorageSource,
+) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Yield field-selective session rows or source-safe diagnostics one at a time."""
     try:
         with _open_read_only_database(source) as connection:
@@ -414,11 +552,23 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
                 FROM
                 """
             query += table_name
+            query += " LIMIT ?"
             cursor = connection.execute(
                 query,
-                (MAX_JSON_BYTES, MAX_JSON_BYTES, MAX_JSON_BYTES, MAX_JSON_BYTES),
+                (
+                    MAX_JSON_BYTES,
+                    MAX_JSON_BYTES,
+                    MAX_JSON_BYTES,
+                    MAX_JSON_BYTES,
+                    MAX_SESSION_ROWS_PER_SOURCE + 1,
+                ),
             )
+            row_count = 0
             while row := cursor.fetchone():
+                row_count += 1
+                if row_count > MAX_SESSION_ROWS_PER_SOURCE:
+                    yield _diagnostic(source, "resource_limit", "session row count exceeds limit")
+                    return
                 if row["runs_over_limit"]:
                     yield _diagnostic(source, "resource_limit", "runs exceeds limit")
                     continue
@@ -489,9 +639,11 @@ def _extract_session_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageS
     entity_id = row["agent_id"] if entity_kind == "agent" else row["team_id"]
     if not isinstance(entity_id, str) or not entity_id:
         raise ValueError
+    _ensure_selected_string_length(entity_id)
     row_key = row["session_id"]
     if not isinstance(row_key, str) or not row_key:
         raise ValueError
+    _ensure_selected_string_length(row_key)
 
     raw_runs = _decode_json_cell(row["runs"], default=[])
     try:
@@ -630,6 +782,8 @@ def _extract_run_node(
 
 
 def _normalize_status(value: object) -> _UsageRunStatus:
+    if isinstance(value, str):
+        _ensure_selected_string_length(value)
     status = value.casefold() if isinstance(value, str) else "unknown"
     return cast("_UsageRunStatus", status) if status in _RUN_STATUSES else "unknown"
 
@@ -665,6 +819,7 @@ def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[in
     for model_type, model_entries in details_mapping.items():
         if not isinstance(model_type, str) or not isinstance(model_entries, list):
             raise TypeError
+        _ensure_selected_string_length(model_type)
         for entry in model_entries:
             if not isinstance(entry, dict):
                 raise TypeError
@@ -676,6 +831,8 @@ def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[in
             provider = entry_mapping.get("provider", "")
             if not isinstance(model_id, str) or not isinstance(provider, str):
                 raise TypeError
+            _ensure_selected_string_length(model_id)
+            _ensure_selected_string_length(provider)
             metrics.append(
                 UsageModelMetric(
                     model_type=model_type,
@@ -688,7 +845,10 @@ def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[in
 
 
 def _optional_string(value: object) -> str | None:
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str):
+        return None
+    _ensure_selected_string_length(value)
+    return value
 
 
 def _timestamp_string(value: object) -> str | None:
@@ -696,7 +856,14 @@ def _timestamp_string(value: object) -> str | None:
         return None
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError
-    return str(value)
+    result = str(value)
+    _ensure_selected_string_length(result)
+    return result
+
+
+def _ensure_selected_string_length(value: str) -> None:
+    if len(value) > MAX_EXTRACTED_STRING_LENGTH:
+        raise _ResourceLimitError(_SELECTED_STRING_LENGTH_LIMIT)
 
 
 def _quote_identifier(identifier: str) -> str:

@@ -9728,6 +9728,8 @@ Breakdown rows are sorted by total tokens and capped at 200.
 Coverage can be `complete_retained`, `partial`, or `unknown`.
 `complete_retained` means no gap was detected in the retained data, not that provider-billed history is complete.
 Unreadable sources, malformed records, missing attribution or timestamps, and detected compaction gaps produce partial coverage and corresponding bounded counters.
+Discovery, per-source rows, decoded run nodes, metric fan-out, selected identifiers, and request wall-clock work all have fixed bounds.
+Per-source bound exhaustion produces partial coverage when safe records remain, while request-wide exhaustion returns partial admin results and a source-unavailable error for self queries.
 Shared-agent self queries can report unknown completeness because cumulative session totals cannot safely be compared across requesters.
 
 Errors use the same envelope with a stable code.

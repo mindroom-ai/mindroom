@@ -212,18 +212,18 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
 def _session_has_member_responses(session: Session) -> bool:
     if not isinstance(session, TeamSession) or not session.runs:
         return False
-    return any(
-        isinstance(run, TeamRunOutput) and run.status != RunStatus.paused and bool(run.member_responses)
-        for run in session.runs
-    )
+    return any(isinstance(run, TeamRunOutput) and bool(run.member_responses) for run in session.runs)
 
 
 def _retain_member_usage_only(session: Session) -> None:
     if not isinstance(session, TeamSession) or not session.runs:
         return
     for run in session.runs:
-        if isinstance(run, TeamRunOutput) and run.status != RunStatus.paused:
-            run.member_responses = [_usage_only_run(member) for member in run.member_responses]
+        if not isinstance(run, TeamRunOutput):
+            continue
+        run.member_responses = (
+            [] if run.status == RunStatus.paused else [_usage_only_run(member) for member in run.member_responses]
+        )
 
 
 def _usage_only_run(run: RunOutput | TeamRunOutput) -> RunOutput | TeamRunOutput:
