@@ -143,6 +143,14 @@ class _ConfigStub:
     def get_entities_referencing_tools(self, _tool_names: set[str]) -> set[str]:
         return set()
 
+    @staticmethod
+    def agent_has_tool_at_execution_scope(
+        _agent_name: str,
+        _tool_name: str,
+        _execution_scope: WorkerScope | None,
+    ) -> bool:
+        return True
+
 
 class _FakeClientSession:
     sessions: ClassVar[list[_FakeClientSession]] = []
@@ -3211,6 +3219,17 @@ async def test_mcp_config_reload_retires_unreachable_oauth_scope(
         assert manager._retiring_states == {}
         assert scoped_state.retired is True
         assert session.closed is True
+        transport_count = len(_FakeClientSession.transport_extra_headers)
+
+        with pytest.raises(MCPConnectionError, match="credential target is no longer configured"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+
+        assert manager._scoped_states == {}
+        assert len(_FakeClientSession.transport_extra_headers) == transport_count
     finally:
         await manager.shutdown()
 
@@ -3246,11 +3265,12 @@ async def test_mcp_config_reload_keeps_user_scope_reachable_from_another_agent(
 
     worker_target = _worker_target("@alice:example.test", agent_name="code")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(config_for_agents(("code", "research")))
     await manager.get_request_catalog(
         "demo",
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
     scoped_state = next(iter(manager._scoped_states.values()))
@@ -3262,6 +3282,26 @@ async def test_mcp_config_reload_keeps_user_scope_reachable_from_another_agent(
 
         assert tuple(manager._scoped_states.values()) == (scoped_state,)
         assert scoped_state.retired is False
+        assert session.closed is False
+        assert manager.cached_request_catalog("demo", worker_target=worker_target) is None
+
+        with pytest.raises(MCPConnectionError, match="credential target is no longer configured"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+
+        research_target = _worker_target("@alice:example.test", agent_name="research")
+        assert manager.cached_request_catalog("demo", worker_target=research_target) is scoped_state.catalog
+        assert (
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=research_target,
+            )
+        ).server_id == "demo"
+        assert tuple(manager._scoped_states.values()) == (scoped_state,)
         assert session.closed is False
     finally:
         await manager.shutdown()

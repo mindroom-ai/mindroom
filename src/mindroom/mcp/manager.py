@@ -550,12 +550,13 @@ class MCPServerManager:
                 base_state,
                 worker_target=worker_target,
             )
+            self._require_configured_oauth_target(server_id, credential_context.worker_target)
             key = self._scope_session_key(
                 base_state,
                 credential_context.worker_target,
                 provider_id=credential_context.provider.id,
             )
-        except OAuthConnectionRequired:
+        except (MCPConnectionError, OAuthConnectionRequired):
             return None
         state = self._scoped_states.get(key)
         if state is None or state.retired or state.catalog is None or state.stale or state.last_error is not None:
@@ -649,6 +650,25 @@ class MCPServerManager:
             provider_id=provider_id,
             credential_scope=credential_scope,
         )
+
+    def _require_configured_oauth_target(
+        self,
+        server_id: str,
+        worker_target: ResolvedWorkerTarget | None,
+    ) -> None:
+        """Reject a stale toolkit whose agent, tool, or execution scope was reconfigured."""
+        if worker_target is None or worker_target.routing_agent_name is None:
+            return
+        agent_name = worker_target.routing_agent_name
+        config = self._config
+        if config is not None and config.agent_has_tool_at_execution_scope(
+            agent_name,
+            mcp_tool_name(server_id),
+            worker_target.worker_scope,
+        ):
+            return
+        msg = f"MCP server '{server_id}' credential target is no longer configured"
+        raise MCPConnectionError(server_id, msg)
 
     def _log_oauth_refresh_failure(
         self,
@@ -786,6 +806,7 @@ class MCPServerManager:
                 or base_state.retired
             ):
                 raise _MCPConfigurationChangedError
+            self._require_configured_oauth_target(server_id, worker_target)
             if scope_key in self._retired_scope_keys:
                 raise oauth_connection_required(credential_context)
             state = self._scoped_states.get(key)

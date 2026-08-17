@@ -107,15 +107,16 @@ def scoped_oauth_state_has_configured_agent(
 ) -> bool:
     """Return whether any configured agent can still reach one scoped OAuth state."""
     tool_name = mcp_tool_name(scoped.state.server_id)
+    worker_scope = scoped.credential_surface.worker_scope
+    credential_execution_scope = None if worker_scope == "unscoped" else worker_scope
     for agent_name in config.agents:
-        entity = config.resolve_entity(agent_name)
-        if tool_name not in entity.available_tools:
-            continue
-        if _scoped_state_is_visible_to_agent(
-            scoped,
+        if not config.agent_has_tool_at_execution_scope(
             agent_name,
-            agent_execution_scope=entity.execution_scope,
+            tool_name,
+            credential_execution_scope,
         ):
+            continue
+        if worker_scope not in {"shared", "user_agent"} or scoped.credential_surface.routing_agent_name == agent_name:
             return True
     return False
 
