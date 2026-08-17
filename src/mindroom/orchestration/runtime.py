@@ -29,6 +29,8 @@ from mindroom.matrix.health import (
     MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,
+    get_matrix_ingestion_progress,
+    mark_matrix_ingestion_progress,
     matrix_versions_url,
     response_has_matrix_versions,
 )
@@ -270,8 +272,14 @@ class _SyncIteration:
         startup_timeout_seconds = matrix_sync_startup_timeout_seconds(bot.runtime_paths)
         cache_write_grace_seconds = matrix_sync_cache_write_grace_seconds(bot.runtime_paths)
         startup_monotonic = time.monotonic()
+        observed_ingestion_generation = bot.durable_ingestion_progress_generation()
         while bot.running and not sync_task.done():
             await asyncio.sleep(_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS)
+            ingestion_generation = bot.durable_ingestion_progress_generation()
+            if ingestion_generation != observed_ingestion_generation:
+                observed_ingestion_generation = ingestion_generation
+                if ingestion_generation is not None:
+                    mark_matrix_ingestion_progress(bot.agent_name)
             sync_age_seconds = bot.seconds_since_last_sync_activity()
 
             if sync_age_seconds is None:
@@ -304,6 +312,31 @@ class _SyncIteration:
                         cache_write_grace_seconds=cache_write_grace_seconds,
                         cache_write_seconds_in_flight=cache_write_seconds,
                         resulting_action="await_sync_cache_write",
+                        stale_for_seconds=sync_age_seconds,
+                    )
+                    continue
+                ingestion_progress = get_matrix_ingestion_progress(bot.agent_name)
+                ingestion_seconds = (
+                    ingestion_progress.seconds_in_flight(now_monotonic) if ingestion_progress is not None else None
+                )
+                ingestion_idle_seconds = (
+                    ingestion_progress.seconds_since_advance(now_monotonic) if ingestion_progress is not None else None
+                )
+                if (
+                    cache_write_seconds is None
+                    and ingestion_seconds is not None
+                    and ingestion_idle_seconds is not None
+                    and ingestion_seconds <= cache_write_grace_seconds
+                    and ingestion_idle_seconds <= MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS
+                ):
+                    logger.debug(
+                        "matrix_sync_watchdog_awaiting_ingestion",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        ingestion_grace_seconds=cache_write_grace_seconds,
+                        ingestion_seconds_in_flight=ingestion_seconds,
+                        ingestion_seconds_since_advance=ingestion_idle_seconds,
+                        resulting_action="await_ingestion_progress",
                         stale_for_seconds=sync_age_seconds,
                     )
                     continue

@@ -36,6 +36,7 @@ from mindroom.matrix.health import (
     _track_matrix_sync_cache_write,
     get_matrix_sync_cache_write_progress,
     get_matrix_sync_health_snapshot,
+    mark_matrix_ingestion_progress,
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
     reset_matrix_sync_health,
@@ -121,6 +122,7 @@ class _FakeBot:
         self._last_sync_monotonic: float | None = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._durable_ingestion_progress_generation: int | None = None
         self.sync_calls = 0
         self.first_call_cancelled = False
         self.first_call_cancel_args: tuple[object, ...] = ()
@@ -141,6 +143,9 @@ class _FakeBot:
 
     def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
         return get_matrix_sync_cache_write_progress(self.agent_name)
+
+    def durable_ingestion_progress_generation(self) -> int | None:
+        return self._durable_ingestion_progress_generation
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1075,6 +1080,31 @@ def test_health_reports_shared_cache_write_progress_past_grace() -> None:
         reset_matrix_sync_health()
 
 
+def test_health_defers_only_bounded_recent_owned_ingestion_progress() -> None:
+    """Committed Work progress keeps health live without granting immunity."""
+    stale_sync_time = datetime.now(UTC) - timedelta(seconds=300)
+    reset_matrix_sync_health()
+    try:
+        mark_matrix_sync_loop_started("draining_agent")
+        mark_matrix_sync_success("draining_agent", stale_sync_time)
+        mark_matrix_ingestion_progress("draining_agent", now_monotonic=100.0)
+        mark_matrix_ingestion_progress("draining_agent", now_monotonic=102.0)
+
+        healthy = get_matrix_sync_health_snapshot(
+            cache_write_grace_seconds=5.0,
+            now_monotonic=103.0,
+        )
+        past_grace = get_matrix_sync_health_snapshot(
+            cache_write_grace_seconds=5.0,
+            now_monotonic=106.0,
+        )
+
+        assert healthy.stale_entities == ()
+        assert past_grace.stale_entities == ("draining_agent",)
+    finally:
+        reset_matrix_sync_health()
+
+
 @pytest.mark.asyncio
 async def test_watchdog_defers_to_shared_cache_write_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     """A slow durable phase must outlive the ordinary transport timeout."""
@@ -1105,6 +1135,80 @@ async def test_watchdog_defers_to_shared_cache_write_progress(monkeypatch: pytes
 
     assert cache_write_finished.is_set()
     assert bot.first_call_cancelled is False
+    assert bot.sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_watchdog_defers_while_owned_ingestion_commits_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked Frame may drain Work longer than the ordinary sync timeout."""
+    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="1")
+    progress_finished = asyncio.Event()
+
+    async def sync_with_durable_progress() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        bot._durable_ingestion_progress_generation = 0
+        try:
+            for generation in range(1, 11):
+                await asyncio.sleep(0.01)
+                bot._durable_ingestion_progress_generation = generation
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+        progress_finished.set()
+        bot.running = False
+
+    bot.sync_forever = sync_with_durable_progress
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
+
+    reset_matrix_sync_health()
+    try:
+        await sync_forever_with_restart(bot, max_retries=1)
+    finally:
+        reset_matrix_sync_health()
+
+    assert progress_finished.is_set()
+    assert bot.first_call_cancelled is False
+    assert bot.sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancels_owned_ingestion_progress_past_finite_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Continuous commits cannot exempt an incomplete Frame forever."""
+    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="0.04")
+
+    async def sync_with_unbounded_durable_progress() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        bot._durable_ingestion_progress_generation = 0
+        generation = 0
+        try:
+            while True:
+                await asyncio.sleep(0.005)
+                generation += 1
+                bot._durable_ingestion_progress_generation = generation
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+
+    bot.sync_forever = sync_with_unbounded_durable_progress
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    reset_matrix_sync_health()
+    try:
+        await sync_forever_with_restart(bot, max_retries=1)
+    finally:
+        reset_matrix_sync_health()
+
+    assert bot.first_call_cancelled is True
     assert bot.sync_calls == 1
 
 

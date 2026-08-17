@@ -31,6 +31,8 @@ class _MatrixSyncState:
     loop_started_time: datetime | None = None
     last_sync_time: datetime | None = None
     cache_write_started_monotonic: float | None = None
+    ingestion_progress_started_monotonic: float | None = None
+    ingestion_progress_advanced_monotonic: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,22 @@ class SyncCacheWriteProgress:
     def seconds_in_flight(self, now_monotonic: float) -> float:
         """Return elapsed phase time without allowing a negative clock delta."""
         return max(0.0, now_monotonic - self.started_monotonic)
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncIngestionProgress:
+    """Immutable view of one active durable ingestion catch-up phase."""
+
+    started_monotonic: float
+    advanced_monotonic: float
+
+    def seconds_in_flight(self, now_monotonic: float) -> float:
+        """Return total phase time without allowing a negative clock delta."""
+        return max(0.0, now_monotonic - self.started_monotonic)
+
+    def seconds_since_advance(self, now_monotonic: float) -> float:
+        """Return time since the latest commit-gated advance."""
+        return max(0.0, now_monotonic - self.advanced_monotonic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +129,38 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
         state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
         state.running = True
         state.last_sync_time = resolved_sync_time
+        state.ingestion_progress_started_monotonic = None
+        state.ingestion_progress_advanced_monotonic = None
     return resolved_sync_time
+
+
+def mark_matrix_ingestion_progress(
+    entity_name: str,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Publish one commit-gated advance within an incomplete source Frame."""
+    observed = time.monotonic() if now_monotonic is None else now_monotonic
+    if not math.isfinite(observed):
+        message = "now_monotonic must be finite"
+        raise ValueError(message)
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
+        state.running = True
+        if state.ingestion_progress_started_monotonic is None:
+            state.ingestion_progress_started_monotonic = observed
+        state.ingestion_progress_advanced_monotonic = observed
+
+
+def get_matrix_ingestion_progress(entity_name: str) -> _SyncIngestionProgress | None:
+    """Return the active commit-gated ingestion catch-up phase, if any."""
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.get(entity_name)
+        started = state.ingestion_progress_started_monotonic if state is not None else None
+        advanced = state.ingestion_progress_advanced_monotonic if state is not None else None
+    if started is None or advanced is None:
+        return None
+    return _SyncIngestionProgress(started, advanced)
 
 
 @contextmanager
@@ -177,6 +226,15 @@ def get_matrix_sync_health_snapshot(
                             if state.cache_write_started_monotonic is not None
                             else None
                         ),
+                        (
+                            _SyncIngestionProgress(
+                                state.ingestion_progress_started_monotonic,
+                                state.ingestion_progress_advanced_monotonic,
+                            )
+                            if state.ingestion_progress_started_monotonic is not None
+                            and state.ingestion_progress_advanced_monotonic is not None
+                            else None
+                        ),
                     )
                     for entity_name, state in _matrix_sync_state.items()
                     if state.running
@@ -192,10 +250,10 @@ def get_matrix_sync_health_snapshot(
             last_sync_time=None,
         )
 
-    active_entities = tuple(entity_name for entity_name, _, _, _ in active_states)
+    active_entities = tuple(entity_name for entity_name, _, _, _, _ in active_states)
     stale_entities = tuple(
         entity_name
-        for entity_name, last_sync_time, loop_started_time, cache_write_progress in active_states
+        for entity_name, last_sync_time, loop_started_time, cache_write_progress, ingestion_progress in active_states
         if (
             (
                 cache_write_progress is not None
@@ -203,6 +261,15 @@ def get_matrix_sync_health_snapshot(
             )
             or (
                 cache_write_progress is None
+                and ingestion_progress is not None
+                and (
+                    ingestion_progress.seconds_in_flight(current_monotonic) > cache_write_grace_seconds
+                    or ingestion_progress.seconds_since_advance(current_monotonic) > stale_after_seconds
+                )
+            )
+            or (
+                cache_write_progress is None
+                and ingestion_progress is None
                 and (
                     (
                         last_sync_time is not None
@@ -217,11 +284,11 @@ def get_matrix_sync_health_snapshot(
             )
         )
     )
-    if any(last_sync_time is None for _, last_sync_time, _, _ in active_states):
+    if any(last_sync_time is None for _, last_sync_time, _, _, _ in active_states):
         oldest_last_sync_time = None
     else:
         oldest_last_sync_time = min(
-            last_sync_time for _, last_sync_time, _, _ in active_states if last_sync_time is not None
+            last_sync_time for _, last_sync_time, _, _, _ in active_states if last_sync_time is not None
         )
     return _MatrixSyncHealthSnapshot(
         active_entities=active_entities,

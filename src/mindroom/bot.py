@@ -1203,6 +1203,11 @@ class AgentBot:
         """Return the durable sync-cache phase shared by watchdog and health."""
         return get_matrix_sync_cache_write_progress(self.agent_name)
 
+    def durable_ingestion_progress_generation(self) -> int | None:
+        """Return nio's commit-gated progress generation for the owned session."""
+        session = self._ingestion_session
+        return session._durable_progress_generation if session is not None else None
+
     def _mark_sync_progress(self) -> None:
         """Advance watchdog and health freshness from one sync progress event."""
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
