@@ -1,11 +1,11 @@
-"""Single execution owner for requester-scoped OAuth connection reset."""
+"""Single execution owner for scoped OAuth connection reset."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from mindroom.mcp.errors import MCPError
-from mindroom.mcp.oauth import retire_mcp_oauth_request_session
+from mindroom.mcp.oauth import retire_mcp_oauth_scope_session
 from mindroom.oauth.credential_lifecycle import oauth_reset_operation_result, reset_oauth_credentials
 from mindroom.oauth.providers import OAuthProviderError
 
@@ -38,7 +38,7 @@ async def retire_and_reset_oauth_credentials(
             return completed
     reset_started = False
     try:
-        async with retire_mcp_oauth_request_session(
+        async with retire_mcp_oauth_scope_session(
             dict(mcp_servers),
             context.provider.id,
             credential_context=context,

@@ -384,10 +384,15 @@ def _oauth_non_oauth_collision_config(runtime_paths: RuntimePaths) -> Config:
     )
 
 
-def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> ResolvedWorkerTarget:
+def _worker_target(
+    requester_id: str,
+    *,
+    worker_scope: WorkerScope = "user",
+    agent_name: str = "code",
+) -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
-        agent_name="code",
+        agent_name=agent_name,
         requester_id=requester_id,
         room_id="!room:example.test",
         thread_id="$thread",
@@ -396,7 +401,7 @@ def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> 
         tenant_id="tenant",
         account_id=None,
     )
-    return resolve_worker_target(worker_scope, "code", identity)
+    return resolve_worker_target(worker_scope, agent_name, identity)
 
 
 def _shared_worker_target(requester_id: str, *, agent_name: str = "code") -> ResolvedWorkerTarget:
@@ -659,11 +664,11 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
 
 
 @pytest.mark.asyncio
-async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_credential_load(
+async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Identity-less MCP calls cannot fall back to a legacy global bearer or session key."""
+    """An unscoped MCP server adopts and uses its installation-level OAuth credential."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
@@ -672,7 +677,7 @@ async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_creden
     credentials_manager.save_credentials(
         "mcp_demo_oauth",
         {
-            "token": "legacy-global-token",
+            "token": "installation-token",
             "client_id": "public-client",
             "scopes": [],
             "_source": "oauth",
@@ -682,16 +687,14 @@ async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_creden
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
 
-    with pytest.raises(OAuthConnectionRequired, match="requester identity") as exc_info:
-        await manager.get_request_catalog(
-            "demo",
-            credentials_manager=credentials_manager,
-            worker_target=None,
-        )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
 
-    assert exc_info.value.connect_url is None
-    assert manager._scoped_states == {}
-    assert _FakeClientSession.transport_extra_headers == []
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer installation-token"}]
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {("unscoped", "global")}
 
 
 @pytest.mark.asyncio
@@ -1952,20 +1955,17 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
 
 
 @pytest.mark.asyncio
-async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
+async def test_oauth_mcp_shared_agent_reuses_agent_bearer_across_requesters(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shared worker reuse must not turn requester-owned MCP OAuth into an agent-global token."""
+    """A shared agent owns one MCP OAuth account used by every authorized requester."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     alice_request_target = _shared_worker_target("@alice:example.test")
     bob_request_target = _shared_worker_target("@bob:example.test")
-    alice_credential_target = _worker_target("@alice:example.test", worker_scope="user")
-    bob_credential_target = _worker_target("@bob:example.test", worker_scope="user")
-    _save_mcp_oauth_credentials(runtime_paths, alice_credential_target, "alice-token")
-    _save_mcp_oauth_credentials(runtime_paths, bob_credential_target, "bob-token")
+    _save_mcp_oauth_credentials(runtime_paths, alice_request_target, "agent-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -1981,13 +1981,127 @@ async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
         worker_target=bob_request_target,
     )
 
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer agent-token"}]
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+        ("shared", alice_request_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Distinct shared agents can own different MCP OAuth accounts."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _shared_worker_target("@alice:example.test", agent_name="code")
+    second_target = _shared_worker_target("@alice:example.test", agent_name="research")
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "code-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "research-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
     assert _FakeClientSession.transport_extra_headers == [
-        {"Authorization": "Bearer alice-token"},
-        {"Authorization": "Bearer bob-token"},
+        {"Authorization": "Bearer code-token"},
+        {"Authorization": "Bearer research-token"},
     ]
-    assert {key.worker_key for key in manager._scoped_states} == {
-        alice_credential_target.worker_key,
-        bob_credential_target.worker_key,
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+        ("shared", first_target.worker_key),
+        ("shared", second_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_user_scope_reuses_account_across_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A user-scoped MCP OAuth account is shared across that requester's agents."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _worker_target("@alice:example.test", agent_name="code")
+    second_target = _worker_target("@alice:example.test", agent_name="research")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+        ("user", first_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_user_agent_scope_keeps_accounts_separate_per_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One requester can connect distinct MCP OAuth accounts for different agents."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _worker_target(
+        "@alice:example.test",
+        worker_scope="user_agent",
+        agent_name="code",
+    )
+    second_target = _worker_target(
+        "@alice:example.test",
+        worker_scope="user_agent",
+        agent_name="research",
+    )
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "code-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "research-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer code-token"},
+        {"Authorization": "Bearer research-token"},
+    ]
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+        ("user_agent", first_target.worker_key),
+        ("user_agent", second_target.worker_key),
     }
 
 
@@ -2192,7 +2306,7 @@ async def test_mcp_provider_move_retires_current_provider_owner_not_old_server_i
     assert replacement_session is not None
     assert shared_session is not None
 
-    async with manager.retire_request_session(credential_context=old_context):
+    async with manager.retire_oauth_scope_session(credential_context=old_context):
         assert replacement_key in manager._scoped_states
         assert shared_key not in manager._scoped_states
 
@@ -2226,12 +2340,52 @@ async def test_mcp_manager_retires_requester_oauth_session(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(credential_context=credential_context):
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
         pass
 
     assert alice_session.closed is True
     assert bob_session.closed is False
     assert len(manager._scoped_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retires_shared_agent_session_without_touching_other_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset retirement follows the shared agent credential owner."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    code_target = _shared_worker_target("@alice:example.test", agent_name="code")
+    research_target = _shared_worker_target("@alice:example.test", agent_name="research")
+    _save_mcp_oauth_credentials(runtime_paths, code_target, "code-token")
+    _save_mcp_oauth_credentials(runtime_paths, research_target, "research-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=code_target)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=research_target,
+    )
+    code_session = _FakeClientSession.sessions[0]
+    research_session = _FakeClientSession.sessions[1]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=code_target,
+        credentials_manager=credentials_manager,
+    )
+
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
+        pass
+
+    assert code_session.closed is True
+    assert research_session.closed is False
+    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+        ("shared", research_target.worker_key),
+    }
 
 
 @pytest.mark.asyncio
@@ -2267,7 +2421,7 @@ async def test_mcp_manager_retirement_waits_for_in_flight_requester_call(
     retirement_entered = asyncio.Event()
 
     async def retire() -> None:
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             retirement_entered.set()
 
     call_task = asyncio.create_task(
@@ -2327,7 +2481,7 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(credential_context=credential_context):
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
         assert captured_state.retired is True
         with pytest.raises(_MCPAuthorizationChangedError):
             await manager._refresh_server_catalog(
@@ -2377,7 +2531,7 @@ async def test_mcp_manager_retirement_allows_new_catalog_after_cancellation(
     finish_body = asyncio.Event()
 
     async def retire() -> None:
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             body_entered.set()
             await finish_body.wait()
 
@@ -2425,11 +2579,11 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
         worker_target=worker_target,
         credentials_manager=credentials_manager,
     )
-    request_key = manager._request_session_key(
+    request_key = manager._scope_session_key(
         base_state,
         credential_context.worker_target,
         provider_id=credential_context.provider.id,
-    ).oauth_request_key
+    ).oauth_scope_key
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
     cancellation_turn = asyncio.Event()
@@ -2443,7 +2597,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
 
     async def retire() -> None:
         nonlocal body_entered
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             body_entered = True
 
     monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
@@ -2456,7 +2610,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
     assert retirement.done() is False
     assert manager._scoped_states == {}
     assert manager._retiring_states == {id(state): state}
-    assert request_key in manager._retired_request_keys
+    assert request_key in manager._retired_scope_keys
     with pytest.raises(OAuthConnectionRequired):
         await manager.get_request_catalog(
             "demo",
@@ -2472,7 +2626,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
     assert body_entered is False
     assert session.closed is True
     assert manager._retiring_states == {}
-    assert request_key not in manager._retired_request_keys
+    assert request_key not in manager._retired_scope_keys
 
 
 @pytest.mark.asyncio
@@ -2508,7 +2662,7 @@ async def test_mcp_manager_retires_stale_cached_session_for_current_connection_g
         credential_generation="stale-cached-generation",
     )
 
-    async with manager.retire_request_session(
+    async with manager.retire_oauth_scope_session(
         credential_context=credential_context,
         expected_connection_generation=approved_connection_generation,
     ):
@@ -2546,7 +2700,7 @@ async def test_mcp_manager_does_not_retire_session_from_later_connection_generat
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(
+    async with manager.retire_oauth_scope_session(
         credential_context=credential_context,
         expected_connection_generation="older-approved-connection-generation",
     ):
@@ -2846,8 +3000,8 @@ async def test_request_retirement_drains_later_states_before_propagating_cleanup
 
     monkeypatch.setattr(manager, "_disconnect_state_when_idle", disconnect)
 
-    with pytest.raises(MCPConnectionError, match="requester session cleanup failed"):
-        await manager._drain_retired_request_states((first, second))
+    with pytest.raises(MCPConnectionError, match="credential-scope session cleanup failed"):
+        await manager._drain_retired_oauth_scope_states((first, second))
 
     assert drained == ["first", "second"]
     assert manager._retiring_states == {id(first): first}
@@ -3924,19 +4078,19 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
         ),
     ],
 )
-async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collision(
+async def test_dynamic_load_rejects_scoped_oauth_mcp_function_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     worker_scope: WorkerScope,
     requester_id: str,
     authorization: dict[str, object],
 ) -> None:
-    """Deferred tools should collide with the active requester's discovered OAuth MCP catalog."""
+    """Deferred tools should collide with the active credential scope's discovered OAuth MCP catalog."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target(requester_id, worker_scope=worker_scope)
-    credential_target = _worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope=worker_scope)
     _save_mcp_oauth_credentials(runtime_paths, credential_target, "alice-token")
     config = Config.validate_with_runtime(
         {

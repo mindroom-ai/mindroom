@@ -295,13 +295,13 @@ async def test_oauth_mcp_toolkit_bridge_descriptions_without_server_description(
     )
 
     assert toolkit.async_functions["demo_connection_status"].description == (
-        "Check whether MCP server 'demo' is connected for the current requester."
+        "Check whether MCP server 'demo' is connected for this agent's credential scope."
     )
     assert toolkit.async_functions["demo_list_tools"].description == (
-        "List remote tools exposed by MCP server 'demo' for the current requester."
+        "List remote tools exposed by MCP server 'demo' for this agent's credential scope."
     )
     assert toolkit.async_functions["demo_call_tool"].description == (
-        "Call one remote tool on MCP server 'demo' for the current requester."
+        "Call one remote tool on MCP server 'demo' for this agent's credential scope."
     )
 
 

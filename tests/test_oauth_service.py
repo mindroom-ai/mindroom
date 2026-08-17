@@ -792,7 +792,7 @@ async def test_completed_browser_reset_replay_skips_mcp_retirement(
         retirement_entered = True
         yield
 
-    monkeypatch.setattr(reset_execution, "retire_mcp_oauth_request_session", retirement)
+    monkeypatch.setattr(reset_execution, "retire_mcp_oauth_scope_session", retirement)
 
     deleted = await reset_execution.retire_and_reset_oauth_credentials(
         context,

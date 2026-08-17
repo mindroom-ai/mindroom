@@ -37,7 +37,7 @@ This makes the local state transition atomic instead of reconstructing it after 
 21. The reset tool is non-destructive and only issues a requester-bound browser confirmation URL.
 22. The authenticated browser POST is the reset execution boundary.
 23. MCP retirement completes before the credential transaction commits a reset.
-24. A same-generation HTTP bearer rejection retires the exact MCP requester session without replaying the remote call.
+24. A same-generation HTTP bearer rejection retires the exact MCP credential-scope session without replaying the remote call.
 
 ## Ownership
 
@@ -103,7 +103,7 @@ Later same-scope callers observe the committed rotation and do not consume the s
 
 1. Revalidate the requester, provider, agent, scope, worker key, and confirmed connection generation.
 2. Return a completed stable operation before MCP retirement.
-3. Fence and retire every cached MCP requester session for the credential key.
+3. Fence and retire every cached MCP credential-scope session for the credential key.
 4. Enter the SQLite transaction.
 5. Recheck the stable receipt and connection generation.
 6. Clear the payload, advance both revisions, and insert the permanent receipt in one commit.

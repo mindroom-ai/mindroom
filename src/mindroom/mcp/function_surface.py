@@ -19,20 +19,20 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class MCPFunctionSurfaceSnapshot:
-    """One agent and requester surface prepared by the MCP manager."""
+    """One agent and credential surface prepared by the MCP manager."""
 
     agent_name: str
-    requester_surface: tuple[str, str] | None
+    credential_surface: tuple[str, str] | None
     local_function_names: frozenset[str]
     server_function_sources: tuple[tuple[str, tuple[frozenset[str], ...]], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class MCPFunctionCollisionReport:
-    """Collisions owned by one server on one agent and requester surface."""
+    """Collisions owned by one server on one agent and credential surface."""
 
     agent_name: str
-    requester_surface: tuple[str, str] | None
+    credential_surface: tuple[str, str] | None
     server_id: str
     function_name_collisions: tuple[tuple[str, str], ...]
 
@@ -87,7 +87,7 @@ def analyze_mcp_function_collisions(
         reports.extend(
             MCPFunctionCollisionReport(
                 agent_name=snapshot.agent_name,
-                requester_surface=snapshot.requester_surface,
+                credential_surface=snapshot.credential_surface,
                 server_id=server_id,
                 function_name_collisions=tuple(sorted(collisions)),
             )
