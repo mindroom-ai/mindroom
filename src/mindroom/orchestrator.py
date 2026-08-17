@@ -512,6 +512,44 @@ class _MultiAgentOrchestrator:
                 running_bots.append(bot)
         return running_bots
 
+    def _ready_bot_for_turn_journal_recovery(
+        self,
+        entity_name: str,
+        config: Config,
+    ) -> AgentBot | TeamBot | None:
+        """Return the current bot when its fleet dependencies are ready."""
+        bot = self.agent_bots.get(entity_name)
+        required_entities = (
+            [entity_name]
+            if entity_name == ROUTER_AGENT_NAME
+            else ([entity_name, *config.teams[entity_name].agents] if entity_name in config.teams else [entity_name])
+        )
+        if bot is None or any(
+            self.entity_first_sync_complete(required_entity) is not True for required_entity in required_entities
+        ):
+            return None
+        return bot
+
+    async def _recover_current_turn_journal_bot(self, entity_name: str) -> Exception | None:
+        """Recover the ready current generation for one configured entity."""
+        config = self.config
+        if config is None or entity_name not in configured_entity_names(config):
+            return None
+        bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+        if bot is None:
+            return None
+        try:
+            await bot.recover_pending_turn_journal_events()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.exception(
+                "turn_dispatch_recovery_failed",
+                agent_name=entity_name,
+            )
+            return error
+        return None
+
     async def _recover_ready_turn_journal_events(self) -> None:
         """Recover fleet-dependent turns whose required runtimes are ready."""
         async with self._dispatch_recovery_lock:
@@ -519,32 +557,17 @@ class _MultiAgentOrchestrator:
             if config is None:
                 return
             first_error: Exception | None = None
+            ready_bots: list[tuple[str, AgentBot | TeamBot]] = []
             for entity_name in configured_entity_names(config):
-                bot = self.agent_bots.get(entity_name)
-                required_entities = (
-                    [entity_name]
-                    if entity_name == ROUTER_AGENT_NAME
-                    else (
-                        [entity_name, *config.teams[entity_name].agents]
-                        if entity_name in config.teams
-                        else [entity_name]
-                    )
-                )
-                if bot is None or any(
-                    self.entity_first_sync_complete(required_entity) is not True
-                    for required_entity in required_entities
-                ):
+                bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+                if bot is None:
                     continue
-                try:
-                    await bot.recover_pending_turn_journal_events()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    first_error = first_error or error
-                    logger.exception(
-                        "turn_dispatch_recovery_failed",
-                        agent_name=entity_name,
-                    )
+                ready_bots.append((entity_name, bot))
+            for _entity_name, bot in ready_bots:
+                bot.release_pending_turn_journal_replay()
+            for entity_name, _released_bot in ready_bots:
+                error = await self._recover_current_turn_journal_bot(entity_name)
+                first_error = first_error or error
             if first_error is not None:
                 raise first_error
 

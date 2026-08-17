@@ -1506,9 +1506,13 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
-    async def recover_pending_turn_journal_events(self) -> None:
-        """Release fleet-dependent turn replay after the responder startup pass."""
+    def release_pending_turn_journal_replay(self) -> None:
+        """Let this ready bot's durable turns progress beside fleet recovery."""
         self._journal_dispatcher.release_turn_replay()
+
+    async def recover_pending_turn_journal_events(self) -> None:
+        """Drain fleet-dependent turn replay after the responder startup pass."""
+        self.release_pending_turn_journal_replay()
         await self._journal_dispatcher.drain_once()
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),

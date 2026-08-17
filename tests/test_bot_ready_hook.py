@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -211,6 +212,85 @@ async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: 
 
     bot._journal_dispatcher.drain_once.assert_awaited_once_with()
     bot._turn_store.cleanup.assert_awaited_once_with(unsettled_source_event_ids=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_fleet_turn_recovery_releases_every_ready_bot_before_the_first_drain(tmp_path: Path) -> None:
+    """One expensive recovery must not keep later bots' durable turns parked."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    router_bot = MagicMock()
+    code_bot = MagicMock()
+    router_bot.running = code_bot.running = True
+    router_bot.first_sync_complete = code_bot.first_sync_complete = True
+    router_released = asyncio.Event()
+    code_released = asyncio.Event()
+    router_recovery_started = asyncio.Event()
+    finish_router_recovery = asyncio.Event()
+
+    def release_router() -> None:
+        router_released.set()
+
+    def release_code() -> None:
+        code_released.set()
+
+    async def recover_router() -> None:
+        release_router()
+        router_recovery_started.set()
+        await finish_router_recovery.wait()
+
+    async def recover_code() -> None:
+        release_code()
+
+    router_bot.release_pending_turn_journal_replay = release_router
+    code_bot.release_pending_turn_journal_replay = release_code
+    router_bot.recover_pending_turn_journal_events = recover_router
+    code_bot.recover_pending_turn_journal_events = recover_code
+    orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+
+    recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
+    await router_recovery_started.wait()
+    await asyncio.sleep(0)
+    try:
+        assert router_released.is_set()
+        assert code_released.is_set()
+    finally:
+        finish_router_recovery.set()
+        await recovery
+
+
+@pytest.mark.asyncio
+async def test_fleet_turn_recovery_reloads_current_bot_before_each_serial_drain(tmp_path: Path) -> None:
+    """A reload during an earlier drain must not recover a retired bot generation."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    router_bot = MagicMock()
+    retired_code_bot = MagicMock()
+    replacement_code_bot = MagicMock()
+    for bot in (router_bot, retired_code_bot, replacement_code_bot):
+        bot.running = True
+        bot.first_sync_complete = True
+        bot.release_pending_turn_journal_replay = MagicMock()
+        bot.recover_pending_turn_journal_events = AsyncMock()
+    router_recovery_started = asyncio.Event()
+    finish_router_recovery = asyncio.Event()
+
+    async def recover_router() -> None:
+        router_recovery_started.set()
+        await finish_router_recovery.wait()
+
+    router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
+    orchestrator.agent_bots = {"router": router_bot, "code": retired_code_bot}
+
+    recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
+    await router_recovery_started.wait()
+    orchestrator.agent_bots["code"] = replacement_code_bot
+    finish_router_recovery.set()
+    await recovery
+
+    retired_code_bot.release_pending_turn_journal_replay.assert_called_once_with()
+    retired_code_bot.recover_pending_turn_journal_events.assert_not_awaited()
+    replacement_code_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
