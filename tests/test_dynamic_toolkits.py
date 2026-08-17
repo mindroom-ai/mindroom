@@ -1082,12 +1082,15 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
         ("openai", "gpt-5.6", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
     ],
 )
+@pytest.mark.parametrize("collide_all", [False, True], ids=["partial-collision", "full-collision"])
 def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
     model_id: str,
     deferred_names_attr: str,
+    *,
+    collide_all: bool,
 ) -> None:
     """Final MCP collision projection must preserve the surviving local tool's eager ownership."""
     raw = _base_config_data()
@@ -1120,21 +1123,28 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
                 credentials_manager=get_runtime_credentials_manager(runtime_paths),
             )
         local = Toolkit(name="local", auto_register=False)
-        local.functions["demo_list_tools"] = Function(
-            name="demo_list_tools",
-            entrypoint=lambda: "local",
+        colliding_names = (
+            {"demo_call_tool", "demo_connection_status", "demo_list_tools"} if collide_all else {"demo_list_tools"}
         )
+        for function_name in colliding_names:
+            local.functions[function_name] = Function(
+                name=function_name,
+                entrypoint=lambda: "local",
+            )
         return local
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
 
     agent = create_agent("code", config, runtime_paths, execution_identity=None, session_id="thread-a")
 
-    deferred_names = vars(agent.model)[deferred_names_attr]
-    assert "demo_list_tools" not in deferred_names
-    assert deferred_names == frozenset({"demo_call_tool", "demo_connection_status"})
+    expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
+    assert vars(agent.model).get(deferred_names_attr, frozenset()) == expected_deferred_names
     local = next(tool for tool in agent.tools if tool.name == "local")
     assert "demo_list_tools" in local.functions
+    discovery_blocks = [block for block in agent.instructions if block.startswith("## Deferred Tool Discovery")]
+    assert bool(discovery_blocks) is not collide_all
+    if discovery_blocks:
+        assert "mcp_demo" in discovery_blocks[0]
 
 
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(

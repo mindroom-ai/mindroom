@@ -550,7 +550,8 @@ def test_unreadable_credentials_return_reset_required_payload(tmp_path: Path, un
     assert payload["reason"] == "reset_required"
     assert payload["reset_required"] is True
     assert payload["connect_url"] is None
-    assert "reset_oauth_connection" in payload["error"]
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
 
 
 def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Path) -> None:

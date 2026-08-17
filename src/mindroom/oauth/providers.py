@@ -443,6 +443,12 @@ class OAuthProvider:
             raise ValueError(msg)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
+            if is_oauth_token_service(self.tool_config_service):
+                msg = (
+                    f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
+                    "must not end with '_oauth'"
+                )
+                raise ValueError(msg)
             if is_oauth_client_config_service(self.tool_config_service):
                 msg = (
                     f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "

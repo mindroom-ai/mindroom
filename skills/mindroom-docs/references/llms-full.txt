@@ -13238,7 +13238,7 @@ Providers supply only provider-specific metadata and parsing behavior, such as O
 
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
 When a scoped token exists but cannot be decoded, status returns `reset_required: true`, and the dashboard offers the decode-free scoped disconnect path before reconnecting.
-Agent-facing OAuth tools return the same structured `reset_required` signal and direct the agent to `reset_oauth_connection`, which issues an authenticated, requester-bound browser reset flow instead of an unusable connect link.
+Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to match the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.

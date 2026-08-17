@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -12,8 +14,6 @@ from mindroom.oauth.providers import OAuthProvider
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -56,6 +56,21 @@ def test_builtin_oauth_registry_includes_github() -> None:
 
     assert providers["github"].credential_service == "github_oauth"
     assert providers["github"].tool_config_service == "github"
+
+
+def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
+    """Dashboard-editable provider settings cannot use the reserved OAuth token suffix."""
+    with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth'"):
+        OAuthProvider(
+            id="demo",
+            display_name="Demo",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",  # noqa: S106
+            scopes=("read",),
+            credential_service="demo_oauth",
+            tool_config_service="demo_settings_oauth",
+            client_config_services=("demo_oauth_client",),
+        )
 
 
 def test_load_oauth_provider_registry_caches_loaded_registry(

@@ -1049,7 +1049,8 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
     assert payload["reason"] == "reset_required"
     assert payload["reset_required"] is True
     assert payload["connect_url"] is None
-    assert "reset_oauth_connection" in payload["error"]
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
 
 
 @pytest.mark.asyncio

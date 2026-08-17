@@ -464,7 +464,8 @@ def test_google_wrapper_routes_unreadable_credentials_to_reset_flow(
     assert payload["reason"] == "reset_required"
     assert payload["reset_required"] is True
     assert payload["connect_url"] is None
-    assert "reset_oauth_connection" in payload["error"]
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
 
 
 def test_scoped_oauth_client_connection_required_uses_shared_instruction(

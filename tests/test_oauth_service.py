@@ -44,7 +44,9 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenResult,
+    oauth_connection_required_payload,
 )
+from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -211,6 +213,21 @@ def _load(context: OAuthCredentialContext) -> dict[str, Any] | None:
 
 def _connection_generation(context: OAuthCredentialContext) -> str:
     return credential_lifecycle.load_oauth_credentials_snapshot_sync(context).connection_generation
+
+
+def test_reset_required_guidance_uses_authenticated_dashboard_for_shared_scope(tmp_path: Path) -> None:
+    """Unreadable shared credentials must name a recovery path available outside agent tools."""
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    context = _context(tmp_path, _FakeOAuthProvider(unused_refresh))
+
+    exc = oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON)
+    payload = oauth_connection_required_payload(exc)
+    assert payload["reset_required"] is True
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
 
 
 def _run_nested_sync_refresh(storage_path: str, result_queue: Queue) -> None:
