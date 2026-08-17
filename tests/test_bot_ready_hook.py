@@ -260,6 +260,46 @@ async def test_fleet_turn_recovery_releases_every_ready_bot_before_the_first_dra
 
 
 @pytest.mark.asyncio
+async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_blocked(tmp_path: Path) -> None:
+    """A later first sync must release replay without waiting for an earlier drain."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    router_bot = MagicMock()
+    code_bot = MagicMock()
+    router_bot.agent_name = "router"
+    code_bot.agent_name = "code"
+    router_bot.running = code_bot.running = True
+    router_bot.first_sync_complete = True
+    code_bot.first_sync_complete = False
+    router_recovery_started = asyncio.Event()
+    finish_router_recovery = asyncio.Event()
+    code_released = asyncio.Event()
+
+    async def recover_router() -> None:
+        router_recovery_started.set()
+        await finish_router_recovery.wait()
+
+    router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
+    code_bot.recover_pending_turn_journal_events = AsyncMock()
+    code_bot.release_pending_turn_journal_replay = code_released.set
+    orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+
+    orchestrator._schedule_ready_turn_dispatch_recovery()
+    await router_recovery_started.wait()
+    try:
+        code_bot.first_sync_complete = True
+        await orchestrator.handle_bot_ready(code_bot)
+
+        assert code_released.is_set()
+    finally:
+        finish_router_recovery.set()
+        await wait_for_background_tasks(
+            timeout=1.0,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+
+
+@pytest.mark.asyncio
 async def test_fleet_turn_recovery_reloads_current_bot_before_each_serial_drain(tmp_path: Path) -> None:
     """A reload during an earlier drain must not recover a retired bot generation."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))

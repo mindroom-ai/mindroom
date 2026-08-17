@@ -1232,6 +1232,12 @@ class _MultiAgentOrchestrator:
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         await self._approval_transport.handle_bot_ready(bot)
+        config = self.config
+        if config is not None:
+            for entity_name in configured_entity_names(config):
+                ready_bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+                if ready_bot is not None:
+                    ready_bot.release_pending_turn_journal_replay()
         self._schedule_ready_turn_dispatch_recovery()
 
     async def _start_runtime(self) -> None:
