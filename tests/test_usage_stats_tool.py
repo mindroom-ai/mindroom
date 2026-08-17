@@ -164,6 +164,28 @@ async def test_admin_allows_canonical_global_alias(
 
 
 @pytest.mark.asyncio
+async def test_admin_rejects_alias_only_global_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a canonical ID in global_users grants the established admin role."""
+    context = _context(
+        tmp_path,
+        requester_id="@admin:example.test",
+        global_users=["@telegram-admin:example.test"],
+        aliases={"@admin:example.test": ["@telegram-admin:example.test"]},
+    )
+    collect = Mock()
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
+
+    assert payload["code"] == "authorization_error"
+    collect.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_invalid_grouping_fails_before_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid grouping cannot reach caller context or storage."""
     context = Mock()

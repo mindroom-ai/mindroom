@@ -101,6 +101,7 @@ class UsageSessionRow:
     entity_kind: Literal["agent", "team"]
     row_key: str
     runs: tuple[UsageRunNode, ...]
+    payload_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +370,7 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
             query = (
                 "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
                 "CASE WHEN length(CAST(runs AS BLOB)) <= ? THEN runs END AS runs, "
+                "length(CAST(runs AS BLOB)) AS payload_bytes, "
                 "CASE WHEN length(CAST(runs AS BLOB)) > ? THEN 1 ELSE 0 END AS too_large "
                 f"FROM {table} LIMIT ?"
             )
@@ -424,6 +426,9 @@ def _extract_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageSessionRo
     raw_runs = json.loads(row["runs"] or "[]")
     if not isinstance(raw_runs, list):
         raise TypeError
+    payload_bytes = row["payload_bytes"] or 0
+    if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
+        raise TypeError
     if len(raw_runs) > _MAX_RUNS_PER_ROW:
         raise _UsageResourceLimitError
     runs: list[UsageRunNode] = []
@@ -437,6 +442,7 @@ def _extract_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageSessionRo
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
         runs=tuple(runs),
+        payload_bytes=payload_bytes,
     )
 
 

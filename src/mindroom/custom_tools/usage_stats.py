@@ -80,8 +80,7 @@ class UsageStatsTools(Toolkit):
             return resolved
         config = resolved.current_config
         canonical_requester = config.authorization.resolve_alias(resolved.requester_id)
-        global_users = {config.authorization.resolve_alias(user_id) for user_id in config.authorization.global_users}
-        if canonical_requester not in global_users:
+        if canonical_requester not in config.authorization.global_users:
             return self._error(
                 "authorization_error",
                 "Usage statistics admin access is not authorized for this requester.",

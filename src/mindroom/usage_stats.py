@@ -58,6 +58,8 @@ _TOKEN_FIELDS = (
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _BREAKDOWN_LIMIT = 200
 _MAX_ROWS_PER_REQUEST = 250
+_MAX_RUNS_PER_REQUEST = 25_000
+_MAX_BYTES_PER_REQUEST = 64_000_000
 _COVERAGE_NOTE = (
     "Retained top-level Agno runs only; nested team-member tokens and compacted history are excluded from totals."
 )
@@ -65,6 +67,10 @@ _COVERAGE_NOTE = (
 
 class UsageStatsValidationError(ValueError):
     """A usage query contains an unsupported value."""
+
+
+class _IncompleteRetainedRunError(ValueError):
+    """A visible retained run has unusable usage fields."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +293,7 @@ def collect_admin_usage(
     )
 
 
-def _collect_usage(  # noqa: C901
+def _collect_usage(  # noqa: C901, PLR0912, PLR0915
     *,
     sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
     config: Config,
@@ -317,6 +323,8 @@ def _collect_usage(  # noqa: C901
     scanned_sources: set[str] = set()
     unavailable_sources: set[str] = set()
     rows_scanned = 0
+    runs_scanned = 0
+    bytes_scanned = 0
     truncated = False
     scan_limit_reached = False
 
@@ -337,19 +345,33 @@ def _collect_usage(  # noqa: C901
                 unavailable_sources.add(item.path_label)
                 truncated = truncated or item.status == "resource_limit"
                 continue
+            if bytes_scanned + item.payload_bytes > _MAX_BYTES_PER_REQUEST:
+                truncated = True
+                scan_limit_reached = True
+                break
+            bytes_scanned += item.payload_bytes
+            if runs_scanned + len(item.runs) > _MAX_RUNS_PER_REQUEST:
+                truncated = True
+                scan_limit_reached = True
+                break
+            runs_scanned += len(item.runs)
             for run in item.runs:
-                accepted = _accepted_run(
-                    row=item,
-                    run=run,
-                    config=config,
-                    scope=scope,
-                    expected_agent=expected_agent,
-                    expected_requester=expected_requester,
-                    entity_filter=entity_filter,
-                    requester_filter=requester_filter,
-                    window_start=window_start,
-                    window_end=window_end,
-                )
+                try:
+                    accepted = _accepted_run(
+                        row=item,
+                        run=run,
+                        config=config,
+                        scope=scope,
+                        expected_agent=expected_agent,
+                        expected_requester=expected_requester,
+                        entity_filter=entity_filter,
+                        requester_filter=requester_filter,
+                        window_start=window_start,
+                        window_end=window_end,
+                    )
+                except _IncompleteRetainedRunError:
+                    unavailable_sources.add(source.path_label)
+                    continue
                 if accepted is None:
                     continue
                 if run.run_id is not None:
@@ -424,11 +446,15 @@ def _accepted_run(  # noqa: PLR0911
     ):
         return None
     created_at = _run_timestamp(run.created_at)
-    if created_at is None or (window_start is not None and created_at < window_start) or created_at >= window_end:
+    if created_at is None:
+        raise _IncompleteRetainedRunError
+    if (window_start is not None and created_at < window_start) or created_at >= window_end:
+        return None
+    if not any(run.metrics.get(field) is not None for field in _TOKEN_FIELDS):
         return None
     totals = _metrics_totals(run.metrics)
     if totals is None:
-        return None
+        raise _IncompleteRetainedRunError
     return _AcceptedRun(
         entity_id=entity_id,
         requester_id=requester_id,

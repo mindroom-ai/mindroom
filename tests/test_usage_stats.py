@@ -103,6 +103,7 @@ def _row(
     *runs: UsageRunNode,
     entity_id: str | None = None,
     row_key: str = "session-1",
+    payload_bytes: int = 0,
 ) -> UsageSessionRow:
     is_team = source.scope == "team"
     return UsageSessionRow(
@@ -111,6 +112,7 @@ def _row(
         entity_kind="team" if is_team else "agent",
         row_key=row_key,
         runs=tuple(runs),
+        payload_bytes=payload_bytes,
     )
 
 
@@ -317,6 +319,135 @@ def test_request_row_limit_counts_diagnostics(
 
     assert report.run_count == 0
     assert report.coverage.truncated is True
+
+
+def test_request_run_limit_reports_truncated_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many runs inside one session cannot bypass the request-wide work limit."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (_row(source, _run(run_id="first"), _run(run_id="second")),),
+        },
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_RUNS_PER_REQUEST", 1)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.truncated is True
+
+
+def test_request_byte_limit_reports_truncated_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retained JSON bytes are bounded across all sources in one request."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run(), payload_bytes=2),)},
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_BYTES_PER_REQUEST", 1)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.truncated is True
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        _run(created_at="not-a-timestamp"),
+        UsageRunNode(
+            team_id=None,
+            requester_id="@alice:example.test",
+            created_at="2026-01-02T12:00:00Z",
+            model_provider="openai",
+            model_id="gpt-5.6",
+            run_id="invalid-metrics",
+            metrics=MappingProxyType({"total_tokens": "not-a-number"}),
+        ),
+    ],
+)
+def test_invalid_retained_usage_marks_source_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run: UsageRunNode,
+) -> None:
+    """Invalid retained timestamps and counters cannot look like complete zero usage."""
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, run),)})
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.unavailable_sources == 1
+
+
+def test_retained_run_without_metrics_is_not_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legitimate retained run with no token counters is simply not usage."""
+    source = _source()
+    run = UsageRunNode(
+        team_id=None,
+        requester_id="@alice:example.test",
+        created_at="2026-01-02T12:00:00Z",
+        model_provider=None,
+        model_id=None,
+        run_id="no-metrics",
+        metrics=MappingProxyType({}),
+    )
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, run),)})
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.unavailable_sources == 0
 
 
 def test_self_private_storage_uses_physical_requester_isolation(

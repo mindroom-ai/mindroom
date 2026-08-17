@@ -172,6 +172,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert len(row.runs) == 1
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert row.runs[0].requester_id == "@alice:example.test"
+    assert row.payload_bytes > 0
     assert not hasattr(row.runs[0], "member_responses")
     assert "secret" not in repr(row)
     assert "999" not in repr(row)
