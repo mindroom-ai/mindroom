@@ -5,9 +5,16 @@ Static discovery invalidates conflicting catalogs, dynamic loading rejects the n
 construction hides any collision that appears between those validation boundaries.
 """
 
+from __future__ import annotations
+
 from collections import Counter
-from collections.abc import Collection
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from mindroom.mcp.types import MCPOAuthCredentialScope
 
 __all__ = [
     "MCPFunctionCollisionReport",
@@ -22,7 +29,7 @@ class MCPFunctionSurfaceSnapshot:
     """One agent and credential surface prepared by the MCP manager."""
 
     agent_name: str
-    credential_surface: tuple[str, str] | None
+    credential_surface: MCPOAuthCredentialScope | None
     local_function_names: frozenset[str]
     server_function_sources: tuple[tuple[str, tuple[frozenset[str], ...]], ...]
 
@@ -32,7 +39,7 @@ class MCPFunctionCollisionReport:
     """Collisions owned by one server on one agent and credential surface."""
 
     agent_name: str
-    credential_surface: tuple[str, str] | None
+    credential_surface: MCPOAuthCredentialScope | None
     server_id: str
     function_name_collisions: tuple[tuple[str, str], ...]
 

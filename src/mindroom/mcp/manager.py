@@ -45,6 +45,7 @@ from mindroom.mcp.surface_projection import (
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import (
     MCPDiscoveredTool,
+    MCPOAuthCredentialScope,
     MCPOAuthLeaseVersion,
     MCPServerCatalog,
     MCPServerState,
@@ -103,8 +104,7 @@ class _MCPOAuthScopeKey:
     """Provider and credential scope shared across server config generations."""
 
     provider_id: str
-    worker_scope: str
-    worker_key: str
+    credential_scope: MCPOAuthCredentialScope
 
 
 @dataclass(frozen=True)
@@ -114,16 +114,14 @@ class _MCPSessionKey:
     server_id: str
     config_generation: int
     provider_id: str
-    worker_scope: str
-    worker_key: str
+    credential_scope: MCPOAuthCredentialScope
 
     @property
     def oauth_scope_key(self) -> _MCPOAuthScopeKey:
         """Return the provider and credential scope used by reset retirement."""
         return _MCPOAuthScopeKey(
             provider_id=self.provider_id,
-            worker_scope=self.worker_scope,
-            worker_key=self.worker_key,
+            credential_scope=self.credential_scope,
         )
 
 
@@ -162,10 +160,10 @@ def _resolved_oauth_scope(
     worker_target: ResolvedWorkerTarget | None,
     *,
     provider_id: str,
-) -> tuple[str, str]:
+) -> MCPOAuthCredentialScope:
     """Return the canonical credential scope used to key one MCP OAuth session."""
     if worker_target is None or worker_target.worker_scope is None:
-        return "unscoped", "global"
+        return MCPOAuthCredentialScope(worker_scope="unscoped", worker_key="global")
     worker_scope = worker_target.worker_scope
     worker_key = worker_target.worker_key
     if not worker_key:
@@ -175,7 +173,16 @@ def _resolved_oauth_scope(
     if worker_scope in {"user", "user_agent"} and (identity is None or not identity.requester_id):
         msg = f"MCP OAuth provider '{provider_id}' requires a requester identity"
         raise OAuthConnectionRequired(msg, provider_id=provider_id)
-    return worker_scope, worker_key
+    routing_agent_name = worker_target.routing_agent_name if worker_scope in {"shared", "user_agent"} else None
+    if worker_scope in {"shared", "user_agent"} and not routing_agent_name:
+        msg = f"MCP OAuth provider '{provider_id}' requires an agent identity"
+        raise OAuthProviderError(msg)
+    return MCPOAuthCredentialScope(
+        worker_scope=worker_scope,
+        worker_key=worker_key,
+        requester_id=identity.requester_id if identity is not None and worker_scope in {"user", "user_agent"} else None,
+        routing_agent_name=routing_agent_name,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +318,7 @@ class MCPServerManager:
         """Detach scoped OAuth states with no agent access in the published config."""
         for key, scoped_state in tuple(self._scoped_states.items()):
             scoped = MCPScopedFunctionState(
-                credential_surface=(key.worker_scope, key.worker_key),
+                credential_surface=key.credential_scope,
                 state=scoped_state,
             )
             if scoped_oauth_state_has_configured_agent(config, scoped):
@@ -571,14 +578,13 @@ class MCPServerManager:
     ) -> AsyncIterator[None]:
         """Fence one provider credential lineage across every server config generation."""
         worker_target = credential_context.worker_target
-        worker_scope, worker_key = _resolved_oauth_scope(
+        credential_scope = _resolved_oauth_scope(
             worker_target,
             provider_id=credential_context.provider.id,
         )
         scope_key = _MCPOAuthScopeKey(
             provider_id=credential_context.provider.id,
-            worker_scope=worker_scope,
-            worker_key=worker_key,
+            credential_scope=credential_scope,
         )
         async with self._state_lifecycle_lock:
             retirement_lock = self._scope_retirement_locks.setdefault(scope_key, asyncio.Lock())
@@ -607,7 +613,7 @@ class MCPServerManager:
                         if (
                             id(state) in seen_state_ids
                             or state.oauth_provider_id != scope_key.provider_id
-                            or state.oauth_credential_scope != (scope_key.worker_scope, scope_key.worker_key)
+                            or state.oauth_credential_scope != scope_key.credential_scope
                         ):
                             continue
                         state.retired = True
@@ -640,7 +646,7 @@ class MCPServerManager:
         *,
         provider_id: str,
     ) -> _MCPSessionKey:
-        worker_scope, worker_key = _resolved_oauth_scope(
+        credential_scope = _resolved_oauth_scope(
             worker_target,
             provider_id=provider_id,
         )
@@ -648,8 +654,7 @@ class MCPServerManager:
             server_id=state.server_id,
             config_generation=state.config_generation,
             provider_id=provider_id,
-            worker_scope=worker_scope,
-            worker_key=worker_key,
+            credential_scope=credential_scope,
         )
 
     def _log_oauth_refresh_failure(
@@ -798,8 +803,7 @@ class MCPServerManager:
                     config_generation=key.config_generation,
                     oauth_provider_id=key.provider_id,
                     oauth_authorization=base_state.oauth_authorization,
-                    oauth_credential_scope=(key.worker_scope, key.worker_key),
-                    oauth_routing_agent_name=(worker_target.routing_agent_name if worker_target is not None else None),
+                    oauth_credential_scope=key.credential_scope,
                 )
                 self._scoped_states[key] = state
 
@@ -1631,11 +1635,7 @@ class MCPServerManager:
             or state.oauth_lease_version != authorization_lease.version
             or state.config_generation != authorization_lease.session_key.config_generation
             or state.oauth_provider_id != authorization_lease.session_key.provider_id
-            or state.oauth_credential_scope
-            != (
-                authorization_lease.session_key.worker_scope,
-                authorization_lease.session_key.worker_key,
-            )
+            or state.oauth_credential_scope != authorization_lease.session_key.credential_scope
             or self._scoped_states.get(authorization_lease.session_key) is not state
             or authorization_lease.session_key.oauth_scope_key in self._retired_scope_keys
         ):
@@ -1692,7 +1692,7 @@ class MCPServerManager:
             states=self._states,
             scoped_states=tuple(
                 MCPScopedFunctionState(
-                    credential_surface=(key.worker_scope, key.worker_key),
+                    credential_surface=key.credential_scope,
                     state=state,
                 )
                 for key, state in self._scoped_states.items()
@@ -1762,7 +1762,7 @@ class MCPServerManager:
     def _function_validation_states_for_surface(
         self,
         server_id: str,
-        credential_surface: tuple[str, str] | None,
+        credential_surface: MCPOAuthCredentialScope | None,
     ) -> tuple[MCPServerState, ...]:
         """Return only states whose visible function surface owns one collision."""
         base_state = self._states.get(server_id)
@@ -1772,7 +1772,7 @@ class MCPServerManager:
         states.extend(
             state
             for key, state in self._scoped_states.items()
-            if key.server_id == server_id and (key.worker_scope, key.worker_key) == credential_surface
+            if key.server_id == server_id and key.credential_scope == credential_surface
         )
         return tuple(states)
 
@@ -1819,7 +1819,7 @@ class MCPServerManager:
         context = self._function_surface_context()
         if context is None:
             return []
-        credential_surfaces: set[tuple[str, str]] = set()
+        credential_surfaces: set[MCPOAuthCredentialScope] = set()
         if worker_target is not None:
             for server_id in sorted(self._states):
                 state = self._states[server_id]

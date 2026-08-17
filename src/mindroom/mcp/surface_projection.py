@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.mcp.types import MCPServerCatalog, MCPServerState
+    from mindroom.mcp.types import MCPOAuthCredentialScope, MCPServerCatalog, MCPServerState
 
 type _LoadedToolNames = list[str] | tuple[str, ...] | set[str] | frozenset[str]
 
@@ -47,7 +47,7 @@ logger = get_logger(__name__)
 class MCPScopedFunctionState:
     """One credential surface and the MCP state that can publish onto it."""
 
-    credential_surface: tuple[str, str]
+    credential_surface: MCPOAuthCredentialScope
     state: MCPServerState
 
 
@@ -94,11 +94,11 @@ def _scoped_state_is_visible_to_agent(
     agent_execution_scope: str | None,
 ) -> bool:
     """Return whether one credential-scoped catalog belongs on an agent surface."""
-    worker_scope, _worker_key = scoped.credential_surface
+    worker_scope = scoped.credential_surface.worker_scope
     credential_execution_scope = None if worker_scope == "unscoped" else worker_scope
     if credential_execution_scope != agent_execution_scope:
         return False
-    return worker_scope not in {"shared", "user_agent"} or scoped.state.oauth_routing_agent_name == agent_name
+    return worker_scope not in {"shared", "user_agent"} or scoped.credential_surface.routing_agent_name == agent_name
 
 
 def scoped_oauth_state_has_configured_agent(
@@ -240,7 +240,7 @@ def _agent_function_surface_snapshot(
     agent_name: str,
     *,
     loaded_tools: _LoadedToolNames | None,
-    credential_surface: tuple[str, str] | None,
+    credential_surface: MCPOAuthCredentialScope | None,
     candidate_state: MCPServerState | None = None,
     candidate_catalog: MCPServerCatalog | None = None,
     configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]] | None = None,
@@ -357,7 +357,7 @@ def function_collision_messages(
     agent_name: str,
     loaded_tools: _LoadedToolNames,
     *,
-    credential_surfaces: set[tuple[str, str]],
+    credential_surfaces: set[MCPOAuthCredentialScope],
 ) -> list[str]:
     """Return collision messages for one candidate dynamic-tool surface."""
     active_states = (*context.states.values(), *(scoped.state for scoped in context.scoped_states))

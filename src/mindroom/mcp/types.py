@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.errors import MCPError
+    from mindroom.tool_system.worker_routing import ResolvedWorkerKeyScope
 
 
 class _AsyncReadWriteLock:
@@ -94,6 +95,16 @@ class MCPOAuthLeaseVersion:
     credential_generation: str
 
 
+@dataclass(frozen=True, order=True, slots=True)
+class MCPOAuthCredentialScope:
+    """Lossless identity of one OAuth credential store used by MCP."""
+
+    worker_scope: ResolvedWorkerKeyScope
+    worker_key: str
+    requester_id: str | None = None
+    routing_agent_name: str | None = None
+
+
 @dataclass
 class MCPServerState:
     """Live connection state for one configured server."""
@@ -103,8 +114,7 @@ class MCPServerState:
     config_generation: int = 0
     oauth_provider_id: str | None = None
     oauth_authorization: AuthorizationConfig | None = None
-    oauth_credential_scope: tuple[str, str] | None = None
-    oauth_routing_agent_name: str | None = None
+    oauth_credential_scope: MCPOAuthCredentialScope | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None

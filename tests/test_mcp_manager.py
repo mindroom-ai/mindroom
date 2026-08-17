@@ -448,6 +448,10 @@ def _save_mcp_oauth_credentials(
     )
 
 
+def _scoped_worker_keys(manager: MCPServerManager) -> set[tuple[str, str]]:
+    return {(key.credential_scope.worker_scope, key.credential_scope.worker_key) for key in manager._scoped_states}
+
+
 def _save_expiring_mcp_oauth_credentials(
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget,
@@ -694,7 +698,7 @@ async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
     )
 
     assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer installation-token"}]
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {("unscoped", "global")}
+    assert _scoped_worker_keys(manager) == {("unscoped", "global")}
 
 
 @pytest.mark.asyncio
@@ -1777,7 +1781,7 @@ async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> 
 
     assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
     assert next(iter(manager._scoped_states.values())) is state
-    assert next(iter(manager._scoped_states)).worker_key == canonical_a_target.worker_key
+    assert next(iter(manager._scoped_states)).credential_scope.worker_key == canonical_a_target.worker_key
 
 
 @pytest.mark.asyncio
@@ -1832,7 +1836,7 @@ async def test_mcp_alias_reload_retires_sessions_and_uses_published_identity_pol
     )
 
     assert lease.headers == {"Authorization": "Bearer canonical-b-token"}
-    assert lease.session_key.worker_key == canonical_b_target.worker_key
+    assert lease.session_key.credential_scope.worker_key == canonical_b_target.worker_key
 
 
 @pytest.mark.asyncio
@@ -1982,7 +1986,7 @@ async def test_oauth_mcp_shared_agent_reuses_agent_bearer_across_requesters(
     )
 
     assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer agent-token"}]
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+    assert _scoped_worker_keys(manager) == {
         ("shared", alice_request_target.worker_key),
     }
 
@@ -1996,10 +2000,11 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
-    first_target = _shared_worker_target("@alice:example.test", agent_name="code")
-    second_target = _shared_worker_target("@alice:example.test", agent_name="research")
-    _save_mcp_oauth_credentials(runtime_paths, first_target, "code-token")
-    _save_mcp_oauth_credentials(runtime_paths, second_target, "research-token")
+    first_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    second_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -2016,13 +2021,84 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
     )
 
     assert _FakeClientSession.transport_extra_headers == [
-        {"Authorization": "Bearer code-token"},
-        {"Authorization": "Bearer research-token"},
+        {"Authorization": "Bearer foo-token"},
+        {"Authorization": "Bearer underscored-token"},
     ]
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+    assert len(manager._scoped_states) == 2
+    assert _scoped_worker_keys(manager) == {
         ("shared", first_target.worker_key),
-        ("shared", second_target.worker_key),
     }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_collision_failure_does_not_cross_distinct_raw_agent_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A colliding agent name must not make another credential scope lose its catalog."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    second_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
+
+    class _FakeToolkit:
+        def __init__(self, tool_name: str) -> None:
+            self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr(
+        "mindroom.mcp.surface_projection.get_tool_by_name",
+        lambda tool_name, *_args, **_kwargs: _FakeToolkit(tool_name),
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "agents": {
+                "foo": {
+                    "display_name": "Foo",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "shared",
+                },
+                "_foo_": {
+                    "display_name": "Underscored Foo",
+                    "role": "Use local and MCP tools",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "shared",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    try:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=first_target,
+        )
+        first_state = next(iter(manager._scoped_states.values()))
+
+        with pytest.raises(MCPProtocolError, match="demo_echo"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=second_target,
+            )
+
+        assert first_state.catalog is not None
+        assert first_state.last_error is None
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2085,7 +2161,7 @@ async def test_oauth_mcp_user_scope_reuses_account_across_agents(
     )
 
     assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+    assert _scoped_worker_keys(manager) == {
         ("user", first_target.worker_key),
     }
 
@@ -2102,15 +2178,16 @@ async def test_oauth_mcp_user_agent_scope_keeps_accounts_separate_per_agent(
     first_target = _worker_target(
         "@alice:example.test",
         worker_scope="user_agent",
-        agent_name="code",
+        agent_name="foo",
     )
     second_target = _worker_target(
         "@alice:example.test",
         worker_scope="user_agent",
-        agent_name="research",
+        agent_name="_foo_",
     )
-    _save_mcp_oauth_credentials(runtime_paths, first_target, "code-token")
-    _save_mcp_oauth_credentials(runtime_paths, second_target, "research-token")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -2127,12 +2204,12 @@ async def test_oauth_mcp_user_agent_scope_keeps_accounts_separate_per_agent(
     )
 
     assert _FakeClientSession.transport_extra_headers == [
-        {"Authorization": "Bearer code-token"},
-        {"Authorization": "Bearer research-token"},
+        {"Authorization": "Bearer foo-token"},
+        {"Authorization": "Bearer underscored-token"},
     ]
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+    assert len(manager._scoped_states) == 2
+    assert _scoped_worker_keys(manager) == {
         ("user_agent", first_target.worker_key),
-        ("user_agent", second_target.worker_key),
     }
 
 
@@ -2388,10 +2465,11 @@ async def test_mcp_manager_retires_shared_agent_session_without_touching_other_a
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
-    code_target = _shared_worker_target("@alice:example.test", agent_name="code")
-    research_target = _shared_worker_target("@alice:example.test", agent_name="research")
-    _save_mcp_oauth_credentials(runtime_paths, code_target, "code-token")
-    _save_mcp_oauth_credentials(runtime_paths, research_target, "research-token")
+    code_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    research_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert code_target.worker_key == research_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, code_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, research_target, "underscored-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -2414,7 +2492,7 @@ async def test_mcp_manager_retires_shared_agent_session_without_touching_other_a
 
     assert code_session.closed is True
     assert research_session.closed is False
-    assert {(key.worker_scope, key.worker_key) for key in manager._scoped_states} == {
+    assert _scoped_worker_keys(manager) == {
         ("shared", research_target.worker_key),
     }
 

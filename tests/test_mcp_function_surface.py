@@ -5,12 +5,21 @@ from mindroom.mcp.function_surface import (
     MCPFunctionSurfaceSnapshot,
     analyze_mcp_function_collisions,
 )
+from mindroom.mcp.types import MCPOAuthCredentialScope
+
+
+def _user_credential_scope(requester_id: str) -> MCPOAuthCredentialScope:
+    return MCPOAuthCredentialScope(
+        worker_scope="user",
+        worker_key=f"v1:tenant:user:{requester_id}",
+        requester_id=requester_id,
+    )
 
 
 def _snapshot(
     *,
     agent_name: str = "code",
-    credential_surface: tuple[str, str] | None = None,
+    credential_surface: MCPOAuthCredentialScope | None = None,
     local_function_names: tuple[str, ...] = (),
     server_function_sources: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...],
 ) -> MCPFunctionSurfaceSnapshot:
@@ -69,11 +78,11 @@ def test_reports_every_server_owning_cross_server_collision() -> None:
 def test_same_function_on_distinct_credential_surfaces_does_not_collide() -> None:
     """Function ownership on distinct credential surfaces remains isolated."""
     alice = _snapshot(
-        credential_surface=("user", "@alice:example.test"),
+        credential_surface=_user_credential_scope("@alice:example.test"),
         server_function_sources=(("alpha", (("shared",),)),),
     )
     bob = _snapshot(
-        credential_surface=("user", "@bob:example.test"),
+        credential_surface=_user_credential_scope("@bob:example.test"),
         server_function_sources=(("beta", (("shared",),)),),
     )
 
@@ -83,7 +92,7 @@ def test_same_function_on_distinct_credential_surfaces_does_not_collide() -> Non
 def test_reports_duplicate_function_across_same_server_catalogs() -> None:
     """Duplicate names from two same-scope catalogs implicate that server."""
     snapshot = _snapshot(
-        credential_surface=("user", "@alice:example.test"),
+        credential_surface=_user_credential_scope("@alice:example.test"),
         server_function_sources=(("demo", (("echo", "first_only"), ("echo", "second_only"))),),
     )
 
@@ -92,7 +101,7 @@ def test_reports_duplicate_function_across_same_server_catalogs() -> None:
     assert reports == (
         MCPFunctionCollisionReport(
             agent_name="code",
-            credential_surface=("user", "@alice:example.test"),
+            credential_surface=_user_credential_scope("@alice:example.test"),
             server_id="demo",
             function_name_collisions=(("echo", "MCP function name 'echo' collides within server 'demo'"),),
         ),
