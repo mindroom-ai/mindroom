@@ -2133,6 +2133,89 @@ async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+async def test_requestless_requester_scoped_oauth_mcp_bridges_return_connection_required(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """Requester-scoped bridge calls without a requester must return their structured recovery payload."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=resolve_worker_target(worker_scope, "code", None),
+    )
+    calls = {
+        "demo_call_tool": {"tool_name": "echo", "arguments": {}},
+        "demo_connection_status": {},
+        "demo_list_tools": {},
+    }
+    try:
+        for function_name, kwargs in calls.items():
+            payload = json.loads(await toolkit.get_async_functions()[function_name].entrypoint(**kwargs))
+            assert payload == {
+                "error": "MCP OAuth provider 'mcp_demo' requires a requester identity",
+                "oauth_connection_required": True,
+                "provider": "mcp_demo",
+                "connect_url": None,
+            }
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+async def test_requestless_oauth_scope_does_not_block_unrelated_dynamic_tool_load(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """An unavailable requester scope must not make unrelated deferred tools unloadable."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use local and MCP tools",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": worker_scope,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    worker_target = resolve_worker_target(worker_scope, "code", None)
+    toolkit = DynamicToolsToolkit(
+        agent_name="code",
+        config=config,
+        session_id="thread-a",
+        worker_target=worker_target,
+    )
+
+    bind_mcp_server_manager(manager)
+    try:
+        payload = json.loads(toolkit.load_tool("shell"))
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "loaded"
+    assert payload["loaded_tools"] == ["shell"]
+
+
+@pytest.mark.asyncio
 async def test_oauth_mcp_user_scope_reuses_account_across_agents(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

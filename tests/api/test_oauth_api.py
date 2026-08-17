@@ -2523,7 +2523,6 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
     config = main._app_context(api_app).runtime_config
     assert config is not None
     generated_provider = load_oauth_providers(config, runtime_paths)["mcp_demo"]
-    scope_following_provider = replace(generated_provider, requester_scoped_credentials=False)
 
     with TestClient(api_app) as client:
         _login(client)
@@ -2535,7 +2534,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
         )
         status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
         connected_credentials = _stored_oauth_credentials(
-            scope_following_provider,
+            generated_provider,
             runtime_paths,
             worker_scope=expected_scope,
         )
@@ -2562,7 +2561,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
     assert disconnected_status_response.json()["connected"] is False
     assert (
         _stored_oauth_credentials(
-            scope_following_provider,
+            generated_provider,
             runtime_paths,
             worker_scope=expected_scope,
         )

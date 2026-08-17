@@ -9672,7 +9672,7 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 The toolkit exposes only `reset_oauth_connection(provider_id)`.
 The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
 The call returns a time-limited, retryable, requester-bound browser link and does not change credentials itself.
-The authenticated browser confirmation retires the matching requester-scoped MCP OAuth session when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
+The authenticated browser confirmation retires the matching MCP OAuth session for that credential scope when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
 The reset does not revoke the grant at the external provider.
 Opening the link without confirming is non-destructive.
 Confirming when no local credential exists is safe and still continues to provider authorization.
@@ -9701,7 +9701,8 @@ The browser page is the human approval boundary: its GET only displays the actio
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.
 Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
-The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.
+The resolved credential scope must be `user` or `user_agent`; shared and unscoped credentials are refused.
+Use the authenticated dashboard connection controls to disconnect and reconnect shared or installation-level credentials.
 A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
 Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
 
@@ -11411,6 +11412,7 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
 - OAuth-backed remote MCP credentials and sessions follow the selected agent's effective execution scope.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the active credential target.
+- Agent-initiated `reset_oauth_connection()` supports `user` and `user_agent` MCP credential scopes; reset shared or installation-level MCP connections from the authenticated dashboard.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 

@@ -165,14 +165,14 @@ def _resolved_oauth_scope(
     if worker_target is None or worker_target.worker_scope is None:
         return MCPOAuthCredentialScope(worker_scope="unscoped", worker_key="global")
     worker_scope = worker_target.worker_scope
-    worker_key = worker_target.worker_key
-    if not worker_key:
-        msg = f"MCP OAuth provider '{provider_id}' requires a complete credential target"
-        raise OAuthProviderError(msg)
     identity = worker_target.execution_identity
     if worker_scope in {"user", "user_agent"} and (identity is None or not identity.requester_id):
         msg = f"MCP OAuth provider '{provider_id}' requires a requester identity"
         raise OAuthConnectionRequired(msg, provider_id=provider_id)
+    worker_key = worker_target.worker_key
+    if not worker_key:
+        msg = f"MCP OAuth provider '{provider_id}' requires a complete credential target"
+        raise OAuthProviderError(msg)
     routing_agent_name = worker_target.routing_agent_name if worker_scope in {"shared", "user_agent"} else None
     if worker_scope in {"shared", "user_agent"} and not routing_agent_name:
         msg = f"MCP OAuth provider '{provider_id}' requires an agent identity"
@@ -1829,12 +1829,14 @@ class MCPServerManager:
                     state,
                     worker_target=worker_target,
                 ).worker_target
-                credential_surfaces.add(
-                    _resolved_oauth_scope(
+                try:
+                    credential_surface = _resolved_oauth_scope(
                         canonical_target,
                         provider_id=state.oauth_provider_id or server_id,
-                    ),
-                )
+                    )
+                except OAuthConnectionRequired:
+                    continue
+                credential_surfaces.add(credential_surface)
         return function_collision_messages(
             context,
             agent_name,
