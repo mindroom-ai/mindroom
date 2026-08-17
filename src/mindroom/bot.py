@@ -308,6 +308,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _sync_shutting_down: bool
+    _matrix_ingestion_quiesce_requested: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
     _ingestion_session: _OwnedIngestionSession | None
@@ -382,6 +383,7 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
+        self._matrix_ingestion_quiesce_requested = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
         self._ingestion_session = None
@@ -1763,6 +1765,7 @@ class AgentBot:
 
     async def _quiesce_matrix_ingestion(self) -> None:
         """Drain one final durable source response before a clean stop."""
+        self._matrix_ingestion_quiesce_requested = True
         session = self._ingestion_session
         if session is not None:
             await session._quiesce()

@@ -247,6 +247,11 @@ class _MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
+def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
+    """Return whether the supervisor still owns an active receive loop."""
+    return bot.running and not bot._matrix_ingestion_quiesce_requested
+
+
 @dataclass(slots=True)
 class _SyncIteration:
     """Own the lifecycle of one sync task and its watchdog."""
@@ -257,7 +262,7 @@ class _SyncIteration:
     watchdog_cancelled_sync: asyncio.Event = field(default_factory=asyncio.Event)
 
     @staticmethod
-    async def _watch(
+    async def _watch(  # noqa: C901, PLR0912 - independent bounded grace states
         bot: AgentBot | TeamBot,
         sync_task: asyncio.Task[Any],
         watchdog_cancelled_sync: asyncio.Event,
@@ -273,8 +278,10 @@ class _SyncIteration:
         cache_write_grace_seconds = matrix_sync_cache_write_grace_seconds(bot.runtime_paths)
         startup_monotonic = time.monotonic()
         observed_ingestion_generation = bot.durable_ingestion_progress_generation()
-        while bot.running and not sync_task.done():
+        while _matrix_sync_receive_loop_active(bot) and not sync_task.done():
             await asyncio.sleep(_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS)
+            if not _matrix_sync_receive_loop_active(bot):
+                break
             ingestion_generation = bot.durable_ingestion_progress_generation()
             if ingestion_generation != observed_ingestion_generation:
                 observed_ingestion_generation = ingestion_generation
@@ -370,6 +377,9 @@ class _SyncIteration:
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise _MatrixSyncStalledError(msg)
 
+        if bot._matrix_ingestion_quiesce_requested:
+            await sync_task
+
     @classmethod
     def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
         """Create the sync task and its watchdog for one loop iteration."""
@@ -460,7 +470,7 @@ async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _Sync
         logger.info("starting_sync_loop", agent=bot.agent_name)
         iteration = _SyncIteration.start(bot)
         await iteration.wait()
-        if bot.running:
+        if _matrix_sync_receive_loop_active(bot):
             logger.warning("sync_loop_returned_while_bot_running", agent=bot.agent_name, retry_count=attempt)
             outcome = _SyncIterationOutcome(restart_reason_category="unexpected_sync_return")
     except asyncio.CancelledError as exc:
@@ -731,9 +741,9 @@ async def stop_entities(
 async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
-    while bot.running and (max_retries < 0 or retry_count < max_retries):
+    while _matrix_sync_receive_loop_active(bot) and (max_retries < 0 or retry_count < max_retries):
         outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
-        if outcome.restart_reason_category is None or not bot.running:
+        if outcome.restart_reason_category is None or not _matrix_sync_receive_loop_active(bot):
             break
         retry_count += 1
         will_retry = max_retries < 0 or retry_count < max_retries

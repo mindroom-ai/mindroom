@@ -122,6 +122,7 @@ class _FakeBot:
         self._last_sync_monotonic: float | None = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._matrix_ingestion_quiesce_requested = False
         self._durable_ingestion_progress_generation: int | None = None
         self.sync_calls = 0
         self.first_call_cancelled = False
@@ -332,6 +333,108 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
     await sync_forever_with_restart(bot)
 
     assert call_order == ["cancel", "prepare"]
+
+
+@pytest.mark.asyncio
+async def test_sync_supervisor_does_not_restart_quiesced_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean-stop source return must not start a replacement receive loop."""
+    bot = _FakeBot()
+    starts = 0
+
+    class FakeIteration:
+        async def wait(self) -> None:
+            bot._matrix_ingestion_quiesce_requested = True
+
+        async def cancel(
+            self,
+            *,
+            shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+        ) -> None:
+            assert shutdown_intent == GENERIC_SHUTDOWN
+
+    def start_iteration(_bot: _FakeBot) -> FakeIteration:
+        nonlocal starts
+        starts += 1
+        return FakeIteration()
+
+    monkeypatch.setattr(_SyncIteration, "start", start_iteration)
+    monkeypatch.setattr(
+        runtime_helpers,
+        "retry_delay_seconds",
+        lambda *_args, **_kwargs: 0.0,
+    )
+
+    with capture_logs() as logs:
+        await sync_forever_with_restart(bot, max_retries=2)
+
+    assert starts == 1
+    assert not any(entry["event"] in {"sync_loop_returned_while_bot_running", "restarting_sync_loop"} for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_sync_watchdog_waits_for_quiesced_source_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watchdog tick must not cancel the final source commit."""
+    bot = _FakeBot()
+    source_started = asyncio.Event()
+    allow_source_commit = asyncio.Event()
+    source_committed = asyncio.Event()
+    source_cancelled = asyncio.Event()
+    watchdog_polled = asyncio.Event()
+    release_watchdog_poll = asyncio.Event()
+
+    async def request_quiesce_during_poll(_delay: float) -> None:
+        bot._matrix_ingestion_quiesce_requested = True
+        watchdog_polled.set()
+        await release_watchdog_poll.wait()
+
+    async def held_source_commit() -> None:
+        source_started.set()
+        try:
+            await allow_source_commit.wait()
+        except asyncio.CancelledError:
+            source_cancelled.set()
+            raise
+        source_committed.set()
+
+    monkeypatch.setattr(runtime_helpers.asyncio, "sleep", request_quiesce_during_poll)
+    bot.sync_forever = held_source_commit
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=1))
+
+    try:
+        await asyncio.wait_for(source_started.wait(), timeout=1)
+        await asyncio.wait_for(watchdog_polled.wait(), timeout=1)
+        release_watchdog_poll.set()
+        done, _ = await asyncio.wait({supervisor}, timeout=0.05)
+        assert not done
+        assert not source_cancelled.is_set()
+        allow_source_commit.set()
+        release_watchdog_poll.set()
+        await asyncio.wait_for(supervisor, timeout=1)
+    finally:
+        allow_source_commit.set()
+        if not supervisor.done():
+            supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+
+    assert source_committed.is_set()
+    assert not source_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_ingestion_quiesce_marks_supervisor_stop_intent() -> None:
+    """The terminal source barrier owns the one supervisor-stop write."""
+    bot = object.__new__(AgentBot)
+    bot._matrix_ingestion_quiesce_requested = False
+    bot._ingestion_session = AsyncMock()
+
+    await AgentBot._quiesce_matrix_ingestion(bot)
+
+    assert bot._matrix_ingestion_quiesce_requested is True
+    bot._ingestion_session._quiesce.assert_awaited_once()
 
 
 @pytest.mark.asyncio
