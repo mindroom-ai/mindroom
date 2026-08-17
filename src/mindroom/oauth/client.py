@@ -19,6 +19,7 @@ from google.auth.transport import requests as google_requests
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
+    OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot_if_readable_sync,
     load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
@@ -39,6 +40,7 @@ from mindroom.oauth.providers import (
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
+    OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
@@ -113,6 +115,7 @@ class _GoogleRefreshFailure(Enum):
     TERMINAL = auto()
     PROVIDER = auto()
     MISSING = auto()
+    RESET_REQUIRED = auto()
 
 
 @dataclass(slots=True)
@@ -531,6 +534,9 @@ class ScopedOAuthClientMixin:
                 scope_validator=self._stored_credentials_have_required_scopes,
                 expected_connection_generation=state.connection_generation,
             )
+        except OAuthCredentialUnreadableError:
+            state.last_failure = _GoogleRefreshFailure.RESET_REQUIRED
+            self._raise_google_refresh_failure(state.last_failure)
         except _GoogleRefreshGrantMissingError:
             state.last_failure = _GoogleRefreshFailure.MISSING
             self._raise_google_refresh_failure(state.last_failure)
@@ -579,7 +585,10 @@ class ScopedOAuthClientMixin:
 
     def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
         """Replay one sanitized refresh outcome to the current caller thread."""
-        if failure is _GoogleRefreshFailure.TERMINAL:
+        if failure is _GoogleRefreshFailure.RESET_REQUIRED:
+            self._mark_oauth_connection_required(reason=OAUTH_RESET_REQUIRED_REASON)
+            self.service = None
+        elif failure is _GoogleRefreshFailure.TERMINAL:
             self._mark_oauth_connection_required(reason=OAUTH_REFRESH_REJECTED_REASON)
             self.service = None
         elif failure is _GoogleRefreshFailure.MISSING:
@@ -712,6 +721,10 @@ class ScopedOAuthClientMixin:
         context = self._oauth_credential_context()
         try:
             revision = (context, oauth_credential_generation(context))
+        except OAuthCredentialUnreadableError as exc:
+            self.creds = None
+            self.service = None
+            raise self._connection_required(reason=OAUTH_RESET_REQUIRED_REASON) from exc
         except OAuthProviderError as exc:
             self.creds = None
             self.service = None
@@ -763,6 +776,10 @@ class ScopedOAuthClientMixin:
             self._oauth_logger.info("oauth_authentication_succeeded", tool_name=self._oauth_tool_name)
         except OAuthConnectionRequired:
             raise
+        except OAuthCredentialUnreadableError as exc:
+            self.creds = None
+            self.service = None
+            raise self._connection_required(reason=OAUTH_RESET_REQUIRED_REASON) from exc
         except OAuthRefreshRejectedError as exc:
             self.creds = None
             self.service = None

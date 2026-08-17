@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -107,11 +108,13 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         provider_id: str | None = None,
         connect_url: str | None = None,
         reason: str | None = None,
+        reset_required: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider_id = provider_id
         self.connect_url = connect_url
         self.reason = reason
+        self.reset_required = reset_required
 
 
 def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
@@ -124,6 +127,8 @@ def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str,
     }
     if exc.reason is not None:
         payload["reason"] = exc.reason
+    if exc.reset_required:
+        payload["reset_required"] = True
     if oauth_connect_url_requires_host_browser(exc.connect_url):
         payload["requires_host_browser"] = True
     return payload
@@ -658,7 +663,14 @@ class OAuthProvider:
             msg = "OAuth provider requires a PKCE code verifier"
             raise OAuthProviderError(msg)
         if self.token_exchanger is not None:
-            result = self.token_exchanger(self, code, client_config, runtime_paths, code_verifier)
+            result = await asyncio.to_thread(
+                self.token_exchanger,
+                self,
+                code,
+                client_config,
+                runtime_paths,
+                code_verifier,
+            )
             if isinstance(result, OAuthTokenResult):
                 return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
             return _token_result_with_core_metadata(
@@ -696,9 +708,10 @@ class OAuthProvider:
         parser = self.token_parser or _default_token_parser
         token_response = dict(token_response)
         token_response["_mindroom_token_url"] = endpoints.token_url
+        result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
         return _token_result_with_core_metadata(
             self,
-            parser(self, token_response, client_config, runtime_paths),
+            result,
             client_id=client_config.client_id,
         )
 
@@ -758,7 +771,7 @@ class OAuthProvider:
         ):
             refresh_response["_oauth_claims_verified"] = True
         parser = self.token_parser or _default_token_parser
-        result = parser(self, refresh_response, client_config, runtime_paths)
+        result = await asyncio.to_thread(parser, self, refresh_response, client_config, runtime_paths)
         verified_claims = refresh_response.get("_oauth_claims")
         if (
             not result.claims_verified
@@ -771,7 +784,7 @@ class OAuthProvider:
                 claims_verified=True,
             )
         result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
-        self.validate_claims(result, runtime_paths)
+        await asyncio.to_thread(self.validate_claims, result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:

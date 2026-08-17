@@ -50,6 +50,7 @@ from mindroom.mcp.types import (
 )
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
+    OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot,
     load_oauth_reset_connection_generation,
     oauth_credentials_usable,
@@ -60,6 +61,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
+    OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
 
@@ -652,6 +654,13 @@ class MCPServerManager:
         try:
             refresh_result = await refresh_oauth_credentials_with_result(context)
             credentials = refresh_result.credentials
+        except OAuthCredentialUnreadableError as exc:
+            logger.warning(
+                "MCP OAuth credential store is unreadable",
+                provider_id=provider.id,
+                server_id=state.server_id,
+            )
+            raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from exc
         except OAuthProviderError as exc:
             failed_credentials = (await load_oauth_credentials_snapshot(context)).credentials
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)

@@ -567,7 +567,7 @@ async def _exchange_and_store_oauth_credentials_locked(
             context.runtime_paths,
             code_verifier=code_verifier,
         )
-        context.provider.validate_claims(result, context.runtime_paths)
+        await asyncio.to_thread(context.provider.validate_claims, result, context.runtime_paths)
         safe_result = context.provider.token_result_with_safe_claims(result)
     finally:
         _oauth_provider_adapter_active.reset(adapter_scope)

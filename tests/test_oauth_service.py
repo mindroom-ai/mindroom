@@ -31,6 +31,7 @@ from mindroom.oauth.credential_binding import (
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
+    OAuthCredentialsSnapshot,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
     refresh_oauth_credentials_sync,
@@ -456,6 +457,101 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
     )
 
     assert started == {"alice", "bob"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_callback", ["token_parser", "claim_validator"])
+async def test_blocked_sync_provider_callback_does_not_block_different_scope(
+    blocked_callback: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Provider callbacks in one scope must not stall another scope's transaction."""
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+
+    class TokenClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> TokenClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, str]:
+            return {"access_token": "callback-access"}
+
+    def parse_token(
+        _provider: OAuthProvider,
+        _token_response: Mapping[str, Any],
+        _client_config: OAuthClientConfig,
+        _runtime_paths: RuntimePaths,
+    ) -> OAuthTokenResult:
+        if blocked_callback == "token_parser":
+            callback_started.set()
+            release_callback.wait()
+        return OAuthTokenResult(
+            token_data={
+                "token": "callback-access",
+                "client_id": "public-client",
+                "scopes": [],
+            },
+        )
+
+    def validate_claims(_context: object) -> None:
+        if blocked_callback == "claim_validator":
+            callback_started.set()
+            release_callback.wait()
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", TokenClient)
+    provider = OAuthProvider(
+        id="demo_provider",
+        display_name="Demo Provider",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",  # noqa: S106
+        scopes=(),
+        credential_service="demo_oauth",
+        client_config_services=("demo_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+        allow_empty_scopes=True,
+        token_parser=parse_token,
+        claim_validator=validate_claims,
+    )
+    alice = _context(
+        tmp_path,
+        cast("_FakeOAuthProvider", provider),
+        worker_target=_worker_target("@alice:example.test", worker_scope="user"),
+    )
+    bob = _context(
+        tmp_path,
+        cast("_FakeOAuthProvider", provider),
+        worker_target=_worker_target("@bob:example.test", worker_scope="user"),
+    )
+    _save(bob, _credentials("bob", CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    expected_bob_credentials = _load(bob)
+    connection_generation = _connection_generation(alice)
+
+    exchange_task = asyncio.create_task(
+        exchange_and_store_oauth_credentials(
+            alice,
+            "code",
+            None,
+            expected_connection_generation=connection_generation,
+        ),
+    )
+    snapshot_task: asyncio.Task[OAuthCredentialsSnapshot] | None = None
+    try:
+        await asyncio.to_thread(callback_started.wait)
+        snapshot_task = asyncio.create_task(load_oauth_credentials_snapshot(bob))
+        snapshot = await asyncio.wait_for(asyncio.shield(snapshot_task), timeout=1)
+        assert snapshot.credentials == expected_bob_credentials
+    finally:
+        release_callback.set()
+        await exchange_task
+        if snapshot_task is not None:
+            await snapshot_task
 
 
 @pytest.mark.asyncio

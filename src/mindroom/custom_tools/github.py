@@ -24,6 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
+    OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
@@ -38,6 +39,7 @@ from mindroom.oauth.providers import (
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
+    OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
 
@@ -349,6 +351,9 @@ class GithubTools(AgnoGithubTools):
                 provider_id=self._oauth_provider.id,
                 error_type=type(exc).__name__,
             )
+            if isinstance(exc, OAuthCredentialUnreadableError):
+                self.access_token = None
+                raise self._connection_required(reason=OAUTH_RESET_REQUIRED_REASON) from exc
             if isinstance(exc, OAuthRefreshRejectedError):
                 self.access_token = None
                 raise self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON) from exc

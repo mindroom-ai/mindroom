@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -26,7 +27,12 @@ from mindroom.agents import create_agent
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import (
@@ -42,7 +48,7 @@ from mindroom.mcp.manager import (
     _MCPAuthorizationChangedError,
     _MCPConfigurationChangedError,
 )
-from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.mcp.types import MCPServerState
 from mindroom.oauth.credential_lifecycle import (
@@ -277,8 +283,12 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+def _runtime_paths(tmp_path: Path, process_env: Mapping[str, str] | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env or {},
+    )
 
 
 def _tool(name: str) -> Tool:
@@ -962,6 +972,84 @@ async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
     assert str(exc_info.value) == "OAuth credential refresh failed"
     assert leaked_detail not in str(exc_info.value)
     assert (await load_oauth_credentials_snapshot(credential_context)).credentials is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+@pytest.mark.parametrize(
+    "function_name",
+    ["demo_connection_status", "demo_list_tools", "demo_call_tool"],
+)
+async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
+    tmp_path: Path,
+    unreadable_kind: str,
+    function_name: str,
+) -> None:
+    """Every MCP bridge entrypoint must route unreadable state to the reset flow."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key},
+    )
+    worker_target = _worker_target("@alice:example.test")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+    credentials = {
+        "token": "unreadable-access-token",
+        "client_id": "public-client",
+        "scopes": [],
+        "_source": "oauth",
+        "_oauth_provider": "mcp_demo",
+    }
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            credentials_manager.base_path,
+            shared_base_path=credentials_manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        save_scoped_credentials(
+            "mcp_demo_oauth",
+            credentials,
+            credentials_manager=wrong_key_manager,
+            worker_target=worker_target,
+        )
+    else:
+        credential_path = scoped_credentials_path(
+            "mcp_demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        credential_path.write_bytes(b"corrupt-plaintext-secret")
+
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    function = toolkit.async_functions[function_name]
+    try:
+        if function_name == "demo_call_tool":
+            result = await function.entrypoint(tool_name="echo", arguments={})
+        else:
+            result = await function.entrypoint()
+    finally:
+        await manager.shutdown()
+
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "mcp_demo"
+    assert payload["reason"] == "reset_required"
+    assert payload["reset_required"] is True
+    assert payload["connect_url"] is None
+    assert "reset_oauth_connection" in payload["error"]
 
 
 @pytest.mark.asyncio

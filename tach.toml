@@ -4738,6 +4738,7 @@ from = ["mindroom.oauth.service"]
 expose = [
     "OAuthCredentialConflictError",
     "OAuthCredentialContext",
+    "OAuthCredentialUnreadableError",
     "OAuthCredentialsRefreshResult",
     "OAuthCredentialsSnapshot",
     "OAuthCredentialsStatus",

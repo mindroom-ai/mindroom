@@ -30,6 +30,7 @@ OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
 OAUTH_ACCESS_REJECTED_REASON = "access_rejected"
 OAUTH_REFRESH_REJECTED_REASON = "refresh_rejected"
 OAUTH_MISSING_WRITE_SCOPE_REASON = "missing_write_scope"
+OAUTH_RESET_REQUIRED_REASON = "reset_required"
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = OAUTH_CONNECT_TOKEN_TTL_MINUTES * 60
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
@@ -46,6 +47,7 @@ __all__ = [
     "OAUTH_CONNECT_TOKEN_TTL_MINUTES",
     "OAUTH_MISSING_WRITE_SCOPE_REASON",
     "OAUTH_REFRESH_REJECTED_REASON",
+    "OAUTH_RESET_REQUIRED_REASON",
     "OAuthConnectTarget",
     "build_oauth_connect_instruction",
     "build_oauth_reconnect_instruction",
@@ -262,6 +264,18 @@ def oauth_connection_required(
     retry_safe: bool = True,
 ) -> OAuthConnectionRequired:
     """Build one canonical connect or reconnect error for a credential scope."""
+    if reason == OAUTH_RESET_REQUIRED_REASON:
+        instruction = (
+            f"{context.provider.display_name} credentials for this requester cannot be read. "
+            f"Use `reset_oauth_connection` with provider ID `{context.provider.id}` to open the authenticated "
+            "reset flow, then reconnect and retry the request."
+        )
+        return OAuthConnectionRequired(
+            instruction,
+            provider_id=context.provider.id,
+            reason=reason,
+            reset_required=True,
+        )
     connect_url = oauth_connect_url(
         context.provider,
         context.runtime_paths,

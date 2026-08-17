@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import io
 import json
@@ -29,6 +30,7 @@ from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
     save_scoped_credentials,
+    scoped_credentials_path,
 )
 from mindroom.custom_tools import github as mindroom_github_module
 from mindroom.custom_tools.github import GithubTools
@@ -511,6 +513,44 @@ def test_missing_credentials_return_requester_bound_connection_links(tmp_path: P
     assert bob_result["connect_url"] != alice_result["connect_url"]
     assert "@alice:example.test" not in json.dumps(alice_result)
     assert "@bob:example.test" not in json.dumps(bob_result)
+
+
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+def test_unreadable_credentials_return_reset_required_payload(tmp_path: Path, unreadable_kind: str) -> None:
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key})
+    manager = _save_client_config(runtime_paths)
+    oauth_target = _oauth_target("@alice:example.test")
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            manager.base_path,
+            shared_base_path=manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        save_scoped_credentials(
+            "github_oauth",
+            _oauth_credentials("unreadable-access"),
+            credentials_manager=wrong_key_manager,
+            worker_target=oauth_target,
+        )
+    else:
+        credential_path = scoped_credentials_path(
+            "github_oauth",
+            credentials_manager=manager,
+            worker_target=oauth_target,
+        )
+        credential_path.write_bytes(b"corrupt-plaintext-secret")
+    tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+
+    payload = json.loads(tool.list_repositories())
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "github"
+    assert payload["reason"] == "reset_required"
+    assert payload["reset_required"] is True
+    assert payload["connect_url"] is None
+    assert "reset_oauth_connection" in payload["error"]
 
 
 def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Path) -> None:

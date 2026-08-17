@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
@@ -28,6 +29,7 @@ from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
     save_scoped_credentials,
+    scoped_credentials_path,
 )
 from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
@@ -388,6 +390,81 @@ def test_scoped_oauth_client_structured_auth_failure_returns_oauth_required_json
         "provider": "google_drive",
         "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
     }
+
+
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+def test_google_wrapper_routes_unreadable_credentials_to_reset_flow(
+    tmp_path: Path,
+    unreadable_kind: str,
+) -> None:
+    """Unreadable managed credentials need reset guidance, not an unusable connect link."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user", "general", execution_identity=identity)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
+        },
+    )
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            credentials_manager.base_path,
+            shared_base_path=credentials_manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        save_scoped_credentials(
+            GoogleDriveTools._oauth_provider.credential_service,
+            {
+                "token": "unreadable-access",
+                "client_id": "client-id",
+                "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+            },
+            credentials_manager=wrong_key_manager,
+            worker_target=worker_target,
+        )
+    else:
+        credential_path = scoped_credentials_path(
+            GoogleDriveTools._oauth_provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        credential_path.write_bytes(b"corrupt-plaintext-secret")
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    payload = json.loads(tool._ensure_structured_auth() or "{}")
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "google_drive"
+    assert payload["reason"] == "reset_required"
+    assert payload["reset_required"] is True
+    assert payload["connect_url"] is None
+    assert "reset_oauth_connection" in payload["error"]
 
 
 def test_scoped_oauth_client_connection_required_uses_shared_instruction(
