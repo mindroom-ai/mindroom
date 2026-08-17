@@ -830,8 +830,7 @@ def _collect_normalized_run(
     _record_row_history(state=state, row=row, run=run, entity=entity, records=records)
     if not _admit_stable_run(state=state, run=run, entity=entity):
         return
-    if requester is None:
-        state.missing_requester_runs += 1
+    _record_requester_coverage(state=state, requester=requester, accepted=accepted)
     if not accepted:
         if requester is None and (scope == "self" or requester_filter is not None):
             state.coverage_exclusions += 1
@@ -842,6 +841,19 @@ def _collect_normalized_run(
         state.skipped_runs += 1
         return
     _aggregate_records(state=state, row=row, records=records, group_by=group_by, timezone=timezone)
+
+
+def _record_requester_coverage(
+    *,
+    state: _CollectionState,
+    requester: str | None,
+    accepted: bool,
+) -> None:
+    if requester is not None:
+        return
+    state.missing_requester_runs += 1
+    if accepted:
+        state.coverage_exclusions += 1
 
 
 def _admit_structural_run(

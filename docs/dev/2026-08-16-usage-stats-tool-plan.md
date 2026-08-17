@@ -233,7 +233,7 @@ uv run pytest -q tests/test_usage_stats_storage.py -k discovery
 
 Expected: failure because discovery functions do not exist.
 
-- [ ] **Step 2: Implement self discovery through runtime resolution.**
+- [ ] **Step 2: Implement self discovery through storage-only resolution.**
 
 Add:
 
@@ -248,7 +248,7 @@ def discover_self_usage_sources(
     ...
 ```
 
-Call `resolve_agent_runtime()` with the exact execution identity and derive the current agent database from the returned `session_state_root`.
+Call the mutation-free `resolve_agent_storage()` helper with the exact execution identity and derive the current agent database from the returned `session_state_root`.
 
 Mark a private source `requester_isolated=True` and a shared source `requester_isolated=False`.
 

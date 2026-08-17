@@ -114,7 +114,7 @@ The result serializer exposes only aggregate dimensions and counters.
 
 ## Storage Discovery
 
-The self query resolves the current agent's canonical `session_state_root` with `resolve_agent_runtime` and the live execution identity.
+The self query resolves the current agent's canonical `session_state_root` with the mutation-free `resolve_agent_storage` helper and the live execution identity.
 A shared agent therefore reaches its shared session database, while a private agent reaches only its requester-specific private instance.
 The self query may also read team databases, but it retains only nested runs whose entity and canonical requester both match the current call.
 

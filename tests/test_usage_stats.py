@@ -283,6 +283,39 @@ def test_admin_usage_groups_missing_requesters_as_unknown_and_canonicalizes_filt
     assert filtered.breakdown[0].key == "@alice:example.test"
 
 
+def test_accepted_admin_run_without_requester_marks_equal_retained_coverage_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing attribution remains a coverage gap even when cumulative token evidence matches."""
+    row = _row(
+        _raw_run(
+            requester_id=None,
+            user_id=None,
+            run_id="missing-requester-run",
+            metrics={"total_tokens": 10},
+        ),
+        session_metrics={"total_tokens": 10},
+    )
+    _wire_admin(monkeypatch, (row,))
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="requester",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.coverage.missing_requester_runs == 1
+    assert report.coverage.compacted_sessions == 0
+    assert report.coverage.status == "partial"
+
+
 def test_admin_validates_entity_filters_before_scanning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A changed validation order would scan storage for an invalid entity filter."""
     scanned = False
