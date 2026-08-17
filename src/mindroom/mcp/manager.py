@@ -550,16 +550,9 @@ class MCPServerManager:
                 base_state,
                 worker_target=worker_target,
             )
-            credential_target = credential_context.worker_target
-            if (
-                credential_target is not None
-                and credential_target.worker_scope is not None
-                and not credential_target.worker_key
-            ):
-                return None
             key = self._scope_session_key(
                 base_state,
-                credential_target,
+                credential_context.worker_target,
                 provider_id=credential_context.provider.id,
             )
         except OAuthConnectionRequired:
