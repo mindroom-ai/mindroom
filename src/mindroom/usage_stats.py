@@ -1,20 +1,14 @@
-"""Privacy-safe aggregation of retained direct run usage."""
+"""Read-only aggregation of retained Agno token usage."""
 
 from __future__ import annotations
 
-import math
 import re
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
-from time import monotonic
-from types import MappingProxyType
+from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mindroom.usage_stats_storage import (
-    UsageModelMetric,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -33,13 +27,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AdminGroupBy",
-    "CostCoverage",
     "SelfGroupBy",
     "TokenTotals",
     "UsageBreakdownRow",
     "UsageCoverage",
     "UsageReport",
-    "UsageStatsSourceUnavailableError",
     "UsageStatsValidationError",
     "collect_admin_usage",
     "collect_self_usage",
@@ -48,9 +40,10 @@ __all__ = [
 
 SelfGroupBy = Literal["day", "model"]
 AdminGroupBy = Literal["entity", "requester", "model", "day"]
-_UsageGroupBy = SelfGroupBy | AdminGroupBy
-type _BreakdownDimension = Literal["day", "model", "entity", "requester"]
-type _BreakdownKey = tuple[_BreakdownDimension, str, str | None, str | None, str | None]
+type _GroupBy = SelfGroupBy | AdminGroupBy
+type _Scope = Literal["self", "admin"]
+type _Dimension = Literal["day", "model", "entity", "requester"]
+
 _TOKEN_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -63,34 +56,19 @@ _TOKEN_FIELDS = (
     "audio_total_tokens",
 )
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
-_TIMESTAMP_OFFSET = re.compile(r".*(?:Z|[+-]\d{2}:\d{2})\Z")
-_MAX_BREAKDOWN_ROWS = 200
-_MAX_PERSISTED_NUMERIC_TEXT_LENGTH = 128
-_MAX_PERSISTED_INTEGER = 10**_MAX_PERSISTED_NUMERIC_TEXT_LENGTH - 1
-_MAX_SCANNED_SOURCES = 1_000
-_MAX_SCANNED_STORAGE_ROWS = 10_000
-_MAX_SCANNED_RUN_NODES = 100_000
-_MAX_METRIC_RECORDS = 100_000
-_QUERY_TIME_BUDGET_SECONDS = 5.0
-_SELF_GROUPS = frozenset({"day", "model"})
-_ADMIN_GROUPS = frozenset({"day", "entity", "model", "requester"})
+_BREAKDOWN_LIMIT = 200
+_COVERAGE_NOTE = (
+    "Retained top-level Agno runs only; nested team members are not attributed, and compacted history is unavailable."
+)
 
 
 class UsageStatsValidationError(ValueError):
-    """A usage query contains an unsupported caller-controlled value."""
-
-
-class UsageStatsSourceUnavailableError(RuntimeError):
-    """No expected retained-history source could be read safely."""
-
-
-class _CollectionResourceLimitError(RuntimeError):
-    """A request-wide aggregation work budget was exhausted."""
+    """A usage query contains an unsupported value."""
 
 
 @dataclass(frozen=True, slots=True)
 class TokenTotals:
-    """Independent retained-run token counters."""
+    """Token counters retained by Agno."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -103,7 +81,7 @@ class TokenTotals:
     audio_total_tokens: int = 0
 
     def to_dict(self) -> dict[str, int]:
-        """Serialize only the named aggregate counters."""
+        """Return the public token counters."""
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -116,222 +94,100 @@ class TokenTotals:
             "audio_total_tokens": self.audio_total_tokens,
         }
 
-
-@dataclass(frozen=True, slots=True)
-class CostCoverage:
-    """Known retained-run cost subtotal and coverage counts."""
-
-    known_cost: str
-    runs_with_cost: int
-    runs_without_cost: int
-
-    def to_dict(self) -> dict[str, object]:
-        """Serialize the cost subtotal and coverage counts."""
-        return {
-            "known_cost": self.known_cost,
-            "runs_with_cost": self.runs_with_cost,
-            "runs_without_cost": self.runs_without_cost,
-        }
+    def plus(self, other: TokenTotals) -> TokenTotals:
+        """Add another retained run's counters."""
+        return TokenTotals(**{field: getattr(self, field) + getattr(other, field) for field in _TOKEN_FIELDS})
 
 
 @dataclass(frozen=True, slots=True)
 class UsageBreakdownRow:
-    """One bounded aggregate breakdown row."""
+    """One aggregate group in a usage report."""
 
     dimension: Literal["day", "model", "entity", "requester"]
     key: str
-    model_type: str | None
-    provider: str | None
-    model_id: str | None
     totals: TokenTotals
-    cost: CostCoverage
     run_count: int
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize aggregate dimensions without persisted identifiers."""
-        payload: dict[str, object] = {
+        """Return the public breakdown row."""
+        return {
             "dimension": self.dimension,
             "key": self.key,
             "totals": self.totals.to_dict(),
-            "cost": self.cost.to_dict(),
             "run_count": self.run_count,
         }
-        if self.dimension == "model":
-            payload["model"] = {
-                "type": self.model_type,
-                "provider": self.provider,
-                "id": self.model_id,
-            }
-        return payload
 
 
 @dataclass(frozen=True, slots=True)
 class UsageCoverage:
-    """Coverage information for a retained-run scan."""
+    """Small, honest description of the retained scan."""
 
-    status: Literal["complete_retained", "partial", "unknown"]
     scanned_sources: int
-    partial_sources: int
-    scanned_sessions: int
-    retained_runs: int
+    unavailable_sources: int
     skipped_runs: int
-    malformed_runs: int
-    missing_requester_runs: int
-    missing_timestamp_runs: int
-    missing_run_id_runs: int
-    compacted_sessions: int
-    note: str
+    note: str = _COVERAGE_NOTE
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize bounded scan coverage."""
+        """Return coverage without implying billing completeness."""
         return {
-            "status": self.status,
             "scanned_sources": self.scanned_sources,
-            "partial_sources": self.partial_sources,
-            "scanned_sessions": self.scanned_sessions,
-            "retained_runs": self.retained_runs,
+            "unavailable_sources": self.unavailable_sources,
             "skipped_runs": self.skipped_runs,
-            "malformed_runs": self.malformed_runs,
-            "missing_requester_runs": self.missing_requester_runs,
-            "missing_timestamp_runs": self.missing_timestamp_runs,
-            "missing_run_id_runs": self.missing_run_id_runs,
-            "compacted_sessions": self.compacted_sessions,
             "note": self.note,
         }
 
 
 @dataclass(frozen=True, slots=True)
 class UsageReport:
-    """One aggregate-only retained-run usage report."""
+    """Aggregate-only retained token usage."""
 
-    scope: Literal["self", "admin"]
+    scope: _Scope
     start: str | None
     end: str
     timezone: str
-    as_of: str
     totals: TokenTotals
-    cost: CostCoverage
-    turn_count: int
     run_count: int
     session_count: int
     first_observed_at: str | None
     last_observed_at: str | None
-    status_counts: Mapping[str, int]
     breakdown: tuple[UsageBreakdownRow, ...]
     breakdown_truncated: bool
-    breakdown_omitted: int
     coverage: UsageCoverage
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the public aggregate report shape."""
+        """Return the stable custom-tool payload fields."""
         return {
             "scope": self.scope,
             "window": {"start": self.start, "end": self.end, "timezone": self.timezone},
-            "as_of": self.as_of,
             "totals": self.totals.to_dict(),
-            "cost": self.cost.to_dict(),
-            "turn_count": self.turn_count,
             "run_count": self.run_count,
             "session_count": self.session_count,
             "first_observed_at": self.first_observed_at,
             "last_observed_at": self.last_observed_at,
-            "status_counts": dict(self.status_counts),
             "breakdown": [row.to_dict() for row in self.breakdown],
             "breakdown_truncated": self.breakdown_truncated,
-            "breakdown_omitted": self.breakdown_omitted,
             "coverage": self.coverage.to_dict(),
         }
-
-
-@dataclass(frozen=True, slots=True)
-class _MetricContribution:
-    model_type: str
-    provider: str
-    model_id: str
-    totals: TokenTotals
-    cost: Decimal | None
-
-
-@dataclass(frozen=True, slots=True)
-class _DirectRunEntity:
-    """The one attributed entity for a direct retained run."""
-
-    kind: Literal["agent", "team"]
-    entity_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class _UsageMetricRecord:
-    """One normalized retained metric contribution with no raw persisted payload."""
-
-    entity_id: str
-    requester_id: str | None
-    created_at: datetime
-    model_type: str
-    provider: str
-    model_id: str
-    status: str
-    totals: TokenTotals
-    cost: Decimal | None
 
 
 @dataclass(slots=True)
 class _Aggregate:
     totals: TokenTotals = TokenTotals()
-    known_cost: Decimal = Decimal(0)
-    runs_with_cost: int = 0
-    runs_without_cost: int = 0
     run_count: int = 0
 
-    def add(self, *, totals: TokenTotals, cost: Decimal | None) -> None:
-        self.totals = _add_totals(self.totals, totals)
-        if cost is None:
-            self.runs_without_cost += 1
-        else:
-            self.known_cost += cost
-            self.runs_with_cost += 1
+    def add(self, totals: TokenTotals) -> None:
+        self.totals = self.totals.plus(totals)
         self.run_count += 1
 
-    def cost_coverage(self) -> CostCoverage:
-        return CostCoverage(
-            known_cost=str(self.known_cost),
-            runs_with_cost=self.runs_with_cost,
-            runs_without_cost=self.runs_without_cost,
-        )
 
-
-@dataclass(slots=True)
-class _CollectionState:
-    aggregate: _Aggregate
-    breakdowns: dict[_BreakdownKey, _Aggregate]
-    status_counts: dict[str, int]
-    included_sessions: set[tuple[str, str]]
-    observed_at: list[datetime]
-    partial_source_labels: set[str]
-    unreadable_source_labels: set[str]
-    readable_source_labels: set[str]
-    stable_run_ids: set[tuple[str, str, str]]
-    history_stable_run_ids: set[tuple[str, str, str, str, str]]
-    structural_run_ids: set[tuple[str, str, str]]
-    row_history_totals: dict[tuple[str, str], TokenTotals]
-    row_session_metrics: dict[tuple[str, str], TokenTotals | None]
-    row_comparison_allowed: dict[tuple[str, str], bool]
-    row_history_complete: dict[tuple[str, str], bool]
-    top_level_turn_ids: set[tuple[str, str, str]]
-    deadline: float
-    scanned_sources: int = 0
-    scanned_storage_rows: int = 0
-    scanned_run_nodes: int = 0
-    metric_records: int = 0
-    scanned_sessions: int = 0
-    retained_runs: int = 0
-    turn_count: int = 0
-    skipped_runs: int = 0
-    malformed_runs: int = 0
-    missing_requester_runs: int = 0
-    missing_timestamp_runs: int = 0
-    missing_run_id_runs: int = 0
-    coverage_exclusions: int = 0
+@dataclass(frozen=True, slots=True)
+class _AcceptedRun:
+    entity_id: str
+    requester_id: str | None
+    created_at: datetime
+    provider: str
+    model_id: str
+    totals: TokenTotals
 
 
 def parse_usage_window(
@@ -341,14 +197,18 @@ def parse_usage_window(
     timezone_name: str,
     as_of: datetime,
 ) -> tuple[datetime | None, datetime]:
-    """Parse an inclusive UTC start and exclusive UTC end for a usage query."""
-    timezone = _usage_timezone(timezone_name)
-    normalized_as_of = _as_utc(as_of, error="as_of must include a timezone")
-    parsed_start = _parse_boundary(start, timezone=timezone, is_end=False) if start is not None else None
-    parsed_end = _parse_boundary(end, timezone=timezone, is_end=True) if end is not None else normalized_as_of
+    """Parse an inclusive start and exclusive end into UTC."""
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        message = "Configured timezone is invalid."
+        raise UsageStatsValidationError(message) from error
+    normalized_as_of = _as_utc(as_of, "as_of must include a timezone")
+    parsed_start = _parse_boundary(start, timezone) if start is not None else None
+    parsed_end = _parse_boundary(end, timezone) if end is not None else normalized_as_of
     if parsed_start is not None and parsed_start >= parsed_end:
-        msg = "start must be before end"
-        raise UsageStatsValidationError(msg)
+        message = "start must be before end"
+        raise UsageStatsValidationError(message)
     return parsed_start, parsed_end
 
 
@@ -364,41 +224,26 @@ def collect_self_usage(
     group_by: SelfGroupBy,
     as_of: datetime | None = None,
 ) -> UsageReport:
-    """Collect direct retained usage for one agent and requester without session totals."""
-    _validate_group_by(group_by, allowed=_SELF_GROUPS)
-    query_as_of = _query_as_of(as_of)
-    window_start, window_end = parse_usage_window(
-        start=start,
-        end=end,
-        timezone_name=config.timezone,
-        as_of=query_as_of,
-    )
+    """Collect one requester's direct usage for the current agent."""
+    _validate_group_by(group_by, {"day", "model"})
     expected_requester = config.authorization.resolve_alias(requester_id)
-    sources = discover_self_usage_sources(
-        agent_name=agent_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
-    state = _collect(
-        sources=sources,
+    return _collect_usage(
+        sources=discover_self_usage_sources(
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
         config=config,
         scope="self",
         group_by=group_by,
-        window_start=window_start,
-        window_end=window_end,
+        start=start,
+        end=end,
+        as_of=as_of,
         expected_agent=agent_name,
         expected_requester=expected_requester,
         entity_filter=None,
         requester_filter=None,
-    )
-    return _report(
-        state=state,
-        scope="self",
-        start=window_start,
-        end=window_end,
-        timezone_name=config.timezone,
-        as_of=query_as_of,
     )
 
 
@@ -413,943 +258,284 @@ def collect_admin_usage(
     requester_ids: tuple[str, ...] | None,
     as_of: datetime | None = None,
 ) -> UsageReport:
-    """Collect direct retained usage from current configured agent and team sources."""
-    _validate_group_by(group_by, allowed=_ADMIN_GROUPS)
-    entity_filter = _validate_entity_filter(entity_names, config)
+    """Collect direct usage across configured agent, private-instance, and team stores."""
+    _validate_group_by(group_by, {"day", "entity", "model", "requester"})
+    known_entities = frozenset((*config.agents, *config.teams))
+    entity_filter = frozenset(entity_names) if entity_names is not None else None
+    unknown_entities = sorted((entity_filter or frozenset()) - known_entities)
+    if unknown_entities:
+        message = f"Unknown usage entities: {', '.join(unknown_entities)}"
+        raise UsageStatsValidationError(message)
     requester_filter = (
         frozenset(config.authorization.resolve_alias(requester_id) for requester_id in requester_ids)
         if requester_ids is not None
         else None
     )
-    query_as_of = _query_as_of(as_of)
+    return _collect_usage(
+        sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
+        config=config,
+        scope="admin",
+        group_by=group_by,
+        start=start,
+        end=end,
+        as_of=as_of,
+        expected_agent=None,
+        expected_requester=None,
+        entity_filter=entity_filter,
+        requester_filter=requester_filter,
+    )
+
+
+def _collect_usage(
+    *,
+    sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
+    config: Config,
+    scope: _Scope,
+    group_by: _GroupBy,
+    start: str | None,
+    end: str | None,
+    as_of: datetime | None,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+) -> UsageReport:
+    query_as_of = _as_utc(as_of or datetime.now(UTC), "as_of must include a timezone")
     window_start, window_end = parse_usage_window(
         start=start,
         end=end,
         timezone_name=config.timezone,
         as_of=query_as_of,
     )
-    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
-    state = _collect(
-        sources=sources,
-        config=config,
-        scope="admin",
-        group_by=group_by,
-        window_start=window_start,
-        window_end=window_end,
-        expected_agent=None,
-        expected_requester=None,
-        entity_filter=entity_filter,
-        requester_filter=requester_filter,
-    )
-    return _report(
-        state=state,
-        scope="admin",
-        start=window_start,
-        end=window_end,
-        timezone_name=config.timezone,
-        as_of=query_as_of,
-    )
+    timezone = ZoneInfo(config.timezone)
+    total = _Aggregate()
+    buckets: dict[tuple[_Dimension, str], _Aggregate] = {}
+    sessions: set[tuple[str, str]] = set()
+    observed: list[datetime] = []
+    seen_runs: set[tuple[str, str, str, str]] = set()
+    scanned_sources: set[str] = set()
+    unavailable_sources: set[str] = set()
+    skipped_runs = 0
 
-
-def _collect(
-    *,
-    sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
-    config: Config,
-    scope: Literal["self", "admin"],
-    group_by: _UsageGroupBy,
-    window_start: datetime | None,
-    window_end: datetime,
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-) -> _CollectionState:
-    state = _CollectionState(
-        aggregate=_Aggregate(),
-        breakdowns={},
-        status_counts=defaultdict(int),
-        included_sessions=set(),
-        observed_at=[],
-        partial_source_labels=set(),
-        unreadable_source_labels=set(),
-        readable_source_labels=set(),
-        stable_run_ids=set(),
-        history_stable_run_ids=set(),
-        structural_run_ids=set(),
-        row_history_totals={},
-        row_session_metrics={},
-        row_comparison_allowed={},
-        row_history_complete={},
-        top_level_turn_ids=set(),
-        deadline=monotonic() + _QUERY_TIME_BUDGET_SECONDS,
-    )
-    timezone = _usage_timezone(config.timezone)
-    for source in sources:
-        if state.scanned_sources >= _MAX_SCANNED_SOURCES:
-            if scope == "self":
-                msg = "Usage source unavailable"
-                raise UsageStatsSourceUnavailableError(msg)
-            state.coverage_exclusions += 1
-            break
-        state.scanned_sources += 1
-        if isinstance(source, UsageStorageDiagnostic):
-            _record_source_diagnostic(state, source)
+    for discovered in sources:
+        if isinstance(discovered, UsageStorageDiagnostic):
+            unavailable_sources.add(discovered.path_label)
             continue
-        if not _collect_source(
-            state=state,
-            source=source,
-            config=config,
-            scope=scope,
-            group_by=group_by,
-            timezone=timezone,
-            window_start=window_start,
-            window_end=window_end,
-            expected_agent=expected_agent,
-            expected_requester=expected_requester,
-            entity_filter=entity_filter,
-            requester_filter=requester_filter,
-        ):
-            break
-    if scope == "self" and not state.readable_source_labels and state.unreadable_source_labels:
-        msg = "Usage source unavailable"
-        raise UsageStatsSourceUnavailableError(msg)
-    return state
-
-
-def _collect_source(
-    *,
-    state: _CollectionState,
-    source: UsageStorageSource,
-    config: Config,
-    scope: Literal["self", "admin"],
-    group_by: _UsageGroupBy,
-    timezone: ZoneInfo,
-    window_start: datetime | None,
-    window_end: datetime,
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-) -> bool:
-    source_had_outcome = False
-    try:
-        _check_collection_time(state)
-        for outcome in iter_usage_storage_rows(source):
-            _check_collection_time(state)
-            source_had_outcome = True
-            if isinstance(outcome, UsageStorageDiagnostic):
-                _record_source_diagnostic(state, outcome)
+        source = discovered
+        scanned_sources.add(source.path_label)
+        for item in iter_usage_storage_rows(source):
+            if isinstance(item, UsageStorageDiagnostic):
+                unavailable_sources.add(item.path_label)
                 continue
-            _reserve_storage_row(state)
-            state.readable_source_labels.add(source.path_label)
-            _collect_row(
-                state=state,
-                row=outcome,
-                config=config,
-                scope=scope,
-                group_by=group_by,
-                timezone=timezone,
-                window_start=window_start,
-                window_end=window_end,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-                entity_filter=entity_filter,
-                requester_filter=requester_filter,
-            )
-    except _CollectionResourceLimitError:
-        state.partial_source_labels.add(source.path_label)
-        if scope == "self":
-            msg = "Usage source unavailable"
-            raise UsageStatsSourceUnavailableError(msg) from None
-        return False
-    if not source_had_outcome:
-        state.readable_source_labels.add(source.path_label)
-    return True
+            for run in item.runs:
+                accepted = _accepted_run(
+                    row=item,
+                    run=run,
+                    config=config,
+                    scope=scope,
+                    expected_agent=expected_agent,
+                    expected_requester=expected_requester,
+                    entity_filter=entity_filter,
+                    requester_filter=requester_filter,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                if accepted is None:
+                    if _visible_candidate(
+                        row=item,
+                        run=run,
+                        config=config,
+                        scope=scope,
+                        expected_agent=expected_agent,
+                        expected_requester=expected_requester,
+                    ):
+                        skipped_runs += 1
+                    continue
+                if run.run_id is not None:
+                    identity = (source.path_label, item.row_key, accepted.entity_id, run.run_id)
+                    if identity in seen_runs:
+                        continue
+                    seen_runs.add(identity)
+                total.add(accepted.totals)
+                sessions.add((source.path_label, item.row_key))
+                observed.append(accepted.created_at)
+                dimension, key = _breakdown_key(group_by, accepted, timezone)
+                buckets.setdefault((dimension, key), _Aggregate()).add(accepted.totals)
 
-
-def _record_source_diagnostic(state: _CollectionState, diagnostic: UsageStorageDiagnostic) -> None:
-    if diagnostic.status == "absent":
-        return
-    state.partial_source_labels.add(diagnostic.path_label)
-    state.unreadable_source_labels.add(diagnostic.path_label)
-
-
-def _check_collection_time(state: _CollectionState) -> None:
-    if monotonic() > state.deadline:
-        raise _CollectionResourceLimitError
-
-
-def _reserve_storage_row(state: _CollectionState) -> None:
-    state.scanned_storage_rows += 1
-    if state.scanned_storage_rows > _MAX_SCANNED_STORAGE_ROWS:
-        raise _CollectionResourceLimitError
-
-
-def _reserve_run_node(state: _CollectionState) -> None:
-    _check_collection_time(state)
-    state.scanned_run_nodes += 1
-    if state.scanned_run_nodes > _MAX_SCANNED_RUN_NODES:
-        raise _CollectionResourceLimitError
-
-
-def _reserve_metric_records(state: _CollectionState, count: int) -> None:
-    _check_collection_time(state)
-    if state.metric_records + count > _MAX_METRIC_RECORDS:
-        raise _CollectionResourceLimitError
-    state.metric_records += count
-
-
-def _collect_row(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    config: Config,
-    scope: Literal["self", "admin"],
-    group_by: _UsageGroupBy,
-    timezone: ZoneInfo,
-    window_start: datetime | None,
-    window_end: datetime,
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-) -> None:
-    if scope == "admin" or row.source.requester_isolated:
-        _initialize_row_tracking(state, row, comparison_allowed=True)
-    for index, run in enumerate(row.runs):
-        _collect_run_tree(
-            state=state,
-            row=row,
-            run=run,
-            is_top_level=True,
-            parent_requester=None,
-            parent_timestamp=None,
-            structural_key=str(index),
-            config=config,
-            scope=scope,
-            group_by=group_by,
-            timezone=timezone,
-            window_start=window_start,
-            window_end=window_end,
-            expected_agent=expected_agent,
-            expected_requester=expected_requester,
-            entity_filter=entity_filter,
-            requester_filter=requester_filter,
-        )
-
-
-def _initialize_row_tracking(
-    state: _CollectionState,
-    row: UsageSessionRow,
-    *,
-    comparison_allowed: bool,
-) -> None:
-    row_key = (row.source.path_label, row.row_key)
-    if row_key in state.row_history_totals:
-        return
-    state.scanned_sessions += 1
-    state.row_history_totals[row_key] = TokenTotals()
-    state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
-    state.row_comparison_allowed[row_key] = comparison_allowed
-    state.row_history_complete[row_key] = True
-
-
-def _collect_run_tree(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    is_top_level: bool,
-    parent_requester: str | None,
-    parent_timestamp: datetime | None,
-    structural_key: str,
-    config: Config,
-    scope: Literal["self", "admin"],
-    group_by: _UsageGroupBy,
-    timezone: ZoneInfo,
-    window_start: datetime | None,
-    window_end: datetime,
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-) -> None:
-    _reserve_run_node(state)
-    requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else parent_requester
-    entity = _run_entity(row=row, run=run, is_top_level=is_top_level)
-    timestamp = parent_timestamp if run.created_at is None else _run_timestamp(run.created_at)
-    visible_to_scope = (
-        scope == "admin"
-        or row.source.requester_isolated
-        or _matches_self_identity(
-            entity=entity,
-            requester=requester,
-            expected_agent=expected_agent,
-            expected_requester=expected_requester,
-        )
-    )
-    if visible_to_scope:
-        _initialize_row_tracking(
-            state,
-            row,
-            comparison_allowed=scope == "admin" or row.source.requester_isolated,
-        )
-        if entity is None or timestamp is None:
-            state.malformed_runs += entity is None
-            state.missing_timestamp_runs += timestamp is None
-            state.missing_requester_runs += requester is None
-            state.skipped_runs += 1
-            state.coverage_exclusions += 1
-            _mark_row_history_incomplete(state, row)
-        else:
-            _collect_normalized_run(
-                state=state,
-                row=row,
-                run=run,
-                entity=entity,
-                requester=requester,
-                timestamp=timestamp,
-                structural_key=structural_key,
-                is_top_level=is_top_level,
-                scope=scope,
-                group_by=group_by,
-                timezone=timezone,
-                window_start=window_start,
-                window_end=window_end,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-                entity_filter=entity_filter,
-                requester_filter=requester_filter,
-            )
-    for index, child in enumerate(run.member_responses):
-        _collect_run_tree(
-            state=state,
-            row=row,
-            run=child,
-            is_top_level=False,
-            parent_requester=requester,
-            parent_timestamp=timestamp,
-            structural_key=f"{structural_key}.{index}",
-            config=config,
-            scope=scope,
-            group_by=group_by,
-            timezone=timezone,
-            window_start=window_start,
-            window_end=window_end,
-            expected_agent=expected_agent,
-            expected_requester=expected_requester,
-            entity_filter=entity_filter,
-            requester_filter=requester_filter,
-        )
-
-
-def _matches_self_identity(
-    *,
-    entity: _DirectRunEntity | None,
-    requester: str | None,
-    expected_agent: str | None,
-    expected_requester: str | None,
-) -> bool:
-    return (
-        requester is not None
-        and requester == expected_requester
-        and entity is not None
-        and entity.kind == "agent"
-        and entity.entity_id == expected_agent
-    )
-
-
-def _collect_normalized_run(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    entity: _DirectRunEntity,
-    requester: str | None,
-    timestamp: datetime,
-    structural_key: str,
-    is_top_level: bool,
-    scope: Literal["self", "admin"],
-    group_by: _UsageGroupBy,
-    timezone: ZoneInfo,
-    window_start: datetime | None,
-    window_end: datetime,
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-) -> None:
-    if not _admit_structural_run(state=state, row=row, run=run, structural_key=structural_key):
-        return
-    accepted = _accept_run(
-        entity=entity,
-        requester=requester,
-        timestamp=timestamp,
-        scope=scope,
-        expected_agent=expected_agent,
-        expected_requester=expected_requester,
-        entity_filter=entity_filter,
-        requester_filter=requester_filter,
-        window_start=window_start,
-        window_end=window_end,
-    )
-    if accepted and run.run_id is None:
-        state.missing_run_id_runs += 1
-        state.coverage_exclusions += 1
-    if is_top_level and accepted:
-        _count_top_level_turn(
-            state=state,
-            row=row,
-            run=run,
-            entity=entity,
-            structural_key=structural_key,
-        )
-    contributions = _run_contributions(run)
-    if contributions is None:
-        state.malformed_runs += 1
-        state.missing_requester_runs += requester is None
-        state.skipped_runs += 1
-        state.coverage_exclusions += 1
-        _mark_row_history_incomplete(state, row)
-        return
-    _reserve_metric_records(state, len(contributions))
-    records = tuple(
-        _UsageMetricRecord(
-            entity_id=entity.entity_id,
-            requester_id=requester,
-            created_at=timestamp,
-            model_type=contribution.model_type,
-            provider=contribution.provider,
-            model_id=contribution.model_id,
-            status=run.status,
-            totals=contribution.totals,
-            cost=contribution.cost,
-        )
-        for contribution in contributions
-    )
-    _record_row_history(state=state, row=row, run=run, entity=entity, records=records)
-    if not _admit_stable_run(state=state, run=run, entity=entity):
-        return
-    _record_requester_coverage(state=state, requester=requester, accepted=accepted)
-    if not accepted:
-        if requester is None and (scope == "self" or requester_filter is not None):
-            state.coverage_exclusions += 1
-            _mark_row_history_incomplete(state, row)
-        state.skipped_runs += 1
-        return
-    if not records:
-        state.skipped_runs += 1
-        return
-    _aggregate_records(state=state, row=row, records=records, group_by=group_by, timezone=timezone)
-
-
-def _record_requester_coverage(
-    *,
-    state: _CollectionState,
-    requester: str | None,
-    accepted: bool,
-) -> None:
-    if requester is not None:
-        return
-    state.missing_requester_runs += 1
-    if accepted:
-        state.coverage_exclusions += 1
-
-
-def _admit_structural_run(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    structural_key: str,
-) -> bool:
-    if run.run_id is not None:
-        return True
-    identity = (row.source.path_label, row.row_key, structural_key)
-    if identity in state.structural_run_ids:
-        return False
-    state.structural_run_ids.add(identity)
-    return True
-
-
-def _record_row_history(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    entity: _DirectRunEntity,
-    records: tuple[_UsageMetricRecord, ...],
-) -> None:
-    row_key = (row.source.path_label, row.row_key)
-    if run.run_id is not None:
-        history_key = (*row_key, entity.kind, entity.entity_id, run.run_id)
-        if history_key in state.history_stable_run_ids:
-            return
-        state.history_stable_run_ids.add(history_key)
-    state.row_history_totals[row_key] = _add_totals(
-        state.row_history_totals[row_key],
-        _records_totals(records),
-    )
-
-
-def _admit_stable_run(
-    *,
-    state: _CollectionState,
-    run: UsageRunNode,
-    entity: _DirectRunEntity,
-) -> bool:
-    if run.run_id is None:
-        return True
-    identity = (entity.kind, entity.entity_id, run.run_id)
-    if identity in state.stable_run_ids:
-        return False
-    state.stable_run_ids.add(identity)
-    return True
-
-
-def _count_top_level_turn(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    entity: _DirectRunEntity,
-    structural_key: str,
-) -> None:
-    identity = (
-        (entity.kind, entity.entity_id, run.run_id)
-        if run.run_id is not None
-        else (row.source.path_label, row.row_key, structural_key)
-    )
-    if identity in state.top_level_turn_ids:
-        return
-    state.top_level_turn_ids.add(identity)
-    state.turn_count += 1
-
-
-def _mark_row_history_incomplete(state: _CollectionState, row: UsageSessionRow) -> None:
-    state.row_history_complete[(row.source.path_label, row.row_key)] = False
-
-
-def _aggregate_records(
-    *,
-    state: _CollectionState,
-    row: UsageSessionRow,
-    records: tuple[_UsageMetricRecord, ...],
-    group_by: _UsageGroupBy,
-    timezone: ZoneInfo,
-) -> None:
-    representative = records[0]
-    state.retained_runs += 1
-    state.included_sessions.add((row.source.path_label, row.row_key))
-    state.observed_at.append(representative.created_at)
-    state.status_counts[representative.status] += 1
-    run_totals = TokenTotals()
-    run_cost = Decimal(0)
-    has_cost = False
-    per_breakdown: dict[_BreakdownKey, _Aggregate] = {}
-    for record in records:
-        run_totals = _add_totals(run_totals, record.totals)
-        if record.cost is not None:
-            run_cost += record.cost
-            has_cost = True
-        key = _record_breakdown_key(group_by=group_by, record=record, timezone=timezone)
-        per_breakdown.setdefault(key, _Aggregate()).add(totals=record.totals, cost=record.cost)
-    for key, aggregate in per_breakdown.items():
-        state.breakdowns.setdefault(key, _Aggregate()).add(
-            totals=aggregate.totals,
-            cost=aggregate.known_cost if aggregate.runs_with_cost else None,
-        )
-    state.aggregate.add(totals=run_totals, cost=run_cost if has_cost else None)
-
-
-def _accept_run(
-    *,
-    entity: _DirectRunEntity | None,
-    requester: str | None,
-    timestamp: datetime,
-    scope: Literal["self", "admin"],
-    expected_agent: str | None,
-    expected_requester: str | None,
-    entity_filter: frozenset[str] | None,
-    requester_filter: frozenset[str] | None,
-    window_start: datetime | None,
-    window_end: datetime,
-) -> bool:
-    if window_start is not None and timestamp < window_start:
-        return False
-    if timestamp >= window_end:
-        return False
-    if scope == "self":
-        return _matches_self_identity(
-            entity=entity,
-            requester=requester,
-            expected_agent=expected_agent,
-            expected_requester=expected_requester,
-        )
-    if entity_filter is not None and (entity is None or entity.entity_id not in entity_filter):
-        return False
-    return requester_filter is None or requester in requester_filter
-
-
-def _record_breakdown_key(
-    *,
-    group_by: _UsageGroupBy,
-    record: _UsageMetricRecord,
-    timezone: ZoneInfo,
-) -> _BreakdownKey:
-    if group_by == "model":
-        return ("model", record.model_id, record.model_type, record.provider, record.model_id)
-    if group_by == "entity":
-        return ("entity", record.entity_id, None, None, None)
-    if group_by == "requester":
-        return ("requester", record.requester_id or "unknown", None, None, None)
-    return ("day", record.created_at.astimezone(timezone).date().isoformat(), None, None, None)
-
-
-def _metrics_totals(metrics: Mapping[str, object] | None) -> TokenTotals | None:
-    if metrics is None:
-        return None
-    values: dict[str, int] = {}
-    for field in _TOKEN_FIELDS:
-        value = _token_value(metrics.get(field))
-        if value is None and metrics.get(field) is not None:
-            return None
-        values[field] = value or 0
-    return TokenTotals(**values)
-
-
-def _records_totals(records: tuple[_UsageMetricRecord, ...]) -> TokenTotals:
-    totals = TokenTotals()
-    for record in records:
-        totals = _add_totals(totals, record.totals)
-    return totals
-
-
-def _run_entity(  # noqa: PLR0911
-    *,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    is_top_level: bool,
-) -> _DirectRunEntity | None:
-    if is_top_level and row.source.scope in {"shared_agent", "private_agent"}:
-        if row.source.source_agent_id in row.source.allowed_agent_ids:
-            return _DirectRunEntity(kind="agent", entity_id=row.source.source_agent_id)
-        return None
-    if is_top_level:
-        team_id = run.team_id or (row.entity_id if row.entity_kind == "team" else None)
-        if team_id in row.source.allowed_team_ids:
-            return _DirectRunEntity(kind="team", entity_id=team_id)
-        return None
-    if run.agent_id in row.source.allowed_agent_ids:
-        return _DirectRunEntity(kind="agent", entity_id=run.agent_id)
-    if run.team_id in row.source.allowed_team_ids:
-        return _DirectRunEntity(kind="team", entity_id=run.team_id)
-    return None
-
-
-def _run_contributions(run: UsageRunNode) -> tuple[_MetricContribution, ...] | None:
-    model_metrics = run.model_metrics
-    if model_metrics:
-        metered_model_metrics = tuple(metric for metric in model_metrics if _has_actual_metric(metric.metrics))
-        contributions = tuple(_model_metric_contribution(metric) for metric in metered_model_metrics)
-        if any(contribution is None for contribution in contributions):
-            return None
-        if contributions:
-            return tuple(contribution for contribution in contributions if contribution is not None)
-    if not _has_actual_metric(run.metrics):
-        return ()
-    contribution = _metric_contribution(
-        model_type="model",
-        provider=run.model_provider or "unknown",
-        model_id=run.model_id or "unknown",
-        metrics=run.metrics,
-    )
-    return None if contribution is None else (contribution,)
-
-
-def _has_actual_metric(metrics: Mapping[str, object]) -> bool:
-    return any(metrics.get(field) is not None for field in (*_TOKEN_FIELDS, "cost"))
-
-
-def _model_metric_contribution(metric: UsageModelMetric) -> _MetricContribution | None:
-    return _metric_contribution(
-        model_type=metric.model_type,
-        provider=metric.provider,
-        model_id=metric.model_id,
-        metrics=metric.metrics,
-    )
-
-
-def _metric_contribution(
-    *,
-    model_type: str,
-    provider: str,
-    model_id: str,
-    metrics: Mapping[str, object],
-) -> _MetricContribution | None:
-    values: dict[str, int] = {}
-    for field in _TOKEN_FIELDS:
-        value = _token_value(metrics.get(field))
-        if value is None and metrics.get(field) is not None:
-            return None
-        values[field] = value or 0
-    cost = _cost_value(metrics.get("cost"))
-    if cost is None and metrics.get("cost") is not None:
-        return None
-    return _MetricContribution(
-        model_type=model_type or "unknown",
-        provider=provider or "unknown",
-        model_id=model_id or "unknown",
-        totals=TokenTotals(**values),
-        cost=cost,
-    )
-
-
-def _token_value(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if 0 <= value <= _MAX_PERSISTED_INTEGER else None
-    if isinstance(value, float):
-        return (
-            int(value) if math.isfinite(value) and 0 <= value <= _MAX_PERSISTED_INTEGER and value.is_integer() else None
-        )
-    if isinstance(value, str) and len(value) <= _MAX_PERSISTED_NUMERIC_TEXT_LENGTH and value.isdecimal():
-        return int(value)
-    return None
-
-
-def _cost_value(value: object) -> Decimal | None:
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    if (isinstance(value, int) and not 0 <= value <= _MAX_PERSISTED_INTEGER) or (
-        isinstance(value, float) and (not math.isfinite(value) or not 0 <= value <= _MAX_PERSISTED_INTEGER)
-    ):
-        return None
-    if isinstance(value, str) and len(value) > _MAX_PERSISTED_NUMERIC_TEXT_LENGTH:
-        return None
-    try:
-        cost = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return (
-        cost if cost.is_finite() and cost >= 0 and abs(cost.adjusted()) <= _MAX_PERSISTED_NUMERIC_TEXT_LENGTH else None
-    )
-
-
-def _report(
-    *,
-    state: _CollectionState,
-    scope: Literal["self", "admin"],
-    start: datetime | None,
-    end: datetime,
-    timezone_name: str,
-    as_of: datetime,
-) -> UsageReport:
     rows = tuple(
         UsageBreakdownRow(
             dimension=dimension,
             key=key,
-            model_type=model_type if dimension == "model" else None,
-            provider=provider if dimension == "model" else None,
-            model_id=model_id if dimension == "model" else None,
             totals=aggregate.totals,
-            cost=aggregate.cost_coverage(),
             run_count=aggregate.run_count,
         )
-        for (dimension, key, model_type, provider, model_id), aggregate in state.breakdowns.items()
+        for (dimension, key), aggregate in sorted(
+            buckets.items(),
+            key=lambda item: (-item[1].totals.total_tokens, item[0]),
+        )[:_BREAKDOWN_LIMIT]
     )
-    sorted_rows = tuple(
-        sorted(
-            rows,
-            key=lambda row: (
-                -row.totals.total_tokens,
-                row.dimension,
-                row.key,
-                row.model_type or "",
-                row.provider or "",
-                row.model_id or "",
-            ),
-        ),
-    )
-    retained_rows = sorted_rows[:_MAX_BREAKDOWN_ROWS]
-    coverage_status: Literal["complete_retained", "partial", "unknown"]
-    partial_sources = len(state.partial_source_labels)
-    compacted_sessions, comparison_unknown = _coverage_comparison(state)
-    if partial_sources or compacted_sessions or state.coverage_exclusions:
-        coverage_status = "partial"
-    elif comparison_unknown or not state.scanned_sources:
-        coverage_status = "unknown"
-    else:
-        coverage_status = "complete_retained"
     return UsageReport(
         scope=scope,
-        start=_format_timestamp(start) if start is not None else None,
-        end=_format_timestamp(end),
-        timezone=timezone_name,
-        as_of=_format_timestamp(as_of),
-        totals=state.aggregate.totals,
-        cost=state.aggregate.cost_coverage(),
-        turn_count=state.turn_count,
-        run_count=state.aggregate.run_count,
-        session_count=len(state.included_sessions),
-        first_observed_at=_format_timestamp(min(state.observed_at)) if state.observed_at else None,
-        last_observed_at=_format_timestamp(max(state.observed_at)) if state.observed_at else None,
-        status_counts=MappingProxyType(dict(sorted(state.status_counts.items()))),
-        breakdown=retained_rows,
-        breakdown_truncated=len(sorted_rows) > _MAX_BREAKDOWN_ROWS,
-        breakdown_omitted=max(0, len(sorted_rows) - _MAX_BREAKDOWN_ROWS),
+        start=_format_time(window_start) if window_start is not None else None,
+        end=_format_time(window_end),
+        timezone=config.timezone,
+        totals=total.totals,
+        run_count=total.run_count,
+        session_count=len(sessions),
+        first_observed_at=_format_time(min(observed)) if observed else None,
+        last_observed_at=_format_time(max(observed)) if observed else None,
+        breakdown=rows,
+        breakdown_truncated=len(buckets) > _BREAKDOWN_LIMIT,
         coverage=UsageCoverage(
-            status=coverage_status,
-            scanned_sources=state.scanned_sources,
-            partial_sources=partial_sources,
-            scanned_sessions=state.scanned_sessions,
-            retained_runs=state.retained_runs,
-            skipped_runs=state.skipped_runs,
-            malformed_runs=state.malformed_runs,
-            missing_requester_runs=state.missing_requester_runs,
-            missing_timestamp_runs=state.missing_timestamp_runs,
-            missing_run_id_runs=state.missing_run_id_runs,
-            compacted_sessions=compacted_sessions,
-            note="Retained run usage only; session compaction can make retained history incomplete.",
+            scanned_sources=len(scanned_sources),
+            unavailable_sources=len(unavailable_sources),
+            skipped_runs=skipped_runs,
         ),
     )
 
 
-def _coverage_comparison(state: _CollectionState) -> tuple[int, bool]:
-    compacted_sessions = 0
-    unknown = not state.row_session_metrics
-    for row_key, retained in state.row_history_totals.items():
-        if not state.row_history_complete[row_key]:
-            unknown = True
-            continue
-        if not state.row_comparison_allowed[row_key]:
-            unknown = True
-            continue
-        cumulative = state.row_session_metrics[row_key]
-        if cumulative is None:
-            unknown = True
-            continue
-        if _totals_dominate(cumulative, retained):
-            compacted_sessions += 1
-        elif cumulative != retained:
-            unknown = True
-    return compacted_sessions, unknown
-
-
-def _totals_dominate(left: TokenTotals, right: TokenTotals) -> bool:
-    left_values = left.to_dict().values()
-    right_values = right.to_dict().values()
-    pairs = tuple(zip(left_values, right_values, strict=True))
-    return all(left_value >= right_value for left_value, right_value in pairs) and any(
-        left_value > right_value for left_value, right_value in pairs
+def _accepted_run(  # noqa: PLR0911
+    *,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    config: Config,
+    scope: _Scope,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    entity_filter: frozenset[str] | None,
+    requester_filter: frozenset[str] | None,
+    window_start: datetime | None,
+    window_end: datetime,
+) -> _AcceptedRun | None:
+    entity_id = _entity_id(row, run)
+    requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+    if entity_id is None:
+        return None
+    if scope == "self":
+        if entity_id != expected_agent:
+            return None
+        if not row.source.requester_isolated and requester_id != expected_requester:
+            return None
+    elif (entity_filter is not None and entity_id not in entity_filter) or (
+        requester_filter is not None and requester_id not in requester_filter
+    ):
+        return None
+    created_at = _run_timestamp(run.created_at)
+    if created_at is None or (window_start is not None and created_at < window_start) or created_at >= window_end:
+        return None
+    totals = _metrics_totals(run.metrics)
+    if totals is None:
+        return None
+    return _AcceptedRun(
+        entity_id=entity_id,
+        requester_id=requester_id,
+        created_at=created_at,
+        provider=run.model_provider or "unknown",
+        model_id=run.model_id or "unknown",
+        totals=totals,
     )
 
 
-def _validate_entity_filter(entity_names: tuple[str, ...] | None, config: Config) -> frozenset[str] | None:
-    if entity_names is None:
+def _visible_candidate(
+    *,
+    row: UsageSessionRow,
+    run: UsageRunNode,
+    config: Config,
+    scope: _Scope,
+    expected_agent: str | None,
+    expected_requester: str | None,
+) -> bool:
+    if scope == "admin":
+        return True
+    requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+    return _entity_id(row, run) == expected_agent and (
+        row.source.requester_isolated or requester_id == expected_requester
+    )
+
+
+def _entity_id(row: UsageSessionRow, run: UsageRunNode) -> str | None:
+    if row.source.scope in {"shared_agent", "private_agent"}:
+        entity_id = row.source.source_agent_id
+        return entity_id if entity_id in row.source.allowed_agent_ids else None
+    entity_id = run.team_id or (row.entity_id if row.entity_kind == "team" else None)
+    return entity_id if entity_id in row.source.allowed_team_ids else None
+
+
+def _breakdown_key(group_by: _GroupBy, run: _AcceptedRun, timezone: ZoneInfo) -> tuple[_Dimension, str]:
+    if group_by == "entity":
+        return "entity", run.entity_id
+    if group_by == "requester":
+        return "requester", run.requester_id or "unknown"
+    if group_by == "model":
+        return "model", f"{run.provider}/{run.model_id}"
+    return "day", run.created_at.astimezone(timezone).date().isoformat()
+
+
+def _metrics_totals(metrics: Mapping[str, object]) -> TokenTotals | None:
+    if not any(metrics.get(field) is not None for field in _TOKEN_FIELDS):
         return None
-    known_entities = frozenset(config.agents) | frozenset(config.teams)
-    unknown = sorted(set(entity_names) - known_entities)
-    if unknown:
-        msg = "Unknown entity filter"
-        raise UsageStatsValidationError(msg)
-    return frozenset(entity_names)
+    values: dict[str, int] = {}
+    for field in _TOKEN_FIELDS:
+        value = _token_value(metrics.get(field))
+        if value is None:
+            return None
+        values[field] = value
+    return TokenTotals(**values)
 
 
-def _validate_group_by(group_by: object, *, allowed: frozenset[str]) -> None:
-    if group_by not in allowed:
-        msg = "Unsupported usage statistics group_by"
-        raise UsageStatsValidationError(msg)
-
-
-def _query_as_of(as_of: datetime | None) -> datetime:
-    return _as_utc(as_of or datetime.now(UTC), error="as_of must include a timezone")
-
-
-def _usage_timezone(timezone_name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError as error:
-        msg = "Unknown timezone"
-        raise UsageStatsValidationError(msg) from error
-
-
-def _parse_boundary(value: str, *, timezone: ZoneInfo, is_end: bool) -> datetime:
-    if _DATE_ONLY.fullmatch(value):
+def _token_value(value: object) -> int | None:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float) and value.is_integer():
+        parsed = int(value)
+    elif isinstance(value, str) and len(value) <= 32:
         try:
-            local_date = date.fromisoformat(value)
-            if is_end:
-                local_date += timedelta(days=1)
-        except ValueError as error:
-            msg = "Invalid date"
-            raise UsageStatsValidationError(msg) from error
-        except OverflowError as error:
-            msg = "Invalid date"
-            raise UsageStatsValidationError(msg) from error
-        boundary = datetime.combine(local_date, datetime.min.time(), tzinfo=timezone)
-        return _as_utc(boundary, error="Invalid date")
-    if _TIMESTAMP_OFFSET.fullmatch(value) is None:
-        msg = "Timestamp must include Z or an explicit offset"
-        raise UsageStatsValidationError(msg)
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as error:
-        msg = "Invalid timestamp"
-        raise UsageStatsValidationError(msg) from error
-    return _as_utc(parsed, error="Invalid timestamp")
+            parsed = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed >= 0 else None
 
 
-def _run_timestamp(value: str | None) -> datetime | None:  # noqa: PLR0911
+def _run_timestamp(value: str | None) -> datetime | None:
     if value is None:
         return None
     try:
-        numeric = Decimal(value)
-    except InvalidOperation:
-        numeric = None
-    if numeric is not None:
-        if not numeric.is_finite():
-            return None
-        try:
-            return datetime.fromtimestamp(float(numeric), tz=UTC)
-        except (OverflowError, OSError, ValueError):
-            return None
-    if _TIMESTAMP_OFFSET.fullmatch(value) is None:
-        return None
-    try:
-        return _as_utc(datetime.fromisoformat(value), error="timestamp")
-    except (UsageStatsValidationError, ValueError):
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        parsed = datetime.fromisoformat(value)
+        return _as_utc(parsed, "run timestamp must include a timezone")
+    except (OverflowError, OSError, ValueError):
         return None
 
 
-def _as_utc(value: datetime, *, error: str) -> datetime:
+def _parse_boundary(value: str, timezone: ZoneInfo) -> datetime:
     try:
-        utc_offset = value.utcoffset()
-    except (OverflowError, ValueError) as cause:
-        raise UsageStatsValidationError(error) from cause
-    if value.tzinfo is None or utc_offset is None:
-        raise UsageStatsValidationError(error)
-    try:
-        return value.astimezone(UTC)
-    except (OverflowError, ValueError) as cause:
-        raise UsageStatsValidationError(error) from cause
+        if _DATE_ONLY.fullmatch(value):
+            return datetime.combine(date.fromisoformat(value), time.min, tzinfo=timezone).astimezone(UTC)
+        parsed = datetime.fromisoformat(value)
+    except (OverflowError, ValueError) as error:
+        message = "Invalid usage time boundary."
+        raise UsageStatsValidationError(message) from error
+    return _as_utc(parsed, "timestamps must include an explicit UTC offset")
 
 
-def _add_totals(left: TokenTotals, right: TokenTotals) -> TokenTotals:
-    return TokenTotals(
-        input_tokens=left.input_tokens + right.input_tokens,
-        output_tokens=left.output_tokens + right.output_tokens,
-        total_tokens=left.total_tokens + right.total_tokens,
-        cache_read_tokens=left.cache_read_tokens + right.cache_read_tokens,
-        cache_write_tokens=left.cache_write_tokens + right.cache_write_tokens,
-        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
-        audio_input_tokens=left.audio_input_tokens + right.audio_input_tokens,
-        audio_output_tokens=left.audio_output_tokens + right.audio_output_tokens,
-        audio_total_tokens=left.audio_total_tokens + right.audio_total_tokens,
-    )
+def _as_utc(value: datetime, message: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise UsageStatsValidationError(message)
+    return value.astimezone(UTC)
 
 
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+def _format_time(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _validate_group_by(group_by: str, allowed: set[str]) -> None:
+    if group_by not in allowed:
+        message = "Unsupported usage statistics grouping."
+        raise UsageStatsValidationError(message)

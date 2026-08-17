@@ -3,26 +3,18 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.media import Image
-from agno.models.message import Message
-from agno.models.metrics import Metrics, ModelMetrics
-from agno.models.response import ToolExecution
-from agno.run import RunContext, RunStatus
-from agno.run.agent import RunInput, RunOutput
+from agno.run import RunContext
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 
-from mindroom.agent_storage import create_state_storage, get_team_session
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -425,210 +417,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.add_history_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
-
-
-def test_create_team_instance_persists_member_responses_through_agno(tmp_path: Path) -> None:
-    """Team storage retains nested metrics without persisting complete member outputs."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"alpha": AgentConfig(display_name="Alpha")},
-            teams={
-                "solo": TeamConfig(
-                    display_name="Solo",
-                    role="Persistence test team",
-                    agents=["alpha"],
-                ),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-        runtime_paths,
-    )
-    alpha = _agent(agent_id="alpha", name="Alpha")
-
-    with (
-        open_bound_scope_session_context(
-            agents=[alpha],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            team_name="solo",
-        ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=FakeModel(id="fake-model", provider="fake")),
-    ):
-        assert scope_context is not None
-        team = _create_team_instance(
-            agents=[alpha],
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            team_display_name="Solo",
-            scope_context=scope_context,
-            execution_identity=None,
-            model_name="default",
-            configured_team_name="solo",
-        )
-        member = RunOutput(
-            run_id="member-run",
-            session_id="session-1",
-            agent_id="alpha",
-            agent_name="Alpha",
-            user_id="@alice:example.test",
-            input=RunInput(input_content="member-input-canary"),
-            content="member-content-canary",
-            messages=[Message(role="assistant", content="member-message-canary")],
-            tools=[ToolExecution(tool_name="secret", result="member-tool-canary")],
-            images=[Image(url="https://example.test/member-media-canary.png")],
-            metadata={"requester_id": "@alice:example.test", "secret": "member-metadata-canary"},
-            model="member-model",
-            model_provider="member-provider",
-            created_at=1_786_921_091,
-        )
-        member.metrics = Metrics(
-            input_tokens=5,
-            output_tokens=2,
-            total_tokens=7,
-            details={
-                "model": [
-                    ModelMetrics(
-                        id="member-model",
-                        provider="member-provider",
-                        total_tokens=7,
-                        provider_metrics={"secret": "member-provider-metric-canary"},
-                    ),
-                ],
-            },
-            additional_metrics={"secret": "member-additional-metric-canary"},
-        )
-        team.save_session(
-            TeamSession(
-                session_id="session-1",
-                team_id=team.id,
-                created_at=1_786_921_090,
-                runs=[
-                    TeamRunOutput(
-                        run_id="team-run",
-                        session_id="session-1",
-                        team_id=team.id,
-                        member_responses=[member],
-                    ),
-                ],
-            ),
-        )
-
-        persisted = get_team_session(scope_context.storage, "session-1")
-        assert isinstance(scope_context.storage, SqliteDb)
-        database_path = scope_context.storage.db_file
-        session_table_name = scope_context.storage.session_table.name
-
-    assert persisted is not None
-    assert persisted.runs is not None
-    persisted_run = persisted.runs[0]
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert len(persisted_run.member_responses) == 1
-    persisted_member = persisted_run.member_responses[0]
-    assert isinstance(persisted_member, RunOutput)
-    assert persisted_member.metrics.total_tokens == 7
-    assert persisted_member.metrics.additional_metrics is None
-    assert persisted_member.metrics.details is not None
-    assert persisted_member.metrics.details["model"][0].provider_metrics is None
-    assert persisted_member.user_id == "@alice:example.test"
-    assert persisted_member.model == "member-model"
-    assert persisted_member.model_provider == "member-provider"
-    assert persisted_member.created_at == 1_786_921_091
-    assert persisted_member.input is None
-    assert persisted_member.content is None
-    assert persisted_member.messages is None
-    assert persisted_member.tools is None
-    assert persisted_member.images is None
-    assert persisted_member.metadata is None
-
-    quoted_session_table = session_table_name.replace('"', '""')
-    with sqlite3.connect(database_path) as connection:
-        raw_runs = connection.execute(
-            f'SELECT runs FROM "{quoted_session_table}" WHERE session_id = ?',  # noqa: S608
-            ("session-1",),
-        ).fetchone()
-    assert raw_runs is not None
-    raw_run_json = str(raw_runs[0])
-    for canary in (
-        "member-input-canary",
-        "member-content-canary",
-        "member-message-canary",
-        "member-tool-canary",
-        "member-media-canary",
-        "member-metadata-canary",
-        "member-additional-metric-canary",
-        "member-provider-metric-canary",
-    ):
-        assert canary not in raw_run_json
-
-
-def test_paused_team_storage_does_not_retain_nested_member_payloads(tmp_path: Path) -> None:
-    """Enabling terminal member metrics must not expand paused-run sensitive persistence."""
-    storage = create_state_storage(
-        "paused-team",
-        tmp_path,
-        subdir="sessions",
-        session_table="paused_team_sessions",
-        prompt_roles=frozenset({"system"}),
-    )
-    assert isinstance(storage, SqliteDb)
-    member = RunOutput(
-        run_id="paused-member",
-        session_id="paused-session",
-        agent_id="alpha",
-        input=RunInput(input_content="paused-input-canary"),
-        content="paused-content-canary",
-        messages=[Message(role="assistant", content="paused-message-canary")],
-        tools=[ToolExecution(tool_name="secret", result="paused-tool-canary")],
-        metadata={"secret": "paused-metadata-canary"},
-        status=RunStatus.paused,
-    )
-    session = TeamSession(
-        session_id="paused-session",
-        team_id="paused-team",
-        created_at=1_786_926_316,
-        runs=[
-            TeamRunOutput(
-                run_id="paused-team-run",
-                session_id="paused-session",
-                team_id="paused-team",
-                member_responses=[member],
-                status=RunStatus.paused,
-            ),
-        ],
-    )
-
-    try:
-        storage.upsert_session(session)
-        persisted = get_team_session(storage, "paused-session")
-        with sqlite3.connect(storage.db_file) as connection:
-            raw_runs = connection.execute(
-                'SELECT runs FROM "paused_team_sessions" WHERE session_id = ?',
-                ("paused-session",),
-            ).fetchone()
-    finally:
-        storage.db_engine.dispose()
-
-    assert len(member.tools or []) == 1
-    assert persisted is not None
-    assert persisted.runs is not None
-    persisted_run = persisted.runs[0]
-    assert isinstance(persisted_run, TeamRunOutput)
-    assert persisted_run.member_responses == []
-    assert raw_runs is not None
-    raw_json = str(raw_runs[0])
-    for canary in (
-        "paused-input-canary",
-        "paused-content-canary",
-        "paused-message-canary",
-        "paused-tool-canary",
-        "paused-metadata-canary",
-    ):
-        assert canary not in raw_json
+    assert team.store_member_responses is False
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine
-from agno.metrics import ModelMetrics, RunMetrics
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -89,7 +88,7 @@ def _create_sqlite_state_storage(
     db_file = str(db_dir / f"{storage_name}.db")
     engine = _state_engine(db_file)
     if prompt_roles is not None:
-        return _SessionSanitizingSqliteDb(
+        return _PromptSanitizingSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
@@ -143,8 +142,8 @@ def _create_agent_session_db(
     )
 
 
-class _SessionSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips sensitive nested and prompt payloads."""
+class _PromptSanitizingSqliteDb(SqliteDb):
+    """SQLite session DB that strips prompt messages before durable persistence."""
 
     def __init__(
         self,
@@ -163,7 +162,7 @@ class _SessionSanitizingSqliteDb(SqliteDb):
         deserialize: bool | None = True,
     ) -> Session | dict[str, Any] | None:
         return super().upsert_session(
-            _session_for_storage(session, self._prompt_roles),
+            _session_without_prompt_messages(session, self._prompt_roles),
             deserialize=deserialize,
         )
 
@@ -174,18 +173,17 @@ class _SessionSanitizingSqliteDb(SqliteDb):
         preserve_updated_at: bool = False,
     ) -> list[Session | dict[str, Any]]:
         return super().upsert_sessions(
-            [_session_for_storage(session, self._prompt_roles) for session in sessions],
+            [_session_without_prompt_messages(session, self._prompt_roles) for session in sessions],
             deserialize=deserialize,
             preserve_updated_at=preserve_updated_at,
         )
 
 
-def _session_for_storage(session: Session, prompt_roles: frozenset[str]) -> Session:
-    if not _session_has_prompt_messages(session, prompt_roles) and not _session_has_member_responses(session):
+def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:
+    if not _session_has_prompt_messages(session, prompt_roles):
         return session
     sanitized_session = deepcopy(session)
     _strip_prompt_messages_from_session(sanitized_session, prompt_roles)
-    _retain_member_usage_only(sanitized_session)
     return sanitized_session
 
 
@@ -208,97 +206,6 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
         if not isinstance(run, (RunOutput, TeamRunOutput)) or run.status == RunStatus.paused or not run.messages:
             continue
         run.messages = [message for message in run.messages if message.role not in prompt_roles]
-
-
-def _session_has_member_responses(session: Session) -> bool:
-    if not isinstance(session, TeamSession) or not session.runs:
-        return False
-    return any(isinstance(run, TeamRunOutput) and bool(run.member_responses) for run in session.runs)
-
-
-def _retain_member_usage_only(session: Session) -> None:
-    if not isinstance(session, TeamSession) or not session.runs:
-        return
-    for run in session.runs:
-        if not isinstance(run, TeamRunOutput):
-            continue
-        run.member_responses = (
-            [] if run.status == RunStatus.paused else [_usage_only_run(member) for member in run.member_responses]
-        )
-
-
-def _usage_only_run(run: RunOutput | TeamRunOutput) -> RunOutput | TeamRunOutput:
-    if isinstance(run, TeamRunOutput):
-        return TeamRunOutput(
-            run_id=run.run_id,
-            team_id=run.team_id,
-            team_name=run.team_name,
-            session_id=run.session_id,
-            parent_run_id=run.parent_run_id,
-            user_id=run.user_id,
-            metrics=_usage_only_metrics(run.metrics),
-            model=run.model,
-            model_provider=run.model_provider,
-            member_responses=[_usage_only_run(member) for member in run.member_responses],
-            created_at=run.created_at,
-            status=run.status,
-        )
-    return RunOutput(
-        run_id=run.run_id,
-        agent_id=run.agent_id,
-        agent_name=run.agent_name,
-        session_id=run.session_id,
-        parent_run_id=run.parent_run_id,
-        user_id=run.user_id,
-        metrics=_usage_only_metrics(run.metrics),
-        model=run.model,
-        model_provider=run.model_provider,
-        created_at=run.created_at,
-        status=run.status,
-    )
-
-
-def _usage_only_metrics(metrics: RunMetrics | None) -> RunMetrics | None:
-    if metrics is None:
-        return None
-    details = (
-        {
-            model_type: [_usage_only_model_metrics(model_metrics) for model_metrics in model_metrics_list]
-            for model_type, model_metrics_list in metrics.details.items()
-        }
-        if metrics.details
-        else None
-    )
-    return RunMetrics(
-        input_tokens=metrics.input_tokens,
-        output_tokens=metrics.output_tokens,
-        total_tokens=metrics.total_tokens,
-        audio_input_tokens=metrics.audio_input_tokens,
-        audio_output_tokens=metrics.audio_output_tokens,
-        audio_total_tokens=metrics.audio_total_tokens,
-        cache_read_tokens=metrics.cache_read_tokens,
-        cache_write_tokens=metrics.cache_write_tokens,
-        reasoning_tokens=metrics.reasoning_tokens,
-        cost=metrics.cost,
-        details=details,
-    )
-
-
-def _usage_only_model_metrics(metrics: ModelMetrics) -> ModelMetrics:
-    return ModelMetrics(
-        input_tokens=metrics.input_tokens,
-        output_tokens=metrics.output_tokens,
-        total_tokens=metrics.total_tokens,
-        audio_input_tokens=metrics.audio_input_tokens,
-        audio_output_tokens=metrics.audio_output_tokens,
-        audio_total_tokens=metrics.audio_total_tokens,
-        cache_read_tokens=metrics.cache_read_tokens,
-        cache_write_tokens=metrics.cache_write_tokens,
-        reasoning_tokens=metrics.reasoning_tokens,
-        cost=metrics.cost,
-        id=metrics.id,
-        provider=metrics.provider,
-    )
 
 
 def create_culture_storage(culture_name: str, storage_path: Path) -> BaseDb:

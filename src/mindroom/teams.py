@@ -1803,7 +1803,6 @@ def _create_team_instance(
         num_history_messages=history_settings.policy.num_history_messages,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         store_history_messages=False,
-        store_member_responses=True,
         show_members_responses=True,
         debug_mode=False,
         telemetry=False,

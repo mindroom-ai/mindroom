@@ -9706,7 +9706,7 @@ agents:
 `requester_ids` filters the admin report after canonical authorization-alias resolution.
 Omitting `entity_names` includes every configured agent and team that the admin scope can inspect.
 Omitting `requester_ids` accepts every retained requester attribution, including the explicit `unknown` bucket.
-Authorized admin queries attribute each team coordinator run to its configured team ID and each nested member run to that member's configured agent or nested-team ID.
+Authorized admin queries attribute each retained top-level run to its configured agent or team ID.
 
 `start` and `end` accept either an ISO date or an RFC 3339 timestamp with an explicit UTC offset.
 Dates use the configured MindRoom timezone.
@@ -9717,23 +9717,20 @@ The in-flight call is excluded because its Agno run is not retained until after 
 ### Response And Coverage
 
 Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
-A successful response also includes `scope`, `window`, `as_of`, token `totals`, `cost`, `turn_count`, `run_count`, `session_count`, observed timestamps, status counts, a `breakdown`, truncation fields, and `coverage`.
-`turn_count` counts accepted top-level agent or team turns, while `run_count` counts retained runs with usable metrics and can also include nested team-member runs.
+A successful response also includes `scope`, `window`, token `totals`, `run_count`, `session_count`, observed timestamps, a `breakdown`, and `coverage`.
+`run_count` counts retained top-level agent or team runs with usable token metrics.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
-Cost is a decimal-string subtotal accompanied by counts of runs with and without retained cost data; it is not a provider invoice.
-Model breakdown rows identify the model type, provider, and model ID separately.
+Model breakdown rows use the retained provider and model ID.
 
 Breakdown rows are sorted by total tokens and capped at 200.
-`breakdown_truncated` and `breakdown_omitted` state whether rows were left out, while the top-level totals still cover every included run.
-Coverage can be `complete_retained`, `partial`, or `unknown`.
-`complete_retained` means no gap was detected in the retained data, not that provider-billed history is complete.
-Unreadable sources, malformed records, missing attribution, timestamps, or stable run IDs, and detected compaction gaps produce partial coverage and corresponding bounded counters.
-Discovery, per-source rows, decoded run nodes, metric fan-out, selected identifiers, and request wall-clock work all have fixed bounds.
-Per-source bound exhaustion produces partial coverage when safe records remain, while request-wide exhaustion returns partial admin results and a source-unavailable error for self queries.
-Shared-agent self queries can report unknown completeness because cumulative session totals cannot safely be compared across requesters.
+`breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included run.
+Coverage reports scanned sources, unavailable sources, skipped runs, and the retained-history limitation.
+The tool does not change Agno persistence settings.
+Nested team-member responses remain unretained, so a team run is reported under the team and cannot be split among its members.
+Compacted or deleted Agno runs are unavailable to this read-only report.
 
 Errors use the same envelope with a stable code.
-Common codes are `validation_error`, `authorization_error`, `context_unavailable`, and `source_unavailable`.
+Common codes are `validation_error`, `authorization_error`, and `context_unavailable`.
 
 ## [`subagents`]
 

@@ -15,7 +15,6 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.usage_stats import (
-    UsageStatsSourceUnavailableError,
     UsageStatsValidationError,
     collect_admin_usage,
     collect_self_usage,
@@ -69,13 +68,6 @@ class UsageStatsTools(Toolkit):
     @classmethod
     def _validation_error(cls, message: str = "Unsupported usage statistics grouping.") -> str:
         return cls._error("validation_error", message)
-
-    @classmethod
-    def _source_error(cls) -> str:
-        return cls._error(
-            "source_unavailable",
-            "Usage statistics could not read the expected retained-history source.",
-        )
 
     def _admin_context_or_error(self) -> tuple[ToolRuntimeContext, Config] | str:
         if not self._admin_scope:
@@ -134,8 +126,6 @@ class UsageStatsTools(Toolkit):
             )
         except UsageStatsValidationError as error:
             return self._validation_error(str(error))
-        except UsageStatsSourceUnavailableError:
-            return self._source_error()
         return self._payload("ok", **report.to_dict())
 
     async def get_all_usage(
@@ -166,6 +156,4 @@ class UsageStatsTools(Toolkit):
             )
         except UsageStatsValidationError as error:
             return self._validation_error(str(error))
-        except UsageStatsSourceUnavailableError:
-            return self._source_error()
         return self._payload("ok", **report.to_dict())
