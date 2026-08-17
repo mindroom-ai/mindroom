@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
+    "UsageReadBudget",
     "UsageRunNode",
     "UsageSessionRow",
     "UsageStorageDiagnostic",
@@ -63,6 +64,36 @@ _REQUIRED_COLUMNS = frozenset({"session_id", "session_type", "agent_id", "team_i
 
 class _UsageResourceLimitError(ValueError):
     """A retained row exceeds the adapter's fixed work bounds."""
+
+
+@dataclass(slots=True)
+class UsageReadBudget:
+    """Shared request budget charged before retained payload expansion."""
+
+    row_limit: int
+    byte_limit: int
+    run_limit: int
+    rows_used: int = 0
+    bytes_used: int = 0
+    runs_used: int = 0
+    exhausted: bool = False
+
+    def consume_row(self, payload_bytes: int) -> bool:
+        """Charge one raw session row and its retained JSON bytes."""
+        if self.rows_used >= self.row_limit or self.bytes_used + payload_bytes > self.byte_limit:
+            self.exhausted = True
+            return False
+        self.rows_used += 1
+        self.bytes_used += payload_bytes
+        return True
+
+    def consume_runs(self, run_count: int) -> bool:
+        """Charge raw run nodes before typed nodes are materialized."""
+        if self.runs_used + run_count > self.run_limit:
+            self.exhausted = True
+            return False
+        self.runs_used += run_count
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,8 +386,17 @@ def _source(
     )
 
 
-def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+def iter_usage_storage_rows(  # noqa: C901
+    source: UsageStorageSource,
+    *,
+    budget: UsageReadBudget | None = None,
+) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Yield top-level usage fields without writing or creating a database."""
+    active_budget = budget or UsageReadBudget(
+        row_limit=_MAX_ROWS_PER_SOURCE,
+        byte_limit=_MAX_ROWS_PER_SOURCE * _MAX_JSON_BYTES,
+        run_limit=_MAX_ROWS_PER_SOURCE * _MAX_RUNS_PER_ROW,
+    )
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return
@@ -374,19 +414,23 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
                 "CASE WHEN length(CAST(runs AS BLOB)) > ? THEN 1 ELSE 0 END AS too_large "
                 f"FROM {table} LIMIT ?"
             )
-            for row_index, row in enumerate(
-                connection.execute(query, (_MAX_JSON_BYTES, _MAX_JSON_BYTES, _MAX_ROWS_PER_SOURCE + 1)),
-            ):
-                if row_index >= _MAX_ROWS_PER_SOURCE:
-                    yield _source_diagnostic(source, "resource_limit", "session row limit exceeded")
+            for row in connection.execute(query, (_MAX_JSON_BYTES, _MAX_JSON_BYTES, _MAX_ROWS_PER_SOURCE + 1)):
+                payload_bytes = row["payload_bytes"] or 0
+                if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
+                    yield _source_diagnostic(source, "partial", "malformed retained session")
+                    continue
+                if not active_budget.consume_row(payload_bytes):
+                    yield _source_diagnostic(source, "resource_limit", "request work limit exceeded")
                     return
                 if row["too_large"]:
                     yield _source_diagnostic(source, "resource_limit", "runs payload too large")
                     continue
                 try:
-                    yield _extract_row(source, row)
-                except _UsageResourceLimitError:
-                    yield _source_diagnostic(source, "resource_limit", "run node limit exceeded")
+                    yield _extract_row(source, row, budget=active_budget)
+                except _UsageResourceLimitError as error:
+                    yield _source_diagnostic(source, "resource_limit", str(error))
+                    if active_budget.exhausted:
+                        return
                 except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -414,7 +458,12 @@ def _validate_schema(
     return None
 
 
-def _extract_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageSessionRow:
+def _extract_row(
+    source: UsageStorageSource,
+    row: sqlite3.Row,
+    *,
+    budget: UsageReadBudget,
+) -> UsageSessionRow:
     entity_kind = row["session_type"]
     if entity_kind not in {"agent", "team"}:
         raise ValueError
@@ -423,14 +472,21 @@ def _extract_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageSessionRo
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    raw_runs = json.loads(row["runs"] or "[]")
-    if not isinstance(raw_runs, list):
+    raw_value = row["runs"]
+    raw_runs = None if raw_value is None else json.loads(raw_value)
+    if raw_runs is None:
+        raw_runs = []
+    elif not isinstance(raw_runs, list):
         raise TypeError
     payload_bytes = row["payload_bytes"] or 0
     if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
         raise TypeError
     if len(raw_runs) > _MAX_RUNS_PER_ROW:
-        raise _UsageResourceLimitError
+        message = "run node limit exceeded"
+        raise _UsageResourceLimitError(message)
+    if not budget.consume_runs(len(raw_runs)):
+        message = "request work limit exceeded"
+        raise _UsageResourceLimitError(message)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -20,11 +21,15 @@ from mindroom.usage_stats import (
     parse_usage_window,
 )
 from mindroom.usage_stats_storage import (
+    UsageReadBudget,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _config(*, timezone: str = "UTC") -> Config:
@@ -123,10 +128,24 @@ def _wire(
 ) -> None:
     monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: sources)
     monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: sources)
-    monkeypatch.setattr(
-        "mindroom.usage_stats.iter_usage_storage_rows",
-        lambda source: iter(rows.get(source.path_label, ())),
-    )
+
+    def iter_rows(
+        source: UsageStorageSource,
+        *,
+        budget: UsageReadBudget | None = None,
+    ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+        for item in rows.get(source.path_label, ()):
+            if budget is not None:
+                payload_bytes = item.payload_bytes if isinstance(item, UsageSessionRow) else 0
+                if not budget.consume_row(payload_bytes):
+                    yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
+                    return
+                if isinstance(item, UsageSessionRow) and not budget.consume_runs(len(item.runs)):
+                    yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
+                    return
+            yield item
+
+    monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
 
 
 def test_self_report_has_small_retained_usage_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,6 +233,30 @@ def test_self_filters_shared_storage_by_canonical_requester(
     assert report.totals.total_tokens == 10
     assert report.coverage.unavailable_sources == 0
     assert report.coverage.truncated is False
+
+
+def test_self_marks_missing_shared_requester_attribution_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unattributed shared history stays private without looking complete."""
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        start=None,
+        end=None,
+        group_by="model",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.unavailable_sources == 1
 
 
 def test_admin_filters_do_not_report_partial_coverage(

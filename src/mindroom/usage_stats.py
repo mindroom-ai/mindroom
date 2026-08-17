@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mindroom.usage_stats_storage import (
+    UsageReadBudget,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -293,7 +294,7 @@ def collect_admin_usage(
     )
 
 
-def _collect_usage(  # noqa: C901, PLR0912, PLR0915
+def _collect_usage(  # noqa: C901
     *,
     sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
     config: Config,
@@ -322,9 +323,11 @@ def _collect_usage(  # noqa: C901, PLR0912, PLR0915
     seen_runs: set[tuple[str, str, str, str]] = set()
     scanned_sources: set[str] = set()
     unavailable_sources: set[str] = set()
-    rows_scanned = 0
-    runs_scanned = 0
-    bytes_scanned = 0
+    budget = UsageReadBudget(
+        row_limit=_MAX_ROWS_PER_REQUEST,
+        byte_limit=_MAX_BYTES_PER_REQUEST,
+        run_limit=_MAX_RUNS_PER_REQUEST,
+    )
     truncated = False
     scan_limit_reached = False
 
@@ -335,26 +338,11 @@ def _collect_usage(  # noqa: C901, PLR0912, PLR0915
             continue
         source = discovered
         scanned_sources.add(source.path_label)
-        for item in iter_usage_storage_rows(source):
-            if rows_scanned >= _MAX_ROWS_PER_REQUEST:
-                truncated = True
-                scan_limit_reached = True
-                break
-            rows_scanned += 1
+        for item in iter_usage_storage_rows(source, budget=budget):
             if isinstance(item, UsageStorageDiagnostic):
                 unavailable_sources.add(item.path_label)
                 truncated = truncated or item.status == "resource_limit"
                 continue
-            if bytes_scanned + item.payload_bytes > _MAX_BYTES_PER_REQUEST:
-                truncated = True
-                scan_limit_reached = True
-                break
-            bytes_scanned += item.payload_bytes
-            if runs_scanned + len(item.runs) > _MAX_RUNS_PER_REQUEST:
-                truncated = True
-                scan_limit_reached = True
-                break
-            runs_scanned += len(item.runs)
             for run in item.runs:
                 try:
                     accepted = _accepted_run(
@@ -384,6 +372,7 @@ def _collect_usage(  # noqa: C901, PLR0912, PLR0915
                 observed.append(accepted.created_at)
                 dimension, key = _breakdown_key(group_by, accepted, timezone)
                 buckets.setdefault((dimension, key), _Aggregate()).add(accepted.totals)
+        scan_limit_reached = budget.exhausted
         if scan_limit_reached:
             break
 
@@ -419,7 +408,7 @@ def _collect_usage(  # noqa: C901, PLR0912, PLR0915
     )
 
 
-def _accepted_run(  # noqa: PLR0911
+def _accepted_run(  # noqa: C901, PLR0911
     *,
     row: UsageSessionRow,
     run: UsageRunNode,
@@ -439,8 +428,11 @@ def _accepted_run(  # noqa: PLR0911
     if scope == "self":
         if entity_id != expected_agent:
             return None
-        if not row.source.requester_isolated and requester_id != expected_requester:
-            return None
+        if not row.source.requester_isolated:
+            if requester_id is None:
+                raise _IncompleteRetainedRunError
+            if requester_id != expected_requester:
+                return None
     elif (entity_filter is not None and entity_id not in entity_filter) or (
         requester_filter is not None and requester_id not in requester_filter
     ):

@@ -6,6 +6,9 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING
 
+import pytest
+
+import mindroom.usage_stats_storage as usage_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -22,8 +25,6 @@ from mindroom.usage_stats_storage import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    import pytest
 
 _SESSION_COLUMNS = """
     session_id TEXT PRIMARY KEY,
@@ -204,6 +205,65 @@ def test_reader_reports_run_node_limit(tmp_path: Path, monkeypatch: pytest.Monke
             path_label="code.db",
             status="resource_limit",
             detail="run node limit exceeded",
+        ),
+    ]
+
+
+def test_reader_charges_byte_budget_before_json_decode(tmp_path: Path) -> None:
+    """A request-wide byte budget stops a row before retained JSON is decoded."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    budget = usage_storage.UsageReadBudget(row_limit=1, byte_limit=1, run_limit=1)
+
+    result = list(iter_usage_storage_rows(_source(database), budget=budget))
+
+    assert result == [
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="request work limit exceeded",
+        ),
+    ]
+
+
+def test_reader_accepts_agno_null_runs(tmp_path: Path) -> None:
+    """Agno's JSON null representation means a retained session has no runs."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute('UPDATE "code_sessions" SET runs = ?', ("null",))
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs == ()
+
+
+@pytest.mark.parametrize("raw_runs", ["", "0"])
+def test_reader_rejects_falsey_non_json_list_runs(tmp_path: Path, raw_runs: str) -> None:
+    """Empty text and numeric zero cannot masquerade as an empty run list."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute('UPDATE "code_sessions" SET runs = ?', (raw_runs,))
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert result == [
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="partial",
+            detail="malformed retained session",
         ),
     ]
 
