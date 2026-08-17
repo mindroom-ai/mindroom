@@ -13,6 +13,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -148,6 +149,38 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
 
     assert _function_names(ordinary_toolkit) == {"get_my_usage"}
     assert _function_names(admin_toolkit) == {"get_my_usage", "get_all_usage"}
+
+
+def test_admin_scope_is_rejected_from_default_tools(tmp_path: Path) -> None:
+    """A default tool entry cannot grant an agent-only authorization field."""
+    config = Config(
+        agents={"usage": AgentConfig(display_name="Usage")},
+        defaults=DefaultsConfig(
+            tools=[ToolConfigEntry(name="usage_stats", overrides={"admin_scope": True})],
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"defaults.tools.*admin_scope"):
+        bind_runtime_paths(config, test_runtime_paths(tmp_path))
+
+
+def test_admin_scope_is_valid_on_an_agent_tool_entry(tmp_path: Path) -> None:
+    """The admin authorization field remains available on one explicit agent."""
+    config = Config(
+        agents={
+            "usage": AgentConfig(
+                display_name="Usage",
+                tools=[ToolConfigEntry(name="usage_stats", overrides={"admin_scope": True})],
+            ),
+        },
+    )
+
+    bound = bind_runtime_paths(config, test_runtime_paths(tmp_path))
+
+    usage_entry = next(
+        entry for entry in bound.resolve_entity("usage").authored_tool_configs if entry.name == "usage_stats"
+    )
+    assert usage_entry.tool_config_overrides == {"admin_scope": True}
 
 
 @pytest.mark.asyncio
