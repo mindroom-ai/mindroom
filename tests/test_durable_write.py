@@ -37,7 +37,7 @@ def test_durable_directory_creation_fsyncs_entry_and_parent(
     """A fresh directory entry and its private mode must be durable before use."""
     target = tmp_path / "scope"
     fsynced: list[Path] = []
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fsynced.append)
+    monkeypatch.setattr(durable_write, "fsync_directory_durable", fsynced.append)
 
     create_directory_durable(target, mode=0o700)
 
@@ -62,7 +62,7 @@ def test_durable_directory_creation_retries_failed_parent_publication(
             msg = "parent fsync failed"
             raise OSError(msg)
 
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fail_first_parent)
+    monkeypatch.setattr(durable_write, "fsync_directory_durable", fail_first_parent)
 
     with pytest.raises(OSError, match="parent fsync failed"):
         create_directory_durable(target, mode=0o700)
@@ -78,7 +78,7 @@ def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyP
     source.write_text("new", encoding="utf-8")
     target.write_text("old", encoding="utf-8")
     fsynced: list[Path] = []
-    monkeypatch.setattr(durable_write, "_fsync_directory_durable", fsynced.append)
+    monkeypatch.setattr(durable_write, "fsync_directory_durable", fsynced.append)
 
     replace_file_durable(source, target)
 

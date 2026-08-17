@@ -33,8 +33,8 @@ def create_directory_durable(path: Path, *, mode: int) -> None:
         if _durable_directory_identities.get(path) == identity:
             _durable_directory_identities.move_to_end(path)
             return
-    _fsync_directory_durable(path)
-    _fsync_directory_durable(path.parent)
+    fsync_directory_durable(path)
+    fsync_directory_durable(path.parent)
     with _durable_directory_identities_lock:
         _durable_directory_identities[path] = identity
         _durable_directory_identities.move_to_end(path)
@@ -45,7 +45,7 @@ def create_directory_durable(path: Path, *, mode: int) -> None:
 def replace_file_durable(source: Path, target: Path) -> None:
     """Atomically replace one file and durably publish it when directory fsync is available."""
     source.replace(target)
-    _fsync_directory_durable(target.parent)
+    fsync_directory_durable(target.parent)
 
 
 def write_json_file_durable(
@@ -155,7 +155,7 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
-def _fsync_directory_durable(directory: Path) -> None:
+def fsync_directory_durable(directory: Path) -> None:
     """Flush one supported directory update and propagate durability failures."""
     if not _DIRECTORY_FSYNC_SUPPORTED:
         return

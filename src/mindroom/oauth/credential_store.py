@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 from cryptography.exceptions import InvalidTag
 
 from mindroom.credentials import scoped_credentials_path
+from mindroom.durable_write import fsync_directory_durable
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthProviderError
 
@@ -591,37 +592,39 @@ def _prepare_database_path(database_path: Path) -> None:
         msg = "OAuth credential store could not prepare its private directory"
         raise OAuthProviderError(msg) from exc
     if database_path.is_symlink() or database_path.exists():
-        _validate_existing_database_path(database_path)
-        return
+        database_stat = _validate_existing_database_path(database_path)
+        if database_stat.st_size != 0:
+            return
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
     if os.name != "nt":
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(database_path, flags, 0o600)
-    except FileExistsError:
-        _validate_existing_database_path(database_path)
-        return
+    if database_path.exists():
+        descriptor = os.open(database_path, flags & ~(os.O_CREAT | os.O_EXCL))
+    else:
+        try:
+            descriptor = os.open(database_path, flags, 0o600)
+        except FileExistsError:
+            database_stat = _validate_existing_database_path(database_path)
+            if database_stat.st_size != 0:
+                return
+            descriptor = os.open(database_path, flags & ~(os.O_CREAT | os.O_EXCL))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    directory_descriptor = os.open(database_path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_descriptor)
-    finally:
-        os.close(directory_descriptor)
+    fsync_directory_durable(database_path.parent)
 
 
-def _validate_existing_database_path(database_path: Path) -> None:
+def _validate_existing_database_path(database_path: Path) -> os.stat_result:
     if database_path.is_symlink():
         msg = "OAuth credential database path cannot be a symlink"
         raise OAuthProviderError(msg)
     try:
-        mode = database_path.stat().st_mode
+        database_stat = database_path.stat()
     except FileNotFoundError as exc:
         msg = "OAuth credential database path disappeared during creation"
         raise OAuthProviderError(msg) from exc
-    if not stat.S_ISREG(mode):
+    if not stat.S_ISREG(database_stat.st_mode):
         msg = "OAuth credential database path must be a regular file"
         raise OAuthProviderError(msg)
     try:
@@ -629,6 +632,7 @@ def _validate_existing_database_path(database_path: Path) -> None:
     except OSError as exc:
         msg = "OAuth credential store could not secure its database file"
         raise OAuthProviderError(msg) from exc
+    return database_stat
 
 
 def _legacy_credential_payload(context: _OAuthCredentialStoreContext) -> _LegacyCredentialPayload:

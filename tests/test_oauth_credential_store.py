@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import multiprocessing
+import os
 import shutil
 import sqlite3
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
 
+import mindroom.durable_write as durable_write_module
 import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
@@ -196,6 +199,65 @@ async def test_encrypted_credentials_are_atomic_and_private(tmp_path: Path) -> N
     assert snapshot.credentials == {"token": "secret-access", "refresh_token": "refresh-secret-access"}
     assert snapshot.generation == generation
     assert snapshot.connection_generation == connection_generation
+
+
+@pytest.mark.asyncio
+async def test_new_database_skips_directory_fsync_when_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A platform without directory fsync can still create a credential database."""
+    context = _context(tmp_path)
+    database_path = _oauth_credential_database_path(context)
+    original_fsync = os.fsync
+
+    def reject_directory_fsync(file_descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            msg = "directory fsync is unsupported"
+            raise OSError(msg)
+        original_fsync(file_descriptor)
+
+    monkeypatch.setattr(durable_write_module, "_DIRECTORY_FSYNC_SUPPORTED", False)
+    monkeypatch.setattr(os, "fsync", reject_directory_fsync)
+
+    async with oauth_credential_transaction(context) as transaction:
+        await transaction.commit()
+
+    assert database_path.stat().st_size > 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory fsync is not supported on Windows")
+@pytest.mark.asyncio
+async def test_failed_database_directory_publication_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed directory flush must remain pending when the empty file survives."""
+    context = _context(tmp_path)
+    database_path = _oauth_credential_database_path(context)
+    original_fsync = os.fsync
+    directory_fsync_attempts = 0
+
+    def fail_first_directory_fsync(file_descriptor: int) -> None:
+        nonlocal directory_fsync_attempts
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            directory_fsync_attempts += 1
+            if directory_fsync_attempts == 1:
+                msg = "directory fsync failed"
+                raise OSError(msg)
+        original_fsync(file_descriptor)
+
+    monkeypatch.setattr(durable_write_module, "_DIRECTORY_FSYNC_SUPPORTED", True)
+    monkeypatch.setattr(os, "fsync", fail_first_directory_fsync)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        credential_store_module._prepare_database_path(database_path)
+
+    async with oauth_credential_transaction(context) as transaction:
+        await transaction.commit()
+
+    assert directory_fsync_attempts == 2
+    assert database_path.stat().st_size > 0
 
 
 def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -> None:

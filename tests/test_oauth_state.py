@@ -106,7 +106,7 @@ def test_issue_opaque_oauth_state_propagates_directory_fsync_failure(tmp_path: P
     runtime_paths = resolve_primary_runtime_paths(storage_path=tmp_path / "storage", process_env={})
 
     with (
-        patch("mindroom.durable_write._fsync_directory_durable", side_effect=OSError("fsync failed")),
+        patch("mindroom.durable_write.fsync_directory_durable", side_effect=OSError("fsync failed")),
         pytest.raises(OSError, match="fsync failed"),
     ):
         issue_opaque_oauth_state(
