@@ -64,7 +64,7 @@ from mindroom.orchestration.runtime import (
     stop_entities,
     sync_forever_with_restart,
 )
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator, _run_shutdown_step
 from mindroom.response_delivery import RecoveryOutcome
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -2688,6 +2688,41 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         assert max(quiesce_indexes) < min(cancel_indexes)
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
+
+
+@pytest.mark.asyncio
+async def test_shutdown_step_logs_the_exact_incomplete_phase() -> None:
+    """A stuck shutdown await leaves a non-sensitive exact phase boundary."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_step() -> None:
+        entered.set()
+        await release.wait()
+
+    with patch("mindroom.orchestrator.logger.info") as log_info:
+        task = asyncio.create_task(_run_shutdown_step("config_reload", blocked_step()))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        log_info.assert_any_call(
+            "orchestrator_shutdown_phase_started",
+            shutdown_phase="config_reload",
+        )
+        assert (
+            call(
+                "orchestrator_shutdown_phase_completed",
+                shutdown_phase="config_reload",
+            )
+            not in log_info.call_args_list
+        )
+
+        release.set()
+        await task
+
+        log_info.assert_any_call(
+            "orchestrator_shutdown_phase_completed",
+            shutdown_phase="config_reload",
+        )
 
 
 @pytest.mark.asyncio

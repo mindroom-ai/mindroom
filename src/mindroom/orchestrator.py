@@ -150,6 +150,30 @@ async def _gather_shutdown_phase(
         return list(await phase), cancellation
 
 
+async def _run_shutdown_step[Result](
+    shutdown_phase: str,
+    operation: Awaitable[Result],
+) -> Result:
+    """Expose one non-sensitive shutdown boundary without changing its result."""
+    logger.info(
+        "orchestrator_shutdown_phase_started",
+        shutdown_phase=shutdown_phase,
+    )
+    try:
+        result = await operation
+    except BaseException:
+        logger.info(
+            "orchestrator_shutdown_phase_failed",
+            shutdown_phase=shutdown_phase,
+        )
+        raise
+    logger.info(
+        "orchestrator_shutdown_phase_completed",
+        shutdown_phase=shutdown_phase,
+    )
+    return result
+
+
 @dataclass(frozen=True)
 class _EmbeddedApiServerContext:
     """Shared identity fields for embedded API server lifecycle logs."""
@@ -1975,35 +1999,50 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
-        await self._approval_transport.cancel_startup_cleanup_retry()
-        await shutdown_approval_runtime()
-        await self.config_reload.cancel()
-        owner = self._mcp_catalog_change_task_owner
-        await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
-        await wait_for_background_tasks(
-            5.0,
-            owner=self._dispatch_recovery_task_owner,
-            shutdown_intent=ORDERLY_SHUTDOWN,
+        await _run_shutdown_step(
+            "approval_startup_retry",
+            self._approval_transport.cancel_startup_cleanup_retry(),
         )
-        await self._startup_maintenance.cancel()
-        await self._todo_poke_runtime.stop()
-        await self._stop_memory_auto_flush_worker()
-        await self._knowledge_source_watcher.shutdown()
-        await self._knowledge_refresh_scheduler.shutdown()
-        await self._cancel_bot_start_tasks()
-        await self._stop_mcp_manager()
+        await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
+        await _run_shutdown_step("config_reload", self.config_reload.cancel())
+        owner = self._mcp_catalog_change_task_owner
+        await _run_shutdown_step(
+            "mcp_catalog_background",
+            wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN),
+        )
+        await _run_shutdown_step(
+            "dispatch_recovery_background",
+            wait_for_background_tasks(
+                5.0,
+                owner=self._dispatch_recovery_task_owner,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            ),
+        )
+        await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
+        await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
+        await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
+        await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
+        await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
+        await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())
+        await _run_shutdown_step("mcp_manager", self._stop_mcp_manager())
 
         phase_cancellations: list[asyncio.CancelledError] = []
-        quiesce_results, cancellation = await _gather_shutdown_phase(
-            *(bot._quiesce_matrix_ingestion() for bot in self.agent_bots.values()),
+        quiesce_results, cancellation = await _run_shutdown_step(
+            "source_quiesce",
+            _gather_shutdown_phase(
+                *(bot._quiesce_matrix_ingestion() for bot in self.agent_bots.values()),
+            ),
         )
         if cancellation is not None:
             phase_cancellations.append(cancellation)
         quiesce_failures = [result for result in quiesce_results if isinstance(result, BaseException)]
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.
-        cancel_results, cancellation = await _gather_shutdown_phase(
-            *(cancel_sync_task(entity_name, self._sync_tasks) for entity_name in list(self._sync_tasks)),
+        cancel_results, cancellation = await _run_shutdown_step(
+            "sync_tasks",
+            _gather_shutdown_phase(
+                *(cancel_sync_task(entity_name, self._sync_tasks) for entity_name in list(self._sync_tasks)),
+            ),
         )
         if cancellation is not None:
             phase_cancellations.append(cancellation)
@@ -2012,7 +2051,10 @@ class _MultiAgentOrchestrator:
             bot.running = False
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
-        stop_results, cancellation = await _gather_shutdown_phase(*stop_tasks)
+        stop_results, cancellation = await _run_shutdown_step(
+            "bot_stop",
+            _gather_shutdown_phase(*stop_tasks),
+        )
         if cancellation is not None:
             phase_cancellations.append(cancellation)
         # Last, because every bot borrows it: closing it earlier would pull the
@@ -2020,7 +2062,10 @@ class _MultiAgentOrchestrator:
         journal_failures: list[BaseException] = []
         if self._open_journal is not None:
             journal, self._open_journal = self._open_journal, None
-            close_results, cancellation = await _gather_shutdown_phase(journal.close())
+            close_results, cancellation = await _run_shutdown_step(
+                "event_journal",
+                _gather_shutdown_phase(journal.close()),
+            )
             if cancellation is not None:
                 phase_cancellations.append(cancellation)
             journal_failures.extend(result for result in close_results if isinstance(result, BaseException))
