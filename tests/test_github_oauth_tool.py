@@ -21,6 +21,7 @@ import pytest
 from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
 from github import BadCredentialsException, Github, GithubException
+from github.Requester import Requester
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -654,7 +655,13 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
         captured.update(kwargs)
         return _FakeGithub()
 
-    with patch("mindroom.custom_tools.github.Github", side_effect=github_factory):
+    with (
+        patch("mindroom.custom_tools.github.Github", side_effect=github_factory),
+        patch(
+            "mindroom.custom_tools.github._install_github_provider_failure_capture",
+            side_effect=lambda client: client,
+        ),
+    ):
         tool = tool_class(
             access_token=MANUAL_ACCESS_TOKEN,
             base_url="https://github.example.test/api/v3",
@@ -922,6 +929,10 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     with (
         patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=refresh_credentials),
         patch("mindroom.custom_tools.github.Github", return_value=_FakeGithub()),
+        patch(
+            "mindroom.custom_tools.github._install_github_provider_failure_capture",
+            side_effect=lambda client: client,
+        ),
     ):
         tool = tool_class(
             runtime_paths=runtime_paths,
@@ -1170,6 +1181,40 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
 
     assert json.loads(result) == {"error": "GitHub request failed"}
     assert sentinel not in result
+
+
+def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabled(tmp_path: Path) -> None:
+    """Managed 401 recovery cannot depend on the upstream logger emitting a record."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "revoked-provider-controlled-secret-with-logging-disabled"
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        with patch.object(
+            Requester,
+            "requestJson",
+            return_value=(401, {}, json.dumps({"message": "Bad credentials", "detail": sentinel})),
+        ):
+            tool.g = tool.authenticate()
+            result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert sentinel not in result
+    assert tool.access_token is None
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:

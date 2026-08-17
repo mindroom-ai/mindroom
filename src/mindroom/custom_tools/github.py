@@ -9,12 +9,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from html import unescape
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.tools import github as agno_github_module
 from agno.tools.github import GithubTools as AgnoGithubTools
 from agno.utils import log as agno_log_module
 from github import Auth, Github, GithubException
+from github.Requester import Requester
 
 from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -83,6 +84,37 @@ def _github_exception_status_code(exc: GithubException) -> int | None:
     return None
 
 
+def _record_github_provider_failure(exc: GithubException) -> None:
+    _github_provider_failure.set(_GithubProviderFailure(_github_exception_status_code(exc)))
+
+
+class _GithubProviderFailureRequester(Requester):
+    """Capture typed provider failures before Agno serializes them."""
+
+    @classmethod
+    def createException(  # noqa: N802
+        cls,
+        status: int,
+        headers: dict[str, Any],
+        output: dict[str, Any],
+    ) -> GithubException:
+        exception = super().createException(status, headers, output)
+        _record_github_provider_failure(exception)
+        return exception
+
+
+class _GithubRequesterOwner(Protocol):
+    _Github__requester: Requester
+
+
+def _install_github_provider_failure_capture(client: Github) -> Github:
+    requester_owner = cast(_GithubRequesterOwner, client)  # noqa: TC006
+    original_requester = requester_owner._Github__requester
+    requester_owner._Github__requester = _GithubProviderFailureRequester(**original_requester.kwargs)
+    original_requester.close()
+    return client
+
+
 class _SanitizeAgnoGithubLogFilter(logging.Filter):
     """Remove provider-controlled GitHub exception text before log rendering."""
 
@@ -91,7 +123,7 @@ class _SanitizeAgnoGithubLogFilter(logging.Filter):
             _exception_type, exception, _traceback = record.exc_info
             if isinstance(exception, GithubException):
                 status_code = _github_exception_status_code(exception)
-                _github_provider_failure.set(_GithubProviderFailure(status_code))
+                _record_github_provider_failure(exception)
                 record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
                 record.args = (status_code if status_code is not None else "unknown",)
                 record.exc_info = None
@@ -146,8 +178,7 @@ def _normalized_access_token(value: object) -> str | None:
 
 
 def _sanitized_github_exception_result(exc: GithubException) -> str:
-    status_code = _github_exception_status_code(exc)
-    _github_provider_failure.set(_GithubProviderFailure(status_code))
+    _record_github_provider_failure(exc)
     return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
 
 
@@ -496,5 +527,5 @@ class GithubTools(AgnoGithubTools):
             raise self._connection_required()
         auth = Auth.Token(self.access_token)
         if self.base_url:
-            return Github(base_url=self.base_url, auth=auth)
-        return Github(auth=auth)
+            return _install_github_provider_failure_capture(Github(base_url=self.base_url, auth=auth))
+        return _install_github_provider_failure_capture(Github(auth=auth))
