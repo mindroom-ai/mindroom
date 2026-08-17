@@ -7,6 +7,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.run import RunStatus
 
 from mindroom import usage_stats_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -248,6 +249,33 @@ def test_reader_extracts_a_field_selective_immutable_agno_session_row(tmp_path: 
     assert not hasattr(row.runs[0], "messages")
     with pytest.raises(AttributeError):
         row.entity_id = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("persisted_status", "expected_status"),
+    [
+        (RunStatus.completed.value, "completed"),
+        ("cancelled", "cancelled"),
+        ("invented-secret-status", "unknown"),
+    ],
+)
+def test_reader_normalizes_status_to_bounded_public_buckets(
+    tmp_path: Path,
+    persisted_status: str,
+    expected_status: str,
+) -> None:
+    """Real Agno enum values and arbitrary persisted strings must map to a fixed lowercase vocabulary."""
+    database = tmp_path / "code.db"
+    run = _run()
+    run["status"] = persisted_status
+    _create_database(database, runs=[run])
+
+    result = _read(_source(database))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs[0].status == expected_status
 
 
 def test_missing_database_is_absent_without_creating_a_file(tmp_path: Path) -> None:
@@ -535,7 +563,7 @@ def test_excessive_model_metric_records_return_resource_limit(tmp_path: Path, mo
         ],
     }
     _create_database(database, runs=[run])
-    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_EXTRACTED_MODEL_METRICS", 1, raising=False)
+    monkeypatch.setattr("mindroom.usage_stats_storage.MAX_EXTRACTED_MODEL_METRICS", 1)
 
     result = _read(_source(database))
 

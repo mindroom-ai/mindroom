@@ -9,6 +9,7 @@ from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolManagedInitArg,
     ToolStatus,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     icon_color="text-cyan-500",
     dependencies=["agno"],
     function_names=("get_my_usage", "get_all_usage"),
+    managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     config_fields=[
         ConfigField(
             name="admin_scope",

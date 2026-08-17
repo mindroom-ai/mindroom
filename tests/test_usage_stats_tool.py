@@ -18,6 +18,7 @@ from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 from mindroom.usage_stats import (
     CostCoverage,
     TokenTotals,
@@ -153,32 +154,26 @@ async def test_get_my_usage_derives_canonical_runtime_identity_before_collection
         requester_id="@telegram-alice:example.test",
         aliases={"@alice:example.test": ["@telegram-alice:example.test"]},
     )
-    identity = object()
     collect = Mock(return_value=_Report("self"))
-    to_thread = AsyncMock(side_effect=lambda function, **kwargs: function(**kwargs))
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        "mindroom.custom_tools.usage_stats.build_execution_identity_from_runtime_context",
-        lambda received: identity if received is context else None,
-    )
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
-    monkeypatch.setattr("mindroom.custom_tools.usage_stats.asyncio.to_thread", to_thread)
 
-    payload = json.loads(await UsageStatsTools().get_my_usage(group_by="model"))
+    payload = json.loads(await UsageStatsTools(agent_name="usage").get_my_usage(group_by="model"))
 
     assert list(inspect.signature(UsageStatsTools.get_my_usage).parameters) == ["self", "start", "end", "group_by"]
-    to_thread.assert_awaited_once()
-    assert to_thread.await_args.args == (collect,)
-    assert collect.call_args.kwargs == {
+    collected = dict(collect.call_args.kwargs)
+    identity = collected.pop("execution_identity")
+    assert collected == {
         "agent_name": "usage",
         "requester_id": "@alice:example.test",
         "config": context.config,
         "runtime_paths": context.runtime_paths,
-        "execution_identity": identity,
         "start": None,
         "end": None,
         "group_by": "model",
     }
+    assert identity.agent_name == "usage"
+    assert identity.transport_agent_name == "usage"
     assert payload == {"status": "ok", "tool": "usage_stats", **_report_payload("self")}
     assert "@telegram-alice:example.test" not in json.dumps(payload)
 
@@ -215,7 +210,7 @@ async def test_get_my_usage_rejects_missing_context_or_requester_before_identity
 
 def test_usage_stats_dynamic_registration_follows_admin_scope() -> None:
     """An accidental aggregate endpoint registration would bypass authored scope configuration."""
-    assert _registered_function_names(UsageStatsTools()) == {"get_my_usage"}
+    assert _registered_function_names(UsageStatsTools(agent_name="usage")) == {"get_my_usage"}
     assert _registered_function_names(UsageStatsTools(admin_scope=True)) == {"get_my_usage", "get_all_usage"}
 
 
@@ -333,6 +328,51 @@ async def test_get_all_usage_rejects_non_global_requester_before_thread_or_colle
 
 
 @pytest.mark.asyncio
+async def test_get_all_usage_uses_one_current_config_snapshot_for_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live authorization revocation must override the construction-time context snapshot."""
+    context = _context(tmp_path, global_users=["@alice:example.test"])
+    revoked = context.config.model_copy(update={"authorization": AuthorizationConfig(global_users=[])})
+    context = replace(context, config_provider=lambda: revoked)
+    collect = Mock()
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
+
+    assert payload["code"] == "authorization_error"
+    collect.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambient_agent_name", ["configured-team", "transport-agent"])
+async def test_get_my_usage_uses_materialized_agent_bound_to_toolkit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ambient_agent_name: str,
+) -> None:
+    """Team transport context must not redirect a member toolkit's self usage identity."""
+    context = replace(
+        _context(tmp_path),
+        agent_name=ambient_agent_name,
+        transport_agent_name=ambient_agent_name,
+    )
+    collect = Mock(return_value=_Report("self"))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(agent_name="usage").get_my_usage())
+
+    assert payload["status"] == "ok"
+    assert collect.call_args.kwargs["agent_name"] == "usage"
+    identity = collect.call_args.kwargs["execution_identity"]
+    assert identity.agent_name == "usage"
+    assert identity.transport_agent_name == ambient_agent_name
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requester_id", "aliases"),
     [
@@ -382,7 +422,11 @@ async def test_get_all_usage_allows_canonical_or_alias_global_requester_in_threa
     assert "@admin:example.test" not in json.dumps(payload)
 
 
-def test_usage_stats_agent_override_reaches_constructor(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_usage_stats_agent_override_and_managed_identity_reach_constructor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A per-agent admin_scope override must control the registered toolkit surface."""
     config = bind_runtime_paths(
         Config(
@@ -403,11 +447,23 @@ def test_usage_stats_agent_override_reaches_constructor(tmp_path: Path) -> None:
         "usage_stats",
         runtime_paths_for(config),
         tool_config_overrides=usage_tool_config.tool_config_overrides,
-        worker_target=None,
+        worker_target=ResolvedWorkerTarget(
+            worker_scope=None,
+            routing_agent_name="usage",
+            execution_identity=None,
+            tenant_id=None,
+            account_id=None,
+            worker_key=None,
+        ),
     )
+    collect = Mock(return_value=_Report("self"))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: _context(tmp_path))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
 
     assert isinstance(toolkit, UsageStatsTools)
     assert _registered_function_names(toolkit) == {"get_my_usage", "get_all_usage"}
+    assert json.loads(await toolkit.get_my_usage())["status"] == "ok"
+    assert collect.call_args.kwargs["agent_name"] == "usage"
 
 
 @pytest.mark.asyncio
@@ -484,7 +540,7 @@ async def test_source_unavailable_error_has_stable_code(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_self_usage", collect)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.asyncio.to_thread", to_thread)
 
-    payload = json.loads(await UsageStatsTools().get_my_usage())
+    payload = json.loads(await UsageStatsTools(agent_name="usage").get_my_usage())
 
     assert payload == {
         "code": "source_unavailable",
@@ -509,4 +565,4 @@ async def test_unexpected_collection_error_propagates(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.asyncio.to_thread", to_thread)
 
     with pytest.raises(RuntimeError, match="programming defect"):
-        await UsageStatsTools().get_my_usage()
+        await UsageStatsTools(agent_name="usage").get_my_usage()

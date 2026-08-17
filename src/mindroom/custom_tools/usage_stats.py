@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from agno.tools import Toolkit
@@ -23,11 +24,14 @@ from mindroom.usage_stats import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.config.main import Config
+
 
 class UsageStatsTools(Toolkit):
     """Expose retained usage summaries for the current requester or authorized administrators."""
 
-    def __init__(self, *, admin_scope: bool = False) -> None:
+    def __init__(self, *, agent_name: str | None = None, admin_scope: bool = False) -> None:
+        self._agent_name = agent_name
         self._admin_scope = admin_scope
         functions: list[Callable[..., Awaitable[str]]] = [self.get_my_usage]
         if admin_scope:
@@ -73,7 +77,7 @@ class UsageStatsTools(Toolkit):
             "Usage statistics could not read the expected retained-history source.",
         )
 
-    def _admin_context_or_error(self) -> ToolRuntimeContext | str:
+    def _admin_context_or_error(self) -> tuple[ToolRuntimeContext, Config] | str:
         if not self._admin_scope:
             return self._error(
                 "authorization_error",
@@ -82,17 +86,15 @@ class UsageStatsTools(Toolkit):
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
-        canonical_requester = resolved.config.authorization.resolve_alias(resolved.requester_id)
-        global_users = {
-            resolved.config.authorization.resolve_alias(user_id)
-            for user_id in resolved.config.authorization.global_users
-        }
+        config = resolved.current_config
+        canonical_requester = config.authorization.resolve_alias(resolved.requester_id)
+        global_users = {config.authorization.resolve_alias(user_id) for user_id in config.authorization.global_users}
         if canonical_requester not in global_users:
             return self._error(
                 "authorization_error",
                 "Usage statistics admin access is not authorized for this requester.",
             )
-        return resolved
+        return resolved, config
 
     async def get_my_usage(
         self,
@@ -106,15 +108,24 @@ class UsageStatsTools(Toolkit):
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
+        if self._agent_name is None:
+            return self._error(
+                "context_unavailable",
+                "Usage statistics are unavailable without a bound agent identity.",
+            )
         context = resolved
-        requester_id = context.config.authorization.resolve_alias(context.requester_id)
-        execution_identity = build_execution_identity_from_runtime_context(context)
+        config = context.current_config
+        requester_id = config.authorization.resolve_alias(context.requester_id)
+        execution_identity = replace(
+            build_execution_identity_from_runtime_context(context),
+            agent_name=self._agent_name,
+        )
         try:
             report = await asyncio.to_thread(
                 collect_self_usage,
-                agent_name=context.agent_name,
+                agent_name=self._agent_name,
                 requester_id=requester_id,
-                config=context.config,
+                config=config,
                 runtime_paths=context.runtime_paths,
                 execution_identity=execution_identity,
                 start=start,
@@ -141,11 +152,11 @@ class UsageStatsTools(Toolkit):
         resolved = self._admin_context_or_error()
         if isinstance(resolved, str):
             return resolved
-        context = resolved
+        context, config = resolved
         try:
             report = await asyncio.to_thread(
                 collect_admin_usage,
-                config=context.config,
+                config=config,
                 runtime_paths=context.runtime_paths,
                 start=start,
                 end=end,

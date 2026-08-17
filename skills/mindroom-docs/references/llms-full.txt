@@ -9706,6 +9706,7 @@ agents:
 `requester_ids` filters the admin report after canonical authorization-alias resolution.
 Omitting `entity_names` includes every configured agent and team that the admin scope can inspect.
 Omitting `requester_ids` accepts every retained requester attribution, including the explicit `unknown` bucket.
+Authorized admin queries attribute each team coordinator run to its configured team ID and each nested member run to that member's configured agent or nested-team ID.
 
 `start` and `end` accept either an ISO date or an RFC 3339 timestamp with an explicit UTC offset.
 Dates use the configured MindRoom timezone.

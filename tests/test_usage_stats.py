@@ -193,6 +193,53 @@ def test_self_usage_uses_storage_requester_precedence_and_canonical_aliases(
     assert report.coverage.note == "Retained run usage only; session compaction can make retained history incomplete."
 
 
+def test_self_usage_shared_coverage_ignores_other_requester_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another requester in a shared database must not change any self-visible aggregate or coverage count."""
+    own = _row(_raw_run(run_id="shared-run", metrics={"total_tokens": 7}))
+
+    def collect(rows: tuple[UsageSessionRow, ...]) -> dict[str, object]:
+        _wire_self(monkeypatch, rows)
+        return collect_self_usage(
+            agent_name="code",
+            requester_id="@alice:example.test",
+            config=_config(),
+            runtime_paths=_paths(tmp_path),
+            execution_identity=_identity(),
+            start=None,
+            end=None,
+            group_by="day",
+            as_of=datetime(2026, 1, 3, tzinfo=UTC),
+        ).to_dict()
+
+    baseline = collect((own,))
+    with_other_requester = collect(
+        (
+            _row(
+                _raw_run(
+                    requester_id="@bob:example.test",
+                    user_id="@bob:example.test",
+                    run_id="shared-run",
+                    metrics={"total_tokens": 99},
+                ),
+            ),
+            _row(
+                _raw_run(
+                    requester_id="@bob:example.test",
+                    user_id="@bob:example.test",
+                    created_at=None,
+                    metrics={"total_tokens": "invalid"},
+                ),
+            ),
+            own,
+        ),
+    )
+
+    assert with_other_requester == baseline
+
+
 def test_admin_usage_groups_missing_requesters_as_unknown_and_canonicalizes_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -247,7 +294,7 @@ def test_admin_validates_entity_filters_before_scanning(tmp_path: Path, monkeypa
 
     monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", discover)
 
-    with pytest.raises(ValueError, match="Unknown entity"):
+    with pytest.raises(UsageStatsValidationError, match="Unknown entity"):
         collect_admin_usage(
             config=_config(),
             runtime_paths=_paths(tmp_path),
@@ -1039,6 +1086,39 @@ def test_oversized_numeric_metric_skips_one_source_and_continues_others(
     assert report.run_count == 1
     assert report.coverage.scanned_sources == 2
     assert report.coverage.malformed_runs == 1
+    assert report.coverage.status == "partial"
+
+
+def test_non_text_numeric_limits_skip_hostile_runs_and_keep_independent_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Huge JSON numbers and Decimal exponents must not abort or escape the bounded public report."""
+    source = _source()
+    _wire_admin(
+        monkeypatch,
+        (
+            _row(_raw_run(metrics={"total_tokens": 10**200}), source=source),
+            _row(_raw_run(metrics={"total_tokens": 2, "cost": "1e999999999"}), source=source),
+            _row(_raw_run(metrics={"total_tokens": 7, "cost": "0.25"}), source=source),
+        ),
+    )
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.totals.total_tokens == 7
+    assert report.cost.known_cost == "0.25"
+    assert report.run_count == 1
+    assert report.coverage.malformed_runs == 2
     assert report.coverage.status == "partial"
 
 

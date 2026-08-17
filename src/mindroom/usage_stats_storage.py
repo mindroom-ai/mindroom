@@ -42,6 +42,7 @@ __all__ = [
 
 UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 UsageMetricValue = int | float | str | None
+type _UsageRunStatus = Literal["pending", "running", "completed", "paused", "cancelled", "error", "unknown"]
 
 MAX_JSON_BYTES = 1_000_000
 MAX_JSON_NESTING_DEPTH = 64
@@ -52,6 +53,7 @@ _JSON_NESTING_LIMIT = "JSON nesting exceeds limit"
 _NESTED_RESPONSE_DEPTH_LIMIT = "nested response depth exceeds limit"
 _RUN_NODE_COUNT_LIMIT = "run node count exceeds limit"
 _MODEL_METRIC_COUNT_LIMIT = "model metric count exceeds limit"
+_RUN_STATUSES = frozenset({"pending", "running", "completed", "paused", "cancelled", "error"})
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
@@ -119,7 +121,7 @@ class UsageRunNode:
     model_provider: str | None
     model_id: str | None
     run_id: str | None
-    status: str
+    status: _UsageRunStatus
     metrics: Mapping[str, UsageMetricValue]
     model_metrics: tuple[UsageModelMetric, ...]
     member_responses: tuple[UsageRunNode, ...]
@@ -612,7 +614,7 @@ def _extract_run_node(
         model_provider=_optional_string(run_mapping.get("model_provider")),
         model_id=_optional_string(run_mapping.get("model")),
         run_id=_optional_string(run_mapping.get("run_id")),
-        status=_optional_string(run_mapping.get("status")) or "unknown",
+        status=_normalize_status(run_mapping.get("status")),
         metrics=_extract_metric_values(raw_metrics),
         model_metrics=_extract_model_metrics(raw_metrics, extracted_model_metrics),
         member_responses=tuple(
@@ -625,6 +627,11 @@ def _extract_run_node(
             for response in nested
         ),
     )
+
+
+def _normalize_status(value: object) -> _UsageRunStatus:
+    status = value.casefold() if isinstance(value, str) else "unknown"
+    return cast("_UsageRunStatus", status) if status in _RUN_STATUSES else "unknown"
 
 
 def _extract_metric_values(raw_metrics: object) -> Mapping[str, UsageMetricValue]:

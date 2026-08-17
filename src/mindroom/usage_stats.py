@@ -65,6 +65,7 @@ _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _TIMESTAMP_OFFSET = re.compile(r".*(?:Z|[+-]\d{2}:\d{2})\Z")
 _MAX_BREAKDOWN_ROWS = 200
 _MAX_PERSISTED_NUMERIC_TEXT_LENGTH = 128
+_MAX_PERSISTED_INTEGER = 10**_MAX_PERSISTED_NUMERIC_TEXT_LENGTH - 1
 _SELF_GROUPS = frozenset({"day", "model"})
 _ADMIN_GROUPS = frozenset({"day", "entity", "model", "requester"})
 
@@ -513,12 +514,8 @@ def _collect_row(
     entity_filter: frozenset[str] | None,
     requester_filter: frozenset[str] | None,
 ) -> None:
-    state.scanned_sessions += 1
-    row_key = (row.source.path_label, row.row_key)
-    state.row_history_totals[row_key] = TokenTotals()
-    state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
-    state.row_comparison_allowed[row_key] = scope == "admin" or row.source.requester_isolated
-    state.row_history_complete[row_key] = True
+    if scope == "admin" or row.source.requester_isolated:
+        _initialize_row_tracking(state, row, comparison_allowed=True)
     for index, run in enumerate(row.runs):
         _collect_run_tree(
             state=state,
@@ -539,6 +536,22 @@ def _collect_row(
             entity_filter=entity_filter,
             requester_filter=requester_filter,
         )
+
+
+def _initialize_row_tracking(
+    state: _CollectionState,
+    row: UsageSessionRow,
+    *,
+    comparison_allowed: bool,
+) -> None:
+    row_key = (row.source.path_label, row.row_key)
+    if row_key in state.row_history_totals:
+        return
+    state.scanned_sessions += 1
+    state.row_history_totals[row_key] = TokenTotals()
+    state.row_session_metrics[row_key] = _metrics_totals(row.session_metrics)
+    state.row_comparison_allowed[row_key] = comparison_allowed
+    state.row_history_complete[row_key] = True
 
 
 def _collect_run_tree(
@@ -564,33 +577,49 @@ def _collect_run_tree(
     requester = config.authorization.resolve_alias(run.requester_id) if run.requester_id else parent_requester
     entity = _run_entity(row=row, run=run, is_top_level=is_top_level)
     timestamp = parent_timestamp if run.created_at is None else _run_timestamp(run.created_at)
-    if entity is None or timestamp is None:
-        state.malformed_runs += entity is None
-        state.missing_timestamp_runs += timestamp is None
-        state.missing_requester_runs += requester is None
-        state.skipped_runs += 1
-        state.coverage_exclusions += 1
-        _mark_row_history_incomplete(state, row)
-    else:
-        _collect_normalized_run(
-            state=state,
-            row=row,
-            run=run,
+    visible_to_scope = (
+        scope == "admin"
+        or row.source.requester_isolated
+        or _matches_self_identity(
             entity=entity,
             requester=requester,
-            timestamp=timestamp,
-            structural_key=structural_key,
-            is_top_level=is_top_level,
-            scope=scope,
-            group_by=group_by,
-            timezone=timezone,
-            window_start=window_start,
-            window_end=window_end,
             expected_agent=expected_agent,
             expected_requester=expected_requester,
-            entity_filter=entity_filter,
-            requester_filter=requester_filter,
         )
+    )
+    if visible_to_scope:
+        _initialize_row_tracking(
+            state,
+            row,
+            comparison_allowed=scope == "admin" or row.source.requester_isolated,
+        )
+        if entity is None or timestamp is None:
+            state.malformed_runs += entity is None
+            state.missing_timestamp_runs += timestamp is None
+            state.missing_requester_runs += requester is None
+            state.skipped_runs += 1
+            state.coverage_exclusions += 1
+            _mark_row_history_incomplete(state, row)
+        else:
+            _collect_normalized_run(
+                state=state,
+                row=row,
+                run=run,
+                entity=entity,
+                requester=requester,
+                timestamp=timestamp,
+                structural_key=structural_key,
+                is_top_level=is_top_level,
+                scope=scope,
+                group_by=group_by,
+                timezone=timezone,
+                window_start=window_start,
+                window_end=window_end,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+                entity_filter=entity_filter,
+                requester_filter=requester_filter,
+            )
     for index, child in enumerate(run.member_responses):
         _collect_run_tree(
             state=state,
@@ -611,6 +640,22 @@ def _collect_run_tree(
             entity_filter=entity_filter,
             requester_filter=requester_filter,
         )
+
+
+def _matches_self_identity(
+    *,
+    entity: _DirectRunEntity | None,
+    requester: str | None,
+    expected_agent: str | None,
+    expected_requester: str | None,
+) -> bool:
+    return (
+        requester is not None
+        and requester == expected_requester
+        and entity is not None
+        and entity.kind == "agent"
+        and entity.entity_id == expected_agent
+    )
 
 
 def _collect_normalized_run(
@@ -776,11 +821,11 @@ def _aggregate_records(
     group_by: _UsageGroupBy,
     timezone: ZoneInfo,
 ) -> None:
-    record = records[0]
+    representative = records[0]
     state.retained_runs += 1
     state.included_sessions.add((row.source.path_label, row.row_key))
-    state.observed_at.append(record.created_at)
-    state.status_counts[record.status] += 1
+    state.observed_at.append(representative.created_at)
+    state.status_counts[representative.status] += 1
     run_totals = TokenTotals()
     run_cost = Decimal(0)
     has_cost = False
@@ -818,12 +863,11 @@ def _accept_run(
     if timestamp >= window_end:
         return False
     if scope == "self":
-        return (
-            requester is not None
-            and requester == expected_requester
-            and entity is not None
-            and entity.kind == "agent"
-            and entity.entity_id == expected_agent
+        return _matches_self_identity(
+            entity=entity,
+            requester=requester,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
         )
     if entity_filter is not None and (entity is None or entity.entity_id not in entity_filter):
         return False
@@ -950,9 +994,11 @@ def _token_value(value: object) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if value >= 0 else None
+        return value if 0 <= value <= _MAX_PERSISTED_INTEGER else None
     if isinstance(value, float):
-        return int(value) if math.isfinite(value) and value >= 0 and value.is_integer() else None
+        return (
+            int(value) if math.isfinite(value) and 0 <= value <= _MAX_PERSISTED_INTEGER and value.is_integer() else None
+        )
     if isinstance(value, str) and len(value) <= _MAX_PERSISTED_NUMERIC_TEXT_LENGTH and value.isdecimal():
         return int(value)
     return None
@@ -961,15 +1007,19 @@ def _token_value(value: object) -> int | None:
 def _cost_value(value: object) -> Decimal | None:
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
-    if isinstance(value, float) and not math.isfinite(value):
+    if (isinstance(value, int) and not 0 <= value <= _MAX_PERSISTED_INTEGER) or (
+        isinstance(value, float) and (not math.isfinite(value) or not 0 <= value <= _MAX_PERSISTED_INTEGER)
+    ):
         return None
     if isinstance(value, str) and len(value) > _MAX_PERSISTED_NUMERIC_TEXT_LENGTH:
         return None
     try:
         cost = Decimal(str(value))
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
         return None
-    return cost if cost.is_finite() and cost >= 0 else None
+    return (
+        cost if cost.is_finite() and cost >= 0 and abs(cost.adjusted()) <= _MAX_PERSISTED_NUMERIC_TEXT_LENGTH else None
+    )
 
 
 def _report(
