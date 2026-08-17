@@ -4645,22 +4645,46 @@ async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
-async def test_agent_owned_oauth_catalog_ignores_local_collisions_on_other_agents(
+@pytest.mark.parametrize(
+    ("catalog_scope", "other_agent_scope"),
+    [
+        pytest.param("shared", "shared", id="shared-owner"),
+        pytest.param("user_agent", "user_agent", id="user-agent-owner"),
+        pytest.param("user", "shared", id="user-vs-shared"),
+        pytest.param(None, "user", id="unscoped-vs-user"),
+    ],
+)
+async def test_oauth_catalog_ignores_unreachable_local_collisions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    worker_scope: WorkerScope,
+    catalog_scope: WorkerScope | None,
+    other_agent_scope: WorkerScope,
 ) -> None:
-    """An agent-owned OAuth catalog should be projected only onto its owning agent."""
+    """An OAuth catalog should be projected only onto agents that can reach its scope."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _worker_target(
-        "@alice:example.test",
-        worker_scope=worker_scope,
-        agent_name="code",
-    )
-    _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    if catalog_scope is None:
+        worker_target = None
+        credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+        credentials_manager.save_credentials(
+            "mcp_demo_oauth",
+            {
+                "token": "installation-token",
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": "mcp_demo",
+            },
+        )
+    else:
+        worker_target = _worker_target(
+            "@alice:example.test",
+            worker_scope=catalog_scope,
+            agent_name="code",
+        )
+        _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
 
     class _FakeToolkit:
         def __init__(self, tool_name: str) -> None:
@@ -4683,13 +4707,13 @@ async def test_agent_owned_oauth_catalog_ignores_local_collisions_on_other_agent
                     "display_name": "Code",
                     "role": "Use MCP",
                     "tools": ["mcp_demo"],
-                    "worker_scope": worker_scope,
+                    "worker_scope": catalog_scope,
                 },
                 "research": {
                     "display_name": "Research",
                     "role": "Use local and MCP tools",
                     "tools": ["shell", "mcp_demo"],
-                    "worker_scope": worker_scope,
+                    "worker_scope": other_agent_scope,
                 },
             },
         },
@@ -4700,7 +4724,7 @@ async def test_agent_owned_oauth_catalog_ignores_local_collisions_on_other_agent
 
     catalog = await manager.get_request_catalog(
         "demo",
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
 
