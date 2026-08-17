@@ -67,6 +67,15 @@ class ResolvedAgentRuntime:
 
 
 @dataclass(frozen=True)
+class ResolvedAgentStorage:
+    """Purely resolved state roots for one agent execution without workspace reconciliation."""
+
+    execution: ResolvedAgentExecution
+    state_root: Path
+    session_state_root: Path
+
+
+@dataclass(frozen=True)
 class ResolvedKnowledgeBinding:
     """Resolved storage and watcher behavior for one knowledge base in one execution scope."""
 
@@ -182,26 +191,14 @@ def resolve_agent_runtime(
     create: bool = False,
 ) -> ResolvedAgentRuntime:
     """Resolve one agent's canonical runtime roots for the current execution scope."""
-    resolved_execution = resolve_agent_execution(
+    resolved_storage = resolve_agent_storage(
         agent_name,
         config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
-    if resolved_execution.policy.private_workspace_enabled:
-        worker_key = resolved_execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key"
-            raise ValueError(msg)
-        state_root = _resolved_private_state_root(
-            runtime_paths=runtime_paths,
-            worker_key=worker_key,
-            agent_name=agent_name,
-        )
-    else:
-        state_root = resolve_agent_state_storage_path(
-            agent_name=agent_name,
-            base_storage_path=runtime_paths.storage_root,
-        ).resolve()
+    resolved_execution = resolved_storage.execution
+    state_root = resolved_storage.state_root
 
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,
@@ -245,10 +242,44 @@ def resolve_agent_runtime(
     return ResolvedAgentRuntime(
         execution=resolved_execution,
         state_root=state_root,
-        session_state_root=resolve_session_state_root(state_root, runtime_paths),
+        session_state_root=resolved_storage.session_state_root,
         workspace=workspace,
         tool_base_dir=tool_base_dir,
         file_memory_root=file_memory_root,
+    )
+
+
+def resolve_agent_storage(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> ResolvedAgentStorage:
+    """Resolve canonical state roots without creating or reconciling workspace content."""
+    resolved_execution = resolve_agent_execution(
+        agent_name,
+        config,
+        execution_identity=execution_identity,
+    )
+    if resolved_execution.policy.private_workspace_enabled:
+        worker_key = resolved_execution.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' could not resolve a worker key"
+            raise ValueError(msg)
+        state_root = _resolved_private_state_root(
+            runtime_paths=runtime_paths,
+            worker_key=worker_key,
+            agent_name=agent_name,
+        )
+    else:
+        state_root = resolve_agent_state_storage_path(
+            agent_name=agent_name,
+            base_storage_path=runtime_paths.storage_root,
+        ).resolve()
+    return ResolvedAgentStorage(
+        execution=resolved_execution,
+        state_root=state_root,
+        session_state_root=resolve_session_state_root(state_root, runtime_paths),
     )
 
 
@@ -313,9 +344,11 @@ def resolve_knowledge_binding(
 __all__ = [
     "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
+    "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
     "resolve_agent_execution",
     "resolve_agent_runtime",
+    "resolve_agent_storage",
     "resolve_knowledge_binding",
     "resolve_private_requester_scope_root",
 ]

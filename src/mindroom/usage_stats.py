@@ -178,6 +178,7 @@ class UsageCoverage:
     malformed_runs: int
     missing_requester_runs: int
     missing_timestamp_runs: int
+    missing_run_id_runs: int
     compacted_sessions: int
     note: str
 
@@ -193,6 +194,7 @@ class UsageCoverage:
             "malformed_runs": self.malformed_runs,
             "missing_requester_runs": self.missing_requester_runs,
             "missing_timestamp_runs": self.missing_timestamp_runs,
+            "missing_run_id_runs": self.missing_run_id_runs,
             "compacted_sessions": self.compacted_sessions,
             "note": self.note,
         }
@@ -328,6 +330,7 @@ class _CollectionState:
     malformed_runs: int = 0
     missing_requester_runs: int = 0
     missing_timestamp_runs: int = 0
+    missing_run_id_runs: int = 0
     coverage_exclusions: int = 0
 
 
@@ -790,6 +793,9 @@ def _collect_normalized_run(
         window_start=window_start,
         window_end=window_end,
     )
+    if accepted and run.run_id is None:
+        state.missing_run_id_runs += 1
+        state.coverage_exclusions += 1
     if is_top_level and accepted:
         _count_top_level_turn(
             state=state,
@@ -1193,6 +1199,7 @@ def _report(
             malformed_runs=state.malformed_runs,
             missing_requester_runs=state.missing_requester_runs,
             missing_timestamp_runs=state.missing_timestamp_runs,
+            missing_run_id_runs=state.missing_run_id_runs,
             compacted_sessions=compacted_sessions,
             note="Retained run usage only; session compaction can make retained history incomplete.",
         ),

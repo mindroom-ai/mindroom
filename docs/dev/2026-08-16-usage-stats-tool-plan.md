@@ -386,6 +386,7 @@ class UsageCoverage:
     malformed_runs: int
     missing_requester_runs: int
     missing_timestamp_runs: int
+    missing_run_id_runs: int
     compacted_sessions: int
     note: str
 
@@ -564,7 +565,7 @@ Cover:
 - A shared self source where cumulative metrics and deltas are not exposed and coverage is `unknown`.
 - A corrupt or busy source producing `partial` coverage while other sources still contribute.
 - A query with more than 200 breakdown keys producing deterministic truncation.
-- Exact public counts for scanned and partial sources, scanned sessions, retained and skipped runs, malformed runs, missing requester and timestamp attribution, and compacted sessions.
+- Exact public counts for scanned and partial sources, scanned sessions, retained and skipped runs, malformed runs, missing requester, timestamp, and stable-run-ID attribution, and compacted sessions.
 - A busy or corrupt sole existing self source producing a source-unavailable error instead of a successful partial or zero report.
 - An all-absent self source producing a valid empty retained-history report.
 

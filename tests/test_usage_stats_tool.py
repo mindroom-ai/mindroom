@@ -137,8 +137,9 @@ def _public_report(
             malformed_runs=0,
             missing_requester_runs=0,
             missing_timestamp_runs=0,
+            missing_run_id_runs=0,
             compacted_sessions=0,
-            note="No retained-history gap was detected.",
+            note="Retained run usage only; session compaction can make retained history incomplete.",
         ),
     )
 
@@ -277,6 +278,7 @@ def test_usage_stats_export_and_payloads_expose_only_the_documented_public_shape
         "malformed_runs",
         "missing_requester_runs",
         "missing_timestamp_runs",
+        "missing_run_id_runs",
         "compacted_sessions",
         "note",
     }

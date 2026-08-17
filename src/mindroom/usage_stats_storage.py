@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import worker_dir_name
 
 if TYPE_CHECKING:
@@ -201,21 +201,21 @@ def discover_self_usage_sources(
 ) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
     """Discover the current execution's database and every valid team database."""
     session_root = _effective_session_root(runtime_paths)
-    resolved_runtime = resolve_agent_runtime(
+    resolved_storage = resolve_agent_storage(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
     )
-    database = resolved_runtime.session_state_root / "sessions" / f"{agent_name}.db"
+    database = resolved_storage.session_state_root / "sessions" / f"{agent_name}.db"
     sources = _team_usage_sources(session_root, config)
     try:
         source_path = _self_source_path(
             session_root=session_root,
             agent_name=agent_name,
             database=database,
-            is_private=resolved_runtime.execution.is_private,
-            worker_key=resolved_runtime.execution.worker_key,
+            is_private=resolved_storage.execution.is_private,
+            worker_key=resolved_storage.execution.worker_key,
         )
     except OSError:
         sources.append(_discovery_diagnostic("self", "partial", "source discovery unavailable"))
@@ -225,11 +225,11 @@ def discover_self_usage_sources(
             _usage_source(
                 path=source_path,
                 session_root=session_root,
-                scope="private_agent" if resolved_runtime.execution.is_private else "shared_agent",
+                scope="private_agent" if resolved_storage.execution.is_private else "shared_agent",
                 expected_session_table=f"{agent_name}_sessions",
                 source_agent_id=agent_name,
                 config=config,
-                requester_isolated=resolved_runtime.execution.is_private,
+                requester_isolated=resolved_storage.execution.is_private,
             ),
         )
     return _sorted_sources(sources)
@@ -620,9 +620,14 @@ def _validate_session_table(
     source: UsageStorageSource,
 ) -> UsageStorageDiagnostic | None:
     """Confirm the one expected Agno table and its required columns."""
-    table_names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
     expected = source.expected_session_table
-    if not _IDENTIFIER.fullmatch(expected) or expected not in table_names:
+    if not _IDENTIFIER.fullmatch(expected):
+        return _diagnostic(source, "unsupported_schema", "session table unavailable")
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (expected,),
+    ).fetchone()
+    if table_exists is None:
         return _diagnostic(source, "unsupported_schema", "session table unavailable")
     quoted_table = _quote_identifier(expected)
     column_names = {row[1] for row in connection.execute(f"PRAGMA table_info({quoted_table})")}
@@ -845,7 +850,7 @@ def _extract_model_metrics(raw_metrics: object, extracted_model_metrics: list[in
 
 
 def _optional_string(value: object) -> str | None:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value:
         return None
     _ensure_selected_string_length(value)
     return value

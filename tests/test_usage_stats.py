@@ -901,6 +901,8 @@ def test_nested_runs_without_ids_count_once_per_structural_location(
     assert report.turn_count == 1
     assert report.run_count == 3
     assert report.totals.total_tokens == 6
+    assert report.coverage.missing_run_id_runs == 2
+    assert report.coverage.status == "partial"
 
 
 def test_nested_runs_inherit_only_missing_parent_timestamps(
@@ -1277,7 +1279,7 @@ def test_self_coverage_uses_private_cumulative_evidence_but_keeps_shared_evidenc
     """A changed privacy gate would expose or trust shared cumulative session metrics."""
     private_source = _source(scope="private_agent", requester_isolated=True)
     private_row = _row(
-        _raw_run(metrics={"total_tokens": 10}),
+        _raw_run(run_id="private-run", metrics={"total_tokens": 10}),
         source=private_source,
         session_metrics={"total_tokens": 10},
     )
@@ -1299,7 +1301,7 @@ def test_self_coverage_uses_private_cumulative_evidence_but_keeps_shared_evidenc
 
     shared_source = _source()
     shared_row = _row(
-        _raw_run(metrics={"total_tokens": 10}),
+        _raw_run(run_id="shared-run", metrics={"total_tokens": 10}),
         source=shared_source,
         session_metrics={"total_tokens": 10},
     )
@@ -1406,7 +1408,7 @@ def test_coverage_unequal_or_lower_cumulative_tokens_are_unknown(
     """A non-equal cumulative token vector cannot establish complete retained history."""
     source = _source()
     row = _row(
-        _raw_run(metrics={"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}),
+        _raw_run(run_id="coverage-run", metrics={"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}),
         source=source,
         session_metrics=session_metrics,
     )

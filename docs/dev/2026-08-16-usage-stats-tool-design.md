@@ -146,6 +146,7 @@ Missing databases produce empty sources rather than creating files.
 An unsupported schema or corrupt JSON produces a source diagnostic and does not abort other admin sources.
 Source paths and storage-scope labels remain internal, and public diagnostics expose only bounded category counts.
 The self query returns a partial result when safe retained records remain and an error when its only source cannot be read.
+Self discovery resolves only execution and storage roots and never invokes workspace creation or knowledge-link reconciliation.
 
 ## Run Extraction And Attribution
 
@@ -246,8 +247,9 @@ A successful response has this conceptual shape:
     "malformed_runs": 0,
     "missing_requester_runs": 0,
     "missing_timestamp_runs": 0,
+    "missing_run_id_runs": 0,
     "compacted_sessions": 0,
-    "note": "No retained-history gap was detected."
+    "note": "Retained run usage only; session compaction can make retained history incomplete."
   },
   "breakdown_truncated": false,
   "breakdown_omitted": 0

@@ -680,6 +680,44 @@ def test_reader_uses_only_the_expected_session_table(tmp_path: Path) -> None:
     ]
 
 
+def test_schema_validation_queries_only_the_expected_table_in_a_large_schema(tmp_path: Path) -> None:
+    """Schema validation must not materialize every unrelated SQLite table name."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    with sqlite3.connect(database) as connection:
+        for index in range(100):
+            connection.execute(f'CREATE TABLE "unrelated_{index}" (value TEXT)')
+    statements: list[str] = []
+
+    with sqlite3.connect(database) as connection:
+        connection.set_trace_callback(statements.append)
+        diagnostic = usage_stats_storage._validate_session_table(connection, _source(database))
+
+    assert diagnostic is None
+    schema_queries = [statement for statement in statements if "sqlite_master" in statement]
+    assert len(schema_queries) == 1
+    assert "name = 'code_sessions'" in schema_queries[0]
+    assert "LIMIT 1" in schema_queries[0]
+
+
+def test_empty_persisted_identities_are_treated_as_missing(tmp_path: Path) -> None:
+    """Empty metadata identities cannot block requester fallback or become stable deduplication IDs."""
+    database = tmp_path / "code.db"
+    run = _run()
+    run["run_id"] = ""
+    run["user_id"] = "@alice:example.test"
+    run["metadata"] = {"requester_id": ""}
+    _create_database(database, runs=[run])
+
+    result = _read(_source(database))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs[0].requester_id == "@alice:example.test"
+    assert row.runs[0].run_id is None
+
+
 @pytest.mark.parametrize(
     ("table", "accepted"),
     [("123_sessions", True), ("bad-name_sessions", False), ("semi;drop_sessions", False)],
@@ -935,6 +973,31 @@ def test_discovery_candidate_limit_bounds_fixed_path_checks(
         )
         in outcomes
     )
+
+
+def test_self_discovery_does_not_reconcile_private_workspace_links(tmp_path: Path) -> None:
+    """Read-only usage discovery must not invoke normal runtime workspace reconciliation."""
+    config = _discovery_config()
+    runtime_paths = _discovery_runtime_paths(tmp_path)
+    identity = _identity(requester_id="@alice:example.test")
+    worker_key = resolve_worker_key("user", identity, agent_name="code")
+    assert worker_key is not None
+    workspace = runtime_paths.storage_root / "private_instances" / worker_dir_name(worker_key) / "code" / "code_data"
+    stale_target = workspace / "stale-target"
+    stale_target.mkdir(parents=True)
+    stale_link = workspace / "knowledge" / "stale"
+    stale_link.parent.mkdir()
+    stale_link.symlink_to(stale_target, target_is_directory=True)
+
+    discover_self_usage_sources(
+        agent_name="code",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    assert stale_link.is_symlink()
+    assert stale_link.resolve() == stale_target.resolve()
 
 
 def test_discovery_does_not_scan_canonical_state_root_when_sessions_are_redirected(tmp_path: Path) -> None:
