@@ -27,6 +27,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.mcp.toolkit import hide_mcp_catalog_function_collisions
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
@@ -602,6 +603,17 @@ def _log_toolkits_without_unique_model_functions(
                     function_names=sorted(function_names),
                 )
             seen_function_names.update(function_names)
+
+
+def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
+    """Project requester MCP catalogs against the exact session-local tool surface."""
+    for server_id, function_names in hide_mcp_catalog_function_collisions(toolkits).items():
+        logger.warning(
+            "Hiding MCP catalog functions shadowed by session-loaded local tools",
+            agent=agent_name,
+            server_id=server_id,
+            function_names=list(function_names),
+        )
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -1951,6 +1963,7 @@ def create_agent(
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
     )
+    _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(
         agent_name,
         agent_runtime,

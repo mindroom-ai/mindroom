@@ -47,6 +47,30 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     return normalized or None
 
 
+def hide_mcp_catalog_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
+    """Hide requester-catalog functions shadowed by local tools in this exact runtime projection."""
+    local_function_names = {
+        function_name
+        for toolkit in toolkits
+        if not isinstance(toolkit, MindRoomMCPToolkit)
+        for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
+    hidden_by_server: dict[str, tuple[str, ...]] = {}
+    for toolkit in toolkits:
+        if not isinstance(toolkit, MindRoomMCPToolkit) or toolkit.catalog is None:
+            continue
+        catalog_function_names = {
+            tool.function_name for tool in toolkit._filtered_tools() if tool.function_name in toolkit.async_functions
+        }
+        hidden = tuple(sorted(catalog_function_names & local_function_names))
+        if not hidden:
+            continue
+        for function_name in hidden:
+            toolkit.async_functions.pop(function_name)
+        hidden_by_server[toolkit.server_id] = hidden
+    return hidden_by_server
+
+
 class MindRoomMCPToolkit(Toolkit):
     """Toolkit that exposes cached MCP tools as async Agno functions."""
 

@@ -428,6 +428,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
+    "mindroom.mcp.toolkit",
     "mindroom.model_loading",
     "mindroom.openai_tool_search",
     "mindroom.prompt_templates",
@@ -2143,6 +2144,7 @@ depends_on = [
 path = "mindroom.mcp.toolkit"
 depends_on = []
 visibility = [
+    "mindroom.agents",
     "mindroom.mcp.registry",
     "mindroom.orchestrator",
 ]
@@ -4871,6 +4873,7 @@ from = ["mindroom.tool_system.dynamic_toolkits"]
 expose = [
     "MindRoomMCPToolkit",
     "bind_mcp_server_manager",
+    "hide_mcp_catalog_function_collisions",
     "require_mcp_server_manager",
 ]
 from = ["mindroom.mcp.toolkit"]

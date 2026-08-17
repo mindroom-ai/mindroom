@@ -3363,18 +3363,36 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_scope", "requester_id", "authorization"),
+    [
+        pytest.param("user", "@alice:example.test", {}, id="user"),
+        pytest.param("shared", "@alice:example.test", {}, id="shared"),
+        pytest.param(
+            "user_agent",
+            "@alice-bridge:example.test",
+            {"aliases": {"@alice:example.test": ["@alice-bridge:example.test"]}},
+            id="user-agent-alias",
+        ),
+    ],
+)
 async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    worker_scope: WorkerScope,
+    requester_id: str,
+    authorization: dict[str, object],
 ) -> None:
     """Deferred tools should collide with the active requester's discovered OAuth MCP catalog."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _worker_target("@alice:example.test")
-    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    worker_target = _worker_target(requester_id, worker_scope=worker_scope)
+    credential_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, credential_target, "alice-token")
     config = Config.validate_with_runtime(
         {
+            "authorization": authorization,
             "mcp_servers": {
                 "demo": {
                     **_oauth_mcp_config().model_dump(exclude_none=True),
@@ -3392,7 +3410,7 @@ async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collisio
                     "display_name": "Code",
                     "role": "Write code",
                     "tools": ["mcp_demo", {"shell": {"defer": True}}],
-                    "worker_scope": "user",
+                    "worker_scope": worker_scope,
                 },
             },
         },
@@ -3431,6 +3449,102 @@ async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collisio
         "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
     ]
     assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_catalog_projection_hides_session_loaded_function_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Late OAuth discovery should hide colliding functions only from the loaded session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    **_oauth_mcp_config().model_dump(exclude_none=True),
+                    "tool_prefix": "run",
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    bind_mcp_server_manager(manager)
+    try:
+        with patch(
+            "mindroom.model_loading.get_model_instance",
+            side_effect=lambda *_args, **_kwargs: OpenAIChat(id="gpt-4o-mini", api_key="sk-test"),
+        ):
+            initial_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="loaded-thread",
+                include_interactive_questions=False,
+            )
+            dynamic_manager = next(tool for tool in initial_agent.tools if tool.name == "dynamic_tools")
+            assert json.loads(dynamic_manager.load_tool("shell"))["status"] == "loaded"
+
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+                worker_target=worker_target,
+            )
+
+            loaded_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="loaded-thread",
+                include_interactive_questions=False,
+            )
+            clean_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="clean-thread",
+                include_interactive_questions=False,
+            )
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    loaded_mcp = next(tool for tool in loaded_agent.tools if tool.name == "mcp_demo")
+    clean_mcp = next(tool for tool in clean_agent.tools if tool.name == "mcp_demo")
+    loaded_function_names = [
+        function_name
+        for tool in loaded_agent.tools
+        for function_name in (*tool.get_functions(), *tool.get_async_functions())
+    ]
+    assert loaded_function_names.count("run_shell_command") == 1
+    assert "run_shell_command" not in loaded_mcp.get_async_functions()
+    assert "run_call_tool" in loaded_mcp.get_async_functions()
+    assert "run_shell_command" in clean_mcp.get_async_functions()
 
 
 @pytest.mark.asyncio

@@ -1901,13 +1901,23 @@ class MCPServerManager:
             for state in (*self._states.values(), *self._scoped_states.values())
         ):
             return []
-        requester_surface = (
-            (worker_target.worker_scope, worker_target.worker_key)
-            if worker_target is not None
-            and worker_target.worker_scope is not None
-            and worker_target.worker_key is not None
-            else None
-        )
+        requester_surface: tuple[str, str] | None = None
+        if worker_target is not None:
+            for server_id in sorted(self._states):
+                state = self._states[server_id]
+                if state.config.auth is None:
+                    continue
+                canonical_target = self._oauth_credential_context(
+                    state,
+                    worker_target=worker_target,
+                ).worker_target
+                if (
+                    canonical_target is not None
+                    and canonical_target.worker_scope is not None
+                    and canonical_target.worker_key is not None
+                ):
+                    requester_surface = (canonical_target.worker_scope, canonical_target.worker_key)
+                    break
         snapshot = self._agent_function_surface_snapshot(
             agent_name,
             loaded_tools=loaded_tools,
