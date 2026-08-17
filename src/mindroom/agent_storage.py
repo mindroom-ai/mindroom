@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.learn import LearningMachine
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -235,7 +236,7 @@ def _usage_only_run(run: RunOutput | TeamRunOutput) -> RunOutput | TeamRunOutput
             session_id=run.session_id,
             parent_run_id=run.parent_run_id,
             user_id=run.user_id,
-            metrics=run.metrics,
+            metrics=_usage_only_metrics(run.metrics),
             model=run.model,
             model_provider=run.model_provider,
             member_responses=[_usage_only_run(member) for member in run.member_responses],
@@ -249,11 +250,54 @@ def _usage_only_run(run: RunOutput | TeamRunOutput) -> RunOutput | TeamRunOutput
         session_id=run.session_id,
         parent_run_id=run.parent_run_id,
         user_id=run.user_id,
-        metrics=run.metrics,
+        metrics=_usage_only_metrics(run.metrics),
         model=run.model,
         model_provider=run.model_provider,
         created_at=run.created_at,
         status=run.status,
+    )
+
+
+def _usage_only_metrics(metrics: RunMetrics | None) -> RunMetrics | None:
+    if metrics is None:
+        return None
+    details = (
+        {
+            model_type: [_usage_only_model_metrics(model_metrics) for model_metrics in model_metrics_list]
+            for model_type, model_metrics_list in metrics.details.items()
+        }
+        if metrics.details
+        else None
+    )
+    return RunMetrics(
+        input_tokens=metrics.input_tokens,
+        output_tokens=metrics.output_tokens,
+        total_tokens=metrics.total_tokens,
+        audio_input_tokens=metrics.audio_input_tokens,
+        audio_output_tokens=metrics.audio_output_tokens,
+        audio_total_tokens=metrics.audio_total_tokens,
+        cache_read_tokens=metrics.cache_read_tokens,
+        cache_write_tokens=metrics.cache_write_tokens,
+        reasoning_tokens=metrics.reasoning_tokens,
+        cost=metrics.cost,
+        details=details,
+    )
+
+
+def _usage_only_model_metrics(metrics: ModelMetrics) -> ModelMetrics:
+    return ModelMetrics(
+        input_tokens=metrics.input_tokens,
+        output_tokens=metrics.output_tokens,
+        total_tokens=metrics.total_tokens,
+        audio_input_tokens=metrics.audio_input_tokens,
+        audio_output_tokens=metrics.audio_output_tokens,
+        audio_total_tokens=metrics.audio_total_tokens,
+        cache_read_tokens=metrics.cache_read_tokens,
+        cache_write_tokens=metrics.cache_write_tokens,
+        reasoning_tokens=metrics.reasoning_tokens,
+        cost=metrics.cost,
+        id=metrics.id,
+        provider=metrics.provider,
     )
 
 

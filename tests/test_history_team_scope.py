@@ -12,7 +12,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.media import Image
 from agno.models.message import Message
-from agno.models.metrics import Metrics
+from agno.models.metrics import Metrics, ModelMetrics
 from agno.models.response import ToolExecution
 from agno.run import RunContext, RunStatus
 from agno.run.agent import RunInput, RunOutput
@@ -486,7 +486,22 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
             model_provider="member-provider",
             created_at=1_786_921_091,
         )
-        member.metrics = Metrics(input_tokens=5, output_tokens=2, total_tokens=7)
+        member.metrics = Metrics(
+            input_tokens=5,
+            output_tokens=2,
+            total_tokens=7,
+            details={
+                "model": [
+                    ModelMetrics(
+                        id="member-model",
+                        provider="member-provider",
+                        total_tokens=7,
+                        provider_metrics={"secret": "member-provider-metric-canary"},
+                    ),
+                ],
+            },
+            additional_metrics={"secret": "member-additional-metric-canary"},
+        )
         team.save_session(
             TeamSession(
                 session_id="session-1",
@@ -516,6 +531,9 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
     persisted_member = persisted_run.member_responses[0]
     assert isinstance(persisted_member, RunOutput)
     assert persisted_member.metrics.total_tokens == 7
+    assert persisted_member.metrics.additional_metrics is None
+    assert persisted_member.metrics.details is not None
+    assert persisted_member.metrics.details["model"][0].provider_metrics is None
     assert persisted_member.user_id == "@alice:example.test"
     assert persisted_member.model == "member-model"
     assert persisted_member.model_provider == "member-provider"
@@ -542,6 +560,8 @@ def test_create_team_instance_persists_member_responses_through_agno(tmp_path: P
         "member-tool-canary",
         "member-media-canary",
         "member-metadata-canary",
+        "member-additional-metric-canary",
+        "member-provider-metric-canary",
     ):
         assert canary not in raw_run_json
 
