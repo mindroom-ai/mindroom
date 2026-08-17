@@ -57,8 +57,9 @@ _TOKEN_FIELDS = (
 )
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _BREAKDOWN_LIMIT = 200
+_MAX_ROWS_PER_REQUEST = 1_000
 _COVERAGE_NOTE = (
-    "Retained top-level Agno runs only; nested team members are not attributed, and compacted history is unavailable."
+    "Retained top-level Agno runs only; nested team-member tokens and compacted history are excluded from totals."
 )
 
 
@@ -124,7 +125,7 @@ class UsageCoverage:
 
     scanned_sources: int
     unavailable_sources: int
-    skipped_runs: int
+    truncated: bool
     note: str = _COVERAGE_NOTE
 
     def to_dict(self) -> dict[str, object]:
@@ -132,7 +133,7 @@ class UsageCoverage:
         return {
             "scanned_sources": self.scanned_sources,
             "unavailable_sources": self.unavailable_sources,
-            "skipped_runs": self.skipped_runs,
+            "truncated": self.truncated,
             "note": self.note,
         }
 
@@ -286,7 +287,7 @@ def collect_admin_usage(
     )
 
 
-def _collect_usage(
+def _collect_usage(  # noqa: C901
     *,
     sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
     config: Config,
@@ -315,18 +316,27 @@ def _collect_usage(
     seen_runs: set[tuple[str, str, str, str]] = set()
     scanned_sources: set[str] = set()
     unavailable_sources: set[str] = set()
-    skipped_runs = 0
+    rows_scanned = 0
+    truncated = False
+    scan_limit_reached = False
 
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
             unavailable_sources.add(discovered.path_label)
+            truncated = truncated or discovered.status == "resource_limit"
             continue
         source = discovered
         scanned_sources.add(source.path_label)
         for item in iter_usage_storage_rows(source):
             if isinstance(item, UsageStorageDiagnostic):
                 unavailable_sources.add(item.path_label)
+                truncated = truncated or item.status == "resource_limit"
                 continue
+            if rows_scanned >= _MAX_ROWS_PER_REQUEST:
+                truncated = True
+                scan_limit_reached = True
+                break
+            rows_scanned += 1
             for run in item.runs:
                 accepted = _accepted_run(
                     row=item,
@@ -341,15 +351,6 @@ def _collect_usage(
                     window_end=window_end,
                 )
                 if accepted is None:
-                    if _visible_candidate(
-                        row=item,
-                        run=run,
-                        config=config,
-                        scope=scope,
-                        expected_agent=expected_agent,
-                        expected_requester=expected_requester,
-                    ):
-                        skipped_runs += 1
                     continue
                 if run.run_id is not None:
                     identity = (source.path_label, item.row_key, accepted.entity_id, run.run_id)
@@ -361,6 +362,8 @@ def _collect_usage(
                 observed.append(accepted.created_at)
                 dimension, key = _breakdown_key(group_by, accepted, timezone)
                 buckets.setdefault((dimension, key), _Aggregate()).add(accepted.totals)
+        if scan_limit_reached:
+            break
 
     rows = tuple(
         UsageBreakdownRow(
@@ -389,7 +392,7 @@ def _collect_usage(
         coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
             unavailable_sources=len(unavailable_sources),
-            skipped_runs=skipped_runs,
+            truncated=truncated,
         ),
     )
 
@@ -433,23 +436,6 @@ def _accepted_run(  # noqa: PLR0911
         provider=run.model_provider or "unknown",
         model_id=run.model_id or "unknown",
         totals=totals,
-    )
-
-
-def _visible_candidate(
-    *,
-    row: UsageSessionRow,
-    run: UsageRunNode,
-    config: Config,
-    scope: _Scope,
-    expected_agent: str | None,
-    expected_requester: str | None,
-) -> bool:
-    if scope == "admin":
-        return True
-    requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
-    return _entity_id(row, run) == expected_agent and (
-        row.source.requester_isolated or requester_id == expected_requester
     )
 
 

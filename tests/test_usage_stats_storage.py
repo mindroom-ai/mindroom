@@ -22,6 +22,8 @@ from mindroom.usage_stats_storage import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 _SESSION_COLUMNS = """
     session_id TEXT PRIMARY KEY,
     session_type TEXT NOT NULL,
@@ -259,3 +261,47 @@ def test_admin_discovery_finds_shared_private_and_team_databases(tmp_path: Path)
     assert "agents/shared/sessions/shared.db" in labels
     assert private_database.resolve().relative_to(root.resolve()).as_posix() in labels
     assert team_database.resolve().relative_to(root.resolve()).as_posix() in labels
+
+
+def test_admin_discovery_reports_source_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discovery cap must not silently omit inspectable databases."""
+    config = _config()
+    runtime_paths = _paths(tmp_path)
+    private_database = _private_database(runtime_paths, _identity("@alice:example.test"))
+    _create_database(private_database)
+    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_SOURCES", 1)
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert any(
+        isinstance(source, UsageStorageDiagnostic)
+        and source.status == "resource_limit"
+        and source.detail == "source discovery limit exceeded"
+        for source in sources
+    )
+
+
+def test_admin_discovery_reports_directory_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A directory-entry cap must not silently omit private instances."""
+    config = _config()
+    runtime_paths = _paths(tmp_path)
+    _create_database(_private_database(runtime_paths, _identity("@alice:example.test")))
+    _create_database(_private_database(runtime_paths, _identity("@bob:example.test")))
+    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_DIRECTORY_ENTRIES", 1)
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert any(isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources)
+
+
+def test_admin_discovery_reports_candidate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A private-instance candidate cap must not silently omit databases."""
+    config = _config()
+    runtime_paths = _paths(tmp_path)
+    _create_database(_private_database(runtime_paths, _identity("@alice:example.test")))
+    _create_database(_private_database(runtime_paths, _identity("@bob:example.test")))
+    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_CANDIDATES", 1)
+
+    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
+
+    assert any(isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources)

@@ -92,7 +92,6 @@ def _run(
         model_provider="openai",
         model_id=model,
         run_id=run_id,
-        status="completed",
         metrics=MappingProxyType(
             {"input_tokens": total_tokens - 3, "output_tokens": 3, "total_tokens": total_tokens},
         ),
@@ -172,10 +171,10 @@ def test_self_report_has_small_retained_usage_shape(tmp_path: Path, monkeypatch:
     assert payload["coverage"] == {
         "scanned_sources": 1,
         "unavailable_sources": 0,
-        "skipped_runs": 0,
+        "truncated": False,
         "note": (
-            "Retained top-level Agno runs only; nested team members are not attributed, "
-            "and compacted history is unavailable."
+            "Retained top-level Agno runs only; nested team-member tokens and compacted history "
+            "are excluded from totals."
         ),
     }
     assert "cost" not in payload
@@ -211,7 +210,74 @@ def test_self_filters_shared_storage_by_canonical_requester(
 
     assert report.run_count == 1
     assert report.totals.total_tokens == 10
-    assert report.coverage.skipped_runs == 0
+    assert report.coverage.unavailable_sources == 0
+    assert report.coverage.truncated is False
+
+
+def test_admin_filters_do_not_report_partial_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intentional requester and time filters must not look like unreadable history."""
+    source = _source()
+    rows = (
+        _row(
+            source,
+            _run(requester_id="@alice:example.test", run_id="included"),
+            _run(requester_id="@bob:example.test", run_id="wrong-requester"),
+            _run(created_at="2025-12-01T00:00:00Z", run_id="outside-window"),
+        ),
+    )
+    _wire(monkeypatch, (source,), {source.path_label: rows})
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start="2026-01-01",
+        end="2026-01-03",
+        group_by="entity",
+        entity_names=None,
+        requester_ids=("@alice:example.test",),
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.coverage.unavailable_sources == 0
+    assert report.coverage.truncated is False
+    assert "skipped_runs" not in report.coverage.to_dict()
+
+
+def test_request_row_limit_reports_truncated_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request-wide scan limit must report that retained rows were omitted."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(source, _run(run_id="first"), row_key="session-1"),
+                _row(source, _run(run_id="second"), row_key="session-2"),
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 1)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 1
+    assert report.coverage.truncated is True
 
 
 def test_self_private_storage_uses_physical_requester_isolation(
@@ -242,7 +308,7 @@ def test_admin_groups_top_level_agent_and_team_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admin totals cover configured entities without attributing nested team members."""
+    """Admin totals cover configured top-level agent and team runs."""
     agent_source = _source()
     team_source = _source(scope="team", agent_name=None)
     _wire(

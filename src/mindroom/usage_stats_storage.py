@@ -8,6 +8,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
@@ -33,7 +34,6 @@ __all__ = [
 ]
 
 type _UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
-type _RunStatus = Literal["pending", "running", "completed", "paused", "cancelled", "error", "unknown"]
 type _MetricValue = int | float | str | None
 
 _MAX_JSON_BYTES = 1_000_000
@@ -44,7 +44,6 @@ _MAX_SOURCES = 1_000
 _MAX_STRING_LENGTH = 512
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
-_RUN_STATUSES = frozenset({"pending", "running", "completed", "paused", "cancelled", "error"})
 _TOKEN_FIELDS = frozenset(
     {
         "input_tokens",
@@ -85,7 +84,6 @@ class UsageRunNode:
     model_provider: str | None
     model_id: str | None
     run_id: str | None
-    status: _RunStatus
     metrics: Mapping[str, _MetricValue]
 
 
@@ -177,7 +175,19 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config))
     sources.extend(_team_sources(root, config))
-    return tuple(sorted(sources[:_MAX_SOURCES], key=lambda item: item.path_label))
+    storage_sources = sorted(
+        (source for source in sources if isinstance(source, UsageStorageSource)),
+        key=lambda source: source.path_label,
+    )
+    discovery_truncated = len(storage_sources) > _MAX_SOURCES or any(
+        isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources
+    )
+    diagnostics = [
+        source for source in sources if isinstance(source, UsageStorageDiagnostic) and source.status != "resource_limit"
+    ]
+    if discovery_truncated:
+        diagnostics.append(_discovery_limit_diagnostic())
+    return tuple(sorted([*storage_sources[:_MAX_SOURCES], *diagnostics], key=lambda item: item.path_label))
 
 
 def _session_root(runtime_paths: RuntimePaths) -> Path:
@@ -191,6 +201,7 @@ def _shared_agent_sources(
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for agent_name, agent_config in config.agents.items():
         if len(sources) >= _MAX_SOURCES:
+            sources.append(_discovery_limit_diagnostic())
             break
         if agent_config.private is not None:
             continue
@@ -216,11 +227,14 @@ def _private_agent_sources(
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     private_root = root / "private_instances"
-    entries = _directory_entries(private_root)
-    if entries is None:
+    directory_entries = _directory_entries(private_root)
+    if directory_entries is None:
         return []
+    entries, entries_truncated = directory_entries
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    if entries_truncated:
+        sources.append(_discovery_limit_diagnostic())
     candidates = 0
     for worker_directory in entries:
         if worker_directory.is_symlink() or not worker_directory.is_dir():
@@ -229,7 +243,8 @@ def _private_agent_sources(
             continue
         for agent_name in private_agents:
             candidates += 1
-            if candidates > _MAX_CANDIDATES or len(sources) >= _MAX_SOURCES:
+            if candidates > _MAX_CANDIDATES:
+                sources.append(_discovery_limit_diagnostic())
                 return sources
             relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
             candidate = _safe_candidate(root, relative)
@@ -253,14 +268,15 @@ def _team_sources(
     root: Path,
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    entries = _directory_entries(root / "teams")
-    if entries is None:
+    directory_entries = _directory_entries(root / "teams")
+    if directory_entries is None:
         return []
+    entries, entries_truncated = directory_entries
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
+    if entries_truncated:
+        sources.append(_discovery_limit_diagnostic())
     for directory in entries:
         storage_name = directory.name
-        if len(sources) >= _MAX_SOURCES:
-            break
         if directory.is_symlink() or not directory.is_dir() or _IDENTIFIER.fullmatch(storage_name) is None:
             continue
         candidate = _safe_candidate(root, Path("teams") / storage_name / "sessions" / f"{storage_name}.db")
@@ -280,14 +296,16 @@ def _team_sources(
     return sources
 
 
-def _directory_entries(path: Path) -> tuple[Path, ...] | None:
+def _directory_entries(path: Path) -> tuple[tuple[Path, ...], bool] | None:
     if path.is_symlink() or not path.is_dir():
         return None
     try:
-        entries = tuple(sorted(path.iterdir(), key=lambda entry: entry.name))
+        entries = tuple(islice(path.iterdir(), _MAX_DIRECTORY_ENTRIES + 1))
     except OSError:
         return None
-    return entries[:_MAX_DIRECTORY_ENTRIES]
+    return tuple(sorted(entries[:_MAX_DIRECTORY_ENTRIES], key=lambda entry: entry.name)), len(
+        entries,
+    ) > _MAX_DIRECTORY_ENTRIES
 
 
 def _safe_candidate(root: Path, relative: Path) -> Path | None:
@@ -431,7 +449,6 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode:
         model_provider=_optional_string(run.get("model_provider")),
         model_id=_optional_string(run.get("model")),
         run_id=_optional_string(run.get("run_id")),
-        status=_status(run.get("status")),
         metrics=MappingProxyType(selected_metrics),
     )
 
@@ -454,11 +471,6 @@ def _timestamp_string(value: object) -> str | None:
     return _bounded_string(str(value))
 
 
-def _status(value: object) -> _RunStatus:
-    normalized = value.casefold() if isinstance(value, str) else "unknown"
-    return cast("_RunStatus", normalized) if normalized in _RUN_STATUSES else "unknown"
-
-
 def _quote_identifier(value: str) -> str:
     return f'"{value.replace(chr(34), chr(34) * 2)}"'
 
@@ -469,6 +481,14 @@ def _diagnostic(
     detail: str,
 ) -> UsageStorageDiagnostic:
     return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail)
+
+
+def _discovery_limit_diagnostic() -> UsageStorageDiagnostic:
+    return UsageStorageDiagnostic(
+        path_label="admin discovery",
+        status="resource_limit",
+        detail="source discovery limit exceeded",
+    )
 
 
 def _source_diagnostic(

@@ -101,9 +101,9 @@ Model breakdown rows use the retained provider and model ID.
 
 Breakdown rows are sorted by total tokens and capped at 200.
 `breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included run.
-Coverage reports scanned sources, unavailable sources, skipped runs, and the retained-history limitation.
+Coverage reports scanned sources, unavailable sources, whether a safety limit truncated the scan, and the retained-history limitation.
 The tool does not change Agno persistence settings.
-Nested team-member responses remain unretained, so a team run is reported under the team and cannot be split among its members.
+Nested team-member responses remain unretained, so their tokens are excluded from totals rather than attributed to the team or its members.
 Compacted or deleted Agno runs are unavailable to this read-only report.
 
 Errors use the same envelope with a stable code.
