@@ -20,6 +20,7 @@ from mindroom.usage_stats_storage import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     import pytest
@@ -50,7 +51,7 @@ def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
     )
 
 
-def _run(*, nested: bool = False) -> dict[str, object]:
+def _run(*, nested: bool = False, parent_run_id: str | None = None) -> dict[str, object]:
     member_responses = (
         [
             {
@@ -63,7 +64,7 @@ def _run(*, nested: bool = False) -> dict[str, object]:
         if nested
         else []
     )
-    return {
+    run = {
         "run_id": "run-1",
         "user_id": "@alice:example.test",
         "created_at": 1_723_837_600,
@@ -75,6 +76,9 @@ def _run(*, nested: bool = False) -> dict[str, object]:
         "messages": [{"content": "secret prompt"}],
         "tools": [{"result": "secret output"}],
     }
+    if parent_run_id is not None:
+        run["parent_run_id"] = parent_run_id
+    return run
 
 
 def _create_database(
@@ -171,6 +175,36 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert not hasattr(row.runs[0], "member_responses")
     assert "secret" not in repr(row)
     assert "999" not in repr(row)
+
+
+def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
+    """Delegated sibling runs must not be counted as top-level usage."""
+    database = tmp_path / "code.db"
+    _create_database(database, runs=[_run(), _run(parent_run_id="run-1")])
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert len(row.runs) == 1
+
+
+def test_reader_reports_run_node_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One retained row cannot bypass request bounds with many tiny runs."""
+    database = tmp_path / "code.db"
+    _create_database(database, runs=[_run(), _run()])
+    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_RUNS_PER_ROW", 1)
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert result == [
+        UsageStorageDiagnostic(
+            path_label="code.db",
+            status="resource_limit",
+            detail="run node limit exceeded",
+        ),
+    ]
 
 
 def test_missing_database_is_reported_without_creation(tmp_path: Path) -> None:
@@ -305,3 +339,30 @@ def test_admin_discovery_reports_candidate_limit(tmp_path: Path, monkeypatch: py
     sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
 
     assert any(isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources)
+
+
+def test_admin_discovery_reports_directory_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable storage directory must not look absent."""
+    runtime_paths = _paths(tmp_path)
+    private_root = runtime_paths.config_dir / "sessions" / "private_instances"
+    private_root.mkdir(parents=True)
+    original_iterdir = private_root.__class__.iterdir
+
+    def fail_private_directory(path: Path) -> Iterator[Path]:
+        if path == private_root:
+            raise OSError
+        return original_iterdir(path)
+
+    monkeypatch.setattr(private_root.__class__, "iterdir", fail_private_directory)
+
+    sources = discover_admin_usage_sources(config=_config(), runtime_paths=runtime_paths)
+
+    assert any(
+        isinstance(source, UsageStorageDiagnostic)
+        and source.status == "partial"
+        and source.detail == "source discovery unavailable"
+        for source in sources
+    )

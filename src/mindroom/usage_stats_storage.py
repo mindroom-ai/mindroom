@@ -38,6 +38,7 @@ type _MetricValue = int | float | str | None
 
 _MAX_JSON_BYTES = 1_000_000
 _MAX_ROWS_PER_SOURCE = 10_000
+_MAX_RUNS_PER_ROW = 1_000
 _MAX_DIRECTORY_ENTRIES = 1_000
 _MAX_CANDIDATES = 10_000
 _MAX_SOURCES = 1_000
@@ -58,6 +59,10 @@ _TOKEN_FIELDS = frozenset(
     },
 )
 _REQUIRED_COLUMNS = frozenset({"session_id", "session_type", "agent_id", "team_id", "user_id", "runs"})
+
+
+class _UsageResourceLimitError(ValueError):
+    """A retained row exceeds the adapter's fixed work bounds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,8 +233,8 @@ def _private_agent_sources(
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     private_root = root / "private_instances"
     directory_entries = _directory_entries(private_root)
-    if directory_entries is None:
-        return []
+    if isinstance(directory_entries, UsageStorageDiagnostic):
+        return [directory_entries]
     entries, entries_truncated = directory_entries
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
@@ -269,8 +274,8 @@ def _team_sources(
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     directory_entries = _directory_entries(root / "teams")
-    if directory_entries is None:
-        return []
+    if isinstance(directory_entries, UsageStorageDiagnostic):
+        return [directory_entries]
     entries, entries_truncated = directory_entries
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     if entries_truncated:
@@ -296,13 +301,19 @@ def _team_sources(
     return sources
 
 
-def _directory_entries(path: Path) -> tuple[tuple[Path, ...], bool] | None:
+def _directory_entries(path: Path) -> tuple[tuple[Path, ...], bool] | UsageStorageDiagnostic:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return (), False
+    except OSError:
+        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
     if path.is_symlink() or not path.is_dir():
-        return None
+        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
     try:
         entries = tuple(islice(path.iterdir(), _MAX_DIRECTORY_ENTRIES + 1))
     except OSError:
-        return None
+        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
     return tuple(sorted(entries[:_MAX_DIRECTORY_ENTRIES], key=lambda entry: entry.name)), len(
         entries,
     ) > _MAX_DIRECTORY_ENTRIES
@@ -372,6 +383,8 @@ def iter_usage_storage_rows(source: UsageStorageSource) -> Iterator[UsageSession
                     continue
                 try:
                     yield _extract_row(source, row)
+                except _UsageResourceLimitError:
+                    yield _source_diagnostic(source, "resource_limit", "run node limit exceeded")
                 except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -411,19 +424,31 @@ def _extract_row(source: UsageStorageSource, row: sqlite3.Row) -> UsageSessionRo
     raw_runs = json.loads(row["runs"] or "[]")
     if not isinstance(raw_runs, list):
         raise TypeError
+    if len(raw_runs) > _MAX_RUNS_PER_ROW:
+        raise _UsageResourceLimitError
+    runs: list[UsageRunNode] = []
+    for raw_run in raw_runs:
+        extracted = _extract_run(raw_run, row_requester=row_requester)
+        if extracted is not None:
+            runs.append(extracted)
     return UsageSessionRow(
         source=source,
         entity_id=_bounded_string(entity_id),
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
-        runs=tuple(_extract_run(raw_run, row_requester=row_requester) for raw_run in raw_runs),
+        runs=tuple(runs),
     )
 
 
-def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode:
+def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:
     if not isinstance(raw_run, dict):
         raise TypeError
     run = cast("dict[str, object]", raw_run)
+    parent_run_id = run.get("parent_run_id")
+    if parent_run_id is not None:
+        if not isinstance(parent_run_id, str) or not parent_run_id:
+            raise TypeError
+        return None
     metadata = run.get("metadata")
     metadata_requester = (
         _optional_string(cast("dict[str, object]", metadata).get("requester_id"))

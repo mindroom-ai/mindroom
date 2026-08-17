@@ -57,7 +57,7 @@ _TOKEN_FIELDS = (
 )
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _BREAKDOWN_LIMIT = 200
-_MAX_ROWS_PER_REQUEST = 1_000
+_MAX_ROWS_PER_REQUEST = 250
 _COVERAGE_NOTE = (
     "Retained top-level Agno runs only; nested team-member tokens and compacted history are excluded from totals."
 )
@@ -328,15 +328,15 @@ def _collect_usage(  # noqa: C901
         source = discovered
         scanned_sources.add(source.path_label)
         for item in iter_usage_storage_rows(source):
-            if isinstance(item, UsageStorageDiagnostic):
-                unavailable_sources.add(item.path_label)
-                truncated = truncated or item.status == "resource_limit"
-                continue
             if rows_scanned >= _MAX_ROWS_PER_REQUEST:
                 truncated = True
                 scan_limit_reached = True
                 break
             rows_scanned += 1
+            if isinstance(item, UsageStorageDiagnostic):
+                unavailable_sources.add(item.path_label)
+                truncated = truncated or item.status == "resource_limit"
+                continue
             for run in item.runs:
                 accepted = _accepted_run(
                     row=item,

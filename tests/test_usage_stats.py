@@ -280,6 +280,45 @@ def test_request_row_limit_reports_truncated_coverage(
     assert report.coverage.truncated is True
 
 
+def test_request_row_limit_counts_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed rows cannot bypass the request-wide attempted-row limit."""
+    source = _source()
+    diagnostic = UsageStorageDiagnostic(
+        path_label=source.path_label,
+        status="partial",
+        detail="malformed retained session",
+    )
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                diagnostic,
+                diagnostic,
+                _row(source, _run(run_id="omitted")),
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 2)
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        start=None,
+        end=None,
+        group_by="entity",
+        entity_names=None,
+        requester_ids=None,
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert report.run_count == 0
+    assert report.coverage.truncated is True
+
+
 def test_self_private_storage_uses_physical_requester_isolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
