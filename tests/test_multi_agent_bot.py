@@ -1012,6 +1012,39 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_agent_bot_stop_releases_ownership_after_prepare_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed response drain must not strand durable or HTTP ownership."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(
+            mock_agent_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        failure = RuntimeError("prepare failed")
+        close_order: list[str] = []
+        bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
+        bot._journal_dispatcher = AsyncMock()
+        bot._journal_dispatcher.stop.side_effect = lambda: close_order.append("dispatcher")
+        bot._ingestion_session = AsyncMock()
+        bot._ingestion_session.close.side_effect = lambda: close_order.append("ingestion")
+        bot.client = _make_matrix_client_mock()
+        bot.client.close.side_effect = lambda: close_order.append("http")
+
+        with pytest.raises(RuntimeError, match="prepare failed") as raised:
+            await bot.stop()
+
+        assert raised.value is failure
+        assert close_order == ["dispatcher", "ingestion", "http"]
+        bot._journal_dispatcher.stop.assert_awaited_once()
+        bot._ingestion_session.close.assert_awaited_once()
+        bot.client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(("accept_invites", "expected_join_calls"), [(True, 1), (False, 0)])
     async def test_agent_bot_on_invite(
         self,

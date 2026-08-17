@@ -162,6 +162,9 @@ class _FakeBot:
                 self.first_call_cancel_args = exc.args
             raise
 
+    async def _quiesce_matrix_ingestion(self) -> None:
+        """Mirror the real bot's no-session clean-stop boundary."""
+
     async def prepare_for_sync_shutdown(
         self,
         *,
@@ -1756,12 +1759,18 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     shutdown_intents: list[tuple[str, RuntimeShutdownIntent]] = []
 
     mock_bot1 = AsyncMock()
+    mock_bot1._quiesce_matrix_ingestion = AsyncMock(
+        side_effect=lambda: call_order.append(("quiesce", "agent1")),
+    )
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
         side_effect=lambda **_kwargs: call_order.append(("prepare", "agent1")),
     )
     mock_bot1.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent1")))
 
     mock_bot2 = AsyncMock()
+    mock_bot2._quiesce_matrix_ingestion = AsyncMock(
+        side_effect=lambda: call_order.append(("quiesce", "agent2")),
+    )
     mock_bot2.prepare_for_sync_shutdown = AsyncMock(
         side_effect=lambda **_kwargs: call_order.append(("prepare", "agent2")),
     )
@@ -1791,11 +1800,14 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     with patch("mindroom.orchestration.runtime.cancel_sync_task", side_effect=fake_cancel_sync_task):
         await stop_entities({"agent1", "agent2"}, agent_bots, sync_tasks, restart_entities={"agent1", "agent2"})
 
-    prepare_indexes = [index for index, item in enumerate(call_order) if item[0] == "prepare"]
+    quiesce_indexes = [index for index, item in enumerate(call_order) if item[0] == "quiesce"]
     cancel_indexes = [index for index, item in enumerate(call_order) if item[0] == "cancel"]
+    prepare_indexes = [index for index, item in enumerate(call_order) if item[0] == "prepare"]
 
+    assert quiesce_indexes
     assert prepare_indexes
     assert cancel_indexes
+    assert max(quiesce_indexes) < min(cancel_indexes)
     assert max(cancel_indexes) < min(prepare_indexes)
     assert sorted(shutdown_intents) == [
         ("agent1", SYNC_RESTART_SHUTDOWN),
@@ -1803,6 +1815,171 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     ]
     mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_quiesces_all_sources_concurrently() -> None:
+    """One slow source barrier must not prevent another from starting."""
+    entered: set[str] = set()
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_quiesce(entity_name: str) -> None:
+        entered.add(entity_name)
+        if entered == {"agent1", "agent2"}:
+            both_entered.set()
+        await release.wait()
+
+    agent_bots: dict[str, AsyncMock] = {}
+    for entity_name in ("agent1", "agent2"):
+        bot = AsyncMock()
+
+        async def named_quiesce(name: str = entity_name) -> None:
+            await hold_quiesce(name)
+
+        bot._quiesce_matrix_ingestion = AsyncMock(side_effect=named_quiesce)
+        bot.prepare_for_sync_shutdown = AsyncMock()
+        bot.stop = AsyncMock()
+        agent_bots[entity_name] = bot
+    sync_tasks = {entity_name: asyncio.create_task(asyncio.sleep(60)) for entity_name in agent_bots}
+    stopping = asyncio.create_task(
+        stop_entities(
+            set(agent_bots),
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1", "agent2"},
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(both_entered.wait(), timeout=2)
+        release.set()
+        await asyncio.wait_for(stopping, timeout=2)
+    finally:
+        release.set()
+        if not stopping.done():
+            stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        for task in sync_tasks.values():
+            task.cancel()
+        await asyncio.gather(*sync_tasks.values(), return_exceptions=True)
+
+    assert entered == {"agent1", "agent2"}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_finishes_cleanup_after_cancellation_during_quiesce() -> None:
+    """Caller cancellation is reported only after durable ownership is released."""
+    quiesce_entered = asyncio.Event()
+    release_quiesce = asyncio.Event()
+    bot = AsyncMock()
+
+    async def hold_quiesce() -> None:
+        quiesce_entered.set()
+        await release_quiesce.wait()
+
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=hold_quiesce)
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.stop = AsyncMock()
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+    stopping = asyncio.create_task(
+        stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        ),
+    )
+
+    await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+    stopping.cancel()
+    await asyncio.sleep(0)
+    release_quiesce.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once()
+    bot.stop.assert_awaited_once()
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_cleans_up_before_reporting_source_quiesce_failure() -> None:
+    """A failed source barrier must not strand live sync/store ownership."""
+    failure = RuntimeError("source quiesce failed")
+    bot = AsyncMock()
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=failure)
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.stop = AsyncMock()
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+
+    with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+        await stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        )
+
+    assert raised.value is failure
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once_with(
+        shutdown_intent=SYNC_RESTART_SHUTDOWN,
+    )
+    bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_prioritizes_quiesce_failure_after_cleanup_failures() -> None:
+    """Every cleanup stage runs while the source-barrier error stays primary."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    bot = AsyncMock()
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=cleanup_failure)
+    bot.stop = AsyncMock(side_effect=cleanup_failure)
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+
+    async def failing_cancel(
+        entity_name: str,
+        tasks: dict[str, asyncio.Task],
+        **_kwargs: object,
+    ) -> None:
+        task = tasks.pop(entity_name)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise cleanup_failure
+
+    with (
+        patch(
+            "mindroom.orchestration.runtime.cancel_sync_task",
+            side_effect=failing_cancel,
+        ),
+        pytest.raises(RuntimeError, match="source quiesce failed") as raised,
+    ):
+        await stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        )
+
+    assert raised.value is quiesce_failure
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once()
+    bot.stop.assert_awaited_once()
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
 
 
 @pytest.mark.asyncio
@@ -2337,6 +2514,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         cancelled = []
 
         async def track_cancel(name: str, tasks: dict) -> None:
+            shutdown_order.append("sync_cancel")
             cancelled.append(name)
             tasks.pop(name, None)
 
@@ -2352,6 +2530,12 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         mock_bot1.running = True
         mock_bot2 = AsyncMock()
         mock_bot2.running = True
+
+        async def track_source_quiesce() -> None:
+            shutdown_order.append("source_quiesce")
+
+        mock_bot1._quiesce_matrix_ingestion = AsyncMock(side_effect=track_source_quiesce)
+        mock_bot2._quiesce_matrix_ingestion = AsyncMock(side_effect=track_source_quiesce)
 
         async def track_entity_stop(*_args: object, **_kwargs: object) -> None:
             shutdown_order.append("entity_teardown")
@@ -2394,8 +2578,149 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             ],
         )
         assert mock_wait.await_count == 2
+        quiesce_indexes = [index for index, action in enumerate(shutdown_order) if action == "source_quiesce"]
+        cancel_indexes = [index for index, action in enumerate(shutdown_order) if action == "sync_cancel"]
+        assert len(quiesce_indexes) == 2
+        assert len(cancel_indexes) == 2
+        assert max(quiesce_indexes) < min(cancel_indexes)
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_prioritizes_quiesce_failure_after_cleanup_failures(
+    tmp_path: Path,
+) -> None:
+    """Orderly stop releases every resource before surfacing its barrier error."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.stop = AsyncMock(side_effect=cleanup_failure)
+    journal = AsyncMock()
+    journal.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+    async def failing_cancel(
+        entity_name: str,
+        tasks: dict[str, object],
+    ) -> None:
+        tasks.pop(entity_name)
+        raise cleanup_failure
+
+    with (
+        patch("mindroom.orchestrator.cancel_sync_task", side_effect=failing_cancel),
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._sync_tasks = {"agent1": MagicMock()}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await orchestrator.stop()
+
+    assert raised.value is quiesce_failure
+    assert orchestrator._sync_tasks == {}
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_finishes_journal_close_after_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation cannot strand the shared journal after quiescence."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_completed = asyncio.Event()
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.stop = AsyncMock()
+    journal = AsyncMock()
+
+    async def hold_close() -> None:
+        close_entered.set()
+        await release_close.wait()
+        close_completed.set()
+
+    journal.close = AsyncMock(side_effect=hold_close)
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+
+        await asyncio.wait_for(close_entered.wait(), timeout=2)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        release_close.set()
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await stopping
+
+    assert raised.value is quiesce_failure
+    assert close_completed.is_set()
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_finishes_cleanup_after_cancellation_during_quiesce(
+    tmp_path: Path,
+) -> None:
+    """A source-barrier failure stays primary while shutdown drains cancellation."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    quiesce_entered = asyncio.Event()
+    release_quiesce = asyncio.Event()
+    bot = AsyncMock()
+    bot.running = True
+
+    async def hold_then_fail_quiesce() -> None:
+        quiesce_entered.set()
+        await release_quiesce.wait()
+        raise quiesce_failure
+
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=hold_then_fail_quiesce)
+    bot.stop = AsyncMock()
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._sync_tasks = {"agent1": MagicMock()}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+
+        await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        release_quiesce.set()
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await stopping
+
+    assert raised.value is quiesce_failure
+    assert orchestrator._sync_tasks == {}
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
 
 
 # ---------------------------------------------------------------------------

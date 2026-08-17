@@ -139,6 +139,17 @@ _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
+async def _gather_shutdown_phase(
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish one ownership-release phase even if its caller is cancelled."""
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    try:
+        return list(await asyncio.shield(phase)), None
+    except asyncio.CancelledError as cancellation:
+        return list(await phase), cancellation
+
+
 @dataclass(frozen=True)
 class _EmbeddedApiServerContext:
     """Shared identity fields for embedded API server lifecycle logs."""
@@ -1982,20 +1993,51 @@ class _MultiAgentOrchestrator:
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
 
+        phase_cancellations: list[asyncio.CancelledError] = []
+        quiesce_results, cancellation = await _gather_shutdown_phase(
+            *(bot._quiesce_matrix_ingestion() for bot in self.agent_bots.values()),
+        )
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
+        quiesce_failures = [result for result in quiesce_results if isinstance(result, BaseException)]
+
         # Cancel sync tasks first so shutdown does not race with active sync loops.
-        for entity_name in list(self._sync_tasks.keys()):
-            await cancel_sync_task(entity_name, self._sync_tasks)
+        cancel_results, cancellation = await _gather_shutdown_phase(
+            *(cancel_sync_task(entity_name, self._sync_tasks) for entity_name in list(self._sync_tasks)),
+        )
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
 
         for bot in self.agent_bots.values():
             bot.running = False
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
-        await asyncio.gather(*stop_tasks)
+        stop_results, cancellation = await _gather_shutdown_phase(*stop_tasks)
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
+        journal_failures: list[BaseException] = []
         if self._open_journal is not None:
             journal, self._open_journal = self._open_journal, None
-            await journal.close()
+            close_results, cancellation = await _gather_shutdown_phase(journal.close())
+            if cancellation is not None:
+                phase_cancellations.append(cancellation)
+            journal_failures.extend(result for result in close_results if isinstance(result, BaseException))
+        cleanup_failures = [
+            result
+            for results in (cancel_results, stop_results)
+            for result in results
+            if isinstance(result, BaseException)
+        ]
+        failures = [
+            *quiesce_failures,
+            *phase_cancellations,
+            *cleanup_failures,
+            *journal_failures,
+        ]
+        if failures:
+            raise failures[0]
         logger.info("All agent bots stopped")
 
 

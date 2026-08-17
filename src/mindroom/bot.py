@@ -1596,7 +1596,12 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.shutdown()
 
-        await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+        failures: list[BaseException] = []
+        await self._release(
+            "sync shutdown preparation",
+            self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent),
+            failures,
+        )
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -1612,7 +1617,6 @@ class AgentBot:
         # the client and then aborted the config reload's removal of this
         # generation -- leaving it registered, half-stopped, while its
         # replacement opened the same database under the same principal.
-        failures: list[BaseException] = []
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
         if self._ingestion_session is not None:
             await self._release("ingestion session", self._ingestion_session.close(), failures)
@@ -1756,6 +1760,12 @@ class AgentBot:
                 dispatch_failure_count=drain_result.dispatch_failure_count,
                 dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
             )
+
+    async def _quiesce_matrix_ingestion(self) -> None:
+        """Drain one final durable source response before a clean stop."""
+        session = self._ingestion_session
+        if session is not None:
+            await session._quiesce()
 
     async def sync_forever(self) -> None:
         """Run the owned durable source and one-record admission pump together."""
