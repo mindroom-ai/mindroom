@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -34,6 +35,12 @@ class _Report:
 
     def to_dict(self) -> dict[str, object]:
         return {"scope": self.scope, "totals": {"total_tokens": 10}}
+
+
+def test_usage_endpoints_have_no_query_parameters() -> None:
+    """The public tool stays limited to the two requested all-time summaries."""
+    assert tuple(inspect.signature(UsageStatsTools.get_my_usage).parameters) == ("self",)
+    assert tuple(inspect.signature(UsageStatsTools.get_all_usage).parameters) == ("self",)
 
 
 def _context(
@@ -152,15 +159,11 @@ async def test_admin_allows_canonical_global_alias(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
 
-    payload = json.loads(
-        await UsageStatsTools(admin_scope=True).get_all_usage(
-            group_by="entity",
-            entity_names=["usage"],
-        ),
-    )
+    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
 
     assert payload["status"] == "ok"
-    assert collect.call_args.kwargs["entity_names"] == ("usage",)
+    assert collect.call_args.kwargs["config"] is context.current_config
+    assert collect.call_args.kwargs["runtime_paths"] == context.runtime_paths
 
 
 @pytest.mark.asyncio
@@ -183,15 +186,3 @@ async def test_admin_rejects_alias_only_global_configuration(
 
     assert payload["code"] == "authorization_error"
     collect.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_invalid_grouping_fails_before_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalid grouping cannot reach caller context or storage."""
-    context = Mock()
-    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", context)
-
-    payload = json.loads(await UsageStatsTools().get_my_usage(group_by="model"))  # type: ignore[arg-type]
-
-    assert payload["code"] == "validation_error"
-    context.assert_not_called()

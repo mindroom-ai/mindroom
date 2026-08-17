@@ -79,38 +79,27 @@ agents:
           admin_scope: true
 ```
 
-### Query Parameters
-
-`get_my_usage(start=None, end=None, group_by="day")` groups retained usage by day.
-`get_all_usage(start=None, end=None, group_by="entity", entity_names=None, requester_ids=None)` accepts `entity`, `requester`, or `day` grouping.
-`entity_names` filters the admin report to configured agent or team IDs and rejects unknown IDs before scanning storage.
-`requester_ids` filters the admin report after canonical authorization-alias resolution.
-Omitting `entity_names` includes every configured agent and team that the admin scope can inspect.
-Omitting `requester_ids` accepts every retained requester attribution, including the explicit `unknown` bucket.
-Authorized admin queries attribute each retained top-level run to its configured agent or team ID.
-
-`start` and `end` accept either an ISO date or an RFC 3339 timestamp with an explicit UTC offset.
-Dates use the configured MindRoom timezone.
-The start boundary is inclusive and the end boundary is exclusive.
-An omitted start has no lower bound, and an omitted end uses the query's `as_of` instant.
-The in-flight call is excluded because its Agno run is not retained until after the tool returns.
+Both functions are intentionally parameter-free.
+`get_my_usage()` reports all requester-attributed direct runs retained for the current agent.
+`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
 
 ### Response And Coverage
 
 Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
-A successful response also includes `scope`, `window`, token `totals`, `run_count`, `session_count`, observed timestamps, a `breakdown`, and `coverage`.
-`run_count` counts retained top-level agent or team runs with usable token metrics.
+A successful response also includes `scope`, token `totals`, `session_count`, a `breakdown`, and `coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
-Breakdown rows are sorted by total tokens and capped at 200.
-`breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included run.
+The admin response groups session aggregates by configured agent or team ID.
+The self response has no breakdown because its scope is already one agent and requester.
+Admin breakdown rows are sorted by total tokens and capped at 200.
+`breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included session aggregate.
 Coverage reports scanned sources, unavailable or partially unreadable sources, whether a safety limit truncated the scan, and the retained-history limitation.
 The tool does not change Agno persistence settings.
-Team-member runs are counted from each member agent's own storage, while nested copies in team storage are excluded to avoid double-counting.
-Compacted or deleted Agno runs are unavailable to this read-only report.
+Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
+Compacted self-service runs and deleted sessions are unavailable to this read-only report.
 
 Errors use the same envelope with a stable code.
-Common codes are `validation_error`, `authorization_error`, and `context_unavailable`.
+Common codes are `authorization_error` and `context_unavailable`.
 
 ## [`subagents`]
 

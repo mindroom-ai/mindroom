@@ -1,25 +1,18 @@
 """Read-only retained usage aggregation."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
-
-import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.usage_stats import (
-    UsageStatsValidationError,
-    collect_admin_usage,
-    collect_self_usage,
-    parse_usage_window,
-)
+from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_stats_storage import (
     UsageReadBudget,
     UsageRunNode,
@@ -29,14 +22,15 @@ from mindroom.usage_stats_storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
+
+    import pytest
 
 
-def _config(*, timezone: str = "UTC") -> Config:
+def _config() -> Config:
     return Config(
         agents={"code": AgentConfig(display_name="Code"), "other": AgentConfig(display_name="Other")},
         teams={"engineering": TeamConfig(display_name="Engineering", role="Team", agents=["code"])},
-        timezone=timezone,
         authorization=AuthorizationConfig(
             aliases={"@alice:example.test": ["@telegram-alice:example.test"]},
         ),
@@ -81,22 +75,23 @@ def _source(
     )
 
 
+def _metrics(total_tokens: int = 10) -> Mapping[str, int]:
+    return MappingProxyType(
+        {"input_tokens": total_tokens - 3, "output_tokens": 3, "total_tokens": total_tokens},
+    )
+
+
 def _run(
     *,
     requester_id: str | None = "@alice:example.test",
-    team_id: str | None = None,
     run_id: str | None = "run-1",
-    created_at: str | None = "2026-01-02T12:00:00Z",
     total_tokens: int = 10,
 ) -> UsageRunNode:
     return UsageRunNode(
-        team_id=team_id,
+        team_id=None,
         requester_id=requester_id,
-        created_at=created_at,
         run_id=run_id,
-        metrics=MappingProxyType(
-            {"input_tokens": total_tokens - 3, "output_tokens": 3, "total_tokens": total_tokens},
-        ),
+        metrics=_metrics(total_tokens),
     )
 
 
@@ -104,6 +99,7 @@ def _row(
     source: UsageStorageSource,
     *runs: UsageRunNode,
     entity_id: str | None = None,
+    session_metrics: Mapping[str, object] | None = None,
     row_key: str = "session-1",
     payload_bytes: int = 0,
 ) -> UsageSessionRow:
@@ -114,6 +110,7 @@ def _row(
         entity_kind="team" if is_team else "agent",
         row_key=row_key,
         runs=tuple(runs),
+        session_metrics=MappingProxyType(dict(session_metrics or {})),
         payload_bytes=payload_bytes,
     )
 
@@ -129,6 +126,7 @@ def _wire(
     def iter_rows(
         source: UsageStorageSource,
         *,
+        mode: str = "runs",
         budget: UsageReadBudget | None = None,
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
         for item in rows.get(source.path_label, ()):
@@ -137,7 +135,7 @@ def _wire(
                 if not budget.consume_row(payload_bytes):
                     yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
                     return
-                if isinstance(item, UsageSessionRow) and not budget.consume_runs(len(item.runs)):
+                if mode == "runs" and isinstance(item, UsageSessionRow) and not budget.consume_runs(len(item.runs)):
                     yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
                     return
             yield item
@@ -145,10 +143,21 @@ def _wire(
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
 
 
-def test_self_report_has_small_retained_usage_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Billing and persistence internals must stay out of the public report."""
+def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = _source()
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run()),)})
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(requester_id="@telegram-alice:example.test", run_id="own"),
+                    _run(requester_id="@bob:example.test", run_id="other", total_tokens=50),
+                ),
+            ),
+        },
+    )
 
     report = collect_self_usage(
         agent_name="code",
@@ -156,341 +165,22 @@ def test_self_report_has_small_retained_usage_shape(tmp_path: Path, monkeypatch:
         config=_config(),
         runtime_paths=_paths(tmp_path),
         execution_identity=_identity(),
-        start=None,
-        end=None,
-        group_by="day",
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
     payload = report.to_dict()
-    expected_totals = {
-        "input_tokens": 7,
-        "output_tokens": 3,
-        "total_tokens": 10,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-        "reasoning_tokens": 0,
-        "audio_input_tokens": 0,
-        "audio_output_tokens": 0,
-        "audio_total_tokens": 0,
-    }
     assert payload["scope"] == "self"
-    assert payload["totals"] == expected_totals
-    assert payload["run_count"] == 1
+    assert payload["totals"]["total_tokens"] == 10  # type: ignore[index]
     assert payload["session_count"] == 1
-    assert payload["breakdown"] == [
-        {
-            "dimension": "day",
-            "key": "2026-01-02",
-            "totals": expected_totals,
-            "run_count": 1,
-        },
-    ]
-    assert payload["coverage"] == {
-        "scanned_sources": 1,
-        "unavailable_sources": 0,
-        "truncated": False,
-        "note": (
-            "Retained top-level Agno runs only; team members are counted from agent storage; "
-            "nested copies and compacted history are excluded."
-        ),
-    }
-    assert "cost" not in payload
-    assert "turn_count" not in payload
+    assert payload["breakdown"] == []
+    assert "window" not in payload
+    assert "run_count" not in payload
+    assert "first_observed_at" not in payload
 
 
-def test_self_filters_shared_storage_by_canonical_requester(
+def test_self_usage_accepts_missing_requester_in_exact_private_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A shared agent must not expose another requester's retained run."""
-    source = _source()
-    rows = (
-        _row(
-            source,
-            _run(requester_id="@telegram-alice:example.test", run_id="own"),
-            _run(requester_id="@bob:example.test", run_id="other", total_tokens=50),
-        ),
-    )
-    _wire(monkeypatch, (source,), {source.path_label: rows})
-
-    report = collect_self_usage(
-        agent_name="code",
-        requester_id="@alice:example.test",
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        execution_identity=_identity(),
-        start=None,
-        end=None,
-        group_by="day",
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 1
-    assert report.totals.total_tokens == 10
-    assert report.coverage.unavailable_sources == 0
-    assert report.coverage.truncated is False
-
-
-def test_self_marks_missing_shared_requester_attribution_incomplete(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unattributed shared history stays private without looking complete."""
-    source = _source()
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
-
-    report = collect_self_usage(
-        agent_name="code",
-        requester_id="@alice:example.test",
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        execution_identity=_identity(),
-        start=None,
-        end=None,
-        group_by="day",
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.unavailable_sources == 1
-
-
-def test_admin_filters_do_not_report_partial_coverage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Intentional requester and time filters must not look like unreadable history."""
-    source = _source()
-    rows = (
-        _row(
-            source,
-            _run(requester_id="@alice:example.test", run_id="included"),
-            _run(requester_id="@bob:example.test", run_id="wrong-requester"),
-            _run(created_at="2025-12-01T00:00:00Z", run_id="outside-window"),
-        ),
-    )
-    _wire(monkeypatch, (source,), {source.path_label: rows})
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start="2026-01-01",
-        end="2026-01-03",
-        group_by="entity",
-        entity_names=None,
-        requester_ids=("@alice:example.test",),
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 1
-    assert report.coverage.unavailable_sources == 0
-    assert report.coverage.truncated is False
-    assert "skipped_runs" not in report.coverage.to_dict()
-
-
-def test_request_row_limit_reports_truncated_coverage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A request-wide scan limit must report that retained rows were omitted."""
-    source = _source()
-    _wire(
-        monkeypatch,
-        (source,),
-        {
-            source.path_label: (
-                _row(source, _run(run_id="first"), row_key="session-1"),
-                _row(source, _run(run_id="second"), row_key="session-2"),
-            ),
-        },
-    )
-    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 1)
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 1
-    assert report.coverage.truncated is True
-
-
-def test_request_row_limit_counts_diagnostics(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Malformed rows cannot bypass the request-wide attempted-row limit."""
-    source = _source()
-    diagnostic = UsageStorageDiagnostic(
-        path_label=source.path_label,
-        status="partial",
-        detail="malformed retained session",
-    )
-    _wire(
-        monkeypatch,
-        (source,),
-        {
-            source.path_label: (
-                diagnostic,
-                diagnostic,
-                _row(source, _run(run_id="omitted")),
-            ),
-        },
-    )
-    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 2)
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.truncated is True
-
-
-def test_request_run_limit_reports_truncated_coverage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Many runs inside one session cannot bypass the request-wide work limit."""
-    source = _source()
-    _wire(
-        monkeypatch,
-        (source,),
-        {
-            source.path_label: (_row(source, _run(run_id="first"), _run(run_id="second")),),
-        },
-    )
-    monkeypatch.setattr("mindroom.usage_stats._MAX_RUNS_PER_REQUEST", 1)
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.truncated is True
-
-
-def test_request_byte_limit_reports_truncated_coverage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Retained JSON bytes are bounded across all sources in one request."""
-    source = _source()
-    _wire(
-        monkeypatch,
-        (source,),
-        {source.path_label: (_row(source, _run(), payload_bytes=2),)},
-    )
-    monkeypatch.setattr("mindroom.usage_stats._MAX_BYTES_PER_REQUEST", 1)
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.truncated is True
-
-
-@pytest.mark.parametrize(
-    "run",
-    [
-        _run(created_at="not-a-timestamp"),
-        UsageRunNode(
-            team_id=None,
-            requester_id="@alice:example.test",
-            created_at="2026-01-02T12:00:00Z",
-            run_id="invalid-metrics",
-            metrics=MappingProxyType({"total_tokens": "not-a-number"}),
-        ),
-    ],
-)
-def test_invalid_retained_usage_marks_source_incomplete(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    run: UsageRunNode,
-) -> None:
-    """Invalid retained timestamps and counters cannot look like complete zero usage."""
-    source = _source()
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, run),)})
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.unavailable_sources == 1
-
-
-def test_retained_run_without_metrics_is_not_malformed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A legitimate retained run with no token counters is simply not usage."""
-    source = _source()
-    run = UsageRunNode(
-        team_id=None,
-        requester_id="@alice:example.test",
-        created_at="2026-01-02T12:00:00Z",
-        run_id="no-metrics",
-        metrics=MappingProxyType({}),
-    )
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, run),)})
-
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
-
-    assert report.run_count == 0
-    assert report.coverage.unavailable_sources == 0
-
-
-def test_self_private_storage_uses_physical_requester_isolation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A private-agent database remains usable when an old run lacks requester metadata."""
     source = _source(scope="private_agent", requester_isolated=True)
     _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
 
@@ -500,105 +190,113 @@ def test_self_private_storage_uses_physical_requester_isolation(
         config=_config(),
         runtime_paths=_paths(tmp_path),
         execution_identity=_identity(),
-        start=None,
-        end=None,
-        group_by="day",
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
-    assert report.run_count == 1
     assert report.totals.total_tokens == 10
 
 
-def test_admin_groups_member_agent_and_team_leader_runs_without_double_counting(
+def test_self_usage_marks_missing_shared_requester_incomplete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Member usage comes from agent storage while the team row contributes only its leader."""
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    )
+
+    assert report.totals.total_tokens == 0
+    assert report.coverage.unavailable_sources == 1
+
+
+def test_admin_usage_uses_member_inclusive_session_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     agent_source = _source()
     team_source = _source(scope="team", agent_name=None)
     _wire(
         monkeypatch,
         (agent_source, team_source),
         {
-            agent_source.path_label: (_row(agent_source, _run(run_id="member-agent")),),
-            team_source.path_label: (
-                _row(team_source, _run(team_id="engineering", run_id="team-leader", total_tokens=20)),
-            ),
+            agent_source.path_label: (_row(agent_source, _run(total_tokens=999), session_metrics=_metrics(10)),),
+            team_source.path_label: (_row(team_source, _run(total_tokens=999), session_metrics=_metrics(30)),),
         },
     )
 
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
-    assert report.totals.total_tokens == 30
+    assert report.totals.total_tokens == 40
+    assert report.session_count == 2
     assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {
         ("code", 10),
-        ("engineering", 20),
+        ("engineering", 30),
     }
 
 
-def test_admin_validates_entity_filter_before_discovery(
+def test_admin_usage_rejects_unconfigured_entity_attribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown entity names cannot turn into storage paths."""
-    monkeypatch.setattr(
-        "mindroom.usage_stats.discover_admin_usage_sources",
-        lambda **_: pytest.fail("discovery must not run"),
+    source = _source(agent_name="rogue")
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics()),)})
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 0
+    assert report.session_count == 0
+
+
+def test_invalid_admin_session_metrics_mark_source_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, session_metrics={"total_tokens": -1}),)},
     )
 
-    with pytest.raises(UsageStatsValidationError, match="Unknown usage entities"):
-        collect_admin_usage(
-            config=_config(),
-            runtime_paths=_paths(tmp_path),
-            start=None,
-            end=None,
-            group_by="entity",
-            entity_names=("missing",),
-            requester_ids=None,
-        )
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 0
+    assert report.coverage.unavailable_sources == 1
 
 
-def test_unavailable_sources_are_reported_without_exposing_paths(
+def test_resource_limit_reports_truncated_coverage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed read changes only the aggregate coverage counters."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(source, session_metrics=_metrics(), row_key="session-1"),
+                _row(source, session_metrics=_metrics(), row_key="session-2"),
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 1)
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 10
+    assert report.coverage.truncated is True
+
+
+def test_unavailable_source_is_content_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     diagnostic = UsageStorageDiagnostic(path_label="secret/path.db", status="busy", detail="database busy")
     _wire(monkeypatch, (diagnostic,), {})
 
-    report = collect_admin_usage(
-        config=_config(),
-        runtime_paths=_paths(tmp_path),
-        start=None,
-        end=None,
-        group_by="entity",
-        entity_names=None,
-        requester_ids=None,
-        as_of=datetime(2026, 1, 3, tzinfo=UTC),
-    )
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
 
-    assert report.coverage.unavailable_sources == 1
-    assert "secret" not in str(report.to_dict())
-
-
-def test_usage_window_uses_configured_timezone_and_exclusive_end() -> None:
-    """Date boundaries use local midnight and keep the end exclusive."""
-    start, end = parse_usage_window(
-        start="2026-01-02",
-        end="2026-01-03",
-        timezone_name="America/Los_Angeles",
-        as_of=datetime(2026, 1, 4, tzinfo=UTC),
-    )
-
-    assert start == datetime(2026, 1, 2, 8, tzinfo=UTC)
-    assert end == datetime(2026, 1, 3, 8, tzinfo=UTC)
+    assert payload["coverage"]["unavailable_sources"] == 1  # type: ignore[index]
+    assert "secret" not in str(payload)

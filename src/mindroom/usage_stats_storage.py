@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
@@ -59,7 +59,9 @@ _TOKEN_FIELDS = frozenset(
         "audio_total_tokens",
     },
 )
-_REQUIRED_COLUMNS = frozenset({"session_id", "session_type", "agent_id", "team_id", "user_id", "runs"})
+_REQUIRED_COLUMNS = frozenset(
+    {"session_id", "session_type", "agent_id", "team_id", "user_id", "runs", "session_data"},
+)
 
 
 class _UsageResourceLimitError(ValueError):
@@ -116,7 +118,6 @@ class UsageRunNode:
 
     team_id: str | None
     requester_id: str | None
-    created_at: str | None
     run_id: str | None
     metrics: Mapping[str, _MetricValue]
 
@@ -130,6 +131,7 @@ class UsageSessionRow:
     entity_kind: Literal["agent", "team"]
     row_key: str
     runs: tuple[UsageRunNode, ...]
+    session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
     payload_bytes: int = 0
 
 
@@ -387,9 +389,12 @@ def _source(
 def iter_usage_storage_rows(  # noqa: C901
     source: UsageStorageSource,
     *,
+    mode: Literal["runs", "session_metrics"] = "runs",
     budget: UsageReadBudget | None = None,
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-    """Yield top-level usage fields without writing or creating a database."""
+    """Yield the requested aggregate-only fields without writing or creating a database."""
+    if mode not in {"runs", "session_metrics"}:
+        raise ValueError(mode)
     active_budget = budget or UsageReadBudget(
         row_limit=_MAX_ROWS_PER_SOURCE,
         byte_limit=_MAX_ROWS_PER_SOURCE * _MAX_JSON_BYTES,
@@ -405,11 +410,12 @@ def iter_usage_storage_rows(  # noqa: C901
                 yield schema_error
                 return
             table = _quote_identifier(source.expected_session_table)
+            payload_column = "runs" if mode == "runs" else "session_data"
             query = (
                 "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
-                "CASE WHEN length(CAST(runs AS BLOB)) <= ? THEN runs END AS runs, "
-                "length(CAST(runs AS BLOB)) AS payload_bytes, "
-                "CASE WHEN length(CAST(runs AS BLOB)) > ? THEN 1 ELSE 0 END AS too_large "
+                f"CASE WHEN length(CAST({payload_column} AS BLOB)) <= ? THEN {payload_column} END AS payload, "
+                f"length(CAST({payload_column} AS BLOB)) AS payload_bytes, "
+                f"CASE WHEN length(CAST({payload_column} AS BLOB)) > ? THEN 1 ELSE 0 END AS too_large "
                 f"FROM {table} LIMIT ?"
             )
             for row in connection.execute(query, (_MAX_JSON_BYTES, _MAX_JSON_BYTES, _MAX_ROWS_PER_SOURCE + 1)):
@@ -421,10 +427,10 @@ def iter_usage_storage_rows(  # noqa: C901
                     yield _source_diagnostic(source, "resource_limit", "request work limit exceeded")
                     return
                 if row["too_large"]:
-                    yield _source_diagnostic(source, "resource_limit", "runs payload too large")
+                    yield _source_diagnostic(source, "resource_limit", "usage payload too large")
                     continue
                 try:
-                    yield _extract_row(source, row, budget=active_budget)
+                    yield _extract_row(source, row, mode=mode, budget=active_budget)
                 except _UsageResourceLimitError as error:
                     yield _source_diagnostic(source, "resource_limit", str(error))
                     if active_budget.exhausted:
@@ -460,6 +466,7 @@ def _extract_row(
     source: UsageStorageSource,
     row: sqlite3.Row,
     *,
+    mode: Literal["runs", "session_metrics"],
     budget: UsageReadBudget,
 ) -> UsageSessionRow:
     entity_kind = row["session_type"]
@@ -470,16 +477,18 @@ def _extract_row(
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    raw_runs = _decode_runs(row["runs"])
     payload_bytes = row["payload_bytes"] or 0
     if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
         raise TypeError
-    if not budget.consume_runs(len(raw_runs)):
-        message = "request work limit exceeded"
-        raise _UsageResourceLimitError(message)
-    if len(raw_runs) > _MAX_RUNS_PER_ROW:
-        message = "run node limit exceeded"
-        raise _UsageResourceLimitError(message)
+    raw_runs = _decode_runs(row["payload"]) if mode == "runs" else []
+    session_metrics = _decode_session_metrics(row["payload"]) if mode == "session_metrics" else MappingProxyType({})
+    if mode == "runs":
+        if not budget.consume_runs(len(raw_runs)):
+            message = "request work limit exceeded"
+            raise _UsageResourceLimitError(message)
+        if len(raw_runs) > _MAX_RUNS_PER_ROW:
+            message = "run node limit exceeded"
+            raise _UsageResourceLimitError(message)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
@@ -491,23 +500,41 @@ def _extract_row(
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
         runs=tuple(runs),
+        session_metrics=session_metrics,
         payload_bytes=payload_bytes,
     )
 
 
 def _decode_runs(raw_value: object) -> list[object]:
-    if raw_value is None:
-        return []
-    if not isinstance(raw_value, (str, bytes, bytearray)):
-        raise TypeError
-    decoded = json.loads(raw_value)
-    if isinstance(decoded, str):
-        decoded = json.loads(decoded)
+    decoded = _decode_agno_json(raw_value)
     if decoded is None:
         return []
     if not isinstance(decoded, list):
         raise TypeError
-    return decoded
+    return cast("list[object]", decoded)
+
+
+def _decode_session_metrics(raw_value: object) -> Mapping[str, _MetricValue]:
+    decoded = _decode_agno_json(raw_value)
+    if decoded is None:
+        return MappingProxyType({})
+    if not isinstance(decoded, dict):
+        raise TypeError
+    raw_metrics = cast("dict[str, object]", decoded).get("session_metrics")
+    if raw_metrics is None:
+        return MappingProxyType({})
+    if not isinstance(raw_metrics, dict):
+        raise TypeError
+    return _select_metrics(cast("dict[str, object]", raw_metrics))
+
+
+def _decode_agno_json(raw_value: object) -> object:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, (str, bytes, bytearray)):
+        raise TypeError
+    decoded = json.loads(raw_value)
+    return json.loads(decoded) if isinstance(decoded, str) else decoded
 
 
 def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:
@@ -528,22 +555,26 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     metrics = run.get("metrics", {})
     if not isinstance(metrics, dict):
         raise TypeError
+    selected_metrics = _select_metrics(cast("dict[str, object]", metrics))
+    return UsageRunNode(
+        team_id=_optional_string(run.get("team_id")),
+        requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
+        run_id=_optional_string(run.get("run_id")),
+        metrics=selected_metrics,
+    )
+
+
+def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]:
     selected_metrics: dict[str, _MetricValue] = {}
-    for field in _TOKEN_FIELDS:
-        value = cast("dict[str, object]", metrics).get(field)
+    for metric_name in _TOKEN_FIELDS:
+        value = metrics.get(metric_name)
         if isinstance(value, bool) or not isinstance(value, (int, float, str, type(None))):
             raise TypeError
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError
         if value is not None:
-            selected_metrics[field] = value
-    return UsageRunNode(
-        team_id=_optional_string(run.get("team_id")),
-        requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
-        created_at=_timestamp_string(run.get("created_at")),
-        run_id=_optional_string(run.get("run_id")),
-        metrics=MappingProxyType(selected_metrics),
-    )
+            selected_metrics[metric_name] = value
+    return MappingProxyType(selected_metrics)
 
 
 def _optional_string(value: object) -> str | None:
@@ -554,14 +585,6 @@ def _bounded_string(value: str) -> str:
     if len(value) > _MAX_STRING_LENGTH:
         raise ValueError
     return value
-
-
-def _timestamp_string(value: object) -> str | None:
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return _bounded_string(str(value))
 
 
 def _quote_identifier(value: str) -> str:

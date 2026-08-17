@@ -10,7 +10,11 @@ import pytest
 from agno.metrics import RunMetrics
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
+from agno.team import Team
+from agno.team._session import update_session_metrics
 
 import mindroom.usage_stats_storage as usage_storage
 from mindroom.agent_storage import create_state_storage
@@ -246,6 +250,51 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert isinstance(row, UsageSessionRow)
     assert len(row.runs) == 1
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+
+
+def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) -> None:
+    """Admin totals use Agno's member-inclusive team session aggregate."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="engineering",
+        user_id="@alice:example.test",
+        session_data={},
+        created_at=1_723_837_600,
+        updated_at=1_723_837_600,
+    )
+    update_session_metrics(
+        Team(id="engineering", members=[]),
+        session,
+        TeamRunOutput(
+            team_id="engineering",
+            metrics=RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10),
+            member_responses=[
+                RunOutput(
+                    agent_id="code",
+                    metrics=RunMetrics(input_tokens=14, output_tokens=6, total_tokens=20),
+                ),
+            ],
+        ),
+    )
+    storage = create_state_storage(
+        "engineering",
+        tmp_path,
+        subdir="sessions",
+        session_table="engineering_sessions",
+    )
+    try:
+        storage.upsert_session(session)
+    finally:
+        storage.close()
+
+    source = _source(tmp_path / "sessions" / "engineering.db", table="engineering_sessions")
+    result = list(iter_usage_storage_rows(source, mode="session_metrics"))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
+    assert row.runs == ()
 
 
 def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
@@ -14,11 +14,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.usage_stats import (
-    UsageStatsValidationError,
-    collect_admin_usage,
-    collect_self_usage,
-)
+from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -65,10 +61,6 @@ class UsageStatsTools(Toolkit):
             )
         return context
 
-    @classmethod
-    def _validation_error(cls, message: str = "Unsupported usage statistics grouping.") -> str:
-        return cls._error("validation_error", message)
-
     def _admin_context_or_error(self) -> tuple[ToolRuntimeContext, Config] | str:
         if not self._admin_scope:
             return self._error(
@@ -87,15 +79,8 @@ class UsageStatsTools(Toolkit):
             )
         return resolved, config
 
-    async def get_my_usage(
-        self,
-        start: str | None = None,
-        end: str | None = None,
-        group_by: Literal["day"] = "day",
-    ) -> str:
+    async def get_my_usage(self) -> str:
         """Return retained usage for the current agent and canonical requester."""
-        if group_by != "day":
-            return self._validation_error()
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
@@ -111,48 +96,25 @@ class UsageStatsTools(Toolkit):
             build_execution_identity_from_runtime_context(context),
             agent_name=self._agent_name,
         )
-        try:
-            report = await asyncio.to_thread(
-                collect_self_usage,
-                agent_name=self._agent_name,
-                requester_id=requester_id,
-                config=config,
-                runtime_paths=context.runtime_paths,
-                execution_identity=execution_identity,
-                start=start,
-                end=end,
-                group_by=group_by,
-            )
-        except UsageStatsValidationError as error:
-            return self._validation_error(str(error))
+        report = await asyncio.to_thread(
+            collect_self_usage,
+            agent_name=self._agent_name,
+            requester_id=requester_id,
+            config=config,
+            runtime_paths=context.runtime_paths,
+            execution_identity=execution_identity,
+        )
         return self._payload("ok", **report.to_dict())
 
-    async def get_all_usage(
-        self,
-        start: str | None = None,
-        end: str | None = None,
-        group_by: Literal["entity", "requester", "day"] = "entity",
-        entity_names: list[str] | None = None,
-        requester_ids: list[str] | None = None,
-    ) -> str:
+    async def get_all_usage(self) -> str:
         """Return retained usage for all sources when both admin gates grant access."""
-        if group_by not in {"day", "entity", "requester"}:
-            return self._validation_error()
         resolved = self._admin_context_or_error()
         if isinstance(resolved, str):
             return resolved
         context, config = resolved
-        try:
-            report = await asyncio.to_thread(
-                collect_admin_usage,
-                config=config,
-                runtime_paths=context.runtime_paths,
-                start=start,
-                end=end,
-                group_by=group_by,
-                entity_names=tuple(entity_names) if entity_names is not None else None,
-                requester_ids=tuple(requester_ids) if requester_ids is not None else None,
-            )
-        except UsageStatsValidationError as error:
-            return self._validation_error(str(error))
+        report = await asyncio.to_thread(
+            collect_admin_usage,
+            config=config,
+            runtime_paths=context.runtime_paths,
+        )
         return self._payload("ok", **report.to_dict())
