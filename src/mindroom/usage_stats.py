@@ -39,11 +39,11 @@ __all__ = [
     "parse_usage_window",
 ]
 
-SelfGroupBy = Literal["day", "model"]
-AdminGroupBy = Literal["entity", "requester", "model", "day"]
+SelfGroupBy = Literal["day"]
+AdminGroupBy = Literal["entity", "requester", "day"]
 type _GroupBy = SelfGroupBy | AdminGroupBy
 type _Scope = Literal["self", "admin"]
-type _Dimension = Literal["day", "model", "entity", "requester"]
+type _Dimension = Literal["day", "entity", "requester"]
 
 _TOKEN_FIELDS = (
     "input_tokens",
@@ -62,7 +62,8 @@ _MAX_ROWS_PER_REQUEST = 250
 _MAX_RUNS_PER_REQUEST = 25_000
 _MAX_BYTES_PER_REQUEST = 64_000_000
 _COVERAGE_NOTE = (
-    "Retained top-level Agno runs only; nested team-member tokens and compacted history are excluded from totals."
+    "Retained top-level Agno runs only; team members are counted from agent storage; "
+    "nested copies and compacted history are excluded."
 )
 
 
@@ -111,7 +112,7 @@ class TokenTotals:
 class UsageBreakdownRow:
     """One aggregate group in a usage report."""
 
-    dimension: Literal["day", "model", "entity", "requester"]
+    dimension: Literal["day", "entity", "requester"]
     key: str
     totals: TokenTotals
     run_count: int
@@ -193,8 +194,6 @@ class _AcceptedRun:
     entity_id: str
     requester_id: str | None
     created_at: datetime
-    provider: str
-    model_id: str
     totals: TokenTotals
 
 
@@ -233,7 +232,7 @@ def collect_self_usage(
     as_of: datetime | None = None,
 ) -> UsageReport:
     """Collect one requester's direct usage for the current agent."""
-    _validate_group_by(group_by, {"day", "model"})
+    _validate_group_by(group_by, {"day"})
     expected_requester = config.authorization.resolve_alias(requester_id)
     return _collect_usage(
         sources=discover_self_usage_sources(
@@ -267,7 +266,7 @@ def collect_admin_usage(
     as_of: datetime | None = None,
 ) -> UsageReport:
     """Collect direct usage across configured agent, private-instance, and team stores."""
-    _validate_group_by(group_by, {"day", "entity", "model", "requester"})
+    _validate_group_by(group_by, {"day", "entity", "requester"})
     known_entities = frozenset((*config.agents, *config.teams))
     entity_filter = frozenset(entity_names) if entity_names is not None else None
     unknown_entities = sorted((entity_filter or frozenset()) - known_entities)
@@ -451,8 +450,6 @@ def _accepted_run(  # noqa: C901, PLR0911
         entity_id=entity_id,
         requester_id=requester_id,
         created_at=created_at,
-        provider=run.model_provider or "unknown",
-        model_id=run.model_id or "unknown",
         totals=totals,
     )
 
@@ -470,8 +467,6 @@ def _breakdown_key(group_by: _GroupBy, run: _AcceptedRun, timezone: ZoneInfo) ->
         return "entity", run.entity_id
     if group_by == "requester":
         return "requester", run.requester_id or "unknown"
-    if group_by == "model":
-        return "model", f"{run.provider}/{run.model_id}"
     return "day", run.created_at.astimezone(timezone).date().isoformat()
 
 

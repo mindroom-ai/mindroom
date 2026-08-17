@@ -117,8 +117,6 @@ class UsageRunNode:
     team_id: str | None
     requester_id: str | None
     created_at: str | None
-    model_provider: str | None
-    model_id: str | None
     run_id: str | None
     metrics: Mapping[str, _MetricValue]
 
@@ -543,8 +541,6 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         team_id=_optional_string(run.get("team_id")),
         requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
         created_at=_timestamp_string(run.get("created_at")),
-        model_provider=_optional_string(run.get("model_provider")),
-        model_id=_optional_string(run.get("model")),
         run_id=_optional_string(run.get("run_id")),
         metrics=MappingProxyType(selected_metrics),
     )

@@ -88,14 +88,11 @@ def _run(
     run_id: str | None = "run-1",
     created_at: str | None = "2026-01-02T12:00:00Z",
     total_tokens: int = 10,
-    model: str = "gpt-5.6",
 ) -> UsageRunNode:
     return UsageRunNode(
         team_id=team_id,
         requester_id=requester_id,
         created_at=created_at,
-        model_provider="openai",
-        model_id=model,
         run_id=run_id,
         metrics=MappingProxyType(
             {"input_tokens": total_tokens - 3, "output_tokens": 3, "total_tokens": total_tokens},
@@ -194,8 +191,8 @@ def test_self_report_has_small_retained_usage_shape(tmp_path: Path, monkeypatch:
         "unavailable_sources": 0,
         "truncated": False,
         "note": (
-            "Retained top-level Agno runs only; nested team-member tokens and compacted history "
-            "are excluded from totals."
+            "Retained top-level Agno runs only; team members are counted from agent storage; "
+            "nested copies and compacted history are excluded."
         ),
     }
     assert "cost" not in payload
@@ -225,7 +222,7 @@ def test_self_filters_shared_storage_by_canonical_requester(
         execution_identity=_identity(),
         start=None,
         end=None,
-        group_by="model",
+        group_by="day",
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
@@ -251,7 +248,7 @@ def test_self_marks_missing_shared_requester_attribution_incomplete(
         execution_identity=_identity(),
         start=None,
         end=None,
-        group_by="model",
+        group_by="day",
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
@@ -430,8 +427,6 @@ def test_request_byte_limit_reports_truncated_coverage(
             team_id=None,
             requester_id="@alice:example.test",
             created_at="2026-01-02T12:00:00Z",
-            model_provider="openai",
-            model_id="gpt-5.6",
             run_id="invalid-metrics",
             metrics=MappingProxyType({"total_tokens": "not-a-number"}),
         ),
@@ -471,8 +466,6 @@ def test_retained_run_without_metrics_is_not_malformed(
         team_id=None,
         requester_id="@alice:example.test",
         created_at="2026-01-02T12:00:00Z",
-        model_provider=None,
-        model_id=None,
         run_id="no-metrics",
         metrics=MappingProxyType({}),
     )
@@ -509,7 +502,7 @@ def test_self_private_storage_uses_physical_requester_isolation(
         execution_identity=_identity(),
         start=None,
         end=None,
-        group_by="model",
+        group_by="day",
         as_of=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
@@ -517,19 +510,21 @@ def test_self_private_storage_uses_physical_requester_isolation(
     assert report.totals.total_tokens == 10
 
 
-def test_admin_groups_top_level_agent_and_team_runs(
+def test_admin_groups_member_agent_and_team_leader_runs_without_double_counting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admin totals cover configured top-level agent and team runs."""
+    """Member usage comes from agent storage while the team row contributes only its leader."""
     agent_source = _source()
     team_source = _source(scope="team", agent_name=None)
     _wire(
         monkeypatch,
         (agent_source, team_source),
         {
-            agent_source.path_label: (_row(agent_source, _run(run_id="agent")),),
-            team_source.path_label: (_row(team_source, _run(team_id="engineering", run_id="team", total_tokens=20)),),
+            agent_source.path_label: (_row(agent_source, _run(run_id="member-agent")),),
+            team_source.path_label: (
+                _row(team_source, _run(team_id="engineering", run_id="team-leader", total_tokens=20)),
+            ),
         },
     )
 

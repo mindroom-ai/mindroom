@@ -91,10 +91,10 @@ class UsageStatsTools(Toolkit):
         self,
         start: str | None = None,
         end: str | None = None,
-        group_by: Literal["day", "model"] = "day",
+        group_by: Literal["day"] = "day",
     ) -> str:
         """Return retained usage for the current agent and canonical requester."""
-        if group_by not in {"day", "model"}:
+        if group_by != "day":
             return self._validation_error()
         resolved = self._context_or_error()
         if isinstance(resolved, str):
@@ -131,12 +131,12 @@ class UsageStatsTools(Toolkit):
         self,
         start: str | None = None,
         end: str | None = None,
-        group_by: Literal["entity", "requester", "model", "day"] = "entity",
+        group_by: Literal["entity", "requester", "day"] = "entity",
         entity_names: list[str] | None = None,
         requester_ids: list[str] | None = None,
     ) -> str:
         """Return retained usage for all sources when both admin gates grant access."""
-        if group_by not in {"day", "entity", "model", "requester"}:
+        if group_by not in {"day", "entity", "requester"}:
             return self._validation_error()
         resolved = self._admin_context_or_error()
         if isinstance(resolved, str):

@@ -77,8 +77,8 @@ agents:
 
 ### Query Parameters
 
-`get_my_usage(start=None, end=None, group_by="day")` accepts `day` or `model` grouping.
-`get_all_usage(start=None, end=None, group_by="entity", entity_names=None, requester_ids=None)` accepts `entity`, `requester`, `model`, or `day` grouping.
+`get_my_usage(start=None, end=None, group_by="day")` groups retained usage by day.
+`get_all_usage(start=None, end=None, group_by="entity", entity_names=None, requester_ids=None)` accepts `entity`, `requester`, or `day` grouping.
 `entity_names` filters the admin report to configured agent or team IDs and rejects unknown IDs before scanning storage.
 `requester_ids` filters the admin report after canonical authorization-alias resolution.
 Omitting `entity_names` includes every configured agent and team that the admin scope can inspect.
@@ -97,13 +97,12 @@ Both functions return a JSON custom-tool envelope with `status` and `tool` field
 A successful response also includes `scope`, `window`, token `totals`, `run_count`, `session_count`, observed timestamps, a `breakdown`, and `coverage`.
 `run_count` counts retained top-level agent or team runs with usable token metrics.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
-Model breakdown rows use the retained provider and model ID.
 
 Breakdown rows are sorted by total tokens and capped at 200.
 `breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included run.
 Coverage reports scanned sources, unavailable or partially unreadable sources, whether a safety limit truncated the scan, and the retained-history limitation.
 The tool does not change Agno persistence settings.
-Nested team-member responses and delegated child runs may be retained, but this reader excludes them from totals rather than attributing them to the team or its members.
+Team-member runs are counted from each member agent's own storage, while nested copies in team storage are excluded to avoid double-counting.
 Compacted or deleted Agno runs are unavailable to this read-only report.
 
 Errors use the same envelope with a stable code.

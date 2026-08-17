@@ -191,7 +191,7 @@ async def test_invalid_grouping_fails_before_runtime_context(monkeypatch: pytest
     context = Mock()
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", context)
 
-    payload = json.loads(await UsageStatsTools().get_my_usage(group_by="entity"))  # type: ignore[arg-type]
+    payload = json.loads(await UsageStatsTools().get_my_usage(group_by="model"))  # type: ignore[arg-type]
 
     assert payload["code"] == "validation_error"
     context.assert_not_called()
