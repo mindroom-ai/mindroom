@@ -3255,6 +3255,39 @@ async def test_pump_drains_one_record_batches_wakes_only_semantic_work_and_cance
 
 
 @pytest.mark.asyncio
+async def test_pump_yields_to_ready_task_before_large_backlog_drains() -> None:
+    backlog_size = 500
+    session = _PumpSession([_batch() for _index in range(backlog_size)])
+    admission = _PumpAdmission([REPLAY_FACTS] * backlog_size)
+    never_release = asyncio.Event()
+
+    async def wait_for_work() -> None:
+        await never_release.wait()
+
+    pumping = asyncio.create_task(
+        durable_ingestion_module.run_ingestion_pump(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+            wait_for_work=wait_for_work,
+            wake_semantic_dispatch=lambda: None,
+        ),
+    )
+
+    async def competing_ready_task() -> int:
+        return len(session.batches)
+
+    competing = asyncio.create_task(competing_ready_task())
+    try:
+        assert await asyncio.wait_for(competing, 2) == backlog_size
+    finally:
+        pumping.cancel()
+        with suppress(asyncio.CancelledError):
+            await pumping
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("admission", "settlement"))
 async def test_pump_propagates_failure_without_waiting_or_waking(phase: str) -> None:
     error = RuntimeError(f"{phase} failed")

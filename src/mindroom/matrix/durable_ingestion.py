@@ -1,5 +1,6 @@
 """Strict conversion of authenticated nio batches into local admissions."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from hashlib import sha256
 from hmac import compare_digest
@@ -435,6 +436,7 @@ async def run_ingestion_pump(
 ) -> None:
     """Drain one-record batches until cancellation, waiting without polling."""
     while True:
+        await asyncio.sleep(0)
         facts = await consume_one_ingestion_batch(
             session,
             admission,
