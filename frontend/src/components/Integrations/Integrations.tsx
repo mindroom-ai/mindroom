@@ -283,11 +283,14 @@ export function Integrations() {
             : (status.status ?? config.integration.status),
           connected: fallbackConfigured || status.connected === true,
           status_error: fallbackConfigured ? undefined : status.status_error,
-          helper_text: fallbackConfigured
-            ? providerTool?.helper_text
-            : (status.helper_text ??
-              providerTool?.helper_text ??
-              config.integration.helper_text),
+          helper_text:
+            status.oauth_reset_required === true
+              ? (status.helper_text ?? providerTool?.helper_text)
+              : fallbackConfigured
+                ? providerTool?.helper_text
+                : (status.helper_text ??
+                  providerTool?.helper_text ??
+                  config.integration.helper_text),
           config_service:
             providerTool?.name ??
             status.config_service ??
@@ -354,9 +357,12 @@ export function Integrations() {
             : (status?.status ?? integration.status),
           connected: fallbackConfigured || status?.connected === true,
           status_error: fallbackConfigured ? undefined : status?.status_error,
-          helper_text: fallbackConfigured
-            ? providerTool?.helper_text
-            : (status?.helper_text ?? integration.helper_text),
+          helper_text:
+            status?.oauth_reset_required === true
+              ? (status.helper_text ?? providerTool?.helper_text)
+              : fallbackConfigured
+                ? providerTool?.helper_text
+                : (status?.helper_text ?? integration.helper_text),
           config_service:
             providerTool?.name ??
             status?.config_service ??
@@ -600,6 +606,7 @@ export function Integrations() {
   const runDisconnectOperation = async (
     integration: Integration,
     disconnect: () => void | Promise<void>,
+    success?: { title: string; description: string },
   ) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -619,8 +626,9 @@ export function Integrations() {
       await refetchTools();
 
       toast({
-        title: "Disconnected",
-        description: `${integration.name} has been disconnected.`,
+        title: success?.title ?? "Disconnected",
+        description:
+          success?.description ?? `${integration.name} has been disconnected.`,
       });
     } catch (error) {
       toast({
@@ -637,7 +645,17 @@ export function Integrations() {
   const handleProviderDisconnect = (
     integration: Integration,
     disconnect: NonNullable<IntegrationConfig["onDisconnect"]>,
-  ) => runDisconnectOperation(integration, () => disconnect(integration.id));
+  ) =>
+    runDisconnectOperation(
+      integration,
+      () => disconnect(integration.id),
+      integration.oauth_reset_required === true
+        ? {
+            title: "Connection reset",
+            description: `${integration.name} OAuth has been reset.`,
+          }
+        : undefined,
+    );
 
   const handleStoredCredentialDelete = (integration: Integration) =>
     runDisconnectOperation(integration, async () => {
@@ -720,6 +738,49 @@ export function Integrations() {
           <Key className="h-4 w-4 mr-1" />
           Use {manualFallbackActionLabel}
         </Button>
+      ) : null;
+    const configuredFallbackControls =
+      manualFallbackAvailable &&
+      integration.environment_auth_configured === true &&
+      integration.manual_auth_configured !== true ? (
+        <>
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            Environment {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Configure
+          </Button>
+        </>
+      ) : manualFallbackAvailable &&
+        integration.manual_auth_configured === true ? (
+        <>
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <Key className="h-3 w-3 mr-1" />
+            {manualFallbackLabel}
+          </Badge>
+          <Button
+            onClick={() => openToolConfigDialog(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Edit {manualFallbackActionLabel}
+          </Button>
+          <Button
+            onClick={() => handleStoredCredentialDelete(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Remove {manualFallbackActionLabel}
+          </Button>
+        </>
       ) : null;
 
     // Handle tools with delegated authentication
@@ -865,65 +926,20 @@ export function Integrations() {
             variant="destructive"
             size="sm"
           >
+            {loading && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
             Reset connection
           </Button>
           {oauthClientConfigButton}
-          {manualFallbackButton}
+          {configuredFallbackControls ?? manualFallbackButton}
         </div>
       );
     }
 
-    if (
-      manualFallbackAvailable &&
-      integration.environment_auth_configured === true &&
-      integration.manual_auth_configured !== true
-    ) {
+    if (configuredFallbackControls) {
       return (
         <div className="flex gap-2 items-center">
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
-            Environment {manualFallbackLabel}
-          </Badge>
-          <Button
-            onClick={() => openToolConfigDialog(integration)}
-            disabled={loading}
-            variant="outline"
-            size="sm"
-          >
-            Configure
-          </Button>
+          {configuredFallbackControls}
           {oauthClientConfigButton}
-        </div>
-      );
-    }
-
-    if (
-      manualFallbackAvailable &&
-      integration.manual_auth_configured === true
-    ) {
-      return (
-        <div className="flex gap-2 items-center">
-          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-            <Key className="h-3 w-3 mr-1" />
-            {manualFallbackLabel}
-          </Badge>
-          <Button
-            onClick={() => openToolConfigDialog(integration)}
-            disabled={loading}
-            variant="outline"
-            size="sm"
-          >
-            Edit {manualFallbackActionLabel}
-          </Button>
-          {oauthClientConfigButton}
-          <Button
-            onClick={() => handleStoredCredentialDelete(integration)}
-            disabled={loading}
-            variant="destructive"
-            size="sm"
-          >
-            Remove {manualFallbackActionLabel}
-          </Button>
         </div>
       );
     }

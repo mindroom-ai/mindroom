@@ -361,8 +361,6 @@ def test_exact_approval_decisions_reject_mixed_unresolved_hitl_requirements() ->
             (confirmation, user_input),
             decisions={"confirm-call": True},
             denial_reasons={"confirm-call": None},
-            bindings={},
-            default_agent_name="code",
         )
 
 
@@ -382,48 +380,6 @@ def test_exact_approval_decisions_reject_one_call_with_confirmation_and_input() 
             (mixed,),
             decisions={"mixed-call": True},
             denial_reasons={"mixed-call": None},
-            bindings={},
-            default_agent_name="code",
-        )
-
-
-@pytest.mark.parametrize(
-    ("tool_name", "tool_args", "member_agent_name"),
-    [
-        pytest.param("changed", {"value": 1}, None, id="name"),
-        pytest.param("dangerous", {"value": 2}, None, id="arguments"),
-        pytest.param("dangerous", {"value": 1}, "other", id="member"),
-    ],
-)
-def test_exact_approval_decisions_reject_same_id_descriptor_drift(
-    tool_name: str,
-    tool_args: dict[str, int],
-    member_agent_name: str | None,
-) -> None:
-    """A reused call ID must not authorize a changed name, arguments, or team member."""
-    requirement = RunRequirement(
-        ToolExecution(
-            tool_call_id="call-1",
-            tool_name=tool_name,
-            tool_args=tool_args,
-            requires_confirmation=True,
-        ),
-    )
-    requirement.member_agent_name = member_agent_name
-
-    with pytest.raises(RuntimeError, match="no longer match"):
-        response_turn_module.apply_exact_approval_decisions(
-            (requirement,),
-            decisions={"call-1": True},
-            denial_reasons={"call-1": None},
-            bindings={
-                "call-1": {
-                    "tool_name": "dangerous",
-                    "arguments_json": '{"value":1}',
-                    "invoking_agent": "code",
-                },
-            },
-            default_agent_name="code",
         )
 
 

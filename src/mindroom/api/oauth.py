@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,8 +20,10 @@ from mindroom.api.credentials_target import (
     resolve_requester_credentials_target,
     worker_target_for_credentials_target,
 )
-from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.api.dashboard_credential_scope import (
+    build_dashboard_execution_identity,
+    require_agent_credential_management_authorized,
+)
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.oauth import (
@@ -44,6 +46,7 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
     load_oauth_credentials_status,
     oauth_credentials_usable,
+    oauth_verified_claim,
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
@@ -70,6 +73,9 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 logger = get_logger(__name__)
 _OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
+_OAUTH_STALE_CONNECTION_MESSAGE = (
+    "This OAuth connection changed before the request completed. Start the connection again from the dashboard."
+)
 # OAuth callbacks intentionally verify the browser user inline instead of relying on
 # standalone-public-path bypasses, because callbacks write scoped credentials.
 
@@ -137,7 +143,12 @@ async def _client_config_resolution_for_request(
     try:
         resolution = await provider.client_config_resolution_async(runtime_paths)
     except OAuthProviderError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning(
+            "oauth_client_config_resolution_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="OAuth client configuration could not be resolved") from exc
     if resolution is None or resolution.custom or is_oauth_loopback_hostname(request.url.hostname):
         return resolution
     if reject_remote_provisioned:
@@ -181,7 +192,6 @@ def _resolve_oauth_credentials_target(
         worker_target_for_credentials_target(target),
         execution_identity=target.execution_identity,
         authorization=snapshot.runtime_config.authorization if snapshot.runtime_config is not None else None,
-        allowed_shared_services=target.allowed_shared_services,
     )
     worker_target = context.worker_target
     if worker_target is None or worker_target.worker_key is None:
@@ -215,7 +225,6 @@ async def _issue_authorization_url(
     target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
     if connect_target is not None:
         _verify_connect_target_binding(connect_target.binding, provider, worker_target_for_credentials_target(target))
-    provider_authorization_started = False
     try:
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
@@ -225,16 +234,18 @@ async def _issue_authorization_url(
             payload=await _target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
-        provider_authorization_started = True
         auth_url = await provider.authorization_uri_async(
             target.runtime_paths,
             state=state,
             code_verifier=code_verifier,
         )
     except OAuthProviderError as exc:
-        if connect_token and not provider_authorization_started:
-            raise
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning(
+            "oauth_authorization_start_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="OAuth authorization could not be started") from exc
     if connect_token and connect_target is not None:
         try:
             consume_oauth_connect_token(provider, runtime_paths, connect_token, expected_target=connect_target)
@@ -261,7 +272,7 @@ def _verify_connect_target_authorized(request: Request, requester_id: str | None
             requester_id=snapshot.runtime_config.authorization.resolve_alias(dashboard_identity.requester_id),
         )
     if requester_id and requester_id != dashboard_identity.requester_id:
-        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
+        raise HTTPException(status_code=403, detail="OAuth link does not belong to the current user")
 
 
 def _verify_connect_target_query(
@@ -271,7 +282,7 @@ def _verify_connect_target_query(
 ) -> None:
     expected_scope = "" if binding.worker_scope == "unscoped" else binding.worker_scope
     if (agent_name or "") != (binding.requested_agent_name or "") or (execution_scope or "") != expected_scope:
-        raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
+        raise HTTPException(status_code=400, detail="OAuth link target does not match this request")
 
 
 def _verify_connect_target_binding(
@@ -280,7 +291,7 @@ def _verify_connect_target_binding(
     worker_target: ResolvedWorkerTarget | None,
 ) -> None:
     if binding != oauth_credential_binding(provider, worker_target):
-        raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
+        raise HTTPException(status_code=400, detail="OAuth link target does not match this request")
 
 
 def _verify_browser_reset_intent(
@@ -299,10 +310,14 @@ def _verify_browser_reset_intent(
     config = snapshot.runtime_config
     if config is None:
         raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
-    identity = build_dashboard_execution_identity(request, agent_name or "oauth", runtime_paths=runtime_paths)
-    requester_id = config.authorization.resolve_alias(identity.requester_id) if identity.requester_id else ""
-    if not agent_name or not is_sender_allowed_for_agent_credential_management(requester_id, agent_name, config):
+    if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
+    identity = require_agent_credential_management_authorized(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+    )
     try:
         target = resolve_oauth_reset_target(
             provider.id,
@@ -323,24 +338,14 @@ async def _verify_pending_target_binding(
     target: RequestCredentialsTarget,
 ) -> None:
     if pending_payload != await _target_binding_payload(provider, target):
-        raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
 
 
 def _pending_connection_generation(pending_payload: dict[str, str] | None) -> str:
     generation = pending_payload.get("connection_generation") if pending_payload is not None else None
     if not isinstance(generation, str) or not generation:
-        raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
     return generation
-
-
-def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
-    if credentials.get("_oauth_claims_verified") is not True:
-        return None
-    claims = credentials.get("_oauth_claims")
-    if not isinstance(claims, dict):
-        return None
-    value = claims.get(key)
-    return value if isinstance(value, str) and value else None
 
 
 def _credential_context(
@@ -353,7 +358,6 @@ def _credential_context(
         runtime_paths,
         target.base_manager,
         worker_target_for_credentials_target(target),
-        allowed_shared_services=target.allowed_shared_services,
     )
 
 
@@ -431,6 +435,8 @@ async def confirm_reset(
         execution_scope=execution_scope,
     )
     display_name = escape(provider.display_name)
+    target_agent = escape(intent.binding.requested_agent_name or "unknown")
+    target_scope = escape(intent.binding.worker_scope)
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
@@ -438,6 +444,8 @@ async def confirm_reset(
   <body>
     <h1>Reset and reconnect {display_name}</h1>
     <p>This removes the current scoped credential, then opens the provider authorization page.</p>
+    <p>Target agent: <strong>{target_agent}</strong>.</p>
+    <p>Credential scope: <strong>{target_scope} scope</strong>.</p>
     <form method="post"><button type="submit">Reset and reconnect</button></form>
   </body>
 </html>""",
@@ -482,8 +490,13 @@ async def reset_and_authorize(
             agent_name=agent_name,
         )
     except OAuthCredentialConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
     except OAuthResetPreparationError as exc:
+        logger.warning(
+            "oauth_connection_reset_preparation_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="OAuth reset could not start safely") from exc
     logger.info(
         "oauth_connection_reset",
@@ -565,11 +578,16 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     except HTTPException:
         raise
     except OAuthCredentialConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning(
+            "oauth_callback_provider_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=400, detail="OAuth callback could not be completed") from exc
     except Exception as exc:
         logger.exception(
             "oauth_callback_failed",
@@ -643,8 +661,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),
         has_service_account_config=has_service_account_config,
         reset_required=credential_status.reset_required,
-        email=_claim_str(credentials, "email"),
-        hosted_domain=_claim_str(credentials, "hd"),
+        email=oauth_verified_claim(credentials, "email"),
+        hosted_domain=oauth_verified_claim(credentials, "hd"),
         capabilities=list(provider.status_capabilities),
     )
 
@@ -670,5 +688,10 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
             operation_id=None,
         )
     except OAuthResetPreparationError as exc:
+        logger.warning(
+            "oauth_disconnect_preparation_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="OAuth disconnect could not start safely") from exc
     return {"status": "disconnected", "provider": provider.id}

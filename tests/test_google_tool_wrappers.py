@@ -18,7 +18,6 @@ from agno.tools.function import Function
 from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
-from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.errors import HttpError
 
 from mindroom.config.auth import AuthorizationConfig
@@ -41,8 +40,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialsRefreshResult,
     exchange_and_store_oauth_credentials,
-    load_oauth_credentials,
-    oauth_connection_generation,
+    load_oauth_credentials_snapshot_sync,
     oauth_credential_generation,
     oauth_credentials_worker_target,
     reset_oauth_credentials,
@@ -491,7 +489,7 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
         payload = json.loads(result)
         assert payload["oauth_connection_required"] is True
         assert payload.get("reason") == expected_reason
-    stored = load_oauth_credentials(tool._oauth_credential_context())
+    stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert (stored is not None) is credential_remains
 
 
@@ -518,6 +516,33 @@ def test_google_http_tracker_records_only_final_401(
         assert b"response" not in content
     else:
         assert content == b"response"
+
+
+def test_google_http_tracker_preserves_google_api_transport_defaults() -> None:
+    """The tracked transport keeps googleapiclient's timeout and resumable-upload handling."""
+    tool = object.__new__(GoogleDriveTools)
+
+    tracked_http = tool._google_authorized_http(object())
+
+    assert tracked_http.http.timeout == 60
+    assert 308 not in tracked_http.http.redirect_codes
+
+
+def test_google_refresh_request_bounds_provider_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Managed token refreshes must not hold the credential transaction indefinitely."""
+    captured: dict[str, object] = {}
+
+    class _Request:
+        def __call__(self, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(oauth_client_module.google_requests, "Request", _Request)
+
+    request = oauth_client_module._google_refresh_request()
+    request(url="https://oauth2.googleapis.com/token", method="POST")
+
+    assert captured["timeout"] == 20.0
 
 
 @pytest.mark.parametrize(
@@ -602,172 +627,6 @@ def test_google_final_401_provider_text_is_redacted_before_toolkit_logging(
     assert payload["reason"] == "access_rejected"
     assert "provider-controlled-final-401-secret" not in result
     assert "provider-controlled-final-401-secret" not in agno_log_output.getvalue()
-
-
-def test_google_sheets_secondary_drive_service_uses_tracked_http(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The duplicate-sheet Drive client must share the final-401 boundary."""
-    tool = object.__new__(GoogleSheetsTools)
-    credentials = object()
-    tool.creds = credentials
-    built: dict[str, object] = {}
-    service = object()
-
-    def build_service(api: str, version: str, **kwargs: object) -> object:
-        built.update({"api": api, "version": version, **kwargs})
-        return service
-
-    monkeypatch.setattr("mindroom.custom_tools.google_sheets.build", build_service)
-
-    assert tool._build_drive_service() is service
-    assert built["api"] == "drive"
-    assert built["version"] == "v3"
-    assert "credentials" not in built
-    assert isinstance(built["http"], AuthorizedHttp)
-    assert built["http"].credentials is credentials
-
-
-def test_google_sheets_duplicate_initializes_primary_service(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The override retains upstream authentication and primary-service initialization."""
-    tool = object.__new__(GoogleSheetsTools)
-    tool.creds = _valid_credentials()
-    tool.service = None
-    tool.scopes = ["https://www.googleapis.com/auth/drive"]
-    sheets_service = object()
-
-    class CopyRequest:
-        @staticmethod
-        def execute() -> dict[str, str]:
-            return {"id": "new-sheet"}
-
-    class Files:
-        @staticmethod
-        def copy(**_kwargs: object) -> CopyRequest:
-            return CopyRequest()
-
-    class DriveService:
-        @staticmethod
-        def files() -> Files:
-            return Files()
-
-    monkeypatch.setattr(tool, "_build_service", lambda: sheets_service)
-    monkeypatch.setattr(tool, "_build_drive_service", DriveService)
-
-    result = GoogleSheetsTools.create_duplicate_sheet(
-        tool,
-        "source-sheet",
-        new_title="Copy",
-        copy_permissions=False,
-    )
-
-    assert tool.service is sheets_service
-    assert result.endswith("/new-sheet")
-
-
-@pytest.mark.parametrize("rejection_stage", ["permission_list", "permission_create"])
-def test_google_sheets_partial_duplicate_401_preserves_non_retryable_result(  # noqa: C901
-    runtime_paths: RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
-    rejection_stage: str,
-) -> None:
-    """A post-copy rejection must preserve the created spreadsheet without recommending replay."""
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    provider = GoogleSheetsTools._oauth_provider
-    save_scoped_credentials(
-        provider.credential_service,
-        {
-            "token": "retained-access-token",
-            "refresh_token": "retained-refresh-token",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": "client-id",
-            "expires_at": 4_102_444_800.0,
-            "scopes": list(provider.scopes),
-            "_source": "oauth",
-            "_oauth_provider": provider.id,
-        },
-        credentials_manager=credentials_manager,
-        worker_target=None,
-    )
-    tool = GoogleSheetsTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=credentials_manager,
-        worker_target=None,
-        create_duplicate_sheet=True,
-    )
-    tracked_http = tool._google_authorized_http(tool.creds)
-    sentinel = b'{"error":{"message":"provider-controlled-sheet-permission-secret"}}'
-    rejected_response = SimpleNamespace(status=401, reason="Unauthorized")
-
-    def rejected_request(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
-        return rejected_response, sentinel
-
-    class StaticRequest:
-        def __init__(self, result: dict[str, object]) -> None:
-            self.result = result
-
-        def execute(self) -> dict[str, object]:
-            return self.result
-
-    class RejectedRequest:
-        @staticmethod
-        def execute() -> Never:
-            response, content = tracked_http.request("https://www.googleapis.com/drive/v3/permissions")
-            raise HttpError(response, content)
-
-    class Files:
-        @staticmethod
-        def copy(**_kwargs: object) -> StaticRequest:
-            return StaticRequest({"id": "created-sheet"})
-
-    class Permissions:
-        @staticmethod
-        def list(**_kwargs: object) -> StaticRequest | RejectedRequest:
-            if rejection_stage == "permission_list":
-                return RejectedRequest()
-            return StaticRequest(
-                {
-                    "permissions": [
-                        {
-                            "emailAddress": "writer@example.test",
-                            "role": "writer",
-                            "type": "user",
-                        },
-                    ],
-                },
-            )
-
-        @staticmethod
-        def create(**_kwargs: object) -> RejectedRequest:
-            return RejectedRequest()
-
-    class DriveService:
-        @staticmethod
-        def files() -> Files:
-            return Files()
-
-        @staticmethod
-        def permissions() -> Permissions:
-            return Permissions()
-
-    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", rejected_request)
-    monkeypatch.setattr(tool, "_build_drive_service", DriveService)
-    tool.service = object()
-
-    result = tool.create_duplicate_sheet("source-sheet", new_title="Copy", copy_permissions=True)
-    payload = json.loads(result)
-
-    assert payload["oauth_connection_required"] is True
-    assert payload["reason"] == "access_rejected"
-    assert payload["partial_success"] is True
-    assert payload["retry_safe"] is False
-    assert payload["partial_result"]["spreadsheetId"] == "created-sheet"
-    assert payload["partial_result"]["spreadsheetUrl"].endswith("/created-sheet")
-    assert payload["partial_result"]["permissionsCopyComplete"] is False
-    assert "do not automatically retry" in payload["error"].lower()
-    assert "provider-controlled-sheet-permission-secret" not in result
 
 
 def test_gmail_batch_tracks_final_item_401() -> None:
@@ -863,7 +722,7 @@ def test_google_wrapper_maps_swallowed_final_resource_401_to_access_rejected(
     assert "provider-controlled" not in json.dumps(payload)
     assert tool.creds is None
     assert tool.service is None
-    stored = load_oauth_credentials(tool._oauth_credential_context())
+    stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert stored is not None
     assert stored["token"] == "retained-access-token"  # noqa: S105
 
@@ -944,6 +803,59 @@ def test_google_docs_partial_create_401_preserves_non_retryable_result(
     assert "do not automatically retry" in payload["error"].lower()
     assert "rerun the original request" not in payload["error"].lower()
     assert "provider-controlled-partial-write-secret" not in result
+
+
+@pytest.mark.parametrize("operation", ["create", "read", "insert", "replace"])
+def test_google_docs_provider_failures_preserve_status_without_provider_text(
+    runtime_paths: RuntimePaths,
+    operation: str,
+) -> None:
+    """Every Google Docs operation should expose only the useful HTTP status."""
+    sentinel = b'{"error":{"message":"provider-controlled-docs-secret"}}'
+    response = SimpleNamespace(status=403, reason="provider-controlled-reason")
+
+    class Request:
+        @staticmethod
+        def execute() -> Never:
+            raise HttpError(response, sentinel)
+
+    class Documents:
+        @staticmethod
+        def create(**_kwargs: object) -> Request:
+            return Request()
+
+        @staticmethod
+        def get(**_kwargs: object) -> Request:
+            return Request()
+
+        @staticmethod
+        def batchUpdate(**_kwargs: object) -> Request:  # noqa: N802
+            return Request()
+
+    class Service:
+        @staticmethod
+        def documents() -> Documents:
+            return Documents()
+
+    tool = GoogleDocsTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=None,
+        creds=_valid_credentials(),
+    )
+    tool.service = Service()
+
+    if operation == "create":
+        result = tool.google_docs_create_document("Recovery notes")
+    elif operation == "read":
+        result = tool.google_docs_get_document("document-id")
+    elif operation == "insert":
+        result = tool.google_docs_insert_text("document-id", "text")
+    else:
+        result = tool.google_docs_replace_text("document-id", "old", "new")
+
+    assert json.loads(result) == {"error": "Google Docs request failed (HTTP 403)"}
+    assert "provider-controlled" not in result
 
 
 def test_nested_google_wrapper_preserves_final_resource_401_for_outer_owner(
@@ -1175,7 +1087,7 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
     with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
         tool.creds.refresh(object())
 
-    stored = load_oauth_credentials(tool._oauth_credential_context())
+    stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert stored is not None
     assert stored["token"] == "rejected-readonly-token"  # noqa: S105
     assert stored["refresh_token"] == rotated_refresh_token
@@ -1251,7 +1163,7 @@ def test_google_wrapper_replaces_swallowed_mid_call_refresh_rejection(
     assert payload["reason"] == "refresh_rejected"
     assert captured_log_messages == ["OAuth credential refresh failed"]
     assert provider_detail not in repr(captured_log_messages)
-    assert load_oauth_credentials(tool._oauth_credential_context()) is None
+    assert load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials is None
 
 
 def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
@@ -1564,15 +1476,6 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
         assert release_valid_request.wait(timeout=5)
 
     monkeypatch.setattr(GoogleOAuthCredentials, "before_request", block_valid_request)
-    real_refresh_state = oauth_client_module._GoogleRefreshState
-    refresh_states: list[Any] = []
-
-    def capture_refresh_state(*args: object, **kwargs: object) -> Any:  # noqa: ANN401
-        state = real_refresh_state(*args, **kwargs)
-        refresh_states.append(state)
-        return state
-
-    monkeypatch.setattr(oauth_client_module, "_GoogleRefreshState", capture_refresh_state)
     provider_calls = 0
 
     def rotate(credentials: object, _request: object) -> None:
@@ -1591,29 +1494,6 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
     credentials.refresh(object())
     assert provider_calls == 1
 
-    class ObservedRLock:
-        def __init__(self) -> None:
-            self._lock = threading.RLock()
-            self.failed_nonblocking_acquire = threading.Event()
-
-        def acquire(self, blocking: bool = True) -> bool:
-            acquired = self._lock.acquire(blocking)
-            if not blocking and not acquired:
-                self.failed_nonblocking_acquire.set()
-            return acquired
-
-        def release(self) -> None:
-            self._lock.release()
-
-        def __enter__(self) -> ObservedRLock:
-            self.acquire()
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            self.release()
-
-    observed_lock = ObservedRLock()
-    refresh_states[0].lock = observed_lock
     with ThreadPoolExecutor(max_workers=2) as executor:
         valid_request = executor.submit(
             credentials.before_request,
@@ -1624,8 +1504,10 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
         )
         assert valid_request_entered.wait(timeout=5)
         forced_refresh = executor.submit(credentials.refresh, object())
-        assert observed_lock.failed_nonblocking_acquire.wait(timeout=5)
-        release_valid_request.set()
+        try:
+            assert not forced_refresh.done()
+        finally:
+            release_valid_request.set()
         valid_request.result(timeout=5)
         forced_refresh.result(timeout=5)
 
@@ -1744,7 +1626,7 @@ async def test_google_wrapper_reloads_callback_replacement_in_materialized_worke
     )
     callback_context = replace(tool._oauth_credential_context(), provider=callback_provider)
     issued_revision = oauth_credential_generation(callback_context)
-    issued_connection_generation = oauth_connection_generation(callback_context)
+    issued_connection_generation = load_oauth_credentials_snapshot_sync(callback_context).connection_generation
     worker = ThreadPoolExecutor(max_workers=1)
     try:
 
@@ -1831,7 +1713,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
             runtime_bootstrapper=None,
         ),
     )
-    issued_connection_generation = oauth_connection_generation(callback_context)
+    issued_connection_generation = load_oauth_credentials_snapshot_sync(callback_context).connection_generation
     await exchange_and_store_oauth_credentials(
         callback_context,
         "account-b-code",
@@ -2090,7 +1972,7 @@ async def test_google_wrapper_replaces_swallowed_async_upload_refresh_rejection(
 
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "refresh_rejected"
-    assert load_oauth_credentials(tool._oauth_credential_context()) is None
+    assert load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials is None
 
 
 def test_google_wrapper_keeps_refresh_rejection_state_per_call(

@@ -298,12 +298,7 @@ class MatrixDeliveryWorker:
             outcome = await self._flush(delivery_id=delivery_id, stage=stage)
         return await self._finish_flush(delivery_id, outcome)
 
-    async def _flush(
-        self,
-        *,
-        delivery_id: str,
-        stage: DeliveryStage,
-    ) -> _FlushOutcome:
+    async def _flush(self, *, delivery_id: str, stage: DeliveryStage) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
         claimed = await self.store.claim_matrix_delivery(
             delivery_id=delivery_id,
@@ -569,10 +564,7 @@ class MatrixDeliveryWorker:
                     continue
                 try:
                     async with self._delivery_lock(delivery.delivery_id):
-                        outcome = await self._flush(
-                            delivery_id=delivery.delivery_id,
-                            stage=delivery.stage,
-                        )
+                        outcome = await self._flush(delivery_id=delivery.delivery_id, stage=delivery.stage)
                     sent = await self._finish_flush(delivery.delivery_id, outcome)
                 except Exception:
                     logger.exception(

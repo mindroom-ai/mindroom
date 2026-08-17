@@ -20,7 +20,7 @@ from mindroom.mcp.transports import (
     _TransportStreams,
     build_transport_handle,
 )
-from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -126,8 +126,9 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
     async with handle.opener() as opened_streams:
         assert opened_streams == streams
 
-    httpx_client_factory = captured.pop("httpx_client_factory")
-    assert callable(httpx_client_factory)
+    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
+    async with httpx_client_factory() as client:
+        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
     assert captured == {
         "url": "https://mcp.example/sse",
         "headers": {"Authorization": "Bearer secret-token"},
@@ -169,8 +170,9 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
-    httpx_client_factory = captured.pop("httpx_client_factory")
-    assert callable(httpx_client_factory)
+    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
+    async with httpx_client_factory() as client:
+        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
     assert captured == {
         "url": "https://mcp.example/mcp",
         "headers": {"X-Token": "secret-token"},

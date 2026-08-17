@@ -360,7 +360,6 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
-    "mindroom.approval_bindings",
     "mindroom.ai_runtime",
     "mindroom.ai_turn_state",
     "mindroom.cancellation",
@@ -664,7 +663,6 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
-    "mindroom.approval_bindings",
     "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -673,14 +671,6 @@ depends_on = [
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.response_runner"]
-
-[[modules]]
-path = "mindroom.approval_bindings"
-depends_on = []
-visibility = [
-    "mindroom.approval_response",
-    "mindroom.response_turn",
-]
 
 [[modules]]
 path = "mindroom.approval_inbound"
@@ -722,10 +712,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.oauth.credential_binding"
-depends_on = [
-    "mindroom.oauth.providers",
-    "mindroom.tool_system.worker_routing",
-]
+depends_on = []
 visibility = [
     "mindroom.api.oauth",
     "mindroom.oauth.reset",
@@ -738,7 +725,6 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.logging_config",
     "mindroom.oauth.providers",
-    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
 
@@ -746,7 +732,6 @@ visibility = ["mindroom.oauth.credential_lifecycle"]
 path = "mindroom.oauth.credential_lifecycle"
 depends_on = [
     "mindroom.background_tasks",
-    "mindroom.credentials",
     "mindroom.logging_config",
     "mindroom.oauth.credential_store",
     "mindroom.oauth.providers",
@@ -767,6 +752,7 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.reset"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.credentials",
     "mindroom.oauth.credential_binding",
     "mindroom.oauth.credential_lifecycle",
@@ -4745,12 +4731,10 @@ expose = [
     "OAuthCredentialsSnapshot",
     "OAuthCredentialsStatus",
     "exchange_and_store_oauth_credentials",
-    "load_oauth_credentials",
     "load_oauth_credentials_snapshot",
     "load_oauth_credentials_snapshot_sync",
     "load_oauth_credentials_status",
     "load_oauth_reset_connection_generation",
-    "oauth_connection_generation",
     "oauth_credential_generation",
     "oauth_credentials_have_required_scopes",
     "oauth_credentials_have_scopes",
@@ -4759,13 +4743,13 @@ expose = [
     "oauth_credentials_usable",
     "oauth_credentials_worker_target",
     "oauth_reset_operation_result",
+    "oauth_verified_claim",
     "refresh_oauth_credentials",
     "refresh_oauth_credentials_blocking",
     "refresh_oauth_credentials_sync",
     "refresh_oauth_credentials_with_result",
     "reset_oauth_credentials",
     "resolve_oauth_credential_context",
-    "sanitized_oauth_token_result",
 ]
 from = ["mindroom.oauth.credential_lifecycle"]
 

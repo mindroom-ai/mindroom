@@ -144,7 +144,6 @@ class ApprovalContinuation:
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
     execution_identity: dict[str, object] = field(default_factory=dict)
-    tool_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -179,7 +178,6 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
         "execution_identity": continuation.execution_identity,
-        "tool_bindings": continuation.tool_bindings,
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
         "team_member_model_names": [list(item) for item in continuation.team_member_model_names],
@@ -285,7 +283,6 @@ def _from_rows(
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
-        tool_bindings=cast("dict[str, dict[str, object]]", stored.get("tool_bindings", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
         team_member_model_names=tuple(
@@ -555,7 +552,6 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
-    tool_bindings: dict[str, dict[str, object]],
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -569,7 +565,6 @@ def advance(
         run_id=run_id,
         session_id=session_id,
         calls=calls,
-        tool_bindings=tool_bindings,
         state=state,
         runtime_generation=publication_owner,
         failure_reason=None,

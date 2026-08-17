@@ -302,6 +302,7 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+oauth_connections = []
 openai = [
   "openai",
 ]
@@ -312,7 +313,6 @@ openclaw_compat = []
 openweather = [
   "requests",
 ]
-oauth_connections = []
 oxylabs = [
   "oxylabs",
 ]

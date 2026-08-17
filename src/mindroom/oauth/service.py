@@ -231,13 +231,6 @@ def build_oauth_reconnect_instruction(
     retry_safe: bool = True,
 ) -> str:
     """Return a concise instruction for an expired or invalid OAuth session."""
-    if retry_safe and not oauth_connect_url_requires_host_browser(connect_url):
-        return (
-            f"{provider.display_name} session for this agent expired or is no longer valid. "
-            "Reconnect it with this MindRoom link, then retry the request. "
-            f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
-            f"rerun the original request for a fresh link: {connect_url}"
-        )
     retry_guidance = "After reconnecting, retry the request."
     expiry_guidance = "rerun the original request for a fresh link"
     if not retry_safe:

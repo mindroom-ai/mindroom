@@ -197,36 +197,65 @@ async def test_copied_database_is_rejected_by_scope_binding(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_completed_reset_replay_never_deletes_later_credentials(tmp_path: Path) -> None:
-    """A stable completed operation returns its receipt before checking CAS or deleting again."""
-    context = _context(tmp_path)
-    _generation, original_connection = await _publish(context, "old")
-    async with oauth_credential_transaction(context) as transaction:
-        assert (
-            transaction.reset(
-                "browser:stable-reset",
-                expected_connection_generation=original_connection,
-                replayable=True,
-            )
-            is True
-        )
+async def test_new_stores_mint_unique_generation_nonces(tmp_path: Path) -> None:
+    """Independent stores must never reuse cache-fencing generation identities."""
+    first = _context(tmp_path / "first")
+    second = _context(tmp_path / "second")
+
+    async with oauth_credential_transaction(first) as transaction:
+        first_generations = transaction.generations()
+        await transaction.commit()
+    async with oauth_credential_transaction(second) as transaction:
+        second_generations = transaction.generations()
         await transaction.commit()
 
-    await _publish(context, "replacement")
-    async with oauth_credential_transaction(context) as transaction:
-        assert (
-            transaction.reset(
-                "browser:stable-reset",
-                expected_connection_generation=original_connection,
-                replayable=True,
-            )
-            is True
+    assert first_generations.generation != second_generations.generation
+    assert first_generations.connection_generation != second_generations.connection_generation
+
+
+@pytest.mark.asyncio
+async def test_sqlite_lock_admission_has_a_bounded_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stuck external lock must fail instead of polling forever."""
+
+    class _LockedConnection:
+        @staticmethod
+        def execute(_statement: str) -> None:
+            message = "database is locked"
+            raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(credential_store_module, "_LOCK_WAIT_TIMEOUT_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(credential_store_module, "_sqlite_lock_error", lambda _exc: True)
+
+    with pytest.raises(OAuthProviderError, match="Timed out waiting for OAuth credential store"):
+        await asyncio.wait_for(
+            credential_store_module._begin_immediate(cast("sqlite3.Connection", _LockedConnection())),
+            timeout=0.1,
         )
-        assert transaction.snapshot().credentials == {
-            "token": "replacement",
-            "refresh_token": "refresh-replacement",
-        }
-        await transaction.commit()
+
+
+@pytest.mark.asyncio
+async def test_database_directory_permission_failure_uses_oauth_error_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Filesystem permission failures should not escape the OAuth store abstraction."""
+    context = _context(tmp_path)
+    database_path = _oauth_credential_database_path(context)
+    database_parent = database_path.parent
+    original_chmod = Path.chmod
+
+    def deny_chmod(path: Path, mode: int) -> None:
+        if path == database_parent:
+            msg = "provider-controlled-path-detail"
+            raise PermissionError(msg)
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", deny_chmod)
+    monkeypatch.setattr(credential_store_module, "_oauth_credential_database_path", lambda _context: database_path)
+
+    with pytest.raises(OAuthProviderError, match="could not prepare its private directory"):
+        async with oauth_credential_transaction(context):
+            pass
 
 
 @pytest.mark.asyncio
@@ -249,21 +278,46 @@ async def test_corrupt_encrypted_legacy_credential_can_be_reset_without_plaintex
     async with oauth_credential_transaction(context) as transaction:
         with pytest.raises(OAuthProviderError, match="could not be loaded"):
             transaction.snapshot()
-        generations = transaction.generations()
         await transaction.commit()
 
     database_path = _oauth_credential_database_path(context)
     assert b"corrupt-plaintext-secret" not in database_path.read_bytes()
     async with oauth_credential_transaction(context) as transaction:
-        assert (
-            transaction.reset(
-                "browser:corrupt-reset",
-                expected_connection_generation=generations.connection_generation,
-                replayable=True,
-            )
-            is True
-        )
+        assert transaction.reset("browser:corrupt-reset") is True
         await transaction.commit()
+
+
+@pytest.mark.asyncio
+async def test_enabling_encryption_preserves_unadopted_plaintext_legacy_credentials(tmp_path: Path) -> None:
+    """Encryption activation must not delete plaintext bytes that were not adopted."""
+    plaintext_context = _context(tmp_path)
+    save_scoped_credentials(
+        plaintext_context.provider.credential_service,
+        {"token": "recoverable", "refresh_token": "recoverable-refresh"},
+        credentials_manager=plaintext_context.credentials_manager,
+        worker_target=plaintext_context.worker_target,
+    )
+    legacy_path = plaintext_context.credentials_manager.for_primary_runtime_scope(
+        "@alice:example.test",
+        None,
+    ).get_credentials_path(plaintext_context.provider.credential_service)
+    original_payload = legacy_path.read_bytes()
+    encryption_key = base64.urlsafe_b64encode(b"k" * 32).decode()
+    encrypted_context = _context(tmp_path, encryption_key=encryption_key)
+
+    async with oauth_credential_transaction(encrypted_context) as transaction:
+        with pytest.raises(OAuthProviderError, match="could not be loaded"):
+            transaction.snapshot()
+        await transaction.commit()
+
+    assert legacy_path.read_bytes() == original_payload
+
+    async with oauth_credential_transaction(plaintext_context) as transaction:
+        recovered = transaction.snapshot()
+        await transaction.commit()
+
+    assert recovered.credentials == {"token": "recoverable", "refresh_token": "recoverable-refresh"}
+    assert not legacy_path.exists()
 
 
 @pytest.mark.asyncio

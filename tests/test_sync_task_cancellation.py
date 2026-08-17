@@ -323,7 +323,6 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
             call_order.append("cancel")
 
     bot.prepare_for_sync_shutdown = prepare_for_sync_shutdown
-
     monkeypatch.setattr(_SyncIteration, "start", lambda _bot: FakeIteration())
 
     await sync_forever_with_restart(bot)

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.oauth.reset import OAuthResetTargetError, issue_browser_oauth_reset_url, resolve_oauth_reset_target
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 
@@ -19,8 +18,8 @@ class OAuthConnectionTools(Toolkit):
     """Reset only the current requester's OAuth connections for the current agent."""
 
     def __init__(self, runtime_paths: RuntimePaths, *, worker_target: ResolvedWorkerTarget | None) -> None:
-        self.runtime_paths = runtime_paths
-        self.worker_target = worker_target
+        self._runtime_paths = runtime_paths
+        self._worker_target = worker_target
         super().__init__(
             name="oauth_connections",
             tools=[self.reset_oauth_connection],
@@ -45,23 +44,15 @@ class OAuthConnectionTools(Toolkit):
         if runtime_context is None:
             return "Error: OAuth reset requires a live agent request context."
         config = runtime_context.config
-        agent_name = self.worker_target.routing_agent_name if self.worker_target is not None else None
-        if agent_name not in config.agents:
-            return "Error: OAuth reset is available only during an agent request."
-        if not is_sender_allowed_for_agent_credential_management(
-            runtime_context.requester_id,
-            agent_name=agent_name,
-            config=config,
-        ):
-            return "Error: The current requester is not authorized to manage this agent's credentials."
+        agent_name = self._worker_target.routing_agent_name if self._worker_target is not None else None
         try:
             target = resolve_oauth_reset_target(
                 provider_id,
                 agent_name=agent_name,
                 config=config,
-                runtime_paths=self.runtime_paths,
+                runtime_paths=self._runtime_paths,
                 execution_identity=build_execution_identity_from_runtime_context(runtime_context),
-                worker_target=self.worker_target,
+                worker_target=self._worker_target,
             )
             reset_url = await issue_browser_oauth_reset_url(target)
         except OAuthResetTargetError as exc:

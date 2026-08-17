@@ -18,12 +18,12 @@ from github import Auth, Github, GithubException
 from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.logging_config import get_logger
+from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
-    resolve_oauth_credential_context,
 )
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import (
@@ -37,8 +37,6 @@ from mindroom.oauth.service import (
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -80,9 +78,9 @@ class _SanitizeAgnoGithubLogFilter(logging.Filter):
                 record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
                 record.args = (status_code if status_code is not None else "unknown",)
                 record.exc_info = None
-                record.__dict__["exc_text"] = None
-                record.__dict__["stack_info"] = None
-        elif record.getMessage().startswith(_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES):
+                record.exc_text = None
+                record.stack_info = None
+        elif isinstance(record.msg, str) and record.msg.startswith(_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES):
             record.msg = "GitHub provider detail suppressed"
             record.args = ()
         return True
@@ -215,8 +213,7 @@ class GithubTools(AgnoGithubTools):
         explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
             runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
         )
-        self._explicit_access_token = bool(explicit_access_token)
-        self._explicit_access_token_value = explicit_access_token
+        self._explicit_access_token = explicit_access_token
         initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
         super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)
         self._wrap_oauth_function_entrypoints()
@@ -235,18 +232,12 @@ class GithubTools(AgnoGithubTools):
         return _normalized_access_token(token)
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
-        execution_identity = active_tool_execution_identity(None)
-        if execution_identity is None and self._worker_target is not None:
-            execution_identity = self._worker_target.execution_identity
-        runtime_context = get_tool_runtime_context()
-        authorization = runtime_context.config.authorization if runtime_context is not None else self._authorization
-        return resolve_oauth_credential_context(
+        return active_oauth_credential_context(
             self._oauth_provider,
             self._runtime_paths,
             self._credentials_manager,
             self._worker_target,
-            execution_identity=execution_identity,
-            authorization=authorization,
+            authorization=self._authorization,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
@@ -260,9 +251,7 @@ class GithubTools(AgnoGithubTools):
 
     def _ensure_authenticated(self) -> None:
         if self._explicit_access_token:
-            token = self._explicit_access_token_value
-            if token is None:
-                raise self._connection_required()
+            token = self._explicit_access_token
             if self.access_token != token or self._github_state().client is None:
                 self.access_token = token
                 self.g = self.authenticate()
@@ -327,7 +316,7 @@ class GithubTools(AgnoGithubTools):
                             self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
-                return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+                return json.dumps({"error": f"{status_code} {_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE}"})
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)

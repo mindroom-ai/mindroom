@@ -176,10 +176,7 @@ def _available_catalog(
         return None
 
 
-def _tool_factory(
-    server_id: str,
-    server_config: MCPServerConfig,
-) -> Callable[[], type[Toolkit]]:
+def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
     def factory() -> type[Toolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
             def __init__(
@@ -251,9 +248,6 @@ def resolved_mcp_tool_state(
     metadata: dict[str, ToolMetadata] = {}
     for server_id, server_config in _desired_server_entries(config).items():
         tool_name = mcp_tool_name(server_id)
-        registry[tool_name] = _tool_factory(
-            server_id,
-            server_config,
-        )
+        registry[tool_name] = _tool_factory(server_id, server_config)
         metadata[tool_name] = _tool_metadata(server_id, server_config)
     return registry, metadata

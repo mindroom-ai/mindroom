@@ -25,7 +25,7 @@ _durable_directory_identities_lock = Lock()
 
 def create_directory_durable(path: Path, *, mode: int) -> None:
     """Create one directory and durably publish it when directory fsync is available."""
-    path.mkdir(mode=mode, exist_ok=True)
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
     path.chmod(mode)
     stat = path.stat()
     identity = (stat.st_dev, stat.st_ino)

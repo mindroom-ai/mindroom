@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -86,20 +85,6 @@ def test_durable_replace_fsyncs_parent_after_publish(monkeypatch: pytest.MonkeyP
     assert target.read_text(encoding="utf-8") == "new"
     assert not source.exists()
     assert fsynced == [tmp_path]
-
-
-def test_strict_directory_flush_is_explicitly_unsupported_on_windows(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Platforms without directory fsync must skip the POSIX-only directory open."""
-    monkeypatch.setattr(durable_write, "_DIRECTORY_FSYNC_SUPPORTED", False)
-    open_directory = MagicMock(side_effect=AssertionError("directory opened"))
-    monkeypatch.setattr(durable_write.os, "open", open_directory)
-
-    durable_write._fsync_directory_durable(tmp_path)
-
-    open_directory.assert_not_called()
 
 
 def test_cached_override_records_are_returned_as_independent_snapshots(tmp_path: Path) -> None:

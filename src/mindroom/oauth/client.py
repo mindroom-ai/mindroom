@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, auto
-from functools import wraps
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from google.auth.exceptions import GoogleAuthError, RefreshError
@@ -57,7 +57,37 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
+_GOOGLE_REFRESH_TIMEOUT_SECONDS = 20.0
 _SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
+
+
+def _google_refresh_request() -> Callable[..., object]:
+    """Build Google's requests adapter with a bounded token-endpoint timeout."""
+    return partial(google_requests.Request(), timeout=_GOOGLE_REFRESH_TIMEOUT_SECONDS)
+
+
+def active_oauth_credential_context(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    authorization: AuthorizationConfig | None,
+) -> OAuthCredentialContext:
+    """Resolve OAuth storage from the active tool call and its configured fallback."""
+    execution_identity = active_tool_execution_identity(None)
+    if execution_identity is None and worker_target is not None:
+        execution_identity = worker_target.execution_identity
+    runtime_context = get_tool_runtime_context()
+    resolved_authorization = runtime_context.config.authorization if runtime_context is not None else authorization
+    return resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        credentials_manager,
+        worker_target,
+        execution_identity=execution_identity,
+        authorization=resolved_authorization,
+    )
 
 
 class _SanitizedGoogleRefreshError(RefreshError):
@@ -330,6 +360,8 @@ class ScopedOAuthClientMixin:
         if credentials.refresh_handler is not None:
             msg = "Google creds with refresh_handler are not supported"
             raise ValueError(msg)
+        # google-auth exposes these constructor inputs only through private fields;
+        # the exact supported Credentials type and dependency pin make that coupling explicit.
         if credentials._enable_reauth_refresh:
             msg = "Google creds with reauth refresh are not supported"
             raise ValueError(msg)
@@ -358,18 +390,12 @@ class ScopedOAuthClientMixin:
         return load_oauth_credentials_snapshot_sync(self._oauth_credential_context()).credentials
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
-        execution_identity = active_tool_execution_identity(None)
-        if execution_identity is None and self._worker_target is not None:
-            execution_identity = self._worker_target.execution_identity
-        runtime_context = get_tool_runtime_context()
-        authorization = runtime_context.config.authorization if runtime_context is not None else self._authorization
-        return resolve_oauth_credential_context(
+        return active_oauth_credential_context(
             self._oauth_provider,
             self._runtime_paths,
             self._creds_manager,
             self._worker_target,
-            execution_identity=execution_identity,
-            authorization=authorization,
+            authorization=self._authorization,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
@@ -473,9 +499,7 @@ class ScopedOAuthClientMixin:
     ) -> None:
         """Serialize one client's provider refresh and local credential publication."""
         observed_completion_generation = state.refresh_completion_generation
-        if not state.lock.acquire(blocking=False):
-            state.lock.acquire()
-        try:
+        with state.lock:
             if state.refresh_completion_generation != observed_completion_generation:
                 if state.last_succeeded:
                     return
@@ -485,8 +509,6 @@ class ScopedOAuthClientMixin:
                 self._refresh_google_credentials_locked(credentials, state, request)
             finally:
                 state.refresh_completion_generation += 1
-        finally:
-            state.lock.release()
 
     def _refresh_google_credentials_locked(
         self,
@@ -531,6 +553,7 @@ class ScopedOAuthClientMixin:
             self._raise_google_refresh_failure(state.last_failure)
         credentials.token = refreshed.token
         credentials.expiry = refreshed.expiry
+        # google-auth has no public setter for adopting a rotated refresh grant in place.
         credentials._refresh_token = refreshed.refresh_token
         state.snapshot.clear()
         state.snapshot.update(result.credentials)
@@ -649,8 +672,12 @@ class ScopedOAuthClientMixin:
                 context=context,
                 connection_generation=snapshot.connection_generation,
             )
-        except Exception:
-            self._oauth_logger.exception("oauth_credentials_load_failed", tool_name=self._oauth_tool_name)
+        except Exception as exc:
+            self._oauth_logger.warning(
+                "oauth_credentials_load_failed",
+                tool_name=self._oauth_tool_name,
+                error_type=type(exc).__name__,
+            )
             return None
         self._oauth_logger.info("oauth_credentials_loaded", tool_name=self._oauth_tool_name)
         return creds
@@ -711,7 +738,7 @@ class ScopedOAuthClientMixin:
             context = self._oauth_credential_context()
             result = refresh_oauth_credentials_sync(
                 context,
-                lambda current: self._refresh_google_token_data(current, google_requests.Request()),
+                lambda current: self._refresh_google_token_data(current, _google_refresh_request()),
                 scope_validator=self._stored_credentials_have_required_scopes,
             )
             token_data = result.credentials

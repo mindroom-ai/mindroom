@@ -6,6 +6,7 @@ import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from google_auth_httplib2 import AuthorizedHttp
+from googleapiclient.http import build_http
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -23,11 +24,18 @@ class _GoogleServiceThreadState(threading.local):
         self.authorization_rejected = False
 
 
+def _clear_google_account_state(state: _GoogleServiceThreadState) -> None:
+    """Invalidate service and account-derived caches after an identity change."""
+    state.service = None
+    state.label_cache = None
+    state.user_email = None
+
+
 class _TrackedGoogleAuthorizedHttp(AuthorizedHttp):
     """Latch only a final HTTP 401 after AuthorizedHttp finishes its retries."""
 
     def __init__(self, credentials: Any, state: _GoogleServiceThreadState) -> None:  # noqa: ANN401
-        super().__init__(credentials)
+        super().__init__(credentials, http=build_http())
         self._mindroom_state = state
 
     def request(self, *args: Any, **kwargs: Any) -> tuple[Any, Any]:  # noqa: ANN401
@@ -59,9 +67,7 @@ class ThreadLocalGoogleServiceMixin:
     def creds(self, value: Any | None) -> None:  # noqa: ANN401
         state = self._google_service_state()
         if state.creds is not value:
-            state.service = None
-            state.label_cache = None
-            state.user_email = None
+            _clear_google_account_state(state)
         state.creds = value
 
     @property
@@ -82,9 +88,7 @@ class ThreadLocalGoogleServiceMixin:
     def _google_credential_key(self, value: object | None) -> None:
         state = self._google_service_state()
         if state.credential_key != value:
-            state.service = None
-            state.label_cache = None
-            state.user_email = None
+            _clear_google_account_state(state)
         state.credential_key = value
 
     def _adopt_google_credential_revision(self, value: object) -> None:

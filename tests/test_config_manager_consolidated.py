@@ -917,7 +917,7 @@ class TestConsolidatedConfigManager:
         assert "MindRoom-managed OAuth" not in result
 
     def test_manage_agent_returns_target_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
-        """Generic OAuth MCP metadata should use the same updated-agent target flow."""
+        """Requester-scoped MCP OAuth links must target the canonical user credential scope."""
         mcp_server = MCPServerConfig(
             transport="streamable-http",
             url="https://mcp.example.test/mcp",

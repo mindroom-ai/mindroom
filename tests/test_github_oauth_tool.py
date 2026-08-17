@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 import logging
@@ -27,8 +28,9 @@ from mindroom.credentials import (
     get_runtime_credentials_manager,
     save_scoped_credentials,
 )
+from mindroom.custom_tools import github as mindroom_github_module
 from mindroom.custom_tools.github import GithubTools
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
@@ -44,6 +46,13 @@ MANUAL_ACCESS_TOKEN = "manual-access"  # noqa: S105
 OLD_REFRESH_TOKEN = "old-refresh"  # noqa: S105
 ROTATED_REFRESH_TOKEN = "rotated-refresh"  # noqa: S105
 ENV_ACCESS_TOKEN = "environment-access"  # noqa: S105
+
+
+def test_agno_github_log_redaction_prefixes_match_pinned_upstream() -> None:
+    """An Agno wording change must fail tests before it can reopen provider-detail logs."""
+    upstream_source = inspect.getsource(agno_github_module.GithubTools)
+
+    assert all(prefix in upstream_source for prefix in mindroom_github_module._AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES)
 
 
 def _publish_oauth_credentials(
@@ -921,7 +930,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
         )
         result = json.loads(tool.list_repositories())
 
-    stored = load_oauth_credentials(tool._oauth_credential_context())
+    stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert result == ["example/project"]
     assert stored is not None
     assert stored["token"] == "rotated-access"  # noqa: S105
@@ -1008,7 +1017,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
         credentials_manager=manager,
         worker_target=target,
     )
-    adopted = load_oauth_credentials(tool._oauth_credential_context())
+    adopted = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     with (
         patch(
             "mindroom.custom_tools.github.refresh_oauth_credentials_blocking",
@@ -1022,7 +1031,7 @@ def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_pa
     assert str(exc_info.value) == "OAuth credential refresh failed"
     assert leaked_detail not in str(exc_info.value)
     assert "/api/oauth/" not in str(exc_info.value)
-    assert load_oauth_credentials(tool._oauth_credential_context()) == adopted
+    assert load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials == adopted
 
 
 def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path) -> None:
@@ -1051,7 +1060,7 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
     assert tool.access_token is None
 
 
-@pytest.mark.parametrize("status_code", [401, 500])
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500])
 @pytest.mark.parametrize(
     "operation",
     [
@@ -1106,7 +1115,7 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
         assert payload["oauth_connection_required"] is True
         assert payload["reason"] == "access_rejected"
     else:
-        assert payload == {"error": "GitHub request failed"}
+        assert payload == {"error": f"{status_code} GitHub request failed"}
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
@@ -1133,7 +1142,7 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert json.loads(result) == {"error": "500 GitHub request failed"}
     assert sentinel not in result
 
 

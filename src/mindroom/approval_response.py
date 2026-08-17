@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from mindroom import approval_manager
-from mindroom.approval_bindings import build_approval_tool_bindings
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -49,7 +48,6 @@ class _ApprovalPausePlan:
 
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
-    tool_bindings: dict[str, dict[str, object]]
     waiting_text: str | None
 
 
@@ -165,9 +163,6 @@ class ApprovalResponseCoordinator:
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
             calls=calls,
-            tool_bindings=build_approval_tool_bindings(
-                identified,
-            ),
             waiting_text=(
                 "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls)
                 if gated_calls
@@ -262,10 +257,7 @@ class ApprovalResponseCoordinator:
     ) -> str | None:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await self.plan_pause(
-            identified,
-            requester_id=current.requester_id,
-        )
+        plan = await self.plan_pause(identified, requester_id=current.requester_id)
         visible_text = plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if plan.waiting_text is not None else STREAM_STATUS_PENDING
         if not await self.delivery_gateway.edit_text(
@@ -285,7 +277,6 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            tool_bindings=plan.tool_bindings,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
@@ -338,11 +329,10 @@ class ApprovalResponseCoordinator:
             current = await self.request_failure(current, reason)
             if current is None:
                 return False
-        persisted_reason = current.failure_reason or reason
         manager = approval_manager.get_approval_store()
         if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
-        visible_reason = _USER_STOP_VISIBLE_NOTE if persisted_reason == _USER_STOP_FAILURE_REASON else persisted_reason
+        visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(

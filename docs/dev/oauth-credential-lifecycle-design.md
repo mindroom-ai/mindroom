@@ -17,7 +17,7 @@ This makes the local state transition atomic instead of reconstructing it after 
 1. One `OAuthCredentialContext` identifies exactly one provider credential scope.
 2. SQLite scope metadata binds a database to its provider, credential service, worker scope, worker key, and relevant routing agent.
 3. A copied database fails closed when opened for a different scope.
-4. Every credential read or mutation enters the same per-scope SQLite write transaction.
+4. Credential mutations enter the same per-scope SQLite write transaction, while snapshots use a deferred reader that observes the last committed state without waiting for provider network I/O.
 5. `BEGIN IMMEDIATE` is the cross-process operation lock.
 6. Provider refresh and authorization-code exchange remain inside that transaction until the matching local commit succeeds.
 7. Different credential scopes use different databases and may run concurrently.
@@ -44,7 +44,7 @@ This makes the local state transition atomic instead of reconstructing it after 
 ### SQLite credential store
 
 `src/mindroom/oauth/credential_store.py` owns the database schema, scope binding, legacy adoption, transaction admission, payload encoding, revision updates, reset receipts, file permissions, and SQLite durability settings.
-The store uses rollback-journal mode, `synchronous=EXTRA`, a zero SQLite busy timeout, and cancellable asynchronous retry around lock admission.
+The store uses rollback-journal mode, `synchronous=EXTRA`, a zero SQLite busy timeout, and bounded cancellable asynchronous retry around lock admission.
 Commit retry remains inside the same transaction, so a reader-blocked commit never repeats provider I/O.
 The database and its directory are private to the runtime user.
 
@@ -81,8 +81,8 @@ Requester sessions are fenced during reset so captured stale state cannot reconn
 1. Resolve the canonical context.
 2. Wait cancellably for `BEGIN IMMEDIATE`.
 3. Read and validate the credential snapshot.
-4. Return without provider I/O when the credential is missing, unusable, or already current.
-5. Call the provider while retaining the transaction.
+4. Return before the provider adapter when the credential is missing or unusable.
+5. Call the provider adapter while retaining the transaction; the adapter may determine locally that refresh is unnecessary.
 6. Publish a rotation or atomically clear a terminally rejected credential.
 7. Commit once.
 
@@ -115,12 +115,12 @@ If the process stops after commit, the stable receipt and deletion recover toget
 
 ## Cancellation and crash behavior
 
-Snapshot, refresh, and reset waits are cancellable before transaction admission.
+Snapshot read-lock waits and refresh or reset write-lock waits are cancellable before transaction admission.
 Refresh becomes cancellation-safe after admission because the remote provider may rotate its grant.
 Callback admission, exchange, and commit are cancellation-safe after pending browser state is consumed.
 Reset remains cancellable through MCP teardown and SQLite lock admission.
 Cancellation during reset commit rolls the transaction back unless commit already succeeded.
-After a successful reset commit, cancellation returns the committed result.
+After a successful reset commit, the durable result remains recoverable by operation ID while cancellation propagates to the caller.
 SQLite provides the crash boundary for payload, revisions, and reset receipt together.
 
 ## Legacy adoption
@@ -130,11 +130,13 @@ Readable credentials are normalized and encoded with the active credential encry
 Unreadable encrypted ciphertext is retained as an unreadable payload so restoring the key can recover it.
 Unreadable plaintext is represented as present but without storing the secret bytes when encryption is enabled.
 Generations and reset do not decode the payload, so a corrupt credential remains resettable.
-Legacy credential and sidecar files are removed only after the SQLite adoption commit and cleanup is retried on later opens.
+Legacy credential and sidecar files are removed only after their bytes are durably adopted into SQLite.
+When encryption is enabled and a plaintext legacy credential cannot be adopted, its file remains available for operator recovery until an explicit reset or replacement commits.
+If encryption is disabled before that commit, the retained plaintext file is adopted into the unencrypted store and the legacy file is then removed.
 
 ## Verification
 
-Tests cover same-scope serialization, different-scope concurrency, cross-process lock admission, reader-blocked commit retry, cancellation at each boundary, callback and reset compare-and-swap, stable reset replay, copied-database rejection, corrupt credential reset, wrong-key recovery, private file modes, Google and GitHub client invalidation, and MCP lease retirement.
+Tests cover same-scope writer serialization, reads during in-flight provider refresh, different-scope concurrency, cross-process lock admission, reader-blocked commit retry, cancellation at each boundary, callback and reset compare-and-swap, stable reset replay, copied-database rejection, corrupt credential reset, wrong-key recovery, private file modes, Google and GitHub client invalidation, and MCP lease retirement.
 
 ## Non-goals
 

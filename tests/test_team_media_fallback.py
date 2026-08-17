@@ -42,7 +42,6 @@ from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
-from mindroom.approval_bindings import build_approval_tool_bindings
 from mindroom.approval_receipt import approval_receipt_context
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -362,7 +361,6 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
             model_name="default",
             decisions={"call-1": True},
             denial_reasons={"call-1": None},
-            tool_bindings={},
             refresh_scheduler=None,
         )
 
@@ -428,9 +426,6 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    tool_bindings = build_approval_tool_bindings(
-        [(requirement.tool_execution, tool_call_id, requirement.tool_execution.tool_name, "research")],
-    )
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     members = ResolvedExactTeamMembers(
@@ -478,7 +473,6 @@ async def test_team_continuation_executes_real_agno_confirmation(
             model_name="default",
             decisions={tool_call_id: approved},
             denial_reasons={tool_call_id: reason},
-            tool_bindings=tool_bindings,
             refresh_scheduler=None,
             history_scope=persisted_scope,
         )
@@ -587,14 +581,6 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
             model_name="default",
             decisions=decisions,
             denial_reasons=denial_reasons,
-            tool_bindings={
-                call_id: {
-                    "tool_name": "dangerous",
-                    "arguments_json": "{}",
-                    "invoking_agent": "research",
-                }
-                for call_id in decision_call_ids
-            },
             refresh_scheduler=None,
         )
 

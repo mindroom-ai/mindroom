@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
+from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -75,15 +76,23 @@ class _ResolvedOAuthResetTarget:
 def resolve_oauth_reset_target(
     provider_id: str,
     *,
-    agent_name: str,
+    agent_name: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> _ResolvedOAuthResetTarget:
     """Resolve one configured provider to the exact credential target it may reset."""
-    if agent_name not in config.agents:
+    if agent_name is None or agent_name not in config.agents:
         msg = "OAuth reset is available only during an agent request."
+        raise OAuthResetTargetError(msg)
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_sender_allowed_for_agent_credential_management(
+        requester_id,
+        agent_name=agent_name,
+        config=config,
+    ):
+        msg = "The current requester is not authorized to manage this agent's credentials."
         raise OAuthResetTargetError(msg)
 
     tool_metadata = resolved_tool_metadata_for_runtime(

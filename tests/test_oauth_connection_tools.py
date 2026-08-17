@@ -23,6 +23,7 @@ from mindroom.oauth import reset as oauth_reset
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     load_oauth_credentials_snapshot,
+    load_oauth_reset_connection_generation,
     oauth_credentials_worker_target,
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
@@ -189,13 +190,13 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable
         result = await tool.reset_oauth_connection(provider.id)
 
     intent = _reset_intent(result, provider=provider, context=context)
-    assert intent.connection_generation == "initial"
     lifecycle_context = OAuthCredentialContext(
         provider=provider,
         runtime_paths=context.runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    assert intent.connection_generation == await load_oauth_reset_connection_generation(lifecycle_context)
     with pytest.raises(OAuthProviderError, match="could not be loaded"):
         await load_oauth_credentials_snapshot(lifecycle_context)
     assert _oauth_credential_database_path(lifecycle_context).exists()

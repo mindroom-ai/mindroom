@@ -1,9 +1,5 @@
 """Pure MCP function-surface collision analysis tests."""
 
-from dataclasses import FrozenInstanceError
-
-import pytest
-
 from mindroom.mcp.function_surface import (
     MCPFunctionCollisionReport,
     MCPFunctionSurfaceSnapshot,
@@ -123,17 +119,28 @@ def test_unrelated_agent_surface_receives_no_report() -> None:
     }
 
 
-def test_snapshots_and_reports_are_frozen() -> None:
-    """Analysis inputs and outputs reject field mutation."""
-    snapshot = _snapshot(server_function_sources=(("demo", (("echo",),)),))
-    report = MCPFunctionCollisionReport(
-        agent_name="code",
-        requester_surface=None,
-        server_id="demo",
-        function_name_collisions=(("echo", "collision"),),
+def test_empty_surface_receives_no_report() -> None:
+    """An agent without MCP functions has no collision report."""
+    snapshot = _snapshot(server_function_sources=())
+
+    assert analyze_mcp_function_collisions((snapshot,)) == ()
+
+
+def test_combines_local_and_cross_server_messages_for_same_function() -> None:
+    """Each owner receives every reason that makes one function ambiguous."""
+    snapshot = _snapshot(
+        local_function_names=("echo",),
+        server_function_sources=(
+            ("alpha", (("echo",),)),
+            ("beta", (("echo",),)),
+        ),
     )
 
-    with pytest.raises(FrozenInstanceError):
-        snapshot.agent_name = "research"  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
-        report.server_id = "other"  # type: ignore[misc]
+    reports = analyze_mcp_function_collisions((snapshot,))
+
+    expected_collisions = (
+        ("echo", "MCP function name 'echo' collides across servers: alpha, beta"),
+        ("echo", "MCP function name 'echo' collides with an existing MindRoom tool function"),
+    )
+    assert {report.server_id for report in reports} == {"alpha", "beta"}
+    assert all(report.function_name_collisions == expected_collisions for report in reports)

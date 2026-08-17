@@ -312,7 +312,6 @@ async def _load_oauth_provider_credentials(
         context.credentials_manager,
         context.worker_target,
         authorization=context.oauth_authorization,
-        allowed_shared_services=_effective_allowed_shared_services(provider.credential_service, context),
     )
     provider_target = credential_context.worker_target
     if provider.requester_scoped_credentials and provider_target is None:

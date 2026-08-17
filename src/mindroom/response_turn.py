@@ -28,7 +28,6 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
-from mindroom.approval_bindings import validate_exact_approval_requirements
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -110,8 +109,6 @@ def apply_exact_approval_decisions(
     *,
     decisions: Mapping[str, bool],
     denial_reasons: Mapping[str, str | None],
-    bindings: Mapping[str, Mapping[str, object]],
-    default_agent_name: str,
 ) -> list[RunRequirement]:
     """Apply decisions only when they exactly identify one persisted call each."""
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
@@ -129,11 +126,6 @@ def apply_exact_approval_decisions(
     if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
         msg = "Paused tools no longer match the approval continuation"
         raise RuntimeError(msg)
-    validate_exact_approval_requirements(
-        pending,
-        bindings=bindings,
-        default_agent_name=default_agent_name,
-    )
     for requirement, tool_call_id in zip(pending, call_ids, strict=True):
         if decisions[tool_call_id]:
             requirement.confirm()

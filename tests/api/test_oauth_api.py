@@ -31,6 +31,7 @@ from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.mcp.errors import MCPConnectionError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
@@ -1972,14 +1973,26 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
+            unauthenticated_confirmation = client.get(reset_url, follow_redirects=False)
+            unauthenticated_reset = client.post(reset_url, follow_redirects=False)
             _login(client)
+            tampered_target = client.get(
+                reset_url.replace("agent_name=general", "agent_name=devagent"),
+                follow_redirects=False,
+            )
             confirmation = client.get(reset_url, follow_redirects=False)
             before_confirmation = _stored_oauth_credentials(provider, runtime_paths)
             confirmed = client.post(reset_url, follow_redirects=False)
             retried = client.post(reset_url, follow_redirects=False)
 
+    assert unauthenticated_confirmation.status_code == 307
+    assert unauthenticated_confirmation.headers["location"].startswith("/login")
+    assert unauthenticated_reset.status_code == 401
+    assert tampered_target.status_code == 400
     assert confirmation.status_code == 200
     assert "Reset and reconnect Test Drive" in confirmation.text
+    assert "general" in confirmation.text
+    assert "user_agent scope" in confirmation.text
     assert before_confirmation is not None
     assert before_confirmation["refresh_token"] == "old-refresh-token"
     assert confirmed.status_code == 303
@@ -2052,6 +2065,55 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     credentials = _stored_oauth_credentials(provider, runtime_paths)
     assert credentials is not None
     assert credentials["refresh_token"] == "old-refresh-token"
+
+
+def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Path) -> None:
+    """A reset link visible to another room member cannot cross requester scope."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="user_agent",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    target = oauth_reset.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.com",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            confirmation = client.get(reset_url, headers=bob_headers, follow_redirects=False)
+            reset = client.post(reset_url, headers=bob_headers, follow_redirects=False)
+
+    assert confirmation.status_code == 403
+    assert reset.status_code == 403
 
 
 def test_disconnect_invalidates_oauth_state_issued_before_reset(tmp_path: Path) -> None:
@@ -2244,7 +2306,58 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         await oauth_api.callback(provider.id, request)
 
     assert raised.value.status_code == 409
-    assert raised.value.detail == str(conflict)
+    assert raised.value.detail == (
+        "This OAuth connection changed before the request completed. Start the connection again from the dashboard."
+    )
+
+
+@pytest.mark.asyncio
+async def test_callback_hides_provider_controlled_exchange_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider response text must not escape through the callback boundary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=manager,
+        worker_scope=None,
+        agent_name=None,
+        execution_identity=None,
+    )
+    pending = SimpleNamespace(
+        agent_name=None,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        payload={"connection_generation": "generation-1"},
+        code_verifier=None,
+    )
+    provider_error = OAuthProviderError("provider-controlled-callback-secret")
+    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
+    monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
+    monkeypatch.setattr(oauth_api, "exchange_and_store_oauth_credentials", AsyncMock(side_effect=provider_error))
+    request = StarletteRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/oauth/{provider.id}/callback",
+            "query_string": b"code=test-code&state=test-state",
+            "headers": [],
+        },
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await oauth_api.callback(provider.id, request)
+
+    assert raised.value.status_code == 400
+    assert raised.value.detail == "OAuth callback could not be completed"
+    assert "provider-controlled-callback-secret" not in str(raised.value.detail)
 
 
 def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentials(
@@ -3021,7 +3134,8 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
     @asynccontextmanager
     async def failed_retirement(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
         message = "close failed"
-        raise RuntimeError(message)
+        server_id = "test-server"
+        raise MCPConnectionError(server_id, message)
         yield
 
     monkeypatch.setattr(oauth_reset_execution, "retire_mcp_oauth_request_session", failed_retirement)
@@ -3772,7 +3886,7 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
 
     assert authorize_response.status_code == 307
     assert callback_response.status_code == 409
-    assert "credential target" in callback_response.json()["detail"]
+    assert "Start the connection again from the dashboard" in callback_response.json()["detail"]
 
 
 def _config_payload_with_extra_google_agents(worker_scope: str = "user_agent") -> dict[str, Any]:
@@ -3810,11 +3924,11 @@ def _connect_token_for_devagent(provider: OAuthProvider, runtime_paths: constant
     return connect_token
 
 
-def test_connect_token_binding_setup_error_is_not_remapped_to_503(
+def test_connect_token_binding_setup_error_returns_503(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A connect-token setup failure should keep its pre-refactor exception boundary."""
+    """A connect-token setup failure should stay inside the OAuth HTTP boundary."""
     runtime_paths = _runtime_paths(
         tmp_path,
         {
@@ -3826,18 +3940,21 @@ def test_connect_token_binding_setup_error_is_not_remapped_to_503(
     api_app = _make_test_app(runtime_paths, _config_payload_with_extra_google_agents())
     provider = _fake_provider()
     connect_token = _connect_token_for_devagent(provider, runtime_paths)
-    setup_error = OAuthProviderError("connect-token binding setup failed")
+    setup_error = OAuthProviderError("provider-controlled-connect-secret")
     monkeypatch.setattr(oauth_api, "_target_binding_payload", AsyncMock(side_effect=setup_error))
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
-            with pytest.raises(OAuthProviderError, match="connect-token binding setup failed"):
-                client.get(
-                    f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=user_agent"
-                    f"&connect_token={connect_token}",
-                    follow_redirects=False,
-                )
+            response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "OAuth authorization could not be started"}
+    assert "provider-controlled-connect-secret" not in response.text
 
 
 def test_connect_token_rejects_tampered_agent_name(tmp_path: Path) -> None:

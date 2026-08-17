@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 import nio
 
 from mindroom.interactive_models import (
-    INTERACTIVE_PROMPT_KEY,  # noqa: F401
     InteractivePrompt,
     InteractiveSelection,
     interactive_prompt_content,

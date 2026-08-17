@@ -90,7 +90,6 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
     """Return a router bot wired to a narrow mocked orchestrator lifecycle."""
     bot = _agent_bot(tmp_path, agent_name="router")
     orchestrator = MagicMock()
-
     orchestrator.invalidate_agent_reply_memberships = MagicMock(
         side_effect=lambda *, reason: bot._router_reply_membership_sync.invalidate(bot.config, reason=reason),
     )

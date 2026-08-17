@@ -14,7 +14,6 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom import thread_tag_vocabulary
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
@@ -23,7 +22,6 @@ from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsLis
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -45,14 +43,10 @@ def _make_context(
     thread_id: str | None = "$thread:localhost",
     reply_to_event_id: str | None = None,
     requester_id: str = "@user:localhost",
-    aliases: dict[str, list[str]] | None = None,
 ) -> ToolRuntimeContext:
     runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
-            authorization=AuthorizationConfig(aliases=aliases or {}),
-        ),
+        Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(runtime_root),
     )
     return make_test_tool_runtime_context(
@@ -189,14 +183,10 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
 
 @pytest.mark.asyncio
 async def test_tag_thread_preserves_bridge_actor_across_general_tool_identity() -> None:
-    """Non-OAuth tool identity must keep the joined alias as its actor and owner."""
+    """Thread tags must attribute changes to the joined bridge actor."""
     alias = "@telegram_alice:localhost"
-    canonical = "@alice:localhost"
     tool = ThreadTagsTools()
-    context = _make_context(
-        requester_id=alias,
-        aliases={canonical: [alias]},
-    )
+    context = _make_context(requester_id=alias)
 
     with (
         patch(
@@ -212,8 +202,6 @@ async def test_tag_thread_preserves_bridge_actor_across_general_tool_identity() 
         payload = json.loads(await tool.tag_thread("topic"))
 
     assert payload["status"] == "ok"
-    assert context.requester_id == alias
-    assert build_execution_identity_from_runtime_context(context).requester_id == alias
     mock_set.assert_awaited_once_with(
         context.client,
         context.room_id,

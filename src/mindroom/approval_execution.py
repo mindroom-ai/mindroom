@@ -58,7 +58,6 @@ class AgentApprovalExecution:
         self,
         continuation: ApprovalContinuation,
         *,
-        resolved_config: Config | None = None,
         execution_identity: ToolExecutionIdentity,
         tool_dispatch: ToolDispatchContext,
         decisions: dict[str, bool],
@@ -66,43 +65,10 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
-        config = resolved_config or self.config()
+        config = self.config()
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
-        if tool_dispatch.execution_identity != execution_identity:
-            msg = "Approval continuation execution identity no longer matches its target"
-            raise RuntimeError(msg)
-
-        async def continue_in_context() -> CompletedApprovalRun | PausedAttempt:
-            return await self._continue_run_in_context(
-                continuation,
-                config=config,
-                execution_identity=execution_identity,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                tool_trace_collector=tool_trace_collector,
-            )
-
-        return await self.tool_runtime.run_in_context(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-            operation=lambda: run_with_tool_execution_identity(
-                execution_identity,
-                operation=continue_in_context,
-            ),
-        )
-
-    async def _continue_run_in_context(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        config: Config,
-        execution_identity: ToolExecutionIdentity,
-        decisions: dict[str, bool],
-        denial_reasons: dict[str, str | None],
-        tool_trace_collector: list[ToolTraceEntry],
-    ) -> CompletedApprovalRun | PausedAttempt:
-        """Rebuild and continue an agent inside its installed execution contexts."""
         knowledge = self.knowledge_access.for_agent(
             continuation.entity_name,
             execution_identity=execution_identity,
@@ -151,8 +117,6 @@ class AgentApprovalExecution:
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
                 denial_reasons=denial_reasons,
-                bindings=continuation.tool_bindings,
-                default_agent_name=continuation.entity_name,
             )
 
             async def continue_run() -> RunOutput:
@@ -167,7 +131,13 @@ class AgentApprovalExecution:
                 return await cast("Awaitable[RunOutput]", result)
 
             async with typing_indicator(self.client(), continuation.room_id):
-                response = await continue_run()
+                response = await self.tool_runtime.run_in_context(
+                    tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+                    operation=lambda: run_with_tool_execution_identity(
+                        tool_dispatch.execution_identity,
+                        operation=continue_run,
+                    ),
+                )
         finally:
             try:
                 ai_runtime.register_queued_notice_storage(
