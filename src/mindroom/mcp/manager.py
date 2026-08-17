@@ -172,7 +172,7 @@ def _resolved_oauth_scope(
     worker_key = worker_target.worker_key
     if not worker_key:
         msg = f"MCP OAuth provider '{provider_id}' requires a complete credential target"
-        raise OAuthProviderError(msg)
+        raise OAuthConnectionRequired(msg, provider_id=provider_id)
     routing_agent_name = worker_target.routing_agent_name if worker_scope in {"shared", "user_agent"} else None
     if worker_scope in {"shared", "user_agent"} and not routing_agent_name:
         msg = f"MCP OAuth provider '{provider_id}' requires an agent identity"

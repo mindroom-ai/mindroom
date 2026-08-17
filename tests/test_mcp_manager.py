@@ -2133,12 +2133,32 @@ async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-async def test_requestless_requester_scoped_oauth_mcp_bridges_return_connection_required(
+@pytest.mark.parametrize(
+    ("worker_scope", "expected_error"),
+    [
+        pytest.param(
+            "shared",
+            "MCP OAuth provider 'mcp_demo' requires a complete credential target",
+            id="shared",
+        ),
+        pytest.param(
+            "user",
+            "MCP OAuth provider 'mcp_demo' requires a requester identity",
+            id="user",
+        ),
+        pytest.param(
+            "user_agent",
+            "MCP OAuth provider 'mcp_demo' requires a requester identity",
+            id="user-agent",
+        ),
+    ],
+)
+async def test_requestless_incomplete_oauth_mcp_bridges_return_connection_required(
     tmp_path: Path,
     worker_scope: WorkerScope,
+    expected_error: str,
 ) -> None:
-    """Requester-scoped bridge calls without a requester must return their structured recovery payload."""
+    """Bridge calls without a complete scope target must return their structured recovery payload."""
     runtime_paths = _runtime_paths(tmp_path)
     server_config = _oauth_mcp_config()
     manager = MCPServerManager(runtime_paths)
@@ -2161,7 +2181,7 @@ async def test_requestless_requester_scoped_oauth_mcp_bridges_return_connection_
         for function_name, kwargs in calls.items():
             payload = json.loads(await toolkit.get_async_functions()[function_name].entrypoint(**kwargs))
             assert payload == {
-                "error": "MCP OAuth provider 'mcp_demo' requires a requester identity",
+                "error": expected_error,
                 "oauth_connection_required": True,
                 "provider": "mcp_demo",
                 "connect_url": None,
@@ -2171,7 +2191,7 @@ async def test_requestless_requester_scoped_oauth_mcp_bridges_return_connection_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
 async def test_requestless_oauth_scope_does_not_block_unrelated_dynamic_tool_load(
     tmp_path: Path,
     worker_scope: WorkerScope,
