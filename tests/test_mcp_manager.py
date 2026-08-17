@@ -2960,6 +2960,133 @@ async def test_mcp_manager_shutdown_is_terminal_for_later_sync(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reload_kind", ["agent_removed", "tool_removed", "scope_changed"])
+async def test_mcp_config_reload_retires_unreachable_oauth_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reload_kind: str,
+) -> None:
+    """Hot reload should close a scoped OAuth session after its configured access disappears."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    initial_config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "shared",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    worker_target = _shared_worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(initial_config)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    base_state = manager._states["demo"]
+    scoped_state = next(iter(manager._scoped_states.values()))
+    session = scoped_state.session
+    assert isinstance(session, _FakeClientSession)
+
+    reloaded_agents: dict[str, object]
+    if reload_kind == "agent_removed":
+        reloaded_agents = {}
+    else:
+        reloaded_agents = {
+            "code": {
+                "display_name": "Code",
+                "role": "Use MCP",
+                "tools": [] if reload_kind == "tool_removed" else ["mcp_demo"],
+                "worker_scope": "shared" if reload_kind == "tool_removed" else "user",
+            },
+        }
+    reloaded_config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "agents": reloaded_agents,
+        },
+        runtime_paths,
+    )
+
+    try:
+        await manager.sync_servers(reloaded_config)
+
+        assert manager._states["demo"] is base_state
+        assert manager._scoped_states == {}
+        assert manager._retiring_states == {}
+        assert scoped_state.retired is True
+        assert session.closed is True
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_config_reload_keeps_user_scope_reachable_from_another_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A requester-wide session should survive while another user-scoped agent can use it."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+
+    def config_for_agents(agent_names: tuple[str, ...]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "defaults": {"tools": []},
+                "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+                "agents": {
+                    agent_name: {
+                        "display_name": agent_name.title(),
+                        "role": "Use MCP",
+                        "tools": ["mcp_demo"],
+                        "worker_scope": "user",
+                    }
+                    for agent_name in agent_names
+                },
+            },
+            runtime_paths,
+        )
+
+    worker_target = _worker_target("@alice:example.test", agent_name="code")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config_for_agents(("code", "research")))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+    scoped_state = next(iter(manager._scoped_states.values()))
+    session = scoped_state.session
+    assert isinstance(session, _FakeClientSession)
+
+    try:
+        await manager.sync_servers(config_for_agents(("research",)))
+
+        assert tuple(manager._scoped_states.values()) == (scoped_state,)
+        assert scoped_state.retired is False
+        assert session.closed is False
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_shutdown_drains_every_state_when_one_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

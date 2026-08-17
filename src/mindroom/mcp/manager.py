@@ -40,6 +40,7 @@ from mindroom.mcp.surface_projection import (
     function_collision_messages,
     function_collision_reports,
     mcp_tool_unavailable_messages,
+    scoped_oauth_state_has_configured_agent,
 )
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import (
@@ -290,6 +291,34 @@ class MCPServerManager:
             changed_server_ids.difference_update(self.failed_server_ids())
             return changed_server_ids
 
+    def _track_retiring_state(
+        self,
+        state: MCPServerState,
+        retired_states: list[MCPServerState],
+    ) -> None:
+        """Detach one state into the manager-owned retirement set."""
+        if state.retired:
+            return
+        state.retired = True
+        self._retiring_states[id(state)] = state
+        retired_states.append(state)
+
+    def _retire_unreachable_scoped_states(
+        self,
+        config: Config,
+        retired_states: list[MCPServerState],
+    ) -> None:
+        """Detach scoped OAuth states with no agent access in the published config."""
+        for key, scoped_state in tuple(self._scoped_states.items()):
+            scoped = MCPScopedFunctionState(
+                credential_surface=(key.worker_scope, key.worker_key),
+                state=scoped_state,
+            )
+            if scoped_oauth_state_has_configured_agent(config, scoped):
+                continue
+            self._scoped_states.pop(key)
+            self._track_retiring_state(scoped_state, retired_states)
+
     async def _publish_server_config(
         self,
         config: Config,
@@ -297,13 +326,6 @@ class MCPServerManager:
     ) -> list[MCPServerState] | None:
         """Atomically replace changed base generations and detach their scoped sessions."""
         retired_states: list[MCPServerState] = []
-
-        def retire_state(state: MCPServerState) -> None:
-            if state.retired:
-                return
-            state.retired = True
-            self._retiring_states[id(state)] = state
-            retired_states.append(state)
 
         async with self._state_lifecycle_lock:
             if self._shutdown:
@@ -323,11 +345,12 @@ class MCPServerManager:
                 ):
                     continue
                 self._states.pop(server_id)
-                retire_state(state)
+                self._track_retiring_state(state, retired_states)
                 for key, scoped_state in tuple(self._scoped_states.items()):
                     if key.server_id == server_id:
                         self._scoped_states.pop(key)
-                        retire_state(scoped_state)
+                        self._track_retiring_state(scoped_state, retired_states)
+            self._retire_unreachable_scoped_states(config, retired_states)
             for server_id, server_config in desired_servers.items():
                 if server_id in self._states:
                     continue

@@ -37,6 +37,7 @@ __all__ = [
     "function_collision_messages",
     "function_collision_reports",
     "mcp_tool_unavailable_messages",
+    "scoped_oauth_state_has_configured_agent",
 ]
 
 logger = get_logger(__name__)
@@ -98,6 +99,25 @@ def _scoped_state_is_visible_to_agent(
     if credential_execution_scope != agent_execution_scope:
         return False
     return worker_scope not in {"shared", "user_agent"} or scoped.state.oauth_routing_agent_name == agent_name
+
+
+def scoped_oauth_state_has_configured_agent(
+    config: Config,
+    scoped: MCPScopedFunctionState,
+) -> bool:
+    """Return whether any configured agent can still reach one scoped OAuth state."""
+    tool_name = mcp_tool_name(scoped.state.server_id)
+    for agent_name in config.agents:
+        entity = config.resolve_entity(agent_name)
+        if tool_name not in entity.available_tools:
+            continue
+        if _scoped_state_is_visible_to_agent(
+            scoped,
+            agent_name,
+            agent_execution_scope=entity.execution_scope,
+        ):
+            return True
+    return False
 
 
 def _configured_tool_configs(
