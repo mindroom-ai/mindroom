@@ -478,8 +478,9 @@ class ScopedOAuthClientMixin:
             snapshot=dict(token_data),
         )
 
-        def tracked_refresh(request: object) -> None:
-            self._refresh_google_credentials(credentials, refresh_state, request)
+        def tracked_refresh(_request: object) -> None:
+            # AuthorizedHttp's API transport has a longer timeout than the credential lock budget.
+            self._refresh_google_credentials(credentials, refresh_state)
 
         credentials.refresh = tracked_refresh
         original_before_request = credentials.before_request
@@ -495,7 +496,6 @@ class ScopedOAuthClientMixin:
         self,
         credentials: Any,  # noqa: ANN401
         state: _GoogleRefreshState,
-        request: object,
     ) -> None:
         """Serialize one client's provider refresh and local credential publication."""
         observed_completion_generation = state.refresh_completion_generation
@@ -506,7 +506,7 @@ class ScopedOAuthClientMixin:
                 if state.last_failure is not None:
                     self._raise_google_refresh_failure(state.last_failure)
             try:
-                self._refresh_google_credentials_locked(credentials, state, request)
+                self._refresh_google_credentials_locked(credentials, state)
             finally:
                 state.refresh_completion_generation += 1
 
@@ -514,7 +514,6 @@ class ScopedOAuthClientMixin:
         self,
         credentials: Any,  # noqa: ANN401
         state: _GoogleRefreshState,
-        request: object,
     ) -> None:
         """Refresh and publish while holding one materialized client's refresh lock."""
         state.last_succeeded = False
@@ -522,7 +521,7 @@ class ScopedOAuthClientMixin:
         triggering_snapshot = dict(state.snapshot)
 
         def refresh_if_unchanged(current: Mapping[str, Any]) -> dict[str, Any] | None:
-            return self._refresh_google_token_if_snapshot_current(current, triggering_snapshot, request)
+            return self._refresh_google_token_if_snapshot_current(current, triggering_snapshot)
 
         context = state.context
         try:
@@ -570,14 +569,13 @@ class ScopedOAuthClientMixin:
         self,
         current: Mapping[str, Any],
         triggering_snapshot: Mapping[str, Any],
-        request: object,
     ) -> dict[str, Any] | None:
-        """Refresh only the bearer that triggered this provider retry."""
+        """Refresh only the triggering bearer through the bounded token transport."""
         if dict(current) != dict(triggering_snapshot):
             return None
         if not current.get("refresh_token"):
             raise _GoogleRefreshGrantMissingError
-        return self._refresh_google_token_data(current, request, force=True)
+        return self._refresh_google_token_data(current, _google_refresh_request(), force=True)
 
     def _raise_google_refresh_failure(self, failure: _GoogleRefreshFailure) -> NoReturn:
         """Replay one sanitized refresh outcome to the current caller thread."""

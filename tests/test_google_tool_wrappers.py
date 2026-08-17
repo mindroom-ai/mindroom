@@ -568,6 +568,76 @@ def test_google_refresh_request_bounds_provider_io(monkeypatch: pytest.MonkeyPat
     assert captured["timeout"] == 20.0
 
 
+def test_google_authorized_http_lazy_refresh_uses_bounded_provider_request(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A resource 401 must not reuse the longer-lived API transport for token refresh."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    save_scoped_credentials(
+        GoogleDriveTools._oauth_provider.credential_service,
+        {
+            "token": "retained-access-token",
+            "refresh_token": "retained-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(GoogleDriveTools._oauth_provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": GoogleDriveTools._oauth_provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    captured_timeouts: list[object] = []
+
+    class _BoundedRequest:
+        def __call__(self, **kwargs: object) -> object:
+            captured_timeouts.append(kwargs.get("timeout"))
+            return object()
+
+    monkeypatch.setattr(oauth_client_module.google_requests, "Request", _BoundedRequest)
+
+    def rotate(credentials: GoogleOAuthCredentials, request: Callable[..., object]) -> None:
+        request(url="https://oauth2.googleapis.com/token", method="POST")
+        credentials.token = "rotated-access-token"  # noqa: S105
+        credentials.expiry = datetime.fromtimestamp(4_102_444_800.0, tz=UTC)
+
+    monkeypatch.setattr(GoogleOAuthCredentials, "refresh", rotate)
+    tracked_http = tool._google_authorized_http(tool.creds)
+    resource_calls = 0
+
+    def return_response(uri: str, *_args: object, **_kwargs: object) -> tuple[object, bytes]:
+        nonlocal resource_calls
+        if uri == "https://oauth2.googleapis.com/token":
+            return SimpleNamespace(status=200), b"token-response"
+        resource_calls += 1
+        return SimpleNamespace(status=401 if resource_calls == 1 else 200), b"resource-response"
+
+    tracked_http.http.request = return_response
+
+    response, _content = tracked_http.request("https://www.googleapis.com/example")
+
+    assert response.status == 200
+    assert resource_calls == 2
+    assert captured_timeouts == [20.0]
+
+
 @pytest.mark.parametrize(
     ("tool_class", "operation"),
     [
