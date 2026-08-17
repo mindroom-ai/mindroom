@@ -168,7 +168,10 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 
 # Constants
-_SYNC_TIMEOUT_MS = 30000
+# Clean restart waits for one final source response before cancelling the
+# receive loop. Keep that poll comfortably inside the 15-second restart budget
+# so shutdown still leaves time for the replacement to boot and authenticate.
+_SYNC_TIMEOUT_MS = 5_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
 _LOCAL_MEMBERSHIP_OPERATION_NAMESPACE = UUID(

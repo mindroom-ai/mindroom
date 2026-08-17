@@ -18,6 +18,7 @@ from nio.ingest.config import ClassicSourceConfig, SlidingSourceConfig
 from nio.ingest.model import TransportKind
 from nio.store._sync_journal_values import _FrameCompletion
 
+from mindroom import bot as bot_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -149,6 +150,12 @@ def test_bot_ingestion_config_freezes_existing_transport_settings(
         ),
         extensions_json=(b'{"account_data":{"enabled":true},"e2ee":{"enabled":true},"to_device":{"enabled":true}}'),
     )
+
+
+def test_owned_source_poll_fits_the_clean_restart_budget() -> None:
+    """One final quiesce poll must leave time to boot inside the 15-second gate."""
+    assert bot_module._SYNC_TIMEOUT_MS == 5_000
+    assert bot_module._SYNC_TIMEOUT_MS < 15_000
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -294,7 +301,7 @@ class TestAgentBot(AgentBotTestBase):
         assert login_kwargs["completion_sink"] == bot._on_ingestion_frame_completion
         ingestion_config = login_kwargs["config"]
         assert type(ingestion_config.source) is ClassicSourceConfig
-        assert ingestion_config.source.timeout_ms == 30_000
+        assert ingestion_config.source.timeout_ms == 5_000
         assert ingestion_config.source.filter_json == b'{"room":{"timeline":{"limit":50}}}'
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         # The owned ingestion pump is the sole durable source owner. The
