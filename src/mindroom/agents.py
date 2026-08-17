@@ -609,7 +609,7 @@ def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name
     """Project requester MCP catalogs against the exact session-local tool surface."""
     for server_id, function_names in hide_mcp_catalog_function_collisions(toolkits).items():
         logger.warning(
-            "Hiding MCP catalog functions shadowed by session-loaded local tools",
+            "Hiding colliding MCP catalog functions from session tool surface",
             agent=agent_name,
             server_id=server_id,
             function_names=list(function_names),

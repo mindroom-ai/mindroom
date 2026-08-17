@@ -1696,14 +1696,16 @@ class MCPServerManager:
         requester_surface: tuple[str, str] | None,
     ) -> tuple[MCPServerState, ...]:
         """Return only states whose visible function surface owns one collision."""
+        base_state = self._states.get(server_id)
         if requester_surface is None:
-            state = self._states.get(server_id)
-            return (state,) if state is not None else ()
-        return tuple(
+            return (base_state,) if base_state is not None else ()
+        states = [base_state] if base_state is not None and base_state.config.auth is None else []
+        states.extend(
             state
             for key, state in self._scoped_states.items()
             if key.server_id == server_id and (key.worker_scope, key.worker_key) == requester_surface
         )
+        return tuple(states)
 
     async def _disconnect_function_validation_states(self, states: tuple[MCPServerState, ...]) -> None:
         """Drain sessions whose catalogs were already hidden by validation."""

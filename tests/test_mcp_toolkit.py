@@ -12,7 +12,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_catalog_function_collisions
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -555,3 +555,70 @@ def test_mcp_toolkit_rejects_duplicate_function_names() -> None:
                 ),
             ),
         )
+
+
+def test_final_projection_hides_cross_mcp_catalog_collisions(tmp_path: Path) -> None:
+    """Late requester catalogs must not expose the same function from two MCP toolkits."""
+    function_name = "foo_bar_baz"
+    alpha_catalog = MCPServerCatalog(
+        server_id="alpha",
+        tool_name="mcp_alpha",
+        tool_prefix="foo",
+        tools=(
+            MCPDiscoveredTool(
+                remote_name="bar_baz",
+                function_name=function_name,
+                description="Alpha",
+                input_schema={"type": "object", "properties": {}},
+                output_schema=None,
+            ),
+        ),
+        instructions=None,
+        catalog_hash="alpha-hash",
+    )
+    beta_catalog = MCPServerCatalog(
+        server_id="beta",
+        tool_name="mcp_beta",
+        tool_prefix="foo_bar",
+        tools=(
+            MCPDiscoveredTool(
+                remote_name="baz",
+                function_name=function_name,
+                description="Beta",
+                input_schema={"type": "object", "properties": {}},
+                output_schema=None,
+            ),
+        ),
+        instructions=None,
+        catalog_hash="beta-hash",
+    )
+    worker_target = _worker_target()
+    alpha = MindRoomMCPToolkit(
+        server_id="alpha",
+        manager=_OAuthRequiredManager(alpha_catalog),
+        catalog=None,
+        server_config=_oauth_server_config().model_copy(update={"tool_prefix": "foo"}),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "alpha-credentials"),
+        worker_target=worker_target,
+    )
+    beta = MindRoomMCPToolkit(
+        server_id="beta",
+        manager=_OAuthRequiredManager(beta_catalog),
+        catalog=None,
+        server_config=_oauth_server_config().model_copy(update={"tool_prefix": "foo_bar"}),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "beta-credentials"),
+        worker_target=worker_target,
+    )
+
+    hidden = hide_mcp_catalog_function_collisions([alpha, beta])
+
+    assert hidden == {
+        "alpha": (function_name,),
+        "beta": (function_name,),
+    }
+    assert function_name not in alpha.async_functions
+    assert function_name not in beta.async_functions
+    assert "foo_list_tools" in alpha.async_functions
+    assert "foo_bar_list_tools" in beta.async_functions

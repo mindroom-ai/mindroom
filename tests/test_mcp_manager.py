@@ -3184,6 +3184,67 @@ async def test_mcp_manager_marks_collision_introduced_by_later_sync_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_non_oauth_refresh_rejects_existing_requester_catalog_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A base catalog published second must fail and drain both collision owners."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "shared",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    _FakeClientSession.tool_list = [_tool("safe")]
+    assert await manager.sync_servers(config) == {"other"}
+
+    _FakeClientSession.tool_list = [_tool("echo")]
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    oauth_state = next(state for state in manager._scoped_states.values() if state.server_id == "demo")
+    oauth_session = oauth_state.session
+    assert isinstance(oauth_session, _FakeClientSession)
+
+    manager._states["other"].stale = True
+    assert await manager.sync_servers(config) == set()
+
+    other_state = manager._states["other"]
+    assert isinstance(other_state.last_error, MCPProtocolError)
+    assert isinstance(oauth_state.last_error, MCPProtocolError)
+    assert other_state.catalog is None
+    assert oauth_state.catalog is None
+    assert other_state.session is None
+    assert oauth_state.session is None
+    assert oauth_session.closed is True
+    assert _FakeClientSession.sessions[-1].closed is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("operation", "message"),
     [

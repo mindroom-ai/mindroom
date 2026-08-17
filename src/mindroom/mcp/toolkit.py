@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -49,13 +50,19 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
 
 
 def hide_mcp_catalog_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
-    """Hide requester-catalog functions shadowed by local tools in this exact runtime projection."""
+    """Hide requester-catalog functions colliding in this exact runtime projection."""
     local_function_names = {
         function_name
         for toolkit in toolkits
         if not isinstance(toolkit, MindRoomMCPToolkit)
         for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
+    mcp_function_name_counts = Counter(
+        function_name
+        for toolkit in toolkits
+        if isinstance(toolkit, MindRoomMCPToolkit)
+        for function_name in {*toolkit.get_functions(), *toolkit.get_async_functions()}
+    )
     hidden_by_server: dict[str, tuple[str, ...]] = {}
     for toolkit in toolkits:
         if not isinstance(toolkit, MindRoomMCPToolkit) or toolkit.catalog is None:
@@ -63,12 +70,19 @@ def hide_mcp_catalog_function_collisions(toolkits: list[Toolkit]) -> dict[str, t
         catalog_function_names = {
             tool.function_name for tool in toolkit._filtered_tools() if tool.function_name in toolkit.async_functions
         }
-        hidden = tuple(sorted(local_mcp_function_name_collisions(local_function_names, catalog_function_names)))
+        hidden = tuple(
+            sorted(
+                local_mcp_function_name_collisions(local_function_names, catalog_function_names)
+                | {name for name in catalog_function_names if mcp_function_name_counts[name] > 1},
+            ),
+        )
         if not hidden:
             continue
         for function_name in hidden:
             toolkit.async_functions.pop(function_name)
-        hidden_by_server[toolkit.server_id] = hidden
+        hidden_by_server[toolkit.server_id] = tuple(
+            sorted(set(hidden_by_server.get(toolkit.server_id, ())) | set(hidden)),
+        )
     return hidden_by_server
 
 
