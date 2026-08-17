@@ -15,6 +15,7 @@ from agno.tools import github as agno_github_module
 from agno.tools.github import GithubTools as AgnoGithubTools
 from agno.utils import log as agno_log_module
 from github import Auth, Github, GithubException
+from github.GithubRetry import GithubRetry
 from github.Requester import Requester
 
 from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
@@ -42,6 +43,11 @@ from mindroom.oauth.service import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import TracebackType
+
+    from urllib3.connectionpool import ConnectionPool
+    from urllib3.response import HTTPResponse
+    from urllib3.util.retry import Retry
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -100,6 +106,48 @@ class _GithubProviderFailureRequester(Requester):
         return exception
 
 
+class _GithubProviderFailureRetry(GithubRetry):
+    """Capture provider failures raised directly by PyGithub retry handling."""
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: HTTPResponse | None = None,
+        error: Exception | None = None,
+        _pool: ConnectionPool | None = None,
+        _stacktrace: TracebackType | None = None,
+    ) -> Retry:
+        try:
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+        except GithubException as exc:
+            _record_github_provider_failure(exc)
+            raise
+
+
+def _github_provider_failure_retry(retry: GithubRetry) -> _GithubProviderFailureRetry:
+    return _GithubProviderFailureRetry(
+        secondary_rate_wait=retry.secondary_rate_wait,
+        total=retry.total,
+        connect=retry.connect,
+        read=retry.read,
+        redirect=retry.redirect,
+        status=retry.status,
+        other=retry.other,
+        allowed_methods=retry.allowed_methods,
+        status_forcelist=[status for status in retry.status_forcelist if status != 403],
+        backoff_factor=retry.backoff_factor,
+        backoff_max=retry.backoff_max,
+        retry_after_max=retry.retry_after_max,
+        raise_on_redirect=retry.raise_on_redirect,
+        raise_on_status=retry.raise_on_status,
+        history=retry.history,
+        remove_headers_on_redirect=retry.remove_headers_on_redirect,
+        respect_retry_after_header=retry.respect_retry_after_header,
+        backoff_jitter=retry.backoff_jitter,
+    )
+
+
 class _GithubRequesterOwner(Protocol):
     _Github__requester: Requester
 
@@ -107,16 +155,23 @@ class _GithubRequesterOwner(Protocol):
 def _install_github_provider_failure_capture(client: Github) -> Github:
     requester_owner = cast(_GithubRequesterOwner, client)  # noqa: TC006
     original_requester = requester_owner._Github__requester
-    requester_owner._Github__requester = _GithubProviderFailureRequester(**original_requester.kwargs)
+    requester_kwargs = original_requester.kwargs
+    retry = requester_kwargs["retry"]
+    if isinstance(retry, GithubRetry):
+        requester_kwargs["retry"] = _github_provider_failure_retry(retry)
+    requester_owner._Github__requester = _GithubProviderFailureRequester(**requester_kwargs)
     original_requester.close()
     return client
 
 
-class _SanitizeAgnoGithubLogFilter(logging.Filter):
+class _SanitizeGithubProviderLogFilter(logging.Filter):
     """Remove provider-controlled GitHub exception text before log rendering."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.exc_info is not None:
+        if record.name == "github.GithubRetry":
+            record.msg = "GitHub provider retry detail suppressed"
+            record.args = ()
+        elif record.exc_info is not None:
             _exception_type, exception, _traceback = record.exc_info
             if isinstance(exception, GithubException):
                 status_code = _github_exception_status_code(exception)
@@ -132,20 +187,21 @@ class _SanitizeAgnoGithubLogFilter(logging.Filter):
         return True
 
 
-def _install_agno_github_log_sanitizers() -> None:
+def _install_github_log_sanitizers() -> None:
     upstream_loggers = {
         agno_github_module.logger,
         agno_log_module.logger,
         agno_log_module.agent_logger,
         agno_log_module.team_logger,
         agno_log_module.workflow_logger,
+        logging.getLogger("github.GithubRetry"),
     }
     for upstream_logger in upstream_loggers:
-        if not any(isinstance(log_filter, _SanitizeAgnoGithubLogFilter) for log_filter in upstream_logger.filters):
-            upstream_logger.addFilter(_SanitizeAgnoGithubLogFilter())
+        if not any(isinstance(log_filter, _SanitizeGithubProviderLogFilter) for log_filter in upstream_logger.filters):
+            upstream_logger.addFilter(_SanitizeGithubProviderLogFilter())
 
 
-_install_agno_github_log_sanitizers()
+_install_github_log_sanitizers()
 
 
 class _GithubThreadState(threading.local):
@@ -177,6 +233,16 @@ def _normalized_access_token(value: object) -> str | None:
 def _sanitized_github_exception_result(exc: GithubException) -> str:
     _record_github_provider_failure(exc)
     return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+
+
+def _is_serialized_github_error_result(result: object) -> bool:
+    if not isinstance(result, str):
+        return False
+    try:
+        payload = json.loads(result)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and set(payload) == {"error"} and isinstance(payload["error"], str)
 
 
 class GithubTools(AgnoGithubTools):
@@ -324,7 +390,7 @@ class GithubTools(AgnoGithubTools):
                     provider_failure = _github_provider_failure.get()
                 finally:
                     _github_provider_failure.reset(failure_token)
-                if provider_failure is None:
+                if provider_failure is None or not _is_serialized_github_error_result(result):
                     return result
                 status_code = provider_failure.status_code
                 logger.warning(

@@ -365,19 +365,20 @@ def _script_json(value: object) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
 
-def _oauth_browser_conflict_response(message: str) -> HTMLResponse:
-    """Render a browser-readable conflict without exposing a raw API payload."""
+def _oauth_browser_error_response(message: str, *, status_code: int) -> HTMLResponse:
+    """Render a browser-readable OAuth error without exposing a raw API payload."""
+    title = "OAuth connection changed" if status_code == 409 else "OAuth reset unavailable"
     escaped_message = escape(message)
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><title>OAuth connection changed</title></head>
+  <head><meta charset="utf-8"><title>{title}</title></head>
   <body>
-    <h1>OAuth connection changed</h1>
+    <h1>{title}</h1>
     <p>{escaped_message}</p>
   </body>
 </html>""",
-        status_code=409,
+        status_code=status_code,
     )
 
 
@@ -440,9 +441,9 @@ async def confirm_reset(
     login_redirect = await _require_oauth_browser_user(request)
     if login_redirect is not None:
         return login_redirect
-    provider, runtime_paths = _load_provider(request, provider_id)
-    intent = _browser_reset_intent(provider, runtime_paths, reset_token)
     try:
+        provider, runtime_paths = _load_provider(request, provider_id)
+        intent = _browser_reset_intent(provider, runtime_paths, reset_token)
         _verify_browser_reset_intent(
             request,
             provider,
@@ -452,9 +453,7 @@ async def confirm_reset(
             execution_scope=execution_scope,
         )
     except HTTPException as exc:
-        if exc.status_code == 409:
-            return _oauth_browser_conflict_response(str(exc.detail))
-        raise
+        return _oauth_browser_error_response(str(exc.detail), status_code=exc.status_code)
     display_name = escape(provider.display_name)
     target_agent = escape(intent.binding.requested_agent_name or "unknown")
     target_scope = escape(intent.binding.worker_scope)
@@ -496,7 +495,7 @@ async def reset_and_authorize(
         )
     except HTTPException as exc:
         if exc.status_code == 409:
-            return _oauth_browser_conflict_response(str(exc.detail))
+            return _oauth_browser_error_response(str(exc.detail), status_code=409)
         raise
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
@@ -516,7 +515,7 @@ async def reset_and_authorize(
             agent_name=agent_name,
         )
     except OAuthCredentialConflictError:
-        return _oauth_browser_conflict_response(_OAUTH_STALE_CONNECTION_MESSAGE)
+        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409)
     except OAuthResetPreparationError as exc:
         logger.warning(
             "oauth_connection_reset_preparation_failed",
@@ -621,10 +620,10 @@ async def callback(provider_id: str, request: Request) -> Response:
         )
     except HTTPException as exc:
         if exc.status_code == 409:
-            return _oauth_browser_conflict_response(str(exc.detail))
+            return _oauth_browser_error_response(str(exc.detail), status_code=409)
         raise
     except OAuthCredentialConflictError:
-        return _oauth_browser_conflict_response(_OAUTH_STALE_CONNECTION_MESSAGE)
+        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409)
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

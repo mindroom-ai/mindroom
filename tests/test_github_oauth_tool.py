@@ -14,7 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +22,7 @@ from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
 from github import BadCredentialsException, Github, GithubException
 from github.Requester import Requester
+from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -39,6 +40,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from urllib3.util.retry import Retry
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
@@ -202,6 +205,34 @@ class _NestedProviderFailureGithub:
         return _NestedProviderFailureRepository(self.sentinel)
 
 
+class _CapturedNestedProviderFailureRepository(_FakeRepositoryStats):
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+
+    def get_issues(self, *, state: str) -> list[object]:
+        assert state == "open"
+        raise mindroom_github_module._GithubProviderFailureRequester.createException(
+            self.status_code,
+            {},
+            {"message": self.sentinel},
+        )
+
+
+class _CapturedNestedProviderFailureGithub:
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+        self.closed = False
+
+    def get_repo(self, repo_name: str) -> _CapturedNestedProviderFailureRepository:
+        assert repo_name == "example/project"
+        return _CapturedNestedProviderFailureRepository(self.status_code, self.sentinel)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @dataclass(frozen=True)
 class _FakeContentWriteResult:
     path: str = "notes.txt"
@@ -342,6 +373,27 @@ class _ProviderControlledFailureGithub:
 
     def get_pulls(self, **_kwargs: object) -> _FakePullsWithoutTotal:
         self._raise_provider_error()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RetryProviderFailureGithub:
+    def __init__(self, retry: Retry, sentinel: str) -> None:
+        self.retry = retry
+        self.sentinel = sentinel
+        self.closed = False
+
+    def get_user(self) -> Never:
+        response = HTTPResponse(
+            body=json.dumps({"message": self.sentinel}).encode(),
+            status=403,
+            headers={},
+            reason=self.sentinel,
+            preload_content=False,
+        )
+        self.retry.increment(method="GET", url="/user/repos", response=response)
+        raise AssertionError
 
     def close(self) -> None:
         self.closed = True
@@ -782,6 +834,34 @@ def test_github_partial_results_do_not_log_nested_provider_details(tmp_path: Pat
     assert json.loads(result)["actual_open_issues"] is None
     assert sentinel not in result
     assert sentinel not in agno_log_output.getvalue()
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_github_captured_nested_failure_preserves_partial_result(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    managed_access_token = "managed-access"  # noqa: S105
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials(managed_access_token),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = f"provider-controlled-nested-secret-{status_code}"
+    tool.g = _CapturedNestedProviderFailureGithub(status_code, sentinel)
+
+    result = tool.get_repository_with_stats("example/project")
+
+    payload = json.loads(result)
+    assert payload["full_name"] == "example/project"
+    assert payload["actual_open_issues"] is None
+    assert sentinel not in result
+    assert tool.access_token == managed_access_token
 
 
 def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) -> None:
@@ -1226,6 +1306,39 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
 
     assert json.loads(result) == {"error": "GitHub request failed"}
     assert sentinel not in result
+
+
+def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retry-raised provider failures must use the same typed sanitization boundary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    client = tool.authenticate()
+    retry = cast("Retry", client._Github__requester.kwargs["retry"])
+    client.close()
+    sentinel = "provider-controlled-retry-secret-with-logging-disabled"
+    tool.g = _RetryProviderFailureGithub(retry, sentinel)
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
+    assert sentinel not in caplog.text
 
 
 def test_github_wrapper_preserves_local_validation_error(tmp_path: Path) -> None:

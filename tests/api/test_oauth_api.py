@@ -1997,7 +1997,11 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert unauthenticated_confirmation.headers["location"].startswith("/login")
     assert unauthenticated_reset.status_code == 401
     assert tampered_target.status_code == 400
+    assert tampered_target.headers["content-type"].startswith("text/html")
+    assert '"detail"' not in tampered_target.text
     assert tampered_scope.status_code == 400
+    assert tampered_scope.headers["content-type"].startswith("text/html")
+    assert '"detail"' not in tampered_scope.text
     assert tampered_scope_post.status_code == 400
     assert confirmation.status_code == 200
     assert "Reset and reconnect Test Drive" in confirmation.text
@@ -2209,6 +2213,8 @@ def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Pat
             reset = client.post(reset_url, headers=bob_headers, follow_redirects=False)
 
     assert confirmation.status_code == 403
+    assert confirmation.headers["content-type"].startswith("text/html")
+    assert '"detail"' not in confirmation.text
     assert reset.status_code == 403
 
 

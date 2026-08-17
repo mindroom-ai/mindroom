@@ -3519,6 +3519,56 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_warns_when_recovery_transitions_from_transport_failure_to_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newly discovered collision must replace the prior transport warning visibly."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["shell", "mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
+    await manager._record_discovery_failure(
+        state,
+        MCPConnectionError("demo", "MCP operation failed: transport unavailable"),
+    )
+    await manager._cancel_refresh_task(state)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+
+    changed = await manager._refresh_server_catalog(state, notify=False)
+
+    assert changed is False
+    assert state.function_validation_error is True
+    assert [event for event, _kwargs in logger.warning_calls if event == "MCP server discovery failed"] == [
+        "MCP server discovery failed",
+        "MCP server discovery failed",
+    ]
+    assert [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"] == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_failed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

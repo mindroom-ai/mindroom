@@ -1156,12 +1156,16 @@ class MCPServerManager:
                 server_id=state.server_id,
                 error_type=type(close_error).__name__,
             )
+        function_validation_error = isinstance(error, _MCPFunctionValidationError)
         repeated_error = (
-            state.consecutive_failures > 0 and state.last_error is not None and str(state.last_error) == str(error)
+            not function_validation_error
+            and state.consecutive_failures > 0
+            and state.last_error is not None
+            and str(state.last_error) == str(error)
         )
         state.connected = False
         state.catalog = None
-        state.function_validation_error = isinstance(error, _MCPFunctionValidationError)
+        state.function_validation_error = function_validation_error
         state.consecutive_failures += 1
         state.last_error = error
         self._log_discovery_failure(state, error, repeated_error=repeated_error)
