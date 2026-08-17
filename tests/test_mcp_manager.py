@@ -3349,6 +3349,62 @@ async def test_mcp_manager_marks_oauth_bridge_function_name_collisions_as_failed
 
 
 @pytest.mark.asyncio
+async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path: Path) -> None:
+    """Failed OAuth bridge collisions must not survive the final agent projection."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": oauth_server.model_dump(exclude_none=True),
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    await manager.sync_servers(config)
+    worker_target = _worker_target("@alice:example.test")
+
+    bind_mcp_server_manager(manager)
+    try:
+        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                include_interactive_questions=False,
+            )
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    function_names = [
+        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
+    ]
+    assert "shared_connection_status" not in function_names
+    assert "shared_list_tools" not in function_names
+    assert "shared_call_tool" not in function_names
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_failed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

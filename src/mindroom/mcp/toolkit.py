@@ -49,37 +49,35 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     return normalized or None
 
 
-def hide_mcp_catalog_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
-    """Hide requester-catalog functions colliding in this exact runtime projection."""
+def hide_mcp_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
+    """Hide MCP functions colliding in this exact runtime projection."""
     local_function_names = {
         function_name
         for toolkit in toolkits
         if not isinstance(toolkit, MindRoomMCPToolkit)
         for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
     }
-    mcp_function_name_counts = Counter(
-        function_name
+    mcp_toolkit_function_names = [
+        (toolkit, {*toolkit.get_functions(), *toolkit.get_async_functions()})
         for toolkit in toolkits
         if isinstance(toolkit, MindRoomMCPToolkit)
-        for function_name in {*toolkit.get_functions(), *toolkit.get_async_functions()}
+    ]
+    mcp_function_name_counts = Counter(
+        function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
     )
     hidden_by_server: dict[str, tuple[str, ...]] = {}
-    for toolkit in toolkits:
-        if not isinstance(toolkit, MindRoomMCPToolkit) or toolkit.catalog is None:
-            continue
-        catalog_function_names = {
-            tool.function_name for tool in toolkit._filtered_tools() if tool.function_name in toolkit.async_functions
-        }
+    for toolkit, function_names in mcp_toolkit_function_names:
         hidden = tuple(
             sorted(
-                local_mcp_function_name_collisions(local_function_names, catalog_function_names)
-                | {name for name in catalog_function_names if mcp_function_name_counts[name] > 1},
+                local_mcp_function_name_collisions(local_function_names, function_names)
+                | {name for name in function_names if mcp_function_name_counts[name] > 1},
             ),
         )
         if not hidden:
             continue
         for function_name in hidden:
-            toolkit.async_functions.pop(function_name)
+            toolkit.functions.pop(function_name, None)
+            toolkit.async_functions.pop(function_name, None)
         hidden_by_server[toolkit.server_id] = tuple(
             sorted(set(hidden_by_server.get(toolkit.server_id, ())) | set(hidden)),
         )
@@ -173,21 +171,21 @@ class MindRoomMCPToolkit(Toolkit):
         suffix = f" {self.server_config.description}" if self.server_config.description else ""
         self.async_functions[f"{tool_prefix}_connection_status"] = Function(
             name=f"{tool_prefix}_connection_status",
-            description=f"Check whether MCP server '{self.server_id}' is connected for the current worker scope.{suffix}",
+            description=f"Check whether MCP server '{self.server_id}' is connected for the current requester.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_connection_status,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_list_tools"] = Function(
             name=f"{tool_prefix}_list_tools",
-            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current worker scope.{suffix}",
+            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current requester.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_list_tools,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_call_tool"] = Function(
             name=f"{tool_prefix}_call_tool",
-            description=f"Call one remote tool on MCP server '{self.server_id}' for the current worker scope.{suffix}",
+            description=f"Call one remote tool on MCP server '{self.server_id}' for the current requester.{suffix}",
             parameters={
                 "type": "object",
                 "properties": {

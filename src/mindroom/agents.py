@@ -27,7 +27,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
-from mindroom.mcp.toolkit import hide_mcp_catalog_function_collisions
+from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
@@ -606,10 +606,10 @@ def _log_toolkits_without_unique_model_functions(
 
 
 def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
-    """Project requester MCP catalogs against the exact session-local tool surface."""
-    for server_id, function_names in hide_mcp_catalog_function_collisions(toolkits).items():
+    """Project MCP functions against the exact session-local tool surface."""
+    for server_id, function_names in hide_mcp_function_collisions(toolkits).items():
         logger.warning(
-            "Hiding colliding MCP catalog functions from session tool surface",
+            "Hiding colliding MCP functions from session tool surface",
             agent=agent_name,
             server_id=server_id,
             function_names=list(function_names),

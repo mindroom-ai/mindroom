@@ -6,13 +6,14 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools.function import ToolResult
+from agno.tools import Toolkit
+from agno.tools.function import Function, ToolResult
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_catalog_function_collisions
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, hide_mcp_function_collisions
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -294,13 +295,13 @@ async def test_oauth_mcp_toolkit_bridge_descriptions_without_server_description(
     )
 
     assert toolkit.async_functions["demo_connection_status"].description == (
-        "Check whether MCP server 'demo' is connected for the current worker scope."
+        "Check whether MCP server 'demo' is connected for the current requester."
     )
     assert toolkit.async_functions["demo_list_tools"].description == (
-        "List remote tools exposed by MCP server 'demo' for the current worker scope."
+        "List remote tools exposed by MCP server 'demo' for the current requester."
     )
     assert toolkit.async_functions["demo_call_tool"].description == (
-        "Call one remote tool on MCP server 'demo' for the current worker scope."
+        "Call one remote tool on MCP server 'demo' for the current requester."
     )
 
 
@@ -612,7 +613,7 @@ def test_final_projection_hides_cross_mcp_catalog_collisions(tmp_path: Path) -> 
         worker_target=worker_target,
     )
 
-    hidden = hide_mcp_catalog_function_collisions([alpha, beta])
+    hidden = hide_mcp_function_collisions([alpha, beta])
 
     assert hidden == {
         "alpha": (function_name,),
@@ -622,3 +623,28 @@ def test_final_projection_hides_cross_mcp_catalog_collisions(tmp_path: Path) -> 
     assert function_name not in beta.async_functions
     assert "foo_list_tools" in alpha.async_functions
     assert "foo_bar_list_tools" in beta.async_functions
+
+
+def test_final_projection_hides_catalogless_oauth_bridge_local_collision(tmp_path: Path) -> None:
+    """OAuth bridge functions must not survive a collision with a local tool function."""
+    bridge = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=_OAuthRequiredManager(),
+        catalog=None,
+        server_config=_oauth_server_config(),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+    local = Toolkit(name="local", auto_register=False)
+    local.functions["demo_list_tools"] = Function(
+        name="demo_list_tools",
+        entrypoint=lambda: "local",
+    )
+
+    hidden = hide_mcp_function_collisions([bridge, local])
+
+    assert hidden == {"demo": ("demo_list_tools",)}
+    assert "demo_list_tools" not in bridge.async_functions
+    assert "demo_list_tools" in local.functions
+    assert "demo_connection_status" in bridge.async_functions

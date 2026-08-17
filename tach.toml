@@ -4868,7 +4868,7 @@ from = ["mindroom.tool_system.dynamic_toolkits"]
 expose = [
     "MindRoomMCPToolkit",
     "bind_mcp_server_manager",
-    "hide_mcp_catalog_function_collisions",
+    "hide_mcp_function_collisions",
     "require_mcp_server_manager",
 ]
 from = ["mindroom.mcp.toolkit"]
