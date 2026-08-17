@@ -81,13 +81,23 @@ class _FakeUser:
 
 
 class _FakeGithub:
+    def __init__(self) -> None:
+        self.closed = False
+
     def get_user(self) -> _FakeUser:
         return _FakeUser()
 
+    def close(self) -> None:
+        self.closed = True
 
-@dataclass(frozen=True)
+
+@dataclass
 class _TokenGithub:
     token: str
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeIssueSearchResults:
@@ -291,14 +301,21 @@ class _IssueAndPullGithub:
 
 
 class _RevokedTokenGithub:
+    def __init__(self) -> None:
+        self.closed = False
+
     def get_user(self) -> _FakeUser:
         raise BadCredentialsException(401, {"message": "Bad credentials"})
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _ProviderControlledFailureGithub:
     def __init__(self, status_code: int, sentinel: str) -> None:
         self.status_code = status_code
         self.sentinel = sentinel
+        self.closed = False
 
     def _raise_provider_error(self) -> Never:
         raise GithubException(
@@ -325,6 +342,9 @@ class _ProviderControlledFailureGithub:
 
     def get_pulls(self, **_kwargs: object) -> _FakePullsWithoutTotal:
         self._raise_provider_error()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _CapturingLogger:
@@ -503,6 +523,24 @@ def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: P
     assert old_state == ("account-a-token", "account-a-token")
     assert new_state == ("account-b-token", "account-b-token")
     assert retained_new_state == new_state
+
+
+def test_changing_github_access_token_closes_previous_client(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    tool.g.close()
+    previous_client = _TokenGithub(MANUAL_ACCESS_TOKEN)
+    tool.g = previous_client
+
+    tool.access_token = "rotated-access"  # noqa: S105
+
+    assert previous_client.closed is True
 
 
 def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -> None:
@@ -1057,7 +1095,8 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _RevokedTokenGithub()
+    revoked_client = _RevokedTokenGithub()
+    tool.g = revoked_client
 
     result = tool.list_repositories()
     payload = json.loads(result)
@@ -1069,6 +1108,7 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
     assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
     assert revoked_token not in result
     assert tool.access_token is None
+    assert revoked_client.closed is True
 
 
 @pytest.mark.parametrize("status_code", [401, 404, 429, 500])

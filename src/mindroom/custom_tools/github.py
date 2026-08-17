@@ -209,7 +209,10 @@ class GithubTools(AgnoGithubTools):
     def access_token(self, value: str | None) -> None:
         state = self._github_state()
         if state.access_token != value:
+            previous_client = state.client
             state.client = None
+            if previous_client is not None:
+                previous_client.close()
         state.access_token = value
 
     @property
