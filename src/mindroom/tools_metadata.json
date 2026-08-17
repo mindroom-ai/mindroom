@@ -7298,6 +7298,30 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Reset the current requester's OAuth connections for the current agent",
+      "display_name": "OAuth Connections",
+      "docs_url": null,
+      "function_names": [
+        "reset_oauth_connection"
+      ],
+      "helper_text": null,
+      "icon": "Unplug",
+      "icon_color": "text-amber-500",
+      "name": "oauth_connections",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
       "config_fields": [
         {
           "authored_override": true,

@@ -26,27 +26,40 @@ async def run_coroutine_until_complete[Result](
 ) -> Result:
     """Finish one accepted coroutine before propagating cancellation."""
     worker_task = asyncio.create_task(coroutine)
+    return await wait_for_future_until_complete(worker_task)
+
+
+async def wait_for_future_until_complete[Result](
+    future: asyncio.Future[Result],
+    *,
+    on_cancel: Callable[[], None] | None = None,
+    chain_cancelled_result: bool = True,
+) -> Result:
+    """Drain an accepted future before propagating cancellation from its waiter."""
     try:
-        return await asyncio.shield(worker_task)
+        return await asyncio.shield(future)
     except asyncio.CancelledError as cancellation:
-        worker_error: BaseException | None = None
-        while not worker_task.done():
+        if on_cancel is not None:
+            on_cancel()
+        result_error: Exception | asyncio.CancelledError | None = None
+        while not future.done():
             try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-            except Exception as exc:
-                worker_error = exc
-                break
-        if worker_error is None:
-            try:
-                worker_task.result()
+                await asyncio.shield(future)
             except asyncio.CancelledError as exc:
-                worker_error = exc
+                result_error = exc if future.done() else None
             except Exception as exc:
-                worker_error = exc
-        if worker_error is not None:
-            raise cancellation from worker_error
+                result_error = exc
+            if result_error is not None:
+                break
+        if result_error is None:
+            try:
+                future.result()
+            except (Exception, asyncio.CancelledError) as exc:
+                result_error = exc
+        if result_error is not None and (
+            chain_cancelled_result or not isinstance(result_error, asyncio.CancelledError)
+        ):
+            raise cancellation from result_error
         raise
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -18,7 +19,11 @@ from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError, HTTPStatusError
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, is_oauth_client_config_service
+from mindroom.credential_policy import (
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    is_oauth_client_config_service,
+    is_oauth_token_service,
+)
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
 warnings.filterwarnings(
@@ -73,9 +78,20 @@ class OAuthProviderError(RuntimeError):
 class OAuthRefreshRejectedError(OAuthProviderError):
     """Raised when a provider rejects a refresh-token grant."""
 
+    refresh_had_token: bool | None = None
+    refresh_expires_at: float | None = None
+
 
 class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
+
+
+_TERMINAL_REFRESH_ERROR_CODES = frozenset({"bad_refresh_token", "invalid_grant", "invalid_refresh_token"})
+
+
+def is_terminal_oauth_refresh_error_code(value: object) -> bool:
+    """Return whether a provider code permanently rejects token refresh."""
+    return isinstance(value, str) and value.strip().lower() in _TERMINAL_REFRESH_ERROR_CODES
 
 
 class OAuthClaimValidationError(OAuthProviderError):
@@ -92,11 +108,13 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         provider_id: str | None = None,
         connect_url: str | None = None,
         reason: str | None = None,
+        reset_required: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider_id = provider_id
         self.connect_url = connect_url
         self.reason = reason
+        self.reset_required = reset_required
 
 
 def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
@@ -109,6 +127,8 @@ def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str,
     }
     if exc.reason is not None:
         payload["reason"] = exc.reason
+    if exc.reset_required:
+        payload["reset_required"] = True
     if oauth_connect_url_requires_host_browser(exc.connect_url):
         payload["requires_host_browser"] = True
     return payload
@@ -318,7 +338,7 @@ def _token_data_needs_refresh(
 
 def _oauth_error_fields(error: object, description: object) -> tuple[str | None, str | None, str | None]:
     """Return safe OAuth error code and detail from standard non-secret response fields."""
-    error_code = error.strip() if isinstance(error, str) and error.strip() else None
+    error_code = error.strip().lower() if isinstance(error, str) and error.strip() else None
     error_description = description.strip() if isinstance(description, str) and description.strip() else None
     parts = [value.strip() for value in (error, description) if isinstance(value, str) and value.strip()]
     return error_code, error_description, ": ".join(parts) if parts else None
@@ -347,22 +367,20 @@ def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderErro
 
     msg = "OAuth token refresh failed"
     if detail is not None:
-        if error_code == "invalid_grant":
+        if is_terminal_oauth_refresh_error_code(error_code):
             return OAuthRefreshRejectedError(
-                f"{msg}: {detail}",
+                msg,
                 oauth_error=error_code,
-                oauth_error_description=error_description,
             )
         return OAuthProviderError(
             f"{msg}: {detail}",
             oauth_error=error_code,
             oauth_error_description=error_description,
         )
-    if error_code == "invalid_grant":
+    if is_terminal_oauth_refresh_error_code(error_code):
         return OAuthRefreshRejectedError(
-            f"{msg}: {error_code}",
+            msg,
             oauth_error=error_code,
-            oauth_error_description=error_description,
         )
     return OAuthProviderError(msg)
 
@@ -420,8 +438,17 @@ class OAuthProvider:
                 "must not end with '_oauth_client'"
             )
             raise ValueError(msg)
+        if not is_oauth_token_service(self.credential_service):
+            msg = f"OAuth provider '{self.id}' credential_service '{self.credential_service}' must end with '_oauth'"
+            raise ValueError(msg)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
+            if is_oauth_token_service(self.tool_config_service):
+                msg = (
+                    f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
+                    "must not end with '_oauth'"
+                )
+                raise ValueError(msg)
             if is_oauth_client_config_service(self.tool_config_service):
                 msg = (
                     f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
@@ -642,7 +669,14 @@ class OAuthProvider:
             msg = "OAuth provider requires a PKCE code verifier"
             raise OAuthProviderError(msg)
         if self.token_exchanger is not None:
-            result = self.token_exchanger(self, code, client_config, runtime_paths, code_verifier)
+            result = await asyncio.to_thread(
+                self.token_exchanger,
+                self,
+                code,
+                client_config,
+                runtime_paths,
+                code_verifier,
+            )
             if isinstance(result, OAuthTokenResult):
                 return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
             return _token_result_with_core_metadata(
@@ -680,9 +714,10 @@ class OAuthProvider:
         parser = self.token_parser or _default_token_parser
         token_response = dict(token_response)
         token_response["_mindroom_token_url"] = endpoints.token_url
+        result = await asyncio.to_thread(parser, self, token_response, client_config, runtime_paths)
         return _token_result_with_core_metadata(
             self,
-            parser(self, token_response, client_config, runtime_paths),
+            result,
             client_id=client_config.client_id,
         )
 
@@ -742,7 +777,7 @@ class OAuthProvider:
         ):
             refresh_response["_oauth_claims_verified"] = True
         parser = self.token_parser or _default_token_parser
-        result = parser(self, refresh_response, client_config, runtime_paths)
+        result = await asyncio.to_thread(parser, self, refresh_response, client_config, runtime_paths)
         verified_claims = refresh_response.get("_oauth_claims")
         if (
             not result.claims_verified
@@ -755,7 +790,7 @@ class OAuthProvider:
                 claims_verified=True,
             )
         result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
-        self.validate_claims(result, runtime_paths)
+        await asyncio.to_thread(self.validate_claims, result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:

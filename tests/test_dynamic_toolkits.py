@@ -35,7 +35,7 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
 from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
@@ -945,7 +945,10 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
             self,
             _agent_name: str,
             loaded_tools: list[str],
+            *,
+            worker_target: object | None = None,
         ) -> list[str]:
+            del worker_target
             if {"mcp_demo", "shell"} <= set(loaded_tools):
                 return ["MCP/local collision"]
             return []
@@ -1070,6 +1073,78 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
     assert "Deferred capability domains available through native tool search: sleep." in discovery_block
     assert "search the deferred tool catalog before concluding that the capability is unavailable" in discovery_block
     assert "calculator" not in discovery_block
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "deferred_names_attr"),
+    [
+        ("anthropic", "claude-opus-5", _DEFERRED_TOOL_NAMES_ATTR),
+        ("openai", "gpt-5.6", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
+    ],
+)
+@pytest.mark.parametrize("collide_all", [False, True], ids=["partial-collision", "full-collision"])
+def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model_id: str,
+    deferred_names_attr: str,
+    *,
+    collide_all: bool,
+) -> None:
+    """Final MCP collision projection must preserve the surviving local tool's eager ownership."""
+    raw = _base_config_data()
+    raw["models"]["native"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = ["sleep", {"mcp_demo": {"defer": True}}]  # type: ignore[index]
+    raw["mcp_servers"] = {
+        "demo": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    config = _validated_config(tmp_path, raw)
+    runtime_paths = _runtime_paths(tmp_path)
+
+    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        if tool_name == "mcp_demo":
+            return MindRoomMCPToolkit(
+                server_id="demo",
+                manager=None,
+                catalog=None,
+                server_config=config.mcp_servers["demo"],
+                runtime_paths=runtime_paths,
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            )
+        local = Toolkit(name="local", auto_register=False)
+        colliding_names = (
+            {"demo_call_tool", "demo_connection_status", "demo_list_tools"} if collide_all else {"demo_list_tools"}
+        )
+        for function_name in colliding_names:
+            local.functions[function_name] = Function(
+                name=function_name,
+                entrypoint=lambda: "local",
+            )
+        return local
+
+    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+
+    agent = create_agent("code", config, runtime_paths, execution_identity=None, session_id="thread-a")
+
+    expected_deferred_names = frozenset() if collide_all else frozenset({"demo_call_tool", "demo_connection_status"})
+    assert vars(agent.model).get(deferred_names_attr, frozenset()) == expected_deferred_names
+    local = next(tool for tool in agent.tools if tool.name == "local")
+    assert "demo_list_tools" in local.functions
+    discovery_blocks = [block for block in agent.instructions if block.startswith("## Deferred Tool Discovery")]
+    assert bool(discovery_blocks) is not collide_all
+    if discovery_blocks:
+        assert "mcp_demo" in discovery_blocks[0]
 
 
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(

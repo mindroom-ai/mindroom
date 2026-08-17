@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import hashlib
 import json
+import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 from unittest.mock import patch
 
@@ -16,23 +22,48 @@ from agno.models.openai import OpenAIChat
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
+import mindroom.mcp.manager as mcp_manager_module
 from mindroom.agents import create_agent
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
-from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
-from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds
-from mindroom.mcp.toolkit import bind_mcp_server_manager
+from mindroom.mcp.errors import (
+    MCPConnectionError,
+    MCPProtocolError,
+    MCPTimeoutError,
+    MCPToolCallError,
+    MCPToolUnavailableError,
+)
+from mindroom.mcp.manager import (
+    MCPServerManager,
+    _discovery_retry_delay_seconds,
+    _MCPAuthorizationChangedError,
+    _MCPConfigurationChangedError,
+)
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.mcp.types import MCPServerState
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials_snapshot,
+    refresh_oauth_credentials,
+)
+from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
+    OAuthProviderError,
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
-from mindroom.oauth.service import refresh_scoped_oauth_credentials
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -42,8 +73,11 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from pathlib import Path
 
+    from agno.tools.function import ToolResult
+
     from mindroom.constants import RuntimePaths
-    from mindroom.mcp.types import MCPServerState
+    from mindroom.mcp.manager import _MCPAuthorizationLease
+    from mindroom.mcp.types import MCPServerCatalog
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
@@ -55,6 +89,34 @@ CHAIN_0 = "refresh-0"
 CHAIN_1 = "refresh-1"
 CHAIN_2 = "refresh-2"
 ALICE_ACCESS_0 = "access-alice-refresh-0"
+
+
+class _CapturingLogger:
+    def __init__(self) -> None:
+        self.debug_calls: list[tuple[str, dict[str, object]]] = []
+        self.warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def debug(self, event: str, **kwargs: object) -> None:
+        self.debug_calls.append((event, kwargs))
+
+    @staticmethod
+    def info(_event: str, **_kwargs: object) -> None:
+        return
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.warning_calls.append((event, kwargs))
+
+
+async def _publish_oauth_credentials(
+    context: OAuthCredentialContext,
+    credentials: Mapping[str, Any],
+) -> None:
+    """Publish test credentials through the SQLite transaction owner."""
+    async with oauth_credential_transaction(context) as transaction:
+        transaction.publish(credentials, advance_connection_generation=True)
+        await transaction.commit()
+
+
 ALICE_ACCESS_1 = "access-alice-refresh-1"
 ALICE_CHAIN_0 = "alice-refresh-0"
 BOB_ACCESS_0 = "access-bob-refresh-0"
@@ -66,8 +128,14 @@ TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
 
 
 class _ConfigStub:
-    def __init__(self, mcp_servers: dict[str, MCPServerConfig]) -> None:
+    def __init__(
+        self,
+        mcp_servers: dict[str, MCPServerConfig],
+        *,
+        authorization: AuthorizationConfig | None = None,
+    ) -> None:
         self.mcp_servers = mcp_servers
+        self.authorization = authorization or AuthorizationConfig()
         self.plugins: list[object] = []
         self.agents: dict[str, object] = {}
         self.defaults = type("_DefaultsStub", (), {"allow_self_config": False})()
@@ -93,6 +161,9 @@ class _FakeClientSession:
     transport_extra_headers: ClassVar[list[dict[str, str]]] = []
     enforce_same_task_exit: ClassVar[bool] = False
     close_exception: ClassVar[BaseException | None] = None
+    close_attempt_count: ClassVar[int] = 0
+    authorization_rejected: ClassVar[bool] = False
+    reject_authorization_on_tool_error: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -116,6 +187,7 @@ class _FakeClientSession:
 
     async def __aexit__(self, *_args: object) -> None:
         """Mark the fake session as closed when the context exits."""
+        _FakeClientSession.close_attempt_count += 1
         if _FakeClientSession.enforce_same_task_exit and asyncio.current_task() is not self.entered_task:
             msg = "Attempted to exit cancel scope in a different task than it was entered in"
             raise RuntimeError(msg)
@@ -169,6 +241,8 @@ class _FakeClientSession:
                 _FakeClientSession.parallel_call_gate.set()
             await _FakeClientSession.parallel_call_gate.wait()
         if isinstance(next_result, Exception):
+            if _FakeClientSession.reject_authorization_on_tool_error:
+                _FakeClientSession.authorization_rejected = True
             raise next_result
         assert isinstance(next_result, CallToolResult)
         return next_result
@@ -193,6 +267,9 @@ def _reset_fake_session_state() -> Generator[None, None, None]:
     _FakeClientSession.transport_extra_headers = []
     _FakeClientSession.enforce_same_task_exit = False
     _FakeClientSession.close_exception = None
+    _FakeClientSession.close_attempt_count = 0
+    _FakeClientSession.authorization_rejected = False
+    _FakeClientSession.reject_authorization_on_tool_error = False
     yield
     dynamic_toolkits_module._loaded_tools.clear()
 
@@ -206,8 +283,12 @@ def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+def _runtime_paths(tmp_path: Path, process_env: Mapping[str, str] | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env or {},
+    )
 
 
 def _tool(name: str) -> Tool:
@@ -231,6 +312,7 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
         return _MCPTransportHandle(
             transport=server_config.transport,
             opener=lambda: _fake_transport(),
+            authorization_rejected=lambda: _FakeClientSession.authorization_rejected,
         )
 
     monkeypatch.setattr("mindroom.mcp.manager.ClientSession", _FakeClientSession)
@@ -250,6 +332,55 @@ def _oauth_mcp_config() -> MCPServerConfig:
             "authorization_url": "https://auth.example.test/authorize",
             "token_url": "https://auth.example.test/token",
         },
+    )
+
+
+def _cross_server_collision_config(runtime_paths: RuntimePaths, *, include_other: bool = True) -> Config:
+    servers: dict[str, object] = {
+        "demo": {"transport": "stdio", "command": "npx", "tool_prefix": "shared"},
+    }
+    tools = ["mcp_demo"]
+    if include_other:
+        servers["other"] = {"transport": "stdio", "command": "npx", "tool_prefix": "shared"}
+        tools.append("mcp_other")
+    return Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": servers,
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": tools,
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+
+def _oauth_non_oauth_collision_config(runtime_paths: RuntimePaths) -> Config:
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    return Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "shared",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
     )
 
 
@@ -344,6 +475,7 @@ class _FakeMcpOAuthProvider:
     credential_service = "mcp_demo_oauth"
     scopes: tuple[str, ...] = ()
     claim_validator = None
+    requester_scoped_credentials = True
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh
@@ -418,6 +550,28 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_enforces_call_filters_before_remote_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The manager-owned dispatch path must reject a tool removed by runtime filters."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo"), _tool("safe")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+
+    with pytest.raises(MCPToolUnavailableError):
+        await manager.call_tool(
+            "demo",
+            "echo",
+            {},
+            include_tools=("safe",),
+        )
+
+    assert _FakeClientSession.call_tool_invocation_count == 0
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_non_oauth_calls_use_shared_session_without_requester_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -429,10 +583,10 @@ async def test_mcp_manager_non_oauth_calls_use_shared_session_without_requester_
         pytest.fail("non-OAuth MCP calls must not resolve requester-scoped credentials")
 
     monkeypatch.setattr(
-        "mindroom.mcp.manager.refresh_scoped_oauth_credentials_with_result",
+        "mindroom.mcp.manager.refresh_oauth_credentials_with_result",
         _fail_credential_resolution,
     )
-    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", _fail_credential_resolution)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", _fail_credential_resolution)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-alice")]),
@@ -505,6 +659,253 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
 
 
 @pytest.mark.asyncio
+async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_credential_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Identity-less MCP calls cannot fall back to a legacy global bearer or session key."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+    credentials_manager.save_credentials(
+        "mcp_demo_oauth",
+        {
+            "token": "legacy-global-token",
+            "client_id": "public-client",
+            "scopes": [],
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+        },
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    with pytest.raises(OAuthConnectionRequired, match="requester identity") as exc_info:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=None,
+        )
+
+    assert exc_info.value.connect_url is None
+    assert manager._scoped_states == {}
+    assert _FakeClientSession.transport_extra_headers == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_current_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A candidate built with stale headers must close before catalog publication or tool use."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong-b")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    original_connect = manager._connect_and_discover
+    original_call = manager._call_tool_once_or_reconnect
+    changed_during_first_connect = False
+    replacement_task: asyncio.Task[None] | None = None
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+
+    async def connect_with_authorization_change(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        nonlocal changed_during_first_connect, replacement_task
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        if not changed_during_first_connect:
+            changed_during_first_connect = True
+            replacement_task = asyncio.create_task(replace_credentials())
+        return catalog
+
+    async def replace_credentials() -> None:
+        await _publish_oauth_credentials(
+            credential_context,
+            {
+                "token": "account-b-token",
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": "mcp_demo",
+            },
+        )
+
+    async def call_after_authorization_change(
+        state: MCPServerState,
+        remote_tool_name: str,
+        arguments: dict[str, object],
+        *,
+        timeout_seconds: float,
+        auth_headers: Mapping[str, str] | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
+        include_tools: Collection[str] | None = None,
+        exclude_tools: Collection[str] | None = None,
+    ) -> ToolResult:
+        if replacement_task is not None:
+            await replacement_task
+        return await original_call(
+            state,
+            remote_tool_name,
+            arguments,
+            timeout_seconds=timeout_seconds,
+            auth_headers=auth_headers,
+            authorization_lease=authorization_lease,
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
+        )
+
+    monkeypatch.setattr(manager, "_connect_and_discover", connect_with_authorization_change)
+    monkeypatch.setattr(manager, "_call_tool_once_or_reconnect", call_after_authorization_change)
+
+    result = await manager.call_tool(
+        "demo",
+        "echo",
+        {},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    request_state = next(iter(manager._scoped_states.values()))
+    account_b_hash = hashlib.sha256(b"account-b-token").hexdigest()
+    assert result.content == "pong-b"
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer account-a-token"},
+        {"Authorization": "Bearer account-b-token"},
+    ]
+    assert _FakeClientSession.sessions[0].closed is True
+    assert _FakeClientSession.call_tool_invocation_count == 1
+    assert request_state.oauth_lease_version is not None
+    assert request_state.oauth_lease_version.token_hash == account_b_hash
+    assert request_state.oauth_session_lease_version == request_state.oauth_lease_version
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_replay_ambiguous_call_after_authorization_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed remote dispatch on one account cannot be replayed after credential replacement."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("write")]
+    _FakeClientSession.planned_tool_results = [
+        BrokenPipeError("transport closed after dispatch"),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="replayed")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    original_refresh = manager._refresh_server_catalog
+    replaced = False
+
+    async def replace_before_reconnect(
+        state: MCPServerState,
+        *,
+        notify: bool,
+        expected_refresh_revision: int | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+        authorization_lease: _MCPAuthorizationLease | None = None,
+    ) -> bool:
+        nonlocal replaced
+        if expected_refresh_revision is not None and not replaced:
+            replaced = True
+            await _publish_oauth_credentials(
+                credential_context,
+                {
+                    "token": "account-b-token",
+                    "client_id": "public-client",
+                    "scopes": [],
+                    "_source": "oauth",
+                    "_oauth_provider": "mcp_demo",
+                },
+            )
+        return await original_refresh(
+            state,
+            notify=notify,
+            expected_refresh_revision=expected_refresh_revision,
+            auth_headers=auth_headers,
+            authorization_lease=authorization_lease,
+        )
+
+    monkeypatch.setattr(manager, "_refresh_server_catalog", replace_before_reconnect)
+
+    with pytest.raises(MCPConnectionError, match="authorization changed after remote dispatch"):
+        await manager.call_tool(
+            "demo",
+            "write",
+            {"value": "once"},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert replaced is True
+    assert _FakeClientSession.call_tool_invocation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_replay_when_authorization_changes_during_rejection_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authorization drift discovered after dispatch must require manual retry without replay."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("write")]
+    _FakeClientSession.planned_tool_results = [
+        BrokenPipeError("transport closed after dispatch"),
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="replayed")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "account-a-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    async def authorization_changed_after_dispatch(
+        _state: MCPServerState,
+        _authorization_lease: _MCPAuthorizationLease,
+        exc: BaseException | None = None,
+    ) -> None:
+        if exc is not None:
+            raise _MCPAuthorizationChangedError
+
+    monkeypatch.setattr(manager, "_oauth_transport_rejection", authorization_changed_after_dispatch)
+
+    with pytest.raises(MCPConnectionError, match="authorization changed after remote dispatch"):
+        await manager.call_tool(
+            "demo",
+            "write",
+            {"value": "once"},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert _FakeClientSession.call_tool_invocation_count == 1
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -534,8 +935,8 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
             return None
 
         async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, object]:
-            error = "invalid_grant"
-            description = "refresh grant rejected"
+            error = " Invalid_Grant "
+            description = "refresh grant rejected: provider-token-value"
             raise OAuthError(error, description)
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RejectingOAuth2Client)
@@ -549,8 +950,8 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         )
 
     assert "session for this agent expired or is no longer valid" in str(exc_info.value)
-    assert exc_info.value.reason == "oauth_refresh_rejected"
-    assert oauth_connection_required_payload(exc_info.value)["reason"] == "oauth_refresh_rejected"
+    assert exc_info.value.reason == "refresh_rejected"
+    assert oauth_connection_required_payload(exc_info.value)["reason"] == "refresh_rejected"
     warning_call = mock_logger.warning.call_args
     assert warning_call is not None
     assert warning_call.args == ("MCP OAuth token refresh failed",)
@@ -560,14 +961,326 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
         "has_refresh_token": True,
         "expires_at": 900.0,
         "error_type": "OAuthRefreshRejectedError",
-        "error": "OAuth token refresh failed: invalid_grant: refresh grant rejected",
-        "oauth_error": "invalid_grant",
-        "error_description": "refresh grant rejected",
-        "cause_type": "OAuthError",
-        "cause": "invalid_grant: refresh grant rejected",
+        "refresh_rejected": True,
     }
-    assert "expired-access-token-secret" not in str(warning_call)
-    assert "stored-refresh-token-secret" not in str(warning_call)
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A provider outage must not claim the retained requester credential is disconnected."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "retained-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    leaked_detail = "provider unavailable with secret detail"
+
+    async def fail_refresh(_context: OAuthCredentialContext) -> object:
+        raise OAuthProviderError(leaked_detail, oauth_error="temporarily_unavailable")
+
+    monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", fail_refresh)
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await manager._oauth_authorization_material(state, credential_context=credential_context)
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert leaked_detail not in str(exc_info.value)
+    assert (await load_oauth_credentials_snapshot(credential_context)).credentials is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+@pytest.mark.parametrize(
+    "function_name",
+    ["demo_connection_status", "demo_list_tools", "demo_call_tool"],
+)
+async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
+    tmp_path: Path,
+    unreadable_kind: str,
+    function_name: str,
+) -> None:
+    """Every MCP bridge entrypoint must route unreadable state to the reset flow."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key},
+    )
+    worker_target = _worker_target("@alice:example.test")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+    credentials = {
+        "token": "unreadable-access-token",
+        "client_id": "public-client",
+        "scopes": [],
+        "_source": "oauth",
+        "_oauth_provider": "mcp_demo",
+    }
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            credentials_manager.base_path,
+            shared_base_path=credentials_manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        save_scoped_credentials(
+            "mcp_demo_oauth",
+            credentials,
+            credentials_manager=wrong_key_manager,
+            worker_target=worker_target,
+        )
+    else:
+        credential_path = scoped_credentials_path(
+            "mcp_demo_oauth",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        credential_path.write_bytes(b"corrupt-plaintext-secret")
+
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    function = toolkit.async_functions[function_name]
+    try:
+        if function_name == "demo_call_tool":
+            result = await function.entrypoint(tool_name="echo", arguments={})
+        else:
+            result = await function.entrypoint()
+    finally:
+        await manager.shutdown()
+
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "mcp_demo"
+    assert payload["reason"] == "reset_required"
+    assert payload["reset_required"] is True
+    assert payload["connect_url"] is None
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_oauth_refresh_rejection_disconnects_and_evicts_cached_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A deleted terminal credential must not leave its old bearer session callable."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "stale-account-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    cached_session = _FakeClientSession.sessions[-1]
+
+    async def reject_refresh(_context: OAuthCredentialContext) -> object:
+        message = "dead refresh grant"
+        raise OAuthRefreshRejectedError(message, oauth_error=INVALID_GRANT)
+
+    monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", reject_refresh)
+
+    with pytest.raises(OAuthConnectionRequired):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert cached_session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_401_disconnects_without_replaying_ambiguous_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A structured bearer rejection becomes reconnect-required without dispatch replay."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [BrokenPipeError("Connection closed")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "rejected-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    cached_session = _FakeClientSession.sessions[-1]
+    _FakeClientSession.reject_authorization_on_tool_error = True
+
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
+        await manager.call_tool(
+            "demo",
+            "echo",
+            {},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert exc_info.value.reason == "access_rejected"
+    assert _FakeClientSession.call_tool_invocation_count == 1
+    assert cached_session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_discovery_http_401_returns_reconnect_and_evicts_requester_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bearer rejection hidden during discovery remains a requester-scoped reconnect failure."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.authorization_rejected = True
+
+    async def fail_list_tools(
+        _self: object,
+        cursor: str | None = None,
+    ) -> ListToolsResult:
+        del cursor
+        connection_closed = "Connection closed"
+        raise BrokenPipeError(connection_closed)
+
+    monkeypatch.setattr(_FakeClientSession, "list_tools", fail_list_tools)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "rejected-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert exc_info.value.reason == "access_rejected"
+    assert manager._scoped_states == {}
+    assert _FakeClientSession.sessions[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_oauth_refresh_rejection_finishes_cleanup_before_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation must not orphan an evicted terminal-rejection session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "stale-account-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    cached_session = _FakeClientSession.sessions[-1]
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    original_disconnect = manager._disconnect_state
+
+    async def reject_refresh(_context: OAuthCredentialContext) -> object:
+        message = "dead refresh grant"
+        raise OAuthRefreshRejectedError(message, oauth_error=INVALID_GRANT)
+
+    async def delayed_disconnect(state: MCPServerState) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", reject_refresh)
+    monkeypatch.setattr(manager, "_disconnect_state", delayed_disconnect)
+    request = asyncio.create_task(
+        manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await cleanup_started.wait()
+    request.cancel()
+    await asyncio.sleep(0)
+    assert request.done() is False
+    allow_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert cached_session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_oauth_discovery_failure_surfaces_without_authorization_retry_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Endpoint failure remains authoritative after disconnect clears the session lease."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    connect_calls = 0
+
+    async def fail_discovery(*_args: object, **_kwargs: object) -> MCPServerCatalog:
+        nonlocal connect_calls
+        connect_calls += 1
+        server_id = "demo"
+        message = "endpoint unavailable"
+        raise MCPConnectionError(server_id, message)
+
+    monkeypatch.setattr(manager, "_connect_and_discover", fail_discovery)
+
+    with pytest.raises(MCPConnectionError, match="endpoint unavailable"):
+        await asyncio.wait_for(
+            manager.call_tool(
+                "demo",
+                "echo",
+                {},
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            ),
+            timeout=1,
+        )
+
+    assert connect_calls == 1
 
 
 @pytest.mark.asyncio
@@ -618,11 +1331,12 @@ async def test_mcp_manager_logs_successful_oauth_refresh_and_persists_credential
             worker_target=worker_target,
         )
 
-    refreshed_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
+    credential_context = manager._oauth_credential_context(
+        manager._require_state("demo"),
         worker_target=worker_target,
+        credentials_manager=credentials_manager,
     )
+    refreshed_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert refreshed_credentials is not None
     assert refreshed_credentials["token"] == "refreshed-access-token"  # noqa: S105
     assert refreshed_credentials["refresh_token"] == "refreshed-refresh-token"  # noqa: S105
@@ -643,7 +1357,7 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
 ) -> None:
     """Successful OAuth resolution should not do a second load just for failure diagnostics."""
     runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
+    worker_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, ACCESS_0, expires_at=time.time() + 3600)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
@@ -652,12 +1366,15 @@ async def test_mcp_manager_does_not_eagerly_load_oauth_credentials_for_success_l
     def fail_eager_diagnostic_load(*_args: object, **_kwargs: object) -> dict[str, Any]:
         pytest.fail("manager should not eagerly load credentials only for failure logging")
 
-    monkeypatch.setattr("mindroom.mcp.manager.load_scoped_credentials", fail_eager_diagnostic_load)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", fail_eager_diagnostic_load)
 
-    access_token = await manager._oauth_access_token(
+    access_token, _generation = await manager._oauth_authorization_material(
         manager._require_state("demo"),
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+        credential_context=manager._oauth_credential_context(
+            manager._require_state("demo"),
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+        ),
     )
 
     assert access_token == ACCESS_0
@@ -671,9 +1388,10 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     """Concurrent refreshes for one credential scope should share one persisted rotation head."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -704,18 +1422,21 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
     state = manager._require_state("demo")
+    credential_context = manager._oauth_credential_context(
+        state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
 
     with patch("mindroom.mcp.manager.logger") as mock_logger:
-        first_token, second_token = await asyncio.gather(
-            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
-            manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=worker_target),
+        first_result, second_result = await asyncio.gather(
+            manager._oauth_authorization_material(state, credential_context=credential_context),
+            manager._oauth_authorization_material(state, credential_context=credential_context),
         )
+    first_token, _first_generation = first_result
+    second_token, _second_generation = second_result
 
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
+    stored_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert first_token == ACCESS_1
     assert second_token == ACCESS_1
     assert stored_credentials is not None
@@ -730,122 +1451,6 @@ async def test_mcp_manager_serializes_oauth_refresh_read_modify_write_per_scope(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("oauth_error_code", [INVALID_GRANT, INVALID_ROTATION])
-async def test_mcp_manager_recovers_from_stale_oauth_refresh_token_rejection(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    oauth_error_code: str,
-) -> None:
-    """A stale-token rejection should re-read a newer stored token and retry once."""
-    runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
-    )
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    manager = MCPServerManager(runtime_paths)
-    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    seen_refresh_tokens: list[str] = []
-
-    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
-        refresh_token = str(credentials["refresh_token"])
-        seen_refresh_tokens.append(refresh_token)
-        if refresh_token == CHAIN_0:
-            save_scoped_credentials(
-                "mcp_demo_oauth",
-                _refreshed_credentials(CHAIN_1),
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            raise OAuthRefreshRejectedError(oauth_error_code, oauth_error=oauth_error_code)
-        if refresh_token == CHAIN_1:
-            return _refreshed_credentials(CHAIN_2)
-        pytest.fail(f"unexpected refresh token: {refresh_token}")
-
-    provider = _FakeMcpOAuthProvider(refresh)
-    monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
-
-    access_token = await manager._oauth_access_token(
-        manager._require_state("demo"),
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    assert access_token == ACCESS_2
-    assert stored_credentials is not None
-    assert stored_credentials["refresh_token"] == CHAIN_2
-    assert seen_refresh_tokens == [CHAIN_0, CHAIN_1]
-
-
-@pytest.mark.asyncio
-async def test_mcp_manager_does_not_retry_stale_refresh_when_only_description_mentions_recoverable_code(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Only structured OAuth error codes should trigger stale-token recovery."""
-    runtime_paths = _runtime_paths(tmp_path)
-    worker_target = _shared_worker_target("@alice:example.test")
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
-    )
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    manager = MCPServerManager(runtime_paths)
-    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    seen_refresh_tokens: list[str] = []
-
-    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any] | None:
-        refresh_token = str(credentials["refresh_token"])
-        seen_refresh_tokens.append(refresh_token)
-        if refresh_token == CHAIN_0:
-            save_scoped_credentials(
-                "mcp_demo_oauth",
-                _refreshed_credentials(CHAIN_1),
-                credentials_manager=credentials_manager,
-                worker_target=worker_target,
-            )
-            msg = "OAuth provider description mentioned invalid_grant"
-            raise OAuthRefreshRejectedError(
-                msg,
-                oauth_error=TEMPORARILY_UNAVAILABLE,
-                oauth_error_description="retry later; invalid_grant is unrelated text",
-            )
-        pytest.fail(f"unexpected retry with refresh token: {refresh_token}")
-
-    provider = _FakeMcpOAuthProvider(refresh)
-    monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
-
-    with pytest.raises(OAuthConnectionRequired) as exc_info:
-        await manager._oauth_access_token(
-            manager._require_state("demo"),
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
-
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    assert exc_info.value.reason == "oauth_refresh_rejected"
-    assert stored_credentials is not None
-    assert stored_credentials["refresh_token"] == CHAIN_1
-    assert seen_refresh_tokens == [CHAIN_0]
-
-
-@pytest.mark.asyncio
 async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refresh_rejection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -853,9 +1458,10 @@ async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refre
     """A dead refresh token should not retry indefinitely when storage has no newer token."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -874,13 +1480,16 @@ async def test_mcp_manager_surfaces_connection_required_for_terminal_oauth_refre
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
-        await manager._oauth_access_token(
+        await manager._oauth_authorization_material(
             manager._require_state("demo"),
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
+            credential_context=manager._oauth_credential_context(
+                manager._require_state("demo"),
+                worker_target=worker_target,
+                credentials_manager=credentials_manager,
+            ),
         )
 
-    assert exc_info.value.reason == "oauth_refresh_rejected"
+    assert exc_info.value.reason == "refresh_rejected"
     assert len(seen_refresh_tokens) == 1
     assert seen_refresh_tokens == [CHAIN_0]
 
@@ -901,20 +1510,21 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
         return _refreshed_credentials(CHAIN_1)
 
     provider = _FakeMcpOAuthProvider(refresh)
+    context = OAuthCredentialContext(
+        provider=provider,
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
 
     missing_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
     assert missing_credentials is None
 
-    save_scoped_credentials(
-        "mcp_demo_oauth",
+    await _publish_oauth_credentials(
+        context,
         {
             "token": ACCESS_0,
             "refresh_token": CHAIN_0,
@@ -924,35 +1534,28 @@ async def test_scoped_oauth_refresh_lock_releases_after_noop_returns(
             "_oauth_provider": "mcp_demo",
             "expires_at": 900.0,
         },
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
     )
     unusable_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
     assert unusable_credentials is not None
     assert unusable_credentials["client_id"] == "wrong-client"
 
-    _save_mcp_oauth_credentials(
-        runtime_paths,
-        worker_target,
-        ACCESS_0,
-        refresh_token=CHAIN_0,
-        expires_at=900.0,
+    await _publish_oauth_credentials(
+        context,
+        {
+            "token": ACCESS_0,
+            "refresh_token": CHAIN_0,
+            "client_id": "public-client",
+            "scopes": [],
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+            "expires_at": 900.0,
+        },
     )
     refreshed_credentials = await asyncio.wait_for(
-        refresh_scoped_oauth_credentials(
-            provider,
-            runtime_paths,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        ),
+        refresh_oauth_credentials(context),
         timeout=1,
     )
 
@@ -969,9 +1572,10 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
     """Providers that do not rotate refresh tokens should keep the existing token."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _shared_worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope="user")
     _save_mcp_oauth_credentials(
         runtime_paths,
-        worker_target,
+        credential_target,
         ACCESS_0,
         refresh_token=CHAIN_0,
         expires_at=900.0,
@@ -987,17 +1591,17 @@ async def test_mcp_manager_preserves_non_rotating_oauth_refresh_tokens(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
 
-    access_token = await manager._oauth_access_token(
+    credential_context = manager._oauth_credential_context(
         manager._require_state("demo"),
-        credentials_manager=credentials_manager,
         worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    access_token, _generation = await manager._oauth_authorization_material(
+        manager._require_state("demo"),
+        credential_context=credential_context,
     )
 
-    stored_credentials = load_scoped_credentials(
-        "mcp_demo_oauth",
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
+    stored_credentials = (await load_oauth_credentials_snapshot(credential_context)).credentials
     assert access_token == ACCESS_0
     assert stored_credentials is not None
     assert stored_credentials["refresh_token"] == CHAIN_0
@@ -1029,8 +1633,8 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
-    both_refreshes_entered = asyncio.Event()
-    release_refreshes = asyncio.Event()
+    both_refreshes_entered = threading.Event()
+    release_refreshes = threading.Event()
     active_refreshes = 0
     max_active_refreshes = 0
 
@@ -1041,7 +1645,7 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
         max_active_refreshes = max(max_active_refreshes, active_refreshes)
         if active_refreshes == 2:
             both_refreshes_entered.set()
-        await both_refreshes_entered.wait()
+        await asyncio.to_thread(both_refreshes_entered.wait)
         release_refreshes.set()
         active_refreshes -= 1
         if refresh_token == ALICE_CHAIN_0:
@@ -1053,15 +1657,25 @@ async def test_mcp_manager_oauth_refresh_lock_is_per_scope(
     provider = _FakeMcpOAuthProvider(refresh)
     monkeypatch.setattr("mindroom.mcp.manager.mcp_oauth_provider", lambda *_args: provider)
     state = manager._require_state("demo")
+    alice_context = manager._oauth_credential_context(
+        state,
+        worker_target=alice_target,
+        credentials_manager=credentials_manager,
+    )
+    bob_context = manager._oauth_credential_context(
+        state,
+        worker_target=bob_target,
+        credentials_manager=credentials_manager,
+    )
 
     alice_task = asyncio.create_task(
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=alice_target),
+        manager._oauth_authorization_material(state, credential_context=alice_context),
     )
     bob_task = asyncio.create_task(
-        manager._oauth_access_token(state, credentials_manager=credentials_manager, worker_target=bob_target),
+        manager._oauth_authorization_material(state, credential_context=bob_context),
     )
-    await asyncio.wait_for(release_refreshes.wait(), timeout=1)
-    alice_token, bob_token = await asyncio.gather(alice_task, bob_task)
+    await asyncio.to_thread(release_refreshes.wait)
+    (alice_token, _alice_generation), (bob_token, _bob_generation) = await asyncio.gather(alice_task, bob_task)
 
     assert alice_token == ALICE_ACCESS_1
     assert bob_token == BOB_ACCESS_1
@@ -1078,18 +1692,18 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     worker_target = _worker_target("@alice:example.test")
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
     first_token_started = asyncio.Event()
     allow_first_token = asyncio.Event()
     active_token_resolutions = 0
     max_active_token_resolutions = 0
 
-    async def fake_oauth_access_token(
+    async def fake_oauth_authorization_material(
         _state: MCPServerState,
         *,
-        credentials_manager: object,
-        worker_target: object,
-    ) -> str:
-        del credentials_manager, worker_target
+        credential_context: object,
+    ) -> tuple[str, str]:
+        del credential_context
         nonlocal active_token_resolutions, max_active_token_resolutions
         active_token_resolutions += 1
         max_active_token_resolutions = max(max_active_token_resolutions, active_token_resolutions)
@@ -1098,9 +1712,9 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
             await allow_first_token.wait()
         await asyncio.sleep(0)
         active_token_resolutions -= 1
-        return "alice-token"
+        return "alice-token", "credential-generation"
 
-    monkeypatch.setattr(manager, "_oauth_access_token", fake_oauth_access_token)
+    monkeypatch.setattr(manager, "_oauth_authorization_material", fake_oauth_authorization_material)
 
     first_call = asyncio.create_task(
         manager._request_state_and_headers(
@@ -1125,9 +1739,97 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     first_result, second_result = await asyncio.gather(first_call, second_call)
 
     assert first_result[0] is second_result[0]
-    assert first_result[1] == {"Authorization": "Bearer alice-token"}
-    assert second_result[1] == {"Authorization": "Bearer alice-token"}
+    assert first_result[1].headers == {"Authorization": "Bearer alice-token"}
+    assert second_result[1].headers == {"Authorization": "Bearer alice-token"}
+    assert first_result[1].version == second_result[1].version
     assert max_active_token_resolutions == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> None:
+    """A chained alias map must not key a session for one requester while loading another's token."""
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    authorization = AuthorizationConfig(
+        aliases={
+            "@canonical-a:example.test": ["@bridge:example.test"],
+            "@canonical-b:example.test": ["@canonical-a:example.test"],
+        },
+    )
+    await manager.sync_servers(
+        _ConfigStub({"demo": _oauth_mcp_config()}, authorization=authorization),
+    )
+    bridge_target = _worker_target("@bridge:example.test")
+    canonical_a_target = _worker_target("@canonical-a:example.test")
+    canonical_b_target = _worker_target("@canonical-b:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_a_target, "canonical-a-token")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_b_target, "canonical-b-token")
+
+    state, lease = await manager._request_state_and_headers(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+    )
+
+    assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
+    assert next(iter(manager._scoped_states.values())) is state
+    assert next(iter(manager._scoped_states)).worker_key == canonical_a_target.worker_key
+
+
+@pytest.mark.asyncio
+async def test_mcp_alias_reload_retires_sessions_and_uses_published_identity_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Alias-only reloads must retire sessions and publish the new identity policy."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    bridge_target = _worker_target("@bridge:example.test")
+    canonical_a_target = _worker_target("@canonical-a:example.test")
+    canonical_b_target = _worker_target("@canonical-b:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_a_target, "canonical-a-token")
+    _save_mcp_oauth_credentials(runtime_paths, canonical_b_target, "canonical-b-token")
+    initial_authorization = AuthorizationConfig(
+        aliases={"@canonical-a:example.test": ["@bridge:example.test"]},
+    )
+    replacement_authorization = AuthorizationConfig(
+        aliases={"@canonical-b:example.test": ["@bridge:example.test"]},
+    )
+    server_config = _oauth_mcp_config()
+    await manager.sync_servers(
+        _ConfigStub({"demo": server_config}, authorization=initial_authorization),
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+    )
+    initial_state = next(iter(manager._scoped_states.values()))
+    initial_session = initial_state.session
+    initial_generation = manager._states["demo"].config_generation
+
+    await manager.sync_servers(
+        _ConfigStub({"demo": server_config}, authorization=replacement_authorization),
+    )
+
+    assert initial_state.retired is True
+    assert initial_session is not None
+    assert initial_session.closed is True
+    assert manager._states["demo"].config_generation != initial_generation
+    assert manager._scoped_states == {}
+
+    _state, lease = await manager._request_state_and_headers(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bridge_target,
+    )
+
+    assert lease.headers == {"Authorization": "Bearer canonical-b-token"}
+    assert lease.session_key.worker_key == canonical_b_target.worker_key
 
 
 @pytest.mark.asyncio
@@ -1250,11 +1952,260 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_disconnects_requester_oauth_session(
+async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Disconnect should close only the current requester's OAuth-backed MCP session."""
+    """Shared worker reuse must not turn requester-owned MCP OAuth into an agent-global token."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_request_target = _shared_worker_target("@alice:example.test")
+    bob_request_target = _shared_worker_target("@bob:example.test")
+    alice_credential_target = _worker_target("@alice:example.test", worker_scope="user")
+    bob_credential_target = _worker_target("@bob:example.test", worker_scope="user")
+    _save_mcp_oauth_credentials(runtime_paths, alice_credential_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_credential_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=alice_request_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bob_request_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer alice-token"},
+        {"Authorization": "Bearer bob-token"},
+    ]
+    assert {key.worker_key for key in manager._scoped_states} == {
+        alice_credential_target.worker_key,
+        bob_credential_target.worker_key,
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One requester's dynamic catalog cannot poison another requester's session."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, alice_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+
+    class _FakeToolkit:
+        def __init__(self) -> None:
+            self.functions = {"demo_danger": object()}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    _FakeClientSession.tool_list = [_tool("danger")]
+    with pytest.raises(MCPProtocolError, match="demo_danger"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=alice_target,
+        )
+
+    _FakeClientSession.tool_list = [_tool("echo")]
+    bob_catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bob_target,
+    )
+
+    assert [tool.function_name for tool in bob_catalog.tools] == ["demo_echo"]
+    assert manager._states["demo"].last_error is None
+    assert manager.failed_server_ids() == set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_config_reload_retries_request_resolution_on_new_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request racing config replacement cannot publish the retired URL/token pair."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "stored-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    original_config = _oauth_mcp_config()
+    replacement_config = original_config.model_copy(update={"url": "https://replacement.example.test/mcp"})
+    await manager.sync_servers(_ConfigStub({"demo": original_config}))
+    first_authorization_started = asyncio.Event()
+    release_first_authorization = asyncio.Event()
+    replacement_published = asyncio.Event()
+    authorization_calls = 0
+    publish_server_config = manager._publish_server_config
+
+    async def publish_and_signal(
+        config: Config,
+        desired_servers: Mapping[str, MCPServerConfig],
+    ) -> list[MCPServerState] | None:
+        retired_states = await publish_server_config(config, desired_servers)
+        replacement_published.set()
+        return retired_states
+
+    async def authorization_material(
+        _state: MCPServerState,
+        *,
+        credential_context: OAuthCredentialContext,
+    ) -> tuple[str, str]:
+        del credential_context
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls == 1:
+            first_authorization_started.set()
+            await release_first_authorization.wait()
+            return "retired-token", "retired-generation"
+        return "replacement-token", "replacement-generation"
+
+    monkeypatch.setattr(manager, "_oauth_authorization_material", authorization_material)
+    monkeypatch.setattr(manager, "_publish_server_config", publish_and_signal)
+    request_task = asyncio.create_task(
+        manager._request_state_and_headers(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await first_authorization_started.wait()
+    sync_task = asyncio.create_task(manager.sync_servers(_ConfigStub({"demo": replacement_config})))
+    await asyncio.wait_for(replacement_published.wait(), timeout=1)
+    release_first_authorization.set()
+    request_state, lease = await request_task
+    await sync_task
+
+    assert authorization_calls == 2
+    assert request_state.config == replacement_config
+    assert request_state.config_generation == manager._states["demo"].config_generation
+    assert lease.headers == {"Authorization": "Bearer replacement-token"}
+    assert lease.session_key.config_generation == request_state.config_generation
+    assert tuple(manager._scoped_states.values()) == (request_state,)
+
+
+@pytest.mark.asyncio
+async def test_mcp_provider_move_retires_current_provider_owner_not_old_server_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset follows provider/requester ownership when a provider moves between servers."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+
+    def oauth_config(*, provider_id: str, url: str) -> MCPServerConfig:
+        config = _oauth_mcp_config()
+        assert config.auth is not None
+        return config.model_copy(
+            update={
+                "url": url,
+                "auth": config.auth.model_copy(update={"provider_id": provider_id}),
+            },
+        )
+
+    def save_provider_credentials(provider_id: str, token: str) -> None:
+        credentials_manager.save_credentials(f"{provider_id}_oauth_client", {"client_id": "public-client"})
+        save_scoped_credentials(
+            f"{provider_id}_oauth",
+            {
+                "token": token,
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": provider_id,
+            },
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    shared_provider = "mcp_shared"
+    replacement_provider = "mcp_replacement"
+    save_provider_credentials(shared_provider, "shared-token")
+    save_provider_credentials(replacement_provider, "replacement-token")
+    old_alpha = oauth_config(provider_id=shared_provider, url="https://old-alpha.example.test/mcp")
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"alpha": old_alpha}))
+    await manager.get_request_catalog(
+        "alpha",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    old_context = manager._oauth_credential_context(
+        manager._states["alpha"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    new_alpha = oauth_config(
+        provider_id=replacement_provider,
+        url="https://new-alpha.example.test/mcp",
+    )
+    new_beta = oauth_config(provider_id=shared_provider, url="https://new-beta.example.test/mcp")
+    await manager.sync_servers(_ConfigStub({"alpha": new_alpha, "beta": new_beta}))
+    await manager.get_request_catalog(
+        "alpha",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    await manager.get_request_catalog(
+        "beta",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    replacement_key = next(key for key in manager._scoped_states if key.provider_id == replacement_provider)
+    shared_key = next(key for key in manager._scoped_states if key.provider_id == shared_provider)
+    replacement_session = manager._scoped_states[replacement_key].session
+    shared_session = manager._scoped_states[shared_key].session
+    assert replacement_session is not None
+    assert shared_session is not None
+
+    async with manager.retire_request_session(credential_context=old_context):
+        assert replacement_key in manager._scoped_states
+        assert shared_key not in manager._scoped_states
+
+    assert replacement_session.closed is False
+    assert shared_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retires_requester_oauth_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retirement should close only the current requester's OAuth-backed MCP session."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
@@ -1269,12 +2220,340 @@ async def test_mcp_manager_disconnects_requester_oauth_session(
     await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=bob_target)
     alice_session = _FakeClientSession.sessions[0]
     bob_session = _FakeClientSession.sessions[1]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=alice_target,
+        credentials_manager=credentials_manager,
+    )
 
-    await manager.disconnect_request_session("demo", worker_target=alice_target)
+    async with manager.retire_request_session(credential_context=credential_context):
+        pass
 
     assert alice_session.closed is True
     assert bob_session.closed is False
     assert len(manager._scoped_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_waits_for_in_flight_requester_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset retirement cannot close a requester transport during an admitted remote call."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    _FakeClientSession.call_started_event = asyncio.Event()
+    _FakeClientSession.call_continue_event = asyncio.Event()
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    session = _FakeClientSession.sessions[0]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    retirement_entered = asyncio.Event()
+
+    async def retire() -> None:
+        async with manager.retire_request_session(credential_context=credential_context):
+            retirement_entered.set()
+
+    call_task = asyncio.create_task(
+        manager.call_tool(
+            "demo",
+            "echo",
+            {"value": "ping"},
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    await _FakeClientSession.call_started_event.wait()
+    retirement_task = asyncio.create_task(retire())
+    await asyncio.sleep(0)
+
+    assert not retirement_task.done()
+    assert not retirement_entered.is_set()
+    assert session.closed is False
+
+    _FakeClientSession.call_continue_event.set()
+    result = await call_task
+    await retirement_task
+
+    assert result.content == "pong"
+    assert retirement_entered.is_set()
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset retirement must prevent detached stale-token reconnects until deletion commits."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    captured_state, authorization_lease = await manager._request_state_and_headers(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    captured_headers = {"Authorization": "Bearer alice-token"}
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+
+    async with manager.retire_request_session(credential_context=credential_context):
+        assert captured_state.retired is True
+        with pytest.raises(_MCPAuthorizationChangedError):
+            await manager._refresh_server_catalog(
+                captured_state,
+                notify=False,
+                auth_headers=captured_headers,
+                authorization_lease=authorization_lease,
+            )
+        with pytest.raises(OAuthConnectionRequired):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+        assert manager._scoped_states == {}
+
+    assert len(_FakeClientSession.sessions) == 1
+    assert _FakeClientSession.sessions[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_allows_new_catalog_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after reset work cannot leave the requester key retired forever."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    base_state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        base_state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    body_entered = asyncio.Event()
+    finish_body = asyncio.Event()
+
+    async def retire() -> None:
+        async with manager.retire_request_session(credential_context=credential_context):
+            body_entered.set()
+            await finish_body.wait()
+
+    task = asyncio.create_task(retire())
+    await body_entered.wait()
+    finish_body.set()
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert catalog is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A detached requester session must close before retirement cancellation propagates."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    state = next(iter(manager._scoped_states.values()))
+    session = _FakeClientSession.sessions[0]
+    base_state = manager._states["demo"]
+    credential_context = manager._oauth_credential_context(
+        base_state,
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    request_key = manager._request_session_key(
+        base_state,
+        credential_context.worker_target,
+        provider_id=credential_context.provider.id,
+    ).oauth_request_key
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cancellation_turn = asyncio.Event()
+    body_entered = False
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def delayed_disconnect(candidate: MCPServerState) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await original_disconnect(candidate)
+
+    async def retire() -> None:
+        nonlocal body_entered
+        async with manager.retire_request_session(credential_context=credential_context):
+            body_entered = True
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    retirement = asyncio.create_task(retire())
+    await cleanup_started.wait()
+    retirement.cancel()
+    asyncio.get_running_loop().call_soon(cancellation_turn.set)
+    await cancellation_turn.wait()
+
+    assert retirement.done() is False
+    assert manager._scoped_states == {}
+    assert manager._retiring_states == {id(state): state}
+    assert request_key in manager._retired_request_keys
+    with pytest.raises(OAuthConnectionRequired):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+    assert len(_FakeClientSession.sessions) == 1
+
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retirement
+
+    assert body_entered is False
+    assert session.closed is True
+    assert manager._retiring_states == {}
+    assert request_key not in manager._retired_request_keys
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retires_stale_cached_session_for_current_connection_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale cached revision cannot survive reset of its current connection lineage."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    state = next(iter(manager._scoped_states.values()))
+    session = _FakeClientSession.sessions[0]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+    approved_connection_generation = (await load_oauth_credentials_snapshot(credential_context)).connection_generation
+    assert state.oauth_lease_version is not None
+    state.oauth_lease_version = replace(
+        state.oauth_lease_version,
+        credential_generation="stale-cached-generation",
+    )
+
+    async with manager.retire_request_session(
+        credential_context=credential_context,
+        expected_connection_generation=approved_connection_generation,
+    ):
+        assert state.retired is True
+
+    assert session.closed is True
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_does_not_retire_session_from_later_connection_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old reset must not disconnect a session from a replacement connection."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    state = next(iter(manager._scoped_states.values()))
+    session = _FakeClientSession.sessions[0]
+    assert state.oauth_lease_version is not None
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=worker_target,
+        credentials_manager=credentials_manager,
+    )
+
+    async with manager.retire_request_session(
+        credential_context=credential_context,
+        expected_connection_generation="older-approved-connection-generation",
+    ):
+        assert state.retired is False
+
+    assert session.closed is False
+    assert next(iter(manager._scoped_states.values())) is state
 
 
 @pytest.mark.asyncio
@@ -1299,11 +2578,11 @@ async def test_mcp_manager_preserves_empty_tool_arguments(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_reconnects_after_call_failure(
+async def test_mcp_manager_reconnects_for_future_calls_without_replaying_ambiguous_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reconnect once when a tool call fails on a stale transport."""
+    """Reconnect the transport but require an explicit retry after ambiguous dispatch."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.planned_tool_results = [
@@ -1313,8 +2592,9 @@ async def test_mcp_manager_reconnects_after_call_failure(
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
     await manager.sync_servers(config)
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
-    assert result.content == "pong"
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert len(_FakeClientSession.sessions) == 2
 
 
@@ -1335,9 +2615,10 @@ async def test_mcp_manager_closes_session_context_in_owner_task_during_reconnect
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
 
     await asyncio.create_task(manager.sync_servers(config))
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
 
-    assert result.content == "pong"
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert _FakeClientSession.sessions[0].closed is True
     assert len(_FakeClientSession.sessions) == 2
 
@@ -1376,9 +2657,10 @@ async def test_mcp_manager_reconnect_notifies_when_catalog_changes(
         CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
     ]
 
-    result = await manager.call_tool("demo", "echo", {"value": "ping"})
+    with pytest.raises(MCPConnectionError, match="outcome is unknown; retry manually"):
+        await manager.call_tool("demo", "echo", {"value": "ping"})
 
-    assert result.content == "pong"
+    assert _FakeClientSession.call_tool_invocation_count == 1
     assert catalog_changes == ["demo"]
     assert [tool.remote_name for tool in manager.get_catalog("demo").tools] == ["echo", "ping"]
 
@@ -1472,6 +2754,261 @@ async def test_mcp_manager_retries_failed_discovery_and_notifies_on_recovery(
     await manager.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_is_terminal_for_later_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A completed shutdown must reject later reconciliation without recreating sessions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+
+    await manager.shutdown()
+    assert await manager.sync_servers(config) == set()
+
+    assert manager._config is None
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_drains_every_state_when_one_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One teardown failure cannot strand later captured sessions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    _FakeClientSession.close_exception = RuntimeError("close failed")
+
+    await manager.shutdown()
+
+    assert _FakeClientSession.close_attempt_count == 2
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+    assert await manager.sync_servers(config) == set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_config_reload_drains_every_retired_state_when_one_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One old-generation close failure cannot strand later detached sessions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    _FakeClientSession.close_exception = RuntimeError("close failed")
+
+    assert await manager.sync_servers(_ConfigStub({})) == set()
+
+    assert _FakeClientSession.close_attempt_count == 2
+    assert manager._states == {}
+    assert manager._retiring_states == {}
+
+
+@pytest.mark.asyncio
+async def test_request_retirement_drains_later_states_before_propagating_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One requester teardown failure cannot prevent cleanup of later detached states."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = MCPServerConfig(transport="stdio", command="npx")
+    first = MCPServerState(server_id="first", config=config, retired=True)
+    second = MCPServerState(server_id="second", config=config, retired=True)
+    manager._retiring_states = {id(first): first, id(second): second}
+    drained: list[str] = []
+
+    async def disconnect(state: MCPServerState) -> None:
+        drained.append(state.server_id)
+        if state is first:
+            message = "first cleanup failed"
+            raise RuntimeError(message)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", disconnect)
+
+    with pytest.raises(MCPConnectionError, match="requester session cleanup failed"):
+        await manager._drain_retired_request_states((first, second))
+
+    assert drained == ["first", "second"]
+    assert manager._retiring_states == {id(first): first}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_finishes_drain_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation cannot abandon later sessions or make shutdown retry a no-op."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub(
+        {
+            "first": MCPServerConfig(transport="stdio", command="npx"),
+            "second": MCPServerConfig(transport="stdio", command="npx"),
+        },
+    )
+    await manager.sync_servers(config)
+    original_disconnect = manager._disconnect_state_when_idle
+    first_disconnect_started = asyncio.Event()
+    release_first_disconnect = asyncio.Event()
+    drained: list[str] = []
+
+    async def delayed_disconnect(state: MCPServerState) -> None:
+        drained.append(state.server_id)
+        if len(drained) == 1:
+            first_disconnect_started.set()
+            await release_first_disconnect.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await first_disconnect_started.wait()
+    shutdown_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not shutdown_task.done()
+    release_first_disconnect.set()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown_task
+
+    assert drained == ["first", "second"]
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_fences_sync_resuming_after_await(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reconciliation paused during old-generation drain must not survive shutdown."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"old": MCPServerConfig(transport="stdio", command="npx")}))
+    drain_entered = asyncio.Event()
+    allow_drain = asyncio.Event()
+    original_drain = manager._drain_retired_states
+
+    async def delayed_drain(states: tuple[MCPServerState, ...]) -> None:
+        drain_entered.set()
+        await allow_drain.wait()
+        await original_drain(states)
+
+    monkeypatch.setattr(manager, "_drain_retired_states", delayed_drain)
+    sync_task = asyncio.create_task(
+        manager.sync_servers(_ConfigStub({"new": MCPServerConfig(transport="stdio", command="npx")})),
+    )
+    await drain_entered.wait()
+    await manager.shutdown()
+    allow_drain.set()
+    assert await sync_task == set()
+
+    assert manager._config is None
+    assert manager._states == {}
+    assert manager._scoped_states == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_fences_catalog_publication_after_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A discovered catalog must not publish after shutdown retires its state."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    discovery_finished = asyncio.Event()
+    original_connect = manager._connect_and_discover
+
+    async def observed_connect(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        discovery_finished.set()
+        return catalog
+
+    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
+    await manager._catalog_validation_lock.acquire()
+    sync_task = asyncio.create_task(manager.sync_servers(config))
+    await discovery_finished.wait()
+    captured_state = manager._states["demo"]
+    shutdown_started = asyncio.Event()
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def observed_disconnect(state: MCPServerState) -> None:
+        shutdown_started.set()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", observed_disconnect)
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await shutdown_started.wait()
+    manager._catalog_validation_lock.release()
+
+    await shutdown_task
+    assert await sync_task == set()
+    assert captured_state.retired is True
+    assert captured_state.catalog is None
+    assert captured_state.connected is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_shutdown_waits_for_state_already_removed_for_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shutdown must retain ownership of a state popped before its awaited drain."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    drain_started = asyncio.Event()
+    allow_drain = asyncio.Event()
+    original_disconnect = manager._disconnect_state_when_idle
+
+    async def delayed_disconnect(state: MCPServerState) -> None:
+        drain_started.set()
+        await allow_drain.wait()
+        await original_disconnect(state)
+
+    monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
+    removal_task = asyncio.create_task(manager.sync_servers(_ConfigStub({})))
+    await drain_started.wait()
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0)
+
+    assert not shutdown_task.done()
+    allow_drain.set()
+    await removal_task
+    await shutdown_task
+    assert _FakeClientSession.sessions[0].closed is True
+
+
 def test_discovery_retry_delay_saturates_for_long_outages() -> None:
     """The backoff delay must stay at the cap for arbitrarily long outages instead of overflowing."""
     delays = [_discovery_retry_delay_seconds(failures) for failures in (1, 2, 3, 4, 5)]
@@ -1526,11 +3063,11 @@ async def test_mcp_manager_paginates_catalog_discovery(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_deduplicates_concurrent_reconnects(
+async def test_mcp_manager_deduplicates_reconnects_without_replaying_concurrent_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Reconnect only once when multiple in-flight callers hit the same stale transport."""
+    """Reconnect once, but never replay ambiguous concurrent remote dispatches."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.parallel_call_gate = asyncio.Event()
@@ -1546,12 +3083,14 @@ async def test_mcp_manager_deduplicates_concurrent_reconnects(
         {"demo": MCPServerConfig(transport="stdio", command="npx", max_concurrent_calls=2)},
     )
     await manager.sync_servers(config)
-    first_result, second_result = await asyncio.gather(
+    results = await asyncio.gather(
         manager.call_tool("demo", "echo", {"value": "ping-1"}),
         manager.call_tool("demo", "echo", {"value": "ping-2"}),
+        return_exceptions=True,
     )
-    assert first_result.content == "pong"
-    assert second_result.content == "pong"
+    assert all(isinstance(result, MCPConnectionError) for result in results)
+    assert all("outcome is unknown; retry manually" in str(result) for result in results)
+    assert _FakeClientSession.call_tool_invocation_count == 2
     assert len(_FakeClientSession.sessions) == 2
 
 
@@ -1722,31 +3261,9 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     manager = MCPServerManager(runtime_paths)
-    config = Config.validate_with_runtime(
-        {
-            "defaults": {"tools": []},
-            "mcp_servers": {
-                "demo": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "shared",
-                },
-                "other": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "shared",
-                },
-            },
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                    "tools": ["mcp_demo", "mcp_other"],
-                },
-            },
-        },
-        runtime_paths,
-    )
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
+    config = _cross_server_collision_config(runtime_paths)
     changed = await manager.sync_servers(config)
     assert changed == set()
     assert manager.failed_server_ids() == {"demo", "other"}
@@ -1756,6 +3273,177 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     assert isinstance(other_error, MCPProtocolError)
     assert "shared_echo" in str(demo_error)
     assert "demo, other" in str(demo_error)
+    assert manager._states["demo"].refresh_task is None
+    assert manager._states["other"].refresh_task is None
+    collision_warnings = [kwargs for event, kwargs in logger.warning_calls if event == "MCP server discovery failed"]
+    assert {warning["server_id"] for warning in collision_warnings} == {"demo", "other"}
+    assert all("shared_echo" in str(warning["error"]) for warning in collision_warnings)
+    assert not [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_marks_collision_introduced_by_later_sync_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newly configured server cannot publish over an existing server's function surface."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    initial = _cross_server_collision_config(runtime_paths, include_other=False)
+    expanded = _cross_server_collision_config(runtime_paths)
+
+    assert await manager.sync_servers(initial) == {"demo"}
+    assert await manager.sync_servers(expanded) == set()
+
+    assert manager.failed_server_ids() == {"demo", "other"}
+    assert all(isinstance(manager._states[server_id].last_error, MCPProtocolError) for server_id in ("demo", "other"))
+
+
+@pytest.mark.asyncio
+async def test_requester_oauth_catalog_rejects_existing_non_oauth_catalog_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A requester catalog published second must fail and drain both collision owners."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    config = _oauth_non_oauth_collision_config(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    assert await manager.sync_servers(config) == {"other"}
+    other_state = manager._states["other"]
+    other_session = other_state.session
+    assert isinstance(other_session, _FakeClientSession)
+
+    with pytest.raises(MCPProtocolError, match="shared_echo"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    oauth_state = next(state for state in manager._scoped_states.values() if state.server_id == "demo")
+    oauth_session = _FakeClientSession.sessions[-1]
+    assert isinstance(other_state.last_error, MCPProtocolError)
+    assert isinstance(oauth_state.last_error, MCPProtocolError)
+    assert other_state.catalog is None
+    assert oauth_state.catalog is None
+    assert other_state.session is None
+    assert oauth_state.session is None
+    assert other_session.closed is True
+    assert oauth_session is not other_session
+    assert oauth_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_non_oauth_refresh_rejects_existing_requester_catalog_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A base catalog published second must fail and drain both collision owners."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    config = _oauth_non_oauth_collision_config(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    _FakeClientSession.tool_list = [_tool("safe")]
+    assert await manager.sync_servers(config) == {"other"}
+
+    _FakeClientSession.tool_list = [_tool("echo")]
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    oauth_state = next(state for state in manager._scoped_states.values() if state.server_id == "demo")
+    oauth_session = oauth_state.session
+    assert isinstance(oauth_session, _FakeClientSession)
+
+    manager._states["other"].stale = True
+    assert await manager.sync_servers(config) == set()
+
+    other_state = manager._states["other"]
+    assert isinstance(other_state.last_error, MCPProtocolError)
+    assert isinstance(oauth_state.last_error, MCPProtocolError)
+    assert other_state.catalog is None
+    assert oauth_state.catalog is None
+    assert other_state.session is None
+    assert oauth_state.session is None
+    assert oauth_session.closed is True
+    assert _FakeClientSession.sessions[-1].closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        ("catalog", "authorization changed repeatedly during catalog resolution"),
+        ("tool", "authorization changed repeatedly during tool dispatch"),
+    ],
+)
+async def test_mcp_manager_bounds_repeated_authorization_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    message: str,
+) -> None:
+    """Credential churn eventually fails one request instead of retrying forever."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    monkeypatch.setattr(mcp_manager_module, "_MAX_REQUEST_STATE_RETRIES", 2)
+    state = manager._states["demo"]
+    authorization_lease = SimpleNamespace(headers={})
+    attempts = 0
+
+    async def request_state_and_headers(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return state, authorization_lease
+
+    async def reject_changed_authorization(*_args: object, **_kwargs: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        raise _MCPAuthorizationChangedError
+
+    monkeypatch.setattr(manager, "_request_state_and_headers", request_state_and_headers)
+    monkeypatch.setattr(manager, "_refresh_server_catalog", reject_changed_authorization)
+
+    if operation == "catalog":
+        operation_call = manager.get_request_catalog("demo", credentials_manager=None, worker_target=None)
+    else:
+        operation_call = manager.call_tool("demo", "echo", {})
+    with pytest.raises(MCPConnectionError, match=message):
+        await operation_call
+
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_bounds_repeated_configuration_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config churn eventually fails one request instead of retrying forever."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    monkeypatch.setattr(mcp_manager_module, "_MAX_REQUEST_STATE_RETRIES", 2)
+    attempts = 0
+
+    async def reject_changed_configuration(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        nonlocal attempts
+        attempts += 1
+        raise _MCPConfigurationChangedError
+
+    monkeypatch.setattr(manager, "_request_state_and_headers_once", reject_changed_configuration)
+
+    with pytest.raises(MCPConnectionError, match="configuration changed repeatedly during request resolution"):
+        await manager._request_state_and_headers("demo", credentials_manager=None, worker_target=None)
+
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
@@ -1797,6 +3485,62 @@ async def test_mcp_manager_marks_oauth_bridge_function_name_collisions_as_failed
 
 
 @pytest.mark.asyncio
+async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path: Path) -> None:
+    """Failed OAuth bridge collisions must not survive the final agent projection."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": oauth_server.model_dump(exclude_none=True),
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    await manager.sync_servers(config)
+    worker_target = _worker_target("@alice:example.test")
+
+    bind_mcp_server_manager(manager)
+    try:
+        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                include_interactive_questions=False,
+            )
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    function_names = [
+        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
+    ]
+    assert "shared_connection_status" not in function_names
+    assert "shared_list_tools" not in function_names
+    assert "shared_call_tool" not in function_names
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_failed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1811,7 +3555,7 @@ async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_
             self.async_functions = {}
             self.tools = ()
 
-    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -1886,15 +3630,74 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
         runtime_paths,
     )
     manager = MCPServerManager(runtime_paths)
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
 
-    changed = await manager.sync_servers(config)
+    first_changed = await manager.sync_servers(config)
+    second_changed = await manager.sync_servers(config)
 
-    assert changed == set()
+    assert first_changed == set()
+    assert second_changed == set()
     assert manager.failed_server_ids() == {"demo"}
     error = manager._states["demo"].last_error
     assert isinstance(error, MCPProtocolError)
     assert "run_shell_command" in str(error)
     assert "existing MindRoom tool function" in str(error)
+    assert manager._states["demo"].refresh_task is None
+    collision_warnings = [event for event, _kwargs in logger.warning_calls if event == "MCP server discovery failed"]
+    collision_debugs = [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"]
+    assert len(collision_warnings) == 2
+    assert collision_debugs == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_warns_when_recovery_transitions_from_transport_failure_to_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newly discovered collision must replace the prior transport warning visibly."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["shell", "mcp_demo"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
+    await manager._record_discovery_failure(
+        state,
+        MCPConnectionError("demo", "MCP operation failed: transport unavailable"),
+    )
+    await manager._cancel_refresh_task(state)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+
+    changed = await manager._refresh_server_catalog(state, notify=False)
+
+    assert changed is False
+    assert state.function_validation_error is True
+    assert [event for event, _kwargs in logger.warning_calls if event == "MCP server discovery failed"] == [
+        "MCP server discovery failed",
+        "MCP server discovery failed",
+    ]
+    assert [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"] == []
 
 
 @pytest.mark.asyncio
@@ -2105,6 +3908,191 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
     assert payload["collision_messages"] == [
         "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_scope", "requester_id", "authorization"),
+    [
+        pytest.param("user", "@alice:example.test", {}, id="user"),
+        pytest.param("shared", "@alice:example.test", {}, id="shared"),
+        pytest.param(
+            "user_agent",
+            "@alice-bridge:example.test",
+            {"aliases": {"@alice:example.test": ["@alice-bridge:example.test"]}},
+            id="user-agent-alias",
+        ),
+    ],
+)
+async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    requester_id: str,
+    authorization: dict[str, object],
+) -> None:
+    """Deferred tools should collide with the active requester's discovered OAuth MCP catalog."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target(requester_id, worker_scope=worker_scope)
+    credential_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, credential_target, "alice-token")
+    config = Config.validate_with_runtime(
+        {
+            "authorization": authorization,
+            "mcp_servers": {
+                "demo": {
+                    **_oauth_mcp_config().model_dump(exclude_none=True),
+                    "tool_prefix": "run",
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": worker_scope,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    bind_mcp_server_manager(manager)
+    try:
+        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="thread-a",
+                include_interactive_questions=False,
+            )
+        dynamic_manager = next(tool for tool in agent.tools if tool.name == "dynamic_tools")
+        payload = json.loads(dynamic_manager.load_tool("shell"))
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "function_name_collision"
+    assert payload["collision_messages"] == [
+        "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
+    ]
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_catalog_projection_hides_session_loaded_function_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Late OAuth discovery should hide colliding functions only from the loaded session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    **_oauth_mcp_config().model_dump(exclude_none=True),
+                    "tool_prefix": "run",
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    bind_mcp_server_manager(manager)
+    try:
+        with patch(
+            "mindroom.model_loading.get_model_instance",
+            side_effect=lambda *_args, **_kwargs: OpenAIChat(id="gpt-4o-mini", api_key="sk-test"),
+        ):
+            initial_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="loaded-thread",
+                include_interactive_questions=False,
+            )
+            dynamic_manager = next(tool for tool in initial_agent.tools if tool.name == "dynamic_tools")
+            assert json.loads(dynamic_manager.load_tool("shell"))["status"] == "loaded"
+
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+                worker_target=worker_target,
+            )
+
+            loaded_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="loaded-thread",
+                include_interactive_questions=False,
+            )
+            clean_agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=worker_target.execution_identity,
+                session_id="clean-thread",
+                include_interactive_questions=False,
+            )
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    loaded_mcp = next(tool for tool in loaded_agent.tools if tool.name == "mcp_demo")
+    clean_mcp = next(tool for tool in clean_agent.tools if tool.name == "mcp_demo")
+    loaded_function_names = [
+        function_name
+        for tool in loaded_agent.tools
+        for function_name in (*tool.get_functions(), *tool.get_async_functions())
+    ]
+    assert loaded_function_names.count("run_shell_command") == 1
+    assert "run_shell_command" not in loaded_mcp.get_async_functions()
+    assert "run_call_tool" in loaded_mcp.get_async_functions()
+    assert "run_shell_command" in clean_mcp.get_async_functions()
 
 
 @pytest.mark.asyncio
@@ -2353,7 +4341,7 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             self.async_functions = {}
             self.tools = ()
 
-    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -2379,8 +4367,10 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             worker_target=worker_target,
         )
 
-    assert manager.failed_server_ids() == {"demo"}
-    assert manager._states["demo"].last_error is not None
+    assert manager.failed_server_ids() == set()
+    assert manager._states["demo"].last_error is None
+    scoped_error = next(iter(manager._scoped_states.values())).last_error
+    assert isinstance(scoped_error, MCPProtocolError)
 
 
 @pytest.mark.asyncio
@@ -2421,8 +4411,9 @@ async def test_mcp_manager_marks_oauth_typed_bridge_function_name_collisions_as_
             worker_target=worker_target,
         )
 
-    assert manager.failed_server_ids() == {"demo"}
-    error = manager._states["demo"].last_error
+    assert manager.failed_server_ids() == set()
+    assert manager._states["demo"].last_error is None
+    error = next(iter(manager._scoped_states.values())).last_error
     assert isinstance(error, MCPProtocolError)
     assert "collides within server 'demo'" in str(error)
 
@@ -2492,6 +4483,41 @@ async def test_mcp_manager_cancellation_closes_transport_during_discovery(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_cancellation_closes_transport_after_discovery_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancelling lease validation or catalog publication cannot orphan a discovered session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    discovered = asyncio.Event()
+    original_connect = manager._connect_and_discover
+
+    async def observed_connect(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        discovered.set()
+        return catalog
+
+    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
+    await manager._catalog_validation_lock.acquire()
+    sync_task = asyncio.create_task(manager.sync_servers(config))
+    await discovered.wait()
+    sync_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await sync_task
+
+    manager._catalog_validation_lock.release()
+    assert _FakeClientSession.sessions[0].closed is True
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2511,7 +4537,6 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
 
     assert state.session_owner_task is None
     assert state.session_close_event is None
-    assert state.exit_stack is None
     assert state.session is None
     assert state.connected is False
 

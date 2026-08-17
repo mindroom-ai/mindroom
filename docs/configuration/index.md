@@ -646,6 +646,8 @@ Demote stale Space admins manually in a Matrix client when needed.
 MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
 Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
 Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+OAuth token services whose names end with `_oauth` cannot use credential seeds; connect them through the OAuth lifecycle instead.
+OAuth client configuration services whose names end with `_oauth_client` remain seedable.
 
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
 Relative file paths resolve from the config directory.
@@ -682,8 +684,11 @@ PY
 ```
 
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
-Encrypted mode refuses plaintext credential JSON files.
-No plaintext-to-encrypted migration is performed automatically, so configure the key before saving credentials that must be encrypted.
+Encrypted mode refuses plaintext credential JSON files for every credential service.
+Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
+Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
+No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
+If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
 
 ## Debug Logging
 

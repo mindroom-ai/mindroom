@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -37,6 +38,7 @@ _GOOGLE_CLIENT_CONFIG_SERVICE = "google_oauth_client"
 _GOOGLE_PROVISIONING_PATH = "/v1/local-mindroom/oauth/google-client"
 _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY = "_oauth_client_runtime_bootstrap_fetched_at"
 _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS = 60 * 60
+_GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS = 20.0
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -215,7 +217,7 @@ def _google_token_parser(
         try:
             claims = google_id_token.verify_oauth2_token(
                 id_token,
-                GoogleRequest(),
+                partial(GoogleRequest(), timeout=_GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS),
                 client_config.client_id,
             )
         except (ValueError, google_auth_exceptions.GoogleAuthError, requests_exceptions.RequestException) as exc:

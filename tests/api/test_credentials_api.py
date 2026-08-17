@@ -1183,6 +1183,29 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "OAuth token credentials" in response.json()["detail"]
 
+    def test_unregistered_oauth_token_service_rejects_generic_credential_writes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token service names stay reserved before their provider is registered."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/acme_oauth",
+            json={"credentials": {"token": "posted-token"}},
+        )
+
+        assert response.status_code == 400
+        assert "OAuth token credentials" in response.json()["detail"]
+        assert manager.load_credentials("acme_oauth") is None
+        manager.save_credentials("acme_oauth", {"token": "legacy-token"})
+
+        list_response = client.get("/api/credentials/list")
+
+        assert list_response.status_code == 200
+        assert "acme_oauth" not in list_response.json()
+
     def test_oauth_token_service_rejects_legacy_credential_routes(
         self,
         client: TestClient,
@@ -1408,11 +1431,11 @@ class TestCredentialsAPI:
         assert deleted_list_response.status_code == 200
         assert deleted_list_response.json() == []
 
-    def test_list_services_discovers_shared_agent_oauth_store(
+    def test_list_services_hides_shared_agent_oauth_stores(
         self,
         client: TestClient,
     ) -> None:
-        """Shared-scope listings should discover agent-store tokens and ignore stale global ones."""
+        """Shared-scope listings must hide registered, orphaned, and stale OAuth token stores."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
         _publish_committed_runtime_config(client.app, config)
@@ -1446,9 +1469,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/list?agent_name=general")
 
         assert response.status_code == 200
-        # The orphaned agent-store token service is discoverable, the registered
-        # provider token stays hidden, and the stale global token never surfaces.
-        assert response.json() == ["acme_oauth"]
+        assert response.json() == []
 
     def test_primary_runtime_scoped_services_for_shared_agent_target(
         self,
@@ -1617,6 +1638,47 @@ class TestCredentialsAPI:
 
         assert token_response.status_code == 403
         assert copy_response.status_code == 403
+
+    def test_unregistered_agent_oauth_token_service_authorizes_before_generic_rejection(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Reserved OAuth service names must retain agent authorization and private-scope ordering."""
+        use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "user_agent",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+        alice_headers = trusted_upstream_headers(
+            user_id="alice",
+            email="alice@example.org",
+            matrix_user_id="@alice:example.org",
+        )
+
+        unauthorized_response = client.get(
+            "/api/credentials/acme_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+        authorized_response = client.get(
+            "/api/credentials/acme_oauth?agent_name=general",
+            headers=alice_headers,
+        )
+        authorized_test_response = client.post(
+            "/api/credentials/acme_oauth/test?agent_name=general",
+            headers=alice_headers,
+        )
+
+        assert unauthorized_response.status_code == 403
+        assert authorized_response.status_code == 400
+        assert "OAuth token credentials" in authorized_response.json()["detail"]
+        assert authorized_test_response.status_code == 400
+        assert "OAuth token credentials" in authorized_test_response.json()["detail"]
 
     def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
         """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""

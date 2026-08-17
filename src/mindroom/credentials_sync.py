@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
@@ -107,6 +108,12 @@ def _sync_service_credentials(
     env_var: str | None = None,
 ) -> bool:
     """Seed or update one env-backed named service."""
+    if is_oauth_token_service(service):
+        logger.warning(
+            "credential_env_sync_rejected_lifecycle_owned_service",
+            service=service,
+        )
+        return False
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     credentials_path = creds_manager.get_credentials_path(service)
     credentials_file_exists = credentials_path.exists()

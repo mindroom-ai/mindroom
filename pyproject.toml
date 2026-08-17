@@ -302,6 +302,7 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+oauth_connections = []
 openai = [
   "openai",
 ]

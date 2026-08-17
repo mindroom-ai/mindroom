@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import stat
@@ -51,7 +52,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.runtime import close_team_runtime_state_dbs
@@ -579,16 +580,18 @@ def test_agent_role_omits_tool_that_failed_to_build(
     assert "Worker backend:" not in agent.role
 
 
+@pytest.mark.parametrize("tool_name", ["report_publishing", "oauth_connections"])
 @patch("mindroom.agent_storage.SqliteDb")
 def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
+    tool_name: str,
 ) -> None:
     """Agent-context toolkits should stay local because they bypass registry proxy wrapping."""
     config = _test_config()
-    config.agents["general"].tools = ["report_publishing"]
+    config.agents["general"].tools = [tool_name]
     config.agents["general"].include_default_tools = False
-    config.agents["general"].worker_tools = ["report_publishing"]
+    config.agents["general"].worker_tools = [tool_name]
     config.agents["general"].worker_scope = "user_agent"
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -601,9 +604,87 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert "All available tools run in the primary MindRoom runtime: `report_publishing`." in agent.role
+    assert [tool.name for tool in agent.tools] == [tool_name]
+    assert f"All available tools run in the primary MindRoom runtime: `{tool_name}`." in agent.role
     assert "No tools use a worker runtime." in agent.role
     assert "Worker backend:" not in agent.role
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "credential_service", "credential_agent_scope"),
+    [
+        pytest.param("github", "github_oauth", None, id="github"),
+        pytest.param("google_docs", "google_docs_oauth", "general", id="google-docs"),
+    ],
+)
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+@patch("mindroom.agent_storage.SqliteDb")
+def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+    tool_name: str,
+    credential_service: str,
+    credential_agent_scope: str | None,
+    unreadable_kind: str,
+) -> None:
+    """Unreadable OAuth state must not prevent an agent from exposing its recovery tool."""
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key,
+            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
+        },
+    )
+    config = _test_config()
+    config.agents["general"].tools = [tool_name, "oauth_connections"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_scope = "user_agent"
+    config = _bind_runtime_paths(config, runtime_paths)
+    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
+        "@alice:example.org",
+        credential_agent_scope,
+    )
+    credentials_path = scoped_manager.get_credentials_path(credential_service)
+    if unreadable_kind == "wrong_key":
+        CredentialsManager(
+            scoped_manager.base_path,
+            shared_base_path=scoped_manager.shared_base_path,
+            encryption_key=wrong_key,
+        ).save_credentials(
+            credential_service,
+            {
+                "token": "unreadable-access-token",
+                "refresh_token": "unreadable-refresh-token",
+                "_source": "oauth",
+            },
+        )
+    else:
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        credentials_path.write_bytes(b"corrupt-plaintext-secret")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        supports_native_tool_approval=True,
+    )
+
+    toolkits = {tool.name: tool for tool in agent.tools}
+    assert tool_name in toolkits
+    assert "reset_oauth_connection" in toolkits["oauth_connections"].async_functions
 
 
 @patch("mindroom.agent_storage.SqliteDb")
@@ -901,6 +982,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        authorization: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -914,6 +996,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
+            authorization,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -959,6 +1042,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        authorization: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -972,6 +1056,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
+            authorization,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -2251,6 +2336,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_output_workspace_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
+        authorization: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -2262,6 +2348,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             allowed_shared_services,
             tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes,
+            authorization,
         )
         credentials = load_scoped_credentials(
             tool_name,

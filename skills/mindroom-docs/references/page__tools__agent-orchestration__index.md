@@ -1,14 +1,15 @@
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to recover requester-scoped OAuth connections, coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need requester-scoped OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
+- [`oauth_connections`] - Issue a browser-confirmed reset for one requester-scoped OAuth connection.
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
@@ -20,7 +21,8 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 
 ## Common Setup Notes
 
-All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+[`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -32,6 +34,57 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
+
+## [`oauth_connections`]
+
+`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
+
+### What It Does
+
+The toolkit exposes only `reset_oauth_connection(provider_id)`.
+The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
+The call returns a time-limited, retryable, requester-bound browser link and does not change credentials itself.
+The authenticated browser confirmation retires the matching requester-scoped MCP OAuth session when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
+The reset does not revoke the grant at the external provider.
+Opening the link without confirming is non-destructive.
+Confirming when no local credential exists is safe and still continues to provider authorization.
+
+### Configuration
+
+Enable the tool alongside the OAuth-backed tools the agent may recover.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Work with connected documents and recover revoked connections
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - oauth_connections
+      - google_drive
+```
+
+### Browser Confirmation And Requester Scope
+
+The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
+The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
+The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
+Only the original authenticated human requester can open and confirm the link.
+Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
+The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.
+A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
+Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
+
+### Notes
+
+- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
+- Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
+- Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
+- If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
+- Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
+- The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]
 

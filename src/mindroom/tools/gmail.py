@@ -97,6 +97,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
     docs_url="https://docs.agno.com/tools/toolkits/social/gmail",

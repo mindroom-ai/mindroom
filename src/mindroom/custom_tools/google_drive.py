@@ -12,19 +12,25 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
 from agno.utils.log import log_error
+from google.auth.credentials import CredentialsWithQuotaProject
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
 from mindroom.oauth.google_drive import (
     GOOGLE_DRIVE_READ_OAUTH_SCOPES,
     GOOGLE_DRIVE_WRITE_SCOPE,
     google_drive_oauth_provider,
 )
-from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.oauth.service import oauth_connect_url, oauth_credentials_have_scopes
+from mindroom.oauth.service import (
+    OAUTH_MISSING_WRITE_SCOPE_REASON,
+    oauth_connection_required,
+)
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -32,6 +38,7 @@ from mindroom.workspaces import resolve_workspace_relative_path
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -103,6 +110,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
         tool_output_workspace_root: Path | None = None,
         write: bool = True,
         **kwargs: Any,  # noqa: ANN401
@@ -125,15 +133,25 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 kwargs["download_dir"] = tool_output_workspace_root / "google-drive-downloads"
         kwargs["upload_file"] = False
         kwargs.setdefault("scopes", [GOOGLE_DRIVE_WRITE_SCOPE])
+        quota_project_id = kwargs.get("quota_project_id") or runtime_paths.env_value(
+            "GOOGLE_CLOUD_QUOTA_PROJECT_ID",
+        )
+        if quota_project_id is not None and not isinstance(quota_project_id, str):
+            msg = "Google Drive quota_project_id must be a string"
+            raise TypeError(msg)
+        if quota_project_id is not None:
+            kwargs["quota_project_id"] = quota_project_id
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         self._workspace_root = tool_output_workspace_root
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
+            authorization=authorization,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
+            quota_project_id=quota_project_id,
         )
         super().__init__(creds=creds, **kwargs)
         if write:
@@ -142,6 +160,22 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._wrap_oauth_function_entrypoints()
         self._wrap_write_scope_entrypoints()
         apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
+
+    def _build_service(self) -> Any:  # noqa: ANN401
+        """Build Drive without cloning MindRoom's tracked OAuth credential."""
+        credentials = self.creds
+        if credentials is None:
+            msg = "Google Drive credentials are missing"
+            raise RuntimeError(msg)
+        if (
+            self.quota_project_id
+            and type(credentials) is not GoogleOAuthCredentials
+            and isinstance(credentials, CredentialsWithQuotaProject)
+            and credentials.quota_project_id != self.quota_project_id
+        ):
+            credentials = credentials.with_quota_project(self.quota_project_id)
+            self.creds = credentials
+        return build("drive", "v3", http=self._google_authorized_http(credentials))
 
     def _register_write_tools(self) -> None:
         sync_tools = (
@@ -176,17 +210,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         if not oauth_credentials_have_scopes(token_data, GOOGLE_DRIVE_READ_OAUTH_SCOPES):
             return None
 
-        connect_url = oauth_connect_url(
-            self._oauth_provider,
-            self._runtime_paths,
-            worker_target=self._worker_target,
-        )
-        error = OAuthConnectionRequired(
-            "Google Drive reconnect required to grant write access. "
-            f"Reconnect with this MindRoom link, then retry the write: {connect_url}",
-            provider_id=self._oauth_provider.id,
-            connect_url=connect_url,
-            reason="missing_write_scope",
+        error = oauth_connection_required(
+            self._oauth_credential_context(),
+            reason=OAUTH_MISSING_WRITE_SCOPE_REASON,
         )
         return self._structured_auth_failure(error)
 
@@ -210,24 +236,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
             function.entrypoint = write_scope_entrypoint
             setattr(self, function_name, write_scope_entrypoint)
-
-        for function_name in _WRITE_FUNCTION_NAMES:
-            function = self.async_functions.get(function_name)
-            if function is None or function.entrypoint is None:
-                continue
-            entrypoint = function.entrypoint
-
-            @wraps(entrypoint)
-            async def write_scope_async_entrypoint(
-                *args: object,
-                _entrypoint: Callable[..., Any] = entrypoint,
-                **kwargs: object,
-            ) -> object:
-                if result := self._write_scope_upgrade_result():
-                    return result
-                return await _entrypoint(*args, **kwargs)
-
-            function.entrypoint = write_scope_async_entrypoint
 
     def _coerce_max_read_size(self, value: object) -> int | float | None:
         try:
@@ -317,10 +325,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         mime_type: str | None = None,
     ) -> str:
         """Upload one local file without blocking the async agent loop."""
-        if result := self._write_scope_upgrade_result():
-            return result
         return await asyncio.to_thread(
-            self._upload_file,
+            self.upload_file,
             local_path,
             folder_id=folder_id,
             name=name,

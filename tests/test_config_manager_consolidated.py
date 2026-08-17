@@ -738,10 +738,10 @@ class TestConsolidatedConfigManager:
             resolved_thread_id="$thread",
             session_id="!room:example.org:$thread",
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == worker_scope
-        assert connect_target.worker_key == resolve_worker_key(
+        assert connect_target.binding.worker_scope == worker_scope
+        assert connect_target.binding.worker_key == resolve_worker_key(
             worker_scope,
             expected_identity,
             agent_name="research",
@@ -787,9 +787,9 @@ class TestConsolidatedConfigManager:
             cm.runtime_paths,
             query["connect_token"][0],
         )
-        assert connect_target.agent_name == "research"
+        assert connect_target.binding.requested_agent_name == "research"
         assert connect_target.requester_id == "@alice:example.org"
-        assert connect_target.worker_scope == private_scope
+        assert connect_target.binding.worker_scope == private_scope
 
     def test_manage_agent_update_does_not_mint_caller_link_when_requester_cannot_manage_target(
         self,
@@ -917,7 +917,7 @@ class TestConsolidatedConfigManager:
         assert "MindRoom-managed OAuth" not in result
 
     def test_manage_agent_returns_target_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
-        """Generic OAuth MCP metadata should use the same updated-agent target flow."""
+        """Requester-scoped MCP OAuth links must target the canonical user credential scope."""
         mcp_server = MCPServerConfig(
             transport="streamable-http",
             url="https://mcp.example.test/mcp",
@@ -950,7 +950,7 @@ class TestConsolidatedConfigManager:
 
         query = parse_qs(urlparse(_connect_url_from_result(result)).query)
         assert query["agent_name"] == ["research"]
-        assert query["execution_scope"] == ["user_agent"]
+        assert query["execution_scope"] == ["user"]
         assert "/api/oauth/mcp_demo/authorize" in result
 
     def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:

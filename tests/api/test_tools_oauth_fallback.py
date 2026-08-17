@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.api import tools as tools_api
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
@@ -74,7 +76,8 @@ def _github_tool() -> dict[str, object]:
     }
 
 
-def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(runtime_paths)
     alice_target = _worker_target("@alice:example.test")
@@ -89,8 +92,8 @@ def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(tmp_pa
     alice_tool = _github_tool()
     bob_tool = _github_tool()
 
-    tools_api._update_tools_statuses([alice_tool], _context(runtime_paths, manager, alice_target))
-    tools_api._update_tools_statuses([bob_tool], _context(runtime_paths, manager, bob_target))
+    await tools_api._update_tools_statuses([alice_tool], _context(runtime_paths, manager, alice_target))
+    await tools_api._update_tools_statuses([bob_tool], _context(runtime_paths, manager, bob_target))
 
     assert alice_tool["status"] == "available"
     assert alice_tool["manual_auth_configured"] is True
@@ -99,7 +102,8 @@ def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(tmp_pa
     assert manual_secret not in repr(alice_tool)
 
 
-def test_blank_manual_oauth_fallback_does_not_mark_tool_available(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_blank_manual_oauth_fallback_does_not_mark_tool_available(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -111,13 +115,14 @@ def test_blank_manual_oauth_fallback_does_not_mark_tool_available(tmp_path: Path
     )
     tool = _github_tool()
 
-    tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
 
     assert tool["status"] == "requires_config"
     assert tool["manual_auth_configured"] is False
 
 
-def test_environment_oauth_fallback_status_is_available_and_secret_free(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_environment_oauth_fallback_status_is_available_and_secret_free(tmp_path: Path) -> None:
     environment_secret = "github-environment-secret"  # noqa: S105
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -128,7 +133,7 @@ def test_environment_oauth_fallback_status_is_available_and_secret_free(tmp_path
     target = _worker_target("@alice:example.test")
     tool = _github_tool()
 
-    tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
 
     assert tool["status"] == "available"
     assert tool["manual_auth_configured"] is False

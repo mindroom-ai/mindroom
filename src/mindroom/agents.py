@@ -27,6 +27,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
+from mindroom.mcp.toolkit import hide_mcp_function_collisions
 from mindroom.openai_tool_search import install_openai_deferred_tool_search, openai_native_tool_search_supported
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
@@ -138,6 +140,19 @@ class _AdditionalContextChunk:
 
 
 @dataclass(frozen=True)
+class _NativeDeferredToolkit:
+    """One authored native-search domain and its projected toolkit owner."""
+
+    domain_name: str
+    toolkit: Toolkit
+
+    @property
+    def wire_function_names(self) -> tuple[str, ...]:
+        """Return the owner's functions that survive final surface projection."""
+        return (*self.toolkit.get_functions(), *self.toolkit.get_async_functions())
+
+
+@dataclass(frozen=True)
 class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
@@ -145,14 +160,27 @@ class _AgentToolAssembly:
     loaded_tools: tuple[str, ...]
     hidden_toolkits: frozenset[str]
     selected_dynamic_tools: tuple[str, ...]
-    # Authored toolkit names whose schemas use native deferred loading.
-    deferred_tool_names: tuple[str, ...]
-    # Wire-level function names to send with defer_loading on the native
-    # server-side tool-search path (Anthropic and OpenAI Responses); empty on
-    # the homegrown dynamic-tools path.
-    deferred_wire_tool_names: frozenset[str]
+    # Toolkits whose surviving functions should use native deferred loading.
+    # Keep the owners rather than a pre-projection name snapshot because final
+    # MCP collision projection may remove a deferred function while preserving
+    # an eager local function with the same wire name.
+    deferred_toolkits: tuple[_NativeDeferredToolkit, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
+
+    @property
+    def deferred_tool_names(self) -> tuple[str, ...]:
+        """Return authored native-search domains with a surviving function surface."""
+        return tuple(
+            dict.fromkeys(deferred.domain_name for deferred in self.deferred_toolkits if deferred.wire_function_names),
+        )
+
+    @property
+    def deferred_wire_tool_names(self) -> frozenset[str]:
+        """Return deferred wire names from the final projected toolkit surface."""
+        return frozenset(
+            function_name for deferred in self.deferred_toolkits for function_name in deferred.wire_function_names
+        )
 
 
 @dataclass(frozen=True)
@@ -550,6 +578,7 @@ def _build_registered_agent_tool(
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
+    authorization: AuthorizationConfig,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_agent_toolkit_worker_target(
@@ -564,6 +593,7 @@ def _build_registered_agent_tool(
         tool_name,
         runtime_paths,
         credentials_manager=credentials_manager,
+        authorization=authorization,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
@@ -599,6 +629,17 @@ def _log_toolkits_without_unique_model_functions(
                     function_names=sorted(function_names),
                 )
             seen_function_names.update(function_names)
+
+
+def _hide_session_mcp_function_collisions(toolkits: list[Toolkit], *, agent_name: str) -> None:
+    """Project MCP functions against the exact session-local tool surface."""
+    for server_id, function_names in hide_mcp_function_collisions(toolkits).items():
+        logger.warning(
+            "Hiding colliding MCP functions from session tool surface",
+            agent=agent_name,
+            server_id=server_id,
+            function_names=list(function_names),
+        )
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -832,6 +873,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name=agent_name,
                 config=config,
                 session_id=session_id,
+                worker_target=build_agent_toolkit_worker_target(
+                    agent_runtime.execution.execution_scope,
+                    agent_name,
+                    is_private=agent_runtime.execution.is_private,
+                    execution_identity=execution_identity,
+                    runtime_paths=runtime_paths,
+                ),
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),
@@ -855,6 +903,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_runtime.execution.is_private,
         execution_identity,
         runtime_overrides,
+        config.authorization,
     )
 
 
@@ -1525,8 +1574,7 @@ def _assemble_agent_toolkits(
     tools: list[Toolkit] = []
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
-    deferred_tool_names: list[str] = []
-    deferred_wire_tool_names: set[str] = set()
+    deferred_toolkits: list[_NativeDeferredToolkit] = []
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
             runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
@@ -1572,9 +1620,12 @@ def _assemble_agent_toolkits(
                 # the rendered prompt prefix as plain non-deferred tools.
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
                     suppress_fully_deferred_toolkit_instructions(toolkit)
-                    deferred_tool_names.append(tool_entry.authored_name or tool_name)
-                    deferred_wire_tool_names.update(toolkit.get_functions())
-                    deferred_wire_tool_names.update(toolkit.get_async_functions())
+                    deferred_toolkits.append(
+                        _NativeDeferredToolkit(
+                            domain_name=tool_entry.authored_name or tool_name,
+                            toolkit=toolkit,
+                        ),
+                    )
         except _MatrixRoomRuntimeToolCollisionError:
             raise
         except (ValueError, ImportError) as exc:
@@ -1589,8 +1640,7 @@ def _assemble_agent_toolkits(
         loaded_tools=loaded_tools,
         hidden_toolkits=hidden_toolkits,
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
-        deferred_tool_names=tuple(dict.fromkeys(deferred_tool_names)),
-        deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
+        deferred_toolkits=tuple(deferred_toolkits),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
     )
@@ -1940,6 +1990,7 @@ def create_agent(
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
     )
+    _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(
         agent_name,
         agent_runtime,

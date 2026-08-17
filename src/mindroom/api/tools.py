@@ -23,12 +23,14 @@ from mindroom.credentials import (
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
-from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import (
+from mindroom.oauth import OAuthProviderError
+from mindroom.oauth.credential_lifecycle import (
+    load_oauth_credentials_snapshot,
     oauth_credentials_usable,
-    oauth_credentials_worker_target,
-    oauth_provider_service_account_configured,
+    resolve_oauth_credential_context,
 )
+from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -37,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
@@ -65,6 +68,7 @@ class _ResolvedToolAvailabilityContext:
     auth_provider_credential_services: dict[str, str]
     oauth_providers: dict[str, OAuthProvider]
     runtime_paths: RuntimePaths
+    oauth_authorization: AuthorizationConfig | None = None
 
 
 def _effective_allowed_shared_services(
@@ -287,6 +291,7 @@ def _resolve_tool_availability_context(
         },
         oauth_providers=oauth_providers,
         runtime_paths=runtime_paths,
+        oauth_authorization=config.authorization,
     )
 
 
@@ -295,12 +300,41 @@ def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
     return config_lifecycle.read_committed_runtime_config(request)
 
 
-def _update_tools_statuses(
+async def _load_oauth_provider_credentials(
+    provider: OAuthProvider,
+    context: _ResolvedToolAvailabilityContext,
+    cache: dict[tuple[str, str | None], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Load one registered provider through the authoritative lifecycle owner."""
+    credential_context = resolve_oauth_credential_context(
+        provider,
+        context.runtime_paths,
+        context.credentials_manager,
+        context.worker_target,
+        authorization=context.oauth_authorization,
+    )
+    provider_target = credential_context.worker_target
+    if provider.requester_scoped_credentials and provider_target is None:
+        return None
+    cache_key = (
+        provider.id,
+        provider_target.worker_key if provider_target is not None else None,
+    )
+    if cache_key not in cache:
+        try:
+            cache[cache_key] = (await load_oauth_credentials_snapshot(credential_context)).credentials
+        except OAuthProviderError:
+            cache[cache_key] = None
+    return cache[cache_key]
+
+
+async def _update_tools_statuses(
     tools: list[dict[str, Any]],
     context: _ResolvedToolAvailabilityContext,
 ) -> None:
     """Update tool runtime availability using the resolved credential context."""
     credentials_cache: dict[tuple[str, str | None, bool], dict[str, Any] | None] = {}
+    oauth_credentials_cache: dict[tuple[str, str | None], dict[str, Any] | None] = {}
 
     def get_credentials(
         service: str,
@@ -353,19 +387,14 @@ def _update_tools_statuses(
             )
             tool["environment_auth_configured"] = environment_auth_configured
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
-            provider_target = (
-                oauth_credentials_worker_target(provider, context.worker_target)
-                if provider is not None
-                else context.worker_target
-            )
             provider_creds = (
-                get_credentials(
+                await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
+                if provider is not None and (context.status_authoritative or use_request_target)
+                else get_credentials(
                     credential_service,
-                    worker_target=provider_target,
+                    worker_target=context.worker_target,
                     use_request_target=use_request_target,
                 )
-                if provider is None or not provider.requester_scoped_credentials or provider_target is not None
-                else None
             )
             if (
                 manual_auth_configured
@@ -423,6 +452,6 @@ async def get_registered_tools(
         tools,
         supported=context.dashboard_configuration_supported,
     )
-    _update_tools_statuses(tools, context)
+    await _update_tools_statuses(tools, context)
 
     return ToolsResponse(tools=tools, status_authoritative=context.status_authoritative)

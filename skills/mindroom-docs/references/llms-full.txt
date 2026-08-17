@@ -1530,6 +1530,8 @@ Demote stale Space admins manually in a Matrix client when needed.
 MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
 Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
 Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+OAuth token services whose names end with `_oauth` cannot use credential seeds; connect them through the OAuth lifecycle instead.
+OAuth client configuration services whose names end with `_oauth_client` remain seedable.
 
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
 Relative file paths resolve from the config directory.
@@ -1566,8 +1568,11 @@ PY
 ```
 
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
-Encrypted mode refuses plaintext credential JSON files.
-No plaintext-to-encrypted migration is performed automatically, so configure the key before saving credentials that must be encrypted.
+Encrypted mode refuses plaintext credential JSON files for every credential service.
+Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
+Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
+No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
+If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
 
 ## Debug Logging
 
@@ -2057,7 +2062,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -2066,10 +2071,10 @@ A filtered public startup-runtime env payload can still propagate from exported 
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify` and `homeassistant`.
-Configured `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the configured scope, while non-OAuth servers use the shared MCP session without requester credentials.
-Use `worker_scope: user` or `worker_scope: user_agent` when OAuth-backed remote MCP state must be requester-isolated.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers always use requester-scoped `user` credentials and sessions, while non-OAuth servers use the shared MCP session without requester credentials.
+`worker_scope` controls worker-runtime reuse but does not change generated MCP OAuth credential identity.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -3286,7 +3291,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -3344,8 +3349,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
-Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions are always isolated to the canonical requester, while non-OAuth servers always call through the shared server session without requester credentials.
+Worker scope controls execution placement and reuse, not MCP OAuth credential ownership.
 
 ## Automatic Dependency Installation
 
@@ -9623,15 +9628,16 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to recover requester-scoped OAuth connections, coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need requester-scoped OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
+- [`oauth_connections`] - Issue a browser-confirmed reset for one requester-scoped OAuth connection.
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
@@ -9643,7 +9649,8 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 
 ## Common Setup Notes
 
-All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+[`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -9655,6 +9662,57 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
+
+## [`oauth_connections`]
+
+`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
+
+### What It Does
+
+The toolkit exposes only `reset_oauth_connection(provider_id)`.
+The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
+The call returns a time-limited, retryable, requester-bound browser link and does not change credentials itself.
+The authenticated browser confirmation retires the matching requester-scoped MCP OAuth session when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
+The reset does not revoke the grant at the external provider.
+Opening the link without confirming is non-destructive.
+Confirming when no local credential exists is safe and still continues to provider authorization.
+
+### Configuration
+
+Enable the tool alongside the OAuth-backed tools the agent may recover.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Work with connected documents and recover revoked connections
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - oauth_connections
+      - google_drive
+```
+
+### Browser Confirmation And Requester Scope
+
+The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
+The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
+The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
+Only the original authenticated human requester can open and confirm the link.
+Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
+The resolved credential scope must be `user` or `user_agent`; shared credentials are refused.
+A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
+Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
+
+### Notes
+
+- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
+- Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
+- Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
+- If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
+- Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
+- The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`subagents`]
 
@@ -10894,7 +10952,7 @@ The tool names in this table are representative highlights rather than an exhaus
 | **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
-| **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Agent Orchestration** | oauth_connections, subagents, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 | **Runtime Awareness** | update_awareness | [→ tools overview](https://docs.mindroom.chat/tools/#mindroom-update-awareness) |
@@ -11063,12 +11121,13 @@ They are useful when one server exposes many tools but one agent should see only
 
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers load a token for the resolved worker scope at tool-call time and keep one session per worker key.
-Shared scope reuses one agent-scoped token and session; `user` and `user_agent` provide requester isolation.
+OAuth-backed remote MCP servers resolve credentials against the effective requester's canonical `user` scope at tool-call time, independent of the agent's configured worker scope.
+They keep one session per canonical requester credential target and server configuration generation.
+Agent execution still follows the configured worker scope, but MCP OAuth credential and session ownership remains requester-isolated.
 
 ## OAuth-Backed Remote MCP
 
-Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the configured worker scope.
+Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the effective requester's canonical `user` credential scope.
 OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
 
 ```yaml
@@ -11110,12 +11169,12 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 - `<prefix>_list_tools`
 - `<prefix>_call_tool`
 
-The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a worker-scoped tool catalog.
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-scoped tool catalog.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-Until the current worker scope connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+Until the effective requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
-After MindRoom has a cached worker-scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that worker scope in addition to the bridge functions.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the effective requester's canonical `user` credential scope to the MCP server.
+After MindRoom has cached a requester-scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
@@ -11313,10 +11372,15 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 ## Error Handling
 
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
-If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
+If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning for every affected server.
 
 By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
-MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+For servers without OAuth, MindRoom keeps retrying transport and discovery failures in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+OAuth-backed servers retry discovery lazily on the next requester call instead of scheduling a background refresh.
+Function-name collisions remain failed because retrying the same invalid catalog cannot recover; after fixing the remote catalog or configured prefixes, reload `config.yaml` or restart MindRoom to retry those servers.
+Collision invalidation is symmetric and atomic.
+If a requester-scoped OAuth catalog collides with a shared non-OAuth catalog visible to the same agent, MindRoom marks both catalogs failed regardless of which catalog was published first.
+Because the non-OAuth catalog is shared, it remains unavailable to every agent until the collision is fixed and `config.yaml` is reloaded or MindRoom restarts.
 Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
@@ -11338,8 +11402,8 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
-- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the current worker scope.
+- OAuth-backed remote MCP credentials and sessions are always isolated by the effective requester in canonical `user` scope, independent of the agent's configured worker scope.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the effective requester's canonical credential target.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 
@@ -11874,12 +11938,13 @@ def register_oauth_providers(settings, runtime_paths):
     ]
 ```
 
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
 Dashboard flows normally call `connect` and use the returned provider authorization URL.
 Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
 Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
 The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
 The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
+Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
 If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
 Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
 MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
@@ -13174,7 +13239,9 @@ To adopt hooks:
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
 Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
+When a scoped token exists but cannot be decoded, status returns `reset_required: true`, and the dashboard offers the decode-free scoped disconnect path before reconnecting.
+Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to match the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
@@ -13198,7 +13265,11 @@ Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to re
 Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
-OAuth token writes always go through the provider's credential-target resolver and `save_scoped_credentials()`.
+OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
+On first access, MindRoom adopts a scope's legacy `<credential_service>_credentials.json` token document into a sibling `<credential_service>_credentials.sqlite3` store and removes the legacy file only after its bytes are durably represented or an explicit reset or replacement commits.
+If enabling credential encryption leaves a plaintext legacy token unadopted, disabling encryption before reset or replacement lets MindRoom re-adopt that retained token into the unencrypted store.
+Back up both files during an upgrade if an immediate rollback may be necessary.
+Versions that predate the SQLite lifecycle ignore the new store, so downgrading can expose stale legacy state or require the user to reconnect rather than preserving changes made after adoption.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
 For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
@@ -13209,6 +13280,7 @@ Storage, API routing, OAuth provider loading, and worker identity derivation sta
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.
+Every provider token `credential_service` must end with `_oauth` so placement and worker-grant policy recognize it without loading provider code.
 The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared.
 OAuth app client config is stored separately from both of those services.
 Providers declare `client_config_services` in lookup order, and MindRoom reads `client_id`, `client_secret`, and optional `redirect_uri` from those services.
@@ -13243,8 +13315,8 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current resolved worker scope before opening the remote MCP transport.
-Use `worker_scope: user` or `worker_scope: user_agent` when different requesters must receive distinct OAuth tokens and MCP sessions; shared scope deliberately reuses one agent-scoped identity.
+The matching MCP toolkit always loads the token for the current canonical requester from a `user` credential scope before opening the remote MCP transport.
+Generated MCP OAuth credentials and sessions remain requester-isolated even when the agent's execution worker uses `shared` or `user_agent`; `worker_scope` still controls worker-runtime reuse, not the MCP OAuth credential identity.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
@@ -18457,7 +18529,7 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
@@ -18467,7 +18539,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, and `oauth_connections`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 

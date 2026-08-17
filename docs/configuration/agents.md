@@ -367,7 +367,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -376,10 +376,10 @@ A filtered public startup-runtime env payload can still propagate from exported 
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify` and `homeassistant`.
-Configured `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the configured scope, while non-OAuth servers use the shared MCP session without requester credentials.
-Use `worker_scope: user` or `worker_scope: user_agent` when OAuth-backed remote MCP state must be requester-isolated.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers always use requester-scoped `user` credentials and sessions, while non-OAuth servers use the shared MCP session without requester credentials.
+`worker_scope` controls worker-runtime reuse but does not change generated MCP OAuth credential identity.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 

@@ -162,6 +162,11 @@ def test_export_tools_metadata_json() -> None:
         assert "managed_init_args" not in first_tool
 
 
+def test_oauth_connections_requires_live_room_context() -> None:
+    """OAuth reset must not be advertised without a requester-bound live context."""
+    assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+
+
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     """Export should ignore temporary registry contamination from earlier tests."""
     tool_name = "test_leaked_tool"
@@ -510,6 +515,7 @@ def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
     )
     assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
 

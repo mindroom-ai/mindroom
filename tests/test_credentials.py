@@ -410,6 +410,59 @@ class TestCredentialsManager:
             mode = stat.S_IMODE(directory_path.stat().st_mode)
             assert mode == 0o700
 
+    def test_fresh_scoped_credentials_use_durable_directory_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every newly introduced scoped-directory entry must use the durable creator."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        created: list[Path] = []
+        real_create = credentials_module.create_directory_durable
+
+        def record_create(path: Path, *, mode: int) -> None:
+            created.append(path)
+            real_create(path, mode=mode)
+
+        monkeypatch.setattr(credentials_module, "create_directory_durable", record_create)
+
+        scoped_manager = manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        assert created == [
+            scoped_manager.base_path.parent.parent,
+            scoped_manager.base_path.parent,
+            scoped_manager.base_path,
+        ]
+
+    def test_existing_scoped_directory_retries_interrupted_durable_creation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Manager retry must republish an existing scope directory after creator failure."""
+        manager = CredentialsManager(tmp_path / "credentials")
+        scoped_root = tmp_path / "private_oauth"
+        attempted: list[Path] = []
+        real_create = credentials_module.create_directory_durable
+        failed_once = False
+
+        def fail_after_create(path: Path, *, mode: int) -> None:
+            nonlocal failed_once
+            attempted.append(path)
+            real_create(path, mode=mode)
+            if path == scoped_root and not failed_once:
+                failed_once = True
+                msg = "scope publication interrupted"
+                raise OSError(msg)
+
+        monkeypatch.setattr(credentials_module, "create_directory_durable", fail_after_create)
+
+        with pytest.raises(OSError, match="scope publication interrupted"):
+            manager.for_primary_runtime_scope("@user:example.test", "agent")
+        manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        assert attempted.count(scoped_root) == 2
+
     def test_encrypted_scoped_credentials_harden_existing_parent_directories(
         self,
         tmp_path: Path,

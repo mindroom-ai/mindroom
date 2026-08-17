@@ -100,6 +100,7 @@ from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
 from mindroom.tools.newspaper4k import newspaper4k_tools
 from mindroom.tools.notion import notion_tools
+from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
@@ -232,6 +233,7 @@ __all__ = [
     "neo4j_tools",
     "newspaper4k_tools",
     "notion_tools",
+    "oauth_connections_tools",
     "openai_tools",
     "openbb_tools",
     "openweather_tools",

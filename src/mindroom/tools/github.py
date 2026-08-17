@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
     ),
     docs_url="https://docs.agno.com/tools/toolkits/others/github",
     function_names=(

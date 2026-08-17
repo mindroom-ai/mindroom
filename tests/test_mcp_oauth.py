@@ -16,6 +16,7 @@ from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, c
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
+    _mcp_oauth_provider_is_configured,
     _oauth_discovery_config,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
@@ -77,6 +78,20 @@ def test_mcp_oauth_helpers_reject_non_oauth_server_consistently() -> None:
         _oauth_discovery_config(server_config)
     with pytest.raises(ValueError, match="not OAuth-backed"):
         mcp_oauth_provider("example", server_config)
+
+
+def test_mcp_oauth_provider_lookup_ignores_disabled_shadow_server() -> None:
+    """Reset retirement must select the enabled server that owns the live OAuth session."""
+    base = _oauth_mcp_server_config()
+    assert base.auth is not None
+    auth = base.auth.model_copy(update={"provider_id": "shared-provider"})
+    disabled = base.model_copy(update={"enabled": False, "auth": auth})
+    enabled = base.model_copy(update={"auth": auth})
+
+    assert _mcp_oauth_provider_is_configured(
+        {"disabled": disabled, "enabled": enabled},
+        "shared-provider",
+    )
 
 
 def _oauth_mcp_server_config() -> MCPServerConfig:
@@ -209,6 +224,7 @@ def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.extra_auth_params == {"audience": "example"}
     assert provider.extra_token_params == {"resource": "https://mcp.example.test/mcp"}
+    assert provider.requester_scoped_credentials is True
 
 
 def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_scoped() -> None:
