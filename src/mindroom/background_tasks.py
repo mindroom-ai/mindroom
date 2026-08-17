@@ -41,19 +41,20 @@ async def wait_for_future_until_complete[Result](
     except asyncio.CancelledError as cancellation:
         if on_cancel is not None:
             on_cancel()
-        result_error: BaseException | None = None
+        result_error: Exception | asyncio.CancelledError | None = None
         while not future.done():
             try:
                 await asyncio.shield(future)
-            except asyncio.CancelledError:
-                continue
-            except BaseException as exc:
+            except asyncio.CancelledError as exc:
+                result_error = exc if future.done() else None
+            except Exception as exc:
                 result_error = exc
+            if result_error is not None:
                 break
         if result_error is None:
             try:
                 future.result()
-            except BaseException as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 result_error = exc
         if result_error is not None and (
             chain_cancelled_result or not isinstance(result_error, asyncio.CancelledError)

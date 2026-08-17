@@ -2311,7 +2311,11 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
         worker_target=worker_target,
         credentials_manager=credentials_manager,
     )
-    request_key = manager._request_session_key(base_state, credential_context.worker_target).oauth_request_key
+    request_key = manager._request_session_key(
+        base_state,
+        credential_context.worker_target,
+        provider_id=credential_context.provider.id,
+    ).oauth_request_key
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
     cancellation_turn = asyncio.Event()
@@ -3494,16 +3498,24 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
         runtime_paths,
     )
     manager = MCPServerManager(runtime_paths)
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
 
-    changed = await manager.sync_servers(config)
+    first_changed = await manager.sync_servers(config)
+    second_changed = await manager.sync_servers(config)
 
-    assert changed == set()
+    assert first_changed == set()
+    assert second_changed == set()
     assert manager.failed_server_ids() == {"demo"}
     error = manager._states["demo"].last_error
     assert isinstance(error, MCPProtocolError)
     assert "run_shell_command" in str(error)
     assert "existing MindRoom tool function" in str(error)
     assert manager._states["demo"].refresh_task is None
+    collision_warnings = [event for event, _kwargs in logger.warning_calls if event == "MCP server discovery failed"]
+    collision_debugs = [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"]
+    assert len(collision_warnings) == 2
+    assert collision_debugs == []
 
 
 @pytest.mark.asyncio

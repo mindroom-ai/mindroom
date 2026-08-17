@@ -442,14 +442,19 @@ async def confirm_reset(
         return login_redirect
     provider, runtime_paths = _load_provider(request, provider_id)
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
-    _verify_browser_reset_intent(
-        request,
-        provider,
-        intent,
-        runtime_paths,
-        agent_name=agent_name,
-        execution_scope=execution_scope,
-    )
+    try:
+        _verify_browser_reset_intent(
+            request,
+            provider,
+            intent,
+            runtime_paths,
+            agent_name=agent_name,
+            execution_scope=execution_scope,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return _oauth_browser_conflict_response(str(exc.detail))
+        raise
     display_name = escape(provider.display_name)
     target_agent = escape(intent.binding.requested_agent_name or "unknown")
     target_scope = escape(intent.binding.worker_scope)

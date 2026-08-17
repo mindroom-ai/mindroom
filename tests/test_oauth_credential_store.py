@@ -670,6 +670,60 @@ async def test_reader_retries_while_writer_crosses_commit_window(
         for process in (blocking_reader, writer):
             if process.is_alive():
                 process.terminate()
-                process.join()
+            process.join()
     assert blocking_reader.exitcode == 0
     assert writer.exitcode == 0
+
+
+@pytest.mark.asyncio
+async def test_reader_probe_validates_inside_one_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The initialization probe must hold one materialized read snapshot through validation."""
+    context = _context(tmp_path)
+    await _publish(context, "initial")
+    validation_transactions: list[bool] = []
+    original_validate = credential_store_module._validate_initialized_store
+
+    def record_validation_transaction(
+        validation_context: OAuthCredentialContext,
+        connection: sqlite3.Connection,
+        **kwargs: object,
+    ) -> None:
+        validation_transactions.append(connection.in_transaction)
+        original_validate(validation_context, connection, **kwargs)
+
+    monkeypatch.setattr(
+        credential_store_module,
+        "_validate_initialized_store",
+        record_validation_transaction,
+    )
+
+    async with oauth_credential_reader(context) as reader:
+        assert reader.generations().generation
+
+    assert validation_transactions == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_legacy_cleanup_decision_is_made_inside_initialization_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Legacy cleanup must not open an unprotected read window after initialization commits."""
+    context = _context(tmp_path)
+    original_cleanup_decision = credential_store_module._legacy_cleanup_must_be_deferred
+
+    def require_transaction(connection: sqlite3.Connection) -> bool:
+        assert connection.in_transaction
+        return original_cleanup_decision(connection)
+
+    monkeypatch.setattr(
+        credential_store_module,
+        "_legacy_cleanup_must_be_deferred",
+        require_transaction,
+    )
+
+    async with oauth_credential_transaction(context) as transaction:
+        await transaction.commit()

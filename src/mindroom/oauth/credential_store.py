@@ -296,8 +296,7 @@ async def oauth_credential_transaction(
         await _set_synchronous_extra(connection)
         await _enter_delete_journal(connection)
         await _begin_immediate(connection)
-        await _initialize_store(context, connection)
-        legacy_cleanup_deferred = _legacy_cleanup_must_be_deferred(connection)
+        legacy_cleanup_deferred = await _initialize_store(context, connection)
         if not legacy_cleanup_deferred:
             _cleanup_legacy_files(context)
         await _begin_immediate(connection)
@@ -338,7 +337,7 @@ async def oauth_credential_reader(
 async def _initialize_store(
     context: _OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
-) -> None:
+) -> bool:
     """Create and bind one database, adopting legacy credentials exactly once."""
     connection.execute(
         """
@@ -405,6 +404,7 @@ async def _initialize_store(
     else:
         _validate_scope_binding(context, row)
         legacy_adoption = _adopt_deferred_legacy_payload(context, connection, row)
+    legacy_cleanup_deferred = _legacy_cleanup_must_be_deferred(connection)
     await _commit_connection(connection)
     if legacy_adoption is not None:
         logger.info(
@@ -414,6 +414,7 @@ async def _initialize_store(
             credential_present=legacy_adoption.present,
             credential_unreadable=legacy_adoption.unreadable,
         )
+    return legacy_cleanup_deferred
 
 
 def _adopt_deferred_legacy_payload(
@@ -465,25 +466,22 @@ async def _reader_requires_write_preparation(
     connection = sqlite3.connect(database_path, isolation_level=None, timeout=0)
     connection.row_factory = sqlite3.Row
     try:
-        table = await _retry_sqlite_lock(
-            lambda: connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'oauth_credential_state'",
-            ).fetchone(),
-            operation="read initialization",
-        )
+        await _begin_read(connection)
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'oauth_credential_state'",
+        ).fetchone()
         if table is None:
             return True
-        row = await _retry_sqlite_lock(
-            lambda: connection.execute(
-                "SELECT * FROM oauth_credential_state WHERE singleton = 1",
-            ).fetchone(),
-            operation="read initialization",
-        )
+        row = connection.execute(
+            "SELECT * FROM oauth_credential_state WHERE singleton = 1",
+        ).fetchone()
         if row is None:
             return True
         _validate_initialized_store(context, connection, row=row)
         return _deferred_legacy_payload(context, row) is not None
     finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         connection.close()
 
 

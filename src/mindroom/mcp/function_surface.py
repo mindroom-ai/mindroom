@@ -66,7 +66,7 @@ def analyze_mcp_function_collisions(
 
         local_collision_names = local_mcp_function_name_collisions(
             snapshot.local_function_names,
-            server_ids_by_function_name,
+            server_ids_by_function_name.keys(),
         )
         for function_name, server_ids in server_ids_by_function_name.items():
             messages: list[str] = []

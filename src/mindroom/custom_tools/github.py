@@ -59,9 +59,6 @@ _AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES = (
     "Error getting contributors:",
     "Error decoding file content:",
 )
-_TYPED_PROVIDER_FAILURE_ENTRYPOINTS = frozenset(
-    {"delete_file", "edit_issue", "get_pull_request_count", "update_file"},
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,17 +177,6 @@ def _normalized_access_token(value: object) -> str | None:
 def _sanitized_github_exception_result(exc: GithubException) -> str:
     _record_github_provider_failure(exc)
     return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
-
-
-def _is_serialized_github_error_result(result: object) -> bool:
-    """Recognize Agno's generic error envelope without reparsing exception text."""
-    if not isinstance(result, str):
-        return False
-    try:
-        payload = json.loads(result)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(payload, dict) and set(payload) == {"error"} and isinstance(payload["error"], str)
 
 
 class GithubTools(AgnoGithubTools):
@@ -326,7 +312,6 @@ class GithubTools(AgnoGithubTools):
             def oauth_entrypoint(
                 *args: object,
                 _entrypoint: Callable[..., object] = entrypoint,
-                _function_name: str = function.name,
                 **kwargs: object,
             ) -> object:
                 try:
@@ -340,17 +325,13 @@ class GithubTools(AgnoGithubTools):
                 finally:
                     _github_provider_failure.reset(failure_token)
                 if provider_failure is None:
-                    if _function_name not in _TYPED_PROVIDER_FAILURE_ENTRYPOINTS and _is_serialized_github_error_result(
-                        result,
-                    ):
-                        return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
                     return result
                 status_code = provider_failure.status_code
                 logger.warning(
                     "github_tool_call_failed",
                     provider_id=self._oauth_provider.id,
                     error_type="GithubException",
-                    status_code=status_code if status_code is not None else "unknown",
+                    status_code=status_code,
                 )
                 if not self._explicit_access_token and status_code == 401:
                     self.access_token = None

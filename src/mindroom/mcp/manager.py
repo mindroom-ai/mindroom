@@ -168,10 +168,10 @@ class _DiscoveryRejection:
 class _CatalogRefreshOutcome:
     """Values computed under refresh locks and consumed after those locks release."""
 
-    changed: bool = False
-    should_notify_catalog_change: bool = False
-    discovery_rejection: _DiscoveryRejection | None = None
-    invalid_function_states: tuple[MCPServerState, ...] | None = None
+    changed: bool
+    should_notify_catalog_change: bool
+    discovery_rejection: _DiscoveryRejection | None
+    invalid_function_states: tuple[MCPServerState, ...] | None
 
 
 class MCPServerManager:
@@ -498,7 +498,11 @@ class MCPServerManager:
                 base_state,
                 worker_target=worker_target,
             )
-            key = self._request_session_key(base_state, credential_context.worker_target)
+            key = self._request_session_key(
+                base_state,
+                credential_context.worker_target,
+                provider_id=credential_context.provider.id,
+            )
         except OAuthConnectionRequired:
             return None
         state = self._scoped_states.get(key)
@@ -577,13 +581,12 @@ class MCPServerManager:
         self,
         state: MCPServerState,
         worker_target: ResolvedWorkerTarget | None,
+        *,
+        provider_id: str,
     ) -> _MCPSessionKey:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
         worker_key = worker_target.worker_key if worker_target is not None else None
         identity = worker_target.execution_identity if worker_target is not None else None
-        provider_id = state.oauth_provider_id
-        if provider_id is None:
-            raise _MCPConfigurationChangedError
         if (
             worker_scope not in {"user", "user_agent"}
             or not worker_key
@@ -712,7 +715,11 @@ class MCPServerManager:
             credentials_manager=credentials_manager,
         )
         worker_target = credential_context.worker_target
-        key = self._request_session_key(base_state, worker_target)
+        key = self._request_session_key(
+            base_state,
+            worker_target,
+            provider_id=credential_context.provider.id,
+        )
         request_key = key.oauth_request_key
         async with self._state_lifecycle_lock:
             if self._shutdown:
@@ -1463,6 +1470,7 @@ class MCPServerManager:
             async with state.lock:
                 state.last_error = None
                 state.function_validation_error = False
+                state.consecutive_failures = 0
                 state.stale = True
 
     @staticmethod
@@ -1752,6 +1760,8 @@ class MCPServerManager:
             return []
         requester_surfaces: set[tuple[str, str]] = set()
         if worker_target is not None:
+            # Generated MCP OAuth providers are requester-scoped, so every
+            # configured agent worker scope canonicalizes to one user surface.
             for server_id in sorted(self._states):
                 state = self._states[server_id]
                 if state.config.auth is None:

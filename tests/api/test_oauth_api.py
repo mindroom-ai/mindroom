@@ -1984,6 +1984,10 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
                 reset_url.replace("execution_scope=user_agent", "execution_scope=shared"),
                 follow_redirects=False,
             )
+            tampered_scope_post = client.post(
+                reset_url.replace("execution_scope=user_agent", "execution_scope=shared"),
+                follow_redirects=False,
+            )
             confirmation = client.get(reset_url, follow_redirects=False)
             before_confirmation = _stored_oauth_credentials(provider, runtime_paths)
             confirmed = client.post(reset_url, follow_redirects=False)
@@ -1994,6 +1998,7 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert unauthenticated_reset.status_code == 401
     assert tampered_target.status_code == 400
     assert tampered_scope.status_code == 400
+    assert tampered_scope_post.status_code == 400
     assert confirmation.status_code == 200
     assert "Reset and reconnect Test Drive" in confirmation.text
     assert "general" in confirmation.text
@@ -2145,8 +2150,13 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="http://localhost:8765") as client:
             _login(client)
+            confirmation = client.get(reset_url, follow_redirects=False)
             response = client.post(reset_url, follow_redirects=False)
 
+    assert confirmation.status_code == 409
+    assert confirmation.headers["content-type"].startswith("text/html")
+    assert "not available to this agent" in confirmation.text
+    assert '"detail"' not in confirmation.text
     assert response.status_code == 409
     credentials = _stored_oauth_credentials(provider, runtime_paths)
     assert credentials is not None
