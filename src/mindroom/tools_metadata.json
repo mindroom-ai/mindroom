@@ -6918,6 +6918,44 @@
       "status": "available"
     },
     {
+      "agent_override_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": null,
+          "label": "Enable Admin Scope",
+          "name": "admin_scope",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "auth_provider": null,
+      "category": "information",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Inspect retained token usage without modifying session storage",
+      "display_name": "Usage Statistics",
+      "docs_url": null,
+      "function_names": [
+        "get_my_usage",
+        "get_all_usage"
+      ],
+      "helper_text": null,
+      "icon": "FaChartBar",
+      "icon_color": "text-cyan-500",
+      "name": "usage_stats",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",

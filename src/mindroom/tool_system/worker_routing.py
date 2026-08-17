@@ -50,6 +50,7 @@ _LOCAL_ONLY_TOOL_NAMES = frozenset(
         "homeassistant",
         "invite_router",
         "todo",
+        "usage_stats",
     },
 )
 

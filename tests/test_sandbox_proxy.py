@@ -72,6 +72,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_worker_key,
     resolve_worker_target,
+    tool_stays_local,
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
@@ -5764,6 +5765,7 @@ class TestWorkerToolsOverride:
             "homeassistant",
             "invite_router",
             "todo",
+            "usage_stats",
         ],
     )
     def test_local_only_tools_never_proxy(
@@ -5786,6 +5788,7 @@ class TestWorkerToolsOverride:
             )
             is False
         )
+        assert tool_stays_local(tool_name)
         assert (
             sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
@@ -5794,6 +5797,10 @@ class TestWorkerToolsOverride:
             )
             is False
         )
+
+    def test_usage_stats_stays_local(self) -> None:
+        """Usage scans must not leave the primary runtime."""
+        assert tool_stays_local("usage_stats")
 
     def test_browser_can_still_use_explicit_worker_routing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Host-browser isolation must not be disabled by the optional Matrix desktop target."""
