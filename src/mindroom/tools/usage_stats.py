@@ -31,15 +31,6 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     function_names=("get_my_usage", "get_all_usage"),
     managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
-    config_fields=[
-        ConfigField(
-            name="admin_scope",
-            label="Enable Admin Scope",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-    ],
     agent_override_fields=[
         ConfigField(
             name="admin_scope",

@@ -14,7 +14,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_stats_storage import (
-    UsageReadBudget,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -127,18 +126,9 @@ def _wire(
         source: UsageStorageSource,
         *,
         mode: str = "runs",
-        budget: UsageReadBudget | None = None,
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-        for item in rows.get(source.path_label, ()):
-            if budget is not None:
-                payload_bytes = item.payload_bytes if isinstance(item, UsageSessionRow) else 0
-                if not budget.consume_row(payload_bytes):
-                    yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
-                    return
-                if mode == "runs" and isinstance(item, UsageSessionRow) and not budget.consume_runs(len(item.runs)):
-                    yield UsageStorageDiagnostic(source.path_label, "resource_limit", "request work limit exceeded")
-                    return
-            yield item
+        del mode
+        yield from rows.get(source.path_label, ())
 
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
 
@@ -182,7 +172,7 @@ def test_self_usage_accepts_missing_requester_in_exact_private_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source(scope="private_agent", requester_isolated=True)
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics()),)})
 
     report = collect_self_usage(
         agent_name="code",
@@ -193,6 +183,29 @@ def test_self_usage_accepts_missing_requester_in_exact_private_store(
     )
 
     assert report.totals.total_tokens == 10
+
+
+def test_private_self_usage_uses_compaction_safe_session_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(scope="private_agent", requester_isolated=True)
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, session_metrics=_metrics(25)),)},
+    )
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    )
+
+    assert report.totals.total_tokens == 25
+    assert report.session_count == 1
 
 
 def test_self_usage_marks_missing_shared_requester_incomplete(
@@ -269,7 +282,7 @@ def test_invalid_admin_session_metrics_mark_source_incomplete(
     assert report.coverage.unavailable_sources == 1
 
 
-def test_resource_limit_reports_truncated_coverage(
+def test_admin_usage_reads_every_retained_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -284,12 +297,11 @@ def test_resource_limit_reports_truncated_coverage(
             ),
         },
     )
-    monkeypatch.setattr("mindroom.usage_stats._MAX_ROWS_PER_REQUEST", 1)
-
     report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
-    assert report.totals.total_tokens == 10
-    assert report.coverage.truncated is True
+    assert report.totals.total_tokens == 20
+    assert report.session_count == 2
+    assert "truncated" not in report.to_dict()["coverage"]  # type: ignore[operator]
 
 
 def test_unavailable_source_is_content_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

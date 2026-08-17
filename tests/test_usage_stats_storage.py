@@ -16,7 +16,6 @@ from agno.session.team import TeamSession
 from agno.team import Team
 from agno.team._session import update_session_metrics
 
-import mindroom.usage_stats_storage as usage_storage
 from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -310,66 +309,15 @@ def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
     assert len(row.runs) == 1
 
 
-def test_reader_reports_run_node_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One retained row cannot bypass request bounds with many tiny runs."""
+def test_reader_returns_every_retained_row(tmp_path: Path) -> None:
+    """The parameter-free aggregate can inspect every retained session row."""
     database = tmp_path / "code.db"
-    _create_database(database, runs=[_run(), _run()])
-    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_RUNS_PER_ROW", 1)
+    _create_database(database, runs=[_run()])
+    _insert_runs_row(database, session_id="session-2", runs=[_run()])
 
     result = list(iter_usage_storage_rows(_source(database)))
 
-    assert result == [
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="resource_limit",
-            detail="run node limit exceeded",
-        ),
-    ]
-
-
-def test_oversized_rows_still_consume_request_run_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rejected rows still count their raw nodes toward the shared request bound."""
-    database = tmp_path / "code.db"
-    _create_database(database, runs=[_run(), _run()])
-    _insert_runs_row(database, session_id="session-2", runs=[_run(), _run()])
-    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_RUNS_PER_ROW", 1)
-    budget = usage_storage.UsageReadBudget(row_limit=10, byte_limit=1_000_000, run_limit=3)
-
-    result = list(iter_usage_storage_rows(_source(database), budget=budget))
-
-    assert result == [
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="resource_limit",
-            detail="run node limit exceeded",
-        ),
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="resource_limit",
-            detail="request work limit exceeded",
-        ),
-    ]
-    assert budget.exhausted is True
-
-
-def test_reader_charges_byte_budget_before_json_decode(tmp_path: Path) -> None:
-    """A request-wide byte budget stops a row before retained JSON is decoded."""
-    database = tmp_path / "code.db"
-    _create_database(database)
-    budget = usage_storage.UsageReadBudget(row_limit=1, byte_limit=1, run_limit=1)
-
-    result = list(iter_usage_storage_rows(_source(database), budget=budget))
-
-    assert result == [
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="resource_limit",
-            detail="request work limit exceeded",
-        ),
-    ]
+    assert [row.row_key for row in result if isinstance(row, UsageSessionRow)] == ["session-1", "session-2"]
 
 
 def test_reader_accepts_agno_null_runs(tmp_path: Path) -> None:
@@ -502,50 +450,6 @@ def test_admin_discovery_finds_shared_private_and_team_databases(tmp_path: Path)
     assert "agents/shared/sessions/shared.db" in labels
     assert private_database.resolve().relative_to(root.resolve()).as_posix() in labels
     assert team_database.resolve().relative_to(root.resolve()).as_posix() in labels
-
-
-def test_admin_discovery_reports_source_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A discovery cap must not silently omit inspectable databases."""
-    config = _config()
-    runtime_paths = _paths(tmp_path)
-    private_database = _private_database(runtime_paths, _identity("@alice:example.test"))
-    _create_database(private_database)
-    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_SOURCES", 1)
-
-    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
-
-    assert any(
-        isinstance(source, UsageStorageDiagnostic)
-        and source.status == "resource_limit"
-        and source.detail == "source discovery limit exceeded"
-        for source in sources
-    )
-
-
-def test_admin_discovery_reports_directory_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A directory-entry cap must not silently omit private instances."""
-    config = _config()
-    runtime_paths = _paths(tmp_path)
-    _create_database(_private_database(runtime_paths, _identity("@alice:example.test")))
-    _create_database(_private_database(runtime_paths, _identity("@bob:example.test")))
-    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_DIRECTORY_ENTRIES", 1)
-
-    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
-
-    assert any(isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources)
-
-
-def test_admin_discovery_reports_candidate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A private-instance candidate cap must not silently omit databases."""
-    config = _config()
-    runtime_paths = _paths(tmp_path)
-    _create_database(_private_database(runtime_paths, _identity("@alice:example.test")))
-    _create_database(_private_database(runtime_paths, _identity("@bob:example.test")))
-    monkeypatch.setattr("mindroom.usage_stats_storage._MAX_CANDIDATES", 1)
-
-    sources = discover_admin_usage_sources(config=config, runtime_paths=runtime_paths)
-
-    assert any(isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources)
 
 
 def test_admin_discovery_reports_directory_read_failure(

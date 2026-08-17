@@ -15,7 +15,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     bind_runtime_paths,
@@ -123,7 +123,31 @@ def test_registration_keeps_usage_stats_local_and_configurable() -> None:
 
     assert metadata.function_names == ("get_my_usage", "get_all_usage")
     assert metadata.default_execution_target.value == "primary"
-    assert [field.name for field in metadata.config_fields or []] == ["admin_scope"]
+    assert metadata.config_fields is None
+    assert [field.name for field in metadata.agent_override_fields or []] == ["admin_scope"]
+
+
+def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
+    """A deployment-wide stored value cannot grant an ordinary agent admin scope."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    ordinary_toolkit = get_tool_by_name(
+        "usage_stats",
+        runtime_paths,
+        credential_overrides={"admin_scope": True},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+    admin_toolkit = get_tool_by_name(
+        "usage_stats",
+        runtime_paths,
+        tool_config_overrides={"admin_scope": True},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert _function_names(ordinary_toolkit) == {"get_my_usage"}
+    assert _function_names(admin_toolkit) == {"get_my_usage", "get_all_usage"}
 
 
 @pytest.mark.asyncio
@@ -137,7 +161,24 @@ async def test_admin_rejects_non_global_requester_before_collection(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
 
-    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
+    payload = json.loads(await UsageStatsTools(agent_name="usage", admin_scope=True).get_all_usage())
+
+    assert payload["code"] == "authorization_error"
+    collect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_admin_rejects_a_mismatched_runtime_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admin-scoped toolkit remains bound to the agent that received the override."""
+    context = _context(tmp_path, requester_id="@admin:example.test", global_users=["@admin:example.test"])
+    collect = Mock()
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(agent_name="other", admin_scope=True).get_all_usage())
 
     assert payload["code"] == "authorization_error"
     collect.assert_not_called()
@@ -159,7 +200,7 @@ async def test_admin_allows_canonical_global_alias(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
 
-    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
+    payload = json.loads(await UsageStatsTools(agent_name="usage", admin_scope=True).get_all_usage())
 
     assert payload["status"] == "ok"
     assert collect.call_args.kwargs["config"] is context.current_config
@@ -182,7 +223,7 @@ async def test_admin_rejects_alias_only_global_configuration(
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
 
-    payload = json.loads(await UsageStatsTools(admin_scope=True).get_all_usage())
+    payload = json.loads(await UsageStatsTools(agent_name="usage", admin_scope=True).get_all_usage())
 
     assert payload["code"] == "authorization_error"
     collect.assert_not_called()

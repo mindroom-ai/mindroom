@@ -8,7 +8,6 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
@@ -24,7 +23,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
-    "UsageReadBudget",
+    "TOKEN_FIELDS",
     "UsageRunNode",
     "UsageSessionRow",
     "UsageStorageDiagnostic",
@@ -37,65 +36,23 @@ __all__ = [
 type _UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
 type _MetricValue = int | float | str | None
 
-_MAX_JSON_BYTES = 1_000_000
-_MAX_ROWS_PER_SOURCE = 10_000
-_MAX_RUNS_PER_ROW = 1_000
-_MAX_DIRECTORY_ENTRIES = 1_000
-_MAX_CANDIDATES = 10_000
-_MAX_SOURCES = 1_000
 _MAX_STRING_LENGTH = 512
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
-_TOKEN_FIELDS = frozenset(
-    {
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens",
-        "audio_input_tokens",
-        "audio_output_tokens",
-        "audio_total_tokens",
-    },
+TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "audio_total_tokens",
 )
 _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "runs", "session_data"},
 )
-
-
-class _UsageResourceLimitError(ValueError):
-    """A retained row exceeds the adapter's fixed work bounds."""
-
-
-@dataclass(slots=True)
-class UsageReadBudget:
-    """Shared request budget charged before retained payload expansion."""
-
-    row_limit: int
-    byte_limit: int
-    run_limit: int
-    rows_used: int = 0
-    bytes_used: int = 0
-    runs_used: int = 0
-    exhausted: bool = False
-
-    def consume_row(self, payload_bytes: int) -> bool:
-        """Charge one raw session row and its retained JSON bytes."""
-        if self.rows_used >= self.row_limit or self.bytes_used + payload_bytes > self.byte_limit:
-            self.exhausted = True
-            return False
-        self.rows_used += 1
-        self.bytes_used += payload_bytes
-        return True
-
-    def consume_runs(self, run_count: int) -> bool:
-        """Charge raw run nodes before typed nodes are materialized."""
-        if self.runs_used + run_count > self.run_limit:
-            self.exhausted = True
-            return False
-        self.runs_used += run_count
-        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +97,7 @@ class UsageStorageDiagnostic:
     """Content-free outcome for a source that could not be read."""
 
     path_label: str
-    status: Literal["absent", "busy", "corrupt", "unsupported_schema", "resource_limit", "partial"]
+    status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"]
     detail: str
 
 
@@ -212,19 +169,7 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config))
     sources.extend(_team_sources(root, config))
-    storage_sources = sorted(
-        (source for source in sources if isinstance(source, UsageStorageSource)),
-        key=lambda source: source.path_label,
-    )
-    discovery_truncated = len(storage_sources) > _MAX_SOURCES or any(
-        isinstance(source, UsageStorageDiagnostic) and source.status == "resource_limit" for source in sources
-    )
-    diagnostics = [
-        source for source in sources if isinstance(source, UsageStorageDiagnostic) and source.status != "resource_limit"
-    ]
-    if discovery_truncated:
-        diagnostics.append(_discovery_limit_diagnostic())
-    return tuple(sorted([*storage_sources[:_MAX_SOURCES], *diagnostics], key=lambda item: item.path_label))
+    return tuple(sorted(sources, key=lambda item: item.path_label))
 
 
 def _session_root(runtime_paths: RuntimePaths) -> Path:
@@ -237,9 +182,6 @@ def _shared_agent_sources(
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for agent_name, agent_config in config.agents.items():
-        if len(sources) >= _MAX_SOURCES:
-            sources.append(_discovery_limit_diagnostic())
-            break
         if agent_config.private is not None:
             continue
         candidate = _safe_candidate(root, Path("agents") / agent_name / "sessions" / f"{agent_name}.db")
@@ -267,22 +209,15 @@ def _private_agent_sources(
     directory_entries = _directory_entries(private_root)
     if isinstance(directory_entries, UsageStorageDiagnostic):
         return [directory_entries]
-    entries, entries_truncated = directory_entries
+    entries = directory_entries
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
-    if entries_truncated:
-        sources.append(_discovery_limit_diagnostic())
-    candidates = 0
     for worker_directory in entries:
         if worker_directory.is_symlink() or not worker_directory.is_dir():
             continue
         if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
             continue
         for agent_name in private_agents:
-            candidates += 1
-            if candidates > _MAX_CANDIDATES:
-                sources.append(_discovery_limit_diagnostic())
-                return sources
             relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
             candidate = _safe_candidate(root, relative)
             if candidate is None or not candidate.is_file():
@@ -308,10 +243,8 @@ def _team_sources(
     directory_entries = _directory_entries(root / "teams")
     if isinstance(directory_entries, UsageStorageDiagnostic):
         return [directory_entries]
-    entries, entries_truncated = directory_entries
+    entries = directory_entries
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
-    if entries_truncated:
-        sources.append(_discovery_limit_diagnostic())
     for directory in entries:
         storage_name = directory.name
         if directory.is_symlink() or not directory.is_dir() or _IDENTIFIER.fullmatch(storage_name) is None:
@@ -333,22 +266,20 @@ def _team_sources(
     return sources
 
 
-def _directory_entries(path: Path) -> tuple[tuple[Path, ...], bool] | UsageStorageDiagnostic:
+def _directory_entries(path: Path) -> tuple[Path, ...] | UsageStorageDiagnostic:
     try:
         path.lstat()
     except FileNotFoundError:
-        return (), False
+        return ()
     except OSError:
         return _diagnostic("admin discovery", "partial", "source discovery unavailable")
     if path.is_symlink() or not path.is_dir():
         return _diagnostic("admin discovery", "partial", "source discovery unavailable")
     try:
-        entries = tuple(islice(path.iterdir(), _MAX_DIRECTORY_ENTRIES + 1))
+        entries = tuple(path.iterdir())
     except OSError:
         return _diagnostic("admin discovery", "partial", "source discovery unavailable")
-    return tuple(sorted(entries[:_MAX_DIRECTORY_ENTRIES], key=lambda entry: entry.name)), len(
-        entries,
-    ) > _MAX_DIRECTORY_ENTRIES
+    return tuple(sorted(entries, key=lambda entry: entry.name))
 
 
 def _safe_candidate(root: Path, relative: Path) -> Path | None:
@@ -386,20 +317,14 @@ def _source(
     )
 
 
-def iter_usage_storage_rows(  # noqa: C901
+def iter_usage_storage_rows(
     source: UsageStorageSource,
     *,
     mode: Literal["runs", "session_metrics"] = "runs",
-    budget: UsageReadBudget | None = None,
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Yield the requested aggregate-only fields without writing or creating a database."""
     if mode not in {"runs", "session_metrics"}:
         raise ValueError(mode)
-    active_budget = budget or UsageReadBudget(
-        row_limit=_MAX_ROWS_PER_SOURCE,
-        byte_limit=_MAX_ROWS_PER_SOURCE * _MAX_JSON_BYTES,
-        run_limit=_MAX_ROWS_PER_SOURCE * _MAX_RUNS_PER_ROW,
-    )
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return
@@ -413,28 +338,17 @@ def iter_usage_storage_rows(  # noqa: C901
             payload_column = "runs" if mode == "runs" else "session_data"
             query = (
                 "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
-                f"CASE WHEN length(CAST({payload_column} AS BLOB)) <= ? THEN {payload_column} END AS payload, "
-                f"length(CAST({payload_column} AS BLOB)) AS payload_bytes, "
-                f"CASE WHEN length(CAST({payload_column} AS BLOB)) > ? THEN 1 ELSE 0 END AS too_large "
-                f"FROM {table} LIMIT ?"
+                f"{payload_column} AS payload, "
+                f"length(CAST({payload_column} AS BLOB)) AS payload_bytes "
+                f"FROM {table}"
             )
-            for row in connection.execute(query, (_MAX_JSON_BYTES, _MAX_JSON_BYTES, _MAX_ROWS_PER_SOURCE + 1)):
+            for row in connection.execute(query):
                 payload_bytes = row["payload_bytes"] or 0
                 if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
                     yield _source_diagnostic(source, "partial", "malformed retained session")
                     continue
-                if not active_budget.consume_row(payload_bytes):
-                    yield _source_diagnostic(source, "resource_limit", "request work limit exceeded")
-                    return
-                if row["too_large"]:
-                    yield _source_diagnostic(source, "resource_limit", "usage payload too large")
-                    continue
                 try:
-                    yield _extract_row(source, row, mode=mode, budget=active_budget)
-                except _UsageResourceLimitError as error:
-                    yield _source_diagnostic(source, "resource_limit", str(error))
-                    if active_budget.exhausted:
-                        return
+                    yield _extract_row(source, row, mode=mode)
                 except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -467,7 +381,6 @@ def _extract_row(
     row: sqlite3.Row,
     *,
     mode: Literal["runs", "session_metrics"],
-    budget: UsageReadBudget,
 ) -> UsageSessionRow:
     entity_kind = row["session_type"]
     if entity_kind not in {"agent", "team"}:
@@ -482,13 +395,6 @@ def _extract_row(
         raise TypeError
     raw_runs = _decode_runs(row["payload"]) if mode == "runs" else []
     session_metrics = _decode_session_metrics(row["payload"]) if mode == "session_metrics" else MappingProxyType({})
-    if mode == "runs":
-        if not budget.consume_runs(len(raw_runs)):
-            message = "request work limit exceeded"
-            raise _UsageResourceLimitError(message)
-        if len(raw_runs) > _MAX_RUNS_PER_ROW:
-            message = "run node limit exceeded"
-            raise _UsageResourceLimitError(message)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
@@ -566,7 +472,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
 
 def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]:
     selected_metrics: dict[str, _MetricValue] = {}
-    for metric_name in _TOKEN_FIELDS:
+    for metric_name in TOKEN_FIELDS:
         value = metrics.get(metric_name)
         if isinstance(value, bool) or not isinstance(value, (int, float, str, type(None))):
             raise TypeError
@@ -599,17 +505,9 @@ def _diagnostic(
     return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail)
 
 
-def _discovery_limit_diagnostic() -> UsageStorageDiagnostic:
-    return UsageStorageDiagnostic(
-        path_label="admin discovery",
-        status="resource_limit",
-        detail="source discovery limit exceeded",
-    )
-
-
 def _source_diagnostic(
     source: UsageStorageSource,
-    status: Literal["absent", "busy", "corrupt", "unsupported_schema", "resource_limit", "partial"],
+    status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"],
     detail: str,
 ) -> UsageStorageDiagnostic:
     return UsageStorageDiagnostic(path_label=source.path_label, status=status, detail=detail)

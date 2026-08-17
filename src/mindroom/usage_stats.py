@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.usage_stats_storage import (
-    UsageReadBudget,
+    TOKEN_FIELDS,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
@@ -33,24 +33,9 @@ __all__ = [
 
 type _Scope = Literal["self", "admin"]
 
-_TOKEN_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "audio_input_tokens",
-    "audio_output_tokens",
-    "audio_total_tokens",
-)
-_BREAKDOWN_LIMIT = 200
-_MAX_ROWS_PER_REQUEST = 250
-_MAX_RUNS_PER_REQUEST = 25_000
-_MAX_BYTES_PER_REQUEST = 64_000_000
 _COVERAGE_NOTE = (
-    "Self totals use requester-attributed retained agent runs. "
-    "Admin totals use Agno session aggregates, including team members. "
+    "Shared self totals use requester-attributed retained agent runs. "
+    "Private self and admin totals use Agno session aggregates, including team members. "
     "Deleted sessions are unavailable."
 )
 
@@ -85,7 +70,17 @@ class TokenTotals:
 
     def plus(self, other: TokenTotals) -> TokenTotals:
         """Add another aggregate's counters."""
-        return TokenTotals(**{field: getattr(self, field) + getattr(other, field) for field in _TOKEN_FIELDS})
+        return TokenTotals(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
+            audio_input_tokens=self.audio_input_tokens + other.audio_input_tokens,
+            audio_output_tokens=self.audio_output_tokens + other.audio_output_tokens,
+            audio_total_tokens=self.audio_total_tokens + other.audio_total_tokens,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +107,6 @@ class UsageCoverage:
 
     scanned_sources: int
     unavailable_sources: int
-    truncated: bool
     note: str = _COVERAGE_NOTE
 
     def to_dict(self) -> dict[str, object]:
@@ -120,7 +114,6 @@ class UsageCoverage:
         return {
             "scanned_sources": self.scanned_sources,
             "unavailable_sources": self.unavailable_sources,
-            "truncated": self.truncated,
             "note": self.note,
         }
 
@@ -133,7 +126,6 @@ class UsageReport:
     totals: TokenTotals
     session_count: int
     breakdown: tuple[UsageBreakdownRow, ...]
-    breakdown_truncated: bool
     coverage: UsageCoverage
 
     def to_dict(self) -> dict[str, object]:
@@ -143,7 +135,6 @@ class UsageReport:
             "totals": self.totals.to_dict(),
             "session_count": self.session_count,
             "breakdown": [row.to_dict() for row in self.breakdown],
-            "breakdown_truncated": self.breakdown_truncated,
             "coverage": self.coverage.to_dict(),
         }
 
@@ -206,25 +197,16 @@ def _collect_usage(
     seen_runs: set[tuple[str, str, str]] = set()
     scanned_sources: set[str] = set()
     unavailable_sources: set[str] = set()
-    truncated = False
-    budget = UsageReadBudget(
-        row_limit=_MAX_ROWS_PER_REQUEST,
-        byte_limit=_MAX_BYTES_PER_REQUEST,
-        run_limit=_MAX_RUNS_PER_REQUEST,
-    )
-
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
             unavailable_sources.add(discovered.path_label)
-            truncated = truncated or discovered.status == "resource_limit"
             continue
         source = discovered
         scanned_sources.add(source.path_label)
-        mode = "runs" if scope == "self" else "session_metrics"
-        for item in iter_usage_storage_rows(source, mode=mode, budget=budget):
+        mode = "runs" if scope == "self" and not source.requester_isolated else "session_metrics"
+        for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
                 unavailable_sources.add(item.path_label)
-                truncated = truncated or item.status == "resource_limit"
                 continue
             try:
                 if scope == "self":
@@ -248,26 +230,22 @@ def _collect_usage(
             sessions.add((source.path_label, item.row_key))
             if entity_id is not None:
                 buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
-        if budget.exhausted:
-            break
 
     breakdown = tuple(
         UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.session_count)
         for entity_id, aggregate in sorted(
             buckets.items(),
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )[:_BREAKDOWN_LIMIT]
+        )
     )
     return UsageReport(
         scope=scope,
         totals=total,
         session_count=len(sessions),
         breakdown=breakdown,
-        breakdown_truncated=len(buckets) > _BREAKDOWN_LIMIT,
         coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
             unavailable_sources=len(unavailable_sources),
-            truncated=truncated,
         ),
     )
 
@@ -282,15 +260,16 @@ def _self_row_totals(
 ) -> TokenTotals | None:
     if row.source.source_agent_id != expected_agent or expected_agent not in row.source.allowed_agent_ids:
         return None
+    if row.source.requester_isolated:
+        return _metrics_totals(row.session_metrics)
     total = TokenTotals()
     accepted = False
     for run in row.runs:
         requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
-        if not row.source.requester_isolated:
-            if requester_id is None:
-                raise ValueError
-            if requester_id != expected_requester:
-                continue
+        if requester_id is None:
+            raise ValueError
+        if requester_id != expected_requester:
+            continue
         run_totals = _metrics_totals(run.metrics)
         if run_totals is None:
             continue
@@ -312,10 +291,10 @@ def _admin_entity_id(row: UsageSessionRow) -> str | None:
 
 
 def _metrics_totals(metrics: Mapping[str, object]) -> TokenTotals | None:
-    if not any(metrics.get(field) is not None for field in _TOKEN_FIELDS):
+    if not any(metrics.get(field) is not None for field in TOKEN_FIELDS):
         return None
     values: dict[str, int] = {}
-    for field in _TOKEN_FIELDS:
+    for field in TOKEN_FIELDS:
         value = _token_value(metrics.get(field))
         if value is None:
             raise ValueError

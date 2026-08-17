@@ -9659,11 +9659,12 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 
 ## [`usage_stats`]
 
-`usage_stats` returns aggregate retained-run usage for the caller without modifying session storage.
+`usage_stats` returns aggregate retained usage for the caller without modifying session storage.
 All operations are local and read-only.
 `get_my_usage()` always scopes the result to the current agent and the canonical current requester.
 For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
-The result covers retained Agno runs only, excludes the in-flight tool call, and can be incomplete after compaction.
+Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
+The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
 Provider billing, embedding usage, and speech-to-text usage are outside version one.
 
 ### Self-Service Configuration
@@ -9699,7 +9700,7 @@ agents:
 ```
 
 Both functions are intentionally parameter-free.
-`get_my_usage()` reports all requester-attributed direct runs retained for the current agent.
+`get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
 `get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
 
 ### Response And Coverage
@@ -9710,12 +9711,11 @@ Token totals separately report input, output, cache-read, cache-write, reasoning
 
 The admin response groups session aggregates by configured agent or team ID.
 The self response has no breakdown because its scope is already one agent and requester.
-Admin breakdown rows are sorted by total tokens and capped at 200.
-`breakdown_truncated` states whether rows were left out, while the top-level totals still cover every included session aggregate.
-Coverage reports scanned sources, unavailable or partially unreadable sources, whether a safety limit truncated the scan, and the retained-history limitation.
+Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
+Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
 The tool does not change Agno persistence settings.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
-Compacted self-service runs and deleted sessions are unavailable to this read-only report.
+Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
 
 Errors use the same envelope with a stable code.
 Common codes are `authorization_error` and `context_unavailable`.

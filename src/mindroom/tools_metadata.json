@@ -6934,20 +6934,7 @@
       ],
       "auth_provider": null,
       "category": "information",
-      "config_fields": [
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Enable Admin Scope",
-          "name": "admin_scope",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
+      "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [

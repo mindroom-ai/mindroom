@@ -70,6 +70,11 @@ class UsageStatsTools(Toolkit):
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
+        if self._agent_name is None or resolved.agent_name != self._agent_name:
+            return self._error(
+                "authorization_error",
+                "Usage statistics admin scope is not enabled for this agent.",
+            )
         config = resolved.current_config
         canonical_requester = config.authorization.resolve_alias(resolved.requester_id)
         if canonical_requester not in config.authorization.global_users:
