@@ -55,19 +55,19 @@ def _mcp_oauth_provider_is_configured(
 
 
 @asynccontextmanager
-async def retire_mcp_oauth_request_session(
+async def retire_mcp_oauth_scope_session(
     mcp_servers: dict[str, MCPServerConfig],
     provider_id: str,
     *,
     credential_context: OAuthCredentialContext,
     expected_connection_generation: str | None = None,
 ) -> AsyncIterator[None]:
-    """Fence a generated provider's requester session for an OAuth reset transaction."""
+    """Fence a generated provider's credential-scoped session for an OAuth reset transaction."""
     manager = require_mcp_server_manager() if _mcp_oauth_provider_is_configured(mcp_servers, provider_id) else None
     if manager is None:
         yield
         return
-    async with manager.retire_request_session(
+    async with manager.retire_oauth_scope_session(
         credential_context=credential_context,
         expected_connection_generation=expected_connection_generation,
     ):
@@ -146,7 +146,6 @@ def mcp_oauth_provider(server_id: str, server_config: MCPServerConfig) -> OAuthP
         token_endpoint_auth_method=auth_config.token_endpoint_auth_method,
         pkce_code_challenge_method=auth_config.pkce_code_challenge_method,
         allow_empty_scopes=True,
-        requester_scoped_credentials=True,
         status_capabilities=(f"{_display_name(server_id, auth_config)} MCP access",),
         runtime_bootstrapper=oauth_runtime_bootstrapper(_oauth_discovery_config(server_config)),
     )

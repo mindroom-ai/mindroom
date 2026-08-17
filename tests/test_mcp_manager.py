@@ -143,6 +143,14 @@ class _ConfigStub:
     def get_entities_referencing_tools(self, _tool_names: set[str]) -> set[str]:
         return set()
 
+    @staticmethod
+    def agent_has_tool_at_execution_scope(
+        _agent_name: str,
+        _tool_name: str,
+        _execution_scope: WorkerScope | None,
+    ) -> bool:
+        return True
+
 
 class _FakeClientSession:
     sessions: ClassVar[list[_FakeClientSession]] = []
@@ -384,10 +392,15 @@ def _oauth_non_oauth_collision_config(runtime_paths: RuntimePaths) -> Config:
     )
 
 
-def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> ResolvedWorkerTarget:
+def _worker_target(
+    requester_id: str,
+    *,
+    worker_scope: WorkerScope = "user",
+    agent_name: str = "code",
+) -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
-        agent_name="code",
+        agent_name=agent_name,
         requester_id=requester_id,
         room_id="!room:example.test",
         thread_id="$thread",
@@ -396,7 +409,7 @@ def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> 
         tenant_id="tenant",
         account_id=None,
     )
-    return resolve_worker_target(worker_scope, "code", identity)
+    return resolve_worker_target(worker_scope, agent_name, identity)
 
 
 def _shared_worker_target(requester_id: str, *, agent_name: str = "code") -> ResolvedWorkerTarget:
@@ -441,6 +454,10 @@ def _save_mcp_oauth_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+
+
+def _scoped_worker_keys(manager: MCPServerManager) -> set[tuple[str, str]]:
+    return {(key.credential_scope.worker_scope, key.credential_scope.worker_key) for key in manager._scoped_states}
 
 
 def _save_expiring_mcp_oauth_credentials(
@@ -659,11 +676,11 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
 
 
 @pytest.mark.asyncio
-async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_credential_load(
+async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Identity-less MCP calls cannot fall back to a legacy global bearer or session key."""
+    """An unscoped MCP server adopts and uses its installation-level OAuth credential."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
@@ -672,7 +689,7 @@ async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_creden
     credentials_manager.save_credentials(
         "mcp_demo_oauth",
         {
-            "token": "legacy-global-token",
+            "token": "installation-token",
             "client_id": "public-client",
             "scopes": [],
             "_source": "oauth",
@@ -682,16 +699,14 @@ async def test_requester_scoped_mcp_oauth_rejects_missing_identity_before_creden
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
 
-    with pytest.raises(OAuthConnectionRequired, match="requester identity") as exc_info:
-        await manager.get_request_catalog(
-            "demo",
-            credentials_manager=credentials_manager,
-            worker_target=None,
-        )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
 
-    assert exc_info.value.connect_url is None
-    assert manager._scoped_states == {}
-    assert _FakeClientSession.transport_extra_headers == []
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer installation-token"}]
+    assert _scoped_worker_keys(manager) == {("unscoped", "global")}
 
 
 @pytest.mark.asyncio
@@ -1774,7 +1789,7 @@ async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> 
 
     assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
     assert next(iter(manager._scoped_states.values())) is state
-    assert next(iter(manager._scoped_states)).worker_key == canonical_a_target.worker_key
+    assert next(iter(manager._scoped_states)).credential_scope.worker_key == canonical_a_target.worker_key
 
 
 @pytest.mark.asyncio
@@ -1829,7 +1844,7 @@ async def test_mcp_alias_reload_retires_sessions_and_uses_published_identity_pol
     )
 
     assert lease.headers == {"Authorization": "Bearer canonical-b-token"}
-    assert lease.session_key.worker_key == canonical_b_target.worker_key
+    assert lease.session_key.credential_scope.worker_key == canonical_b_target.worker_key
 
 
 @pytest.mark.asyncio
@@ -1952,20 +1967,17 @@ async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters
 
 
 @pytest.mark.asyncio
-async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
+async def test_oauth_mcp_shared_agent_reuses_agent_bearer_across_requesters(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Shared worker reuse must not turn requester-owned MCP OAuth into an agent-global token."""
+    """A shared agent owns one MCP OAuth account used by every authorized requester."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     alice_request_target = _shared_worker_target("@alice:example.test")
     bob_request_target = _shared_worker_target("@bob:example.test")
-    alice_credential_target = _worker_target("@alice:example.test", worker_scope="user")
-    bob_credential_target = _worker_target("@bob:example.test", worker_scope="user")
-    _save_mcp_oauth_credentials(runtime_paths, alice_credential_target, "alice-token")
-    _save_mcp_oauth_credentials(runtime_paths, bob_credential_target, "bob-token")
+    _save_mcp_oauth_credentials(runtime_paths, alice_request_target, "agent-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -1981,13 +1993,334 @@ async def test_oauth_mcp_shared_agent_still_isolates_requester_bearers(
         worker_target=bob_request_target,
     )
 
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer agent-token"}]
+    assert _scoped_worker_keys(manager) == {
+        ("shared", alice_request_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Distinct shared agents can own different MCP OAuth accounts."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    second_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
     assert _FakeClientSession.transport_extra_headers == [
-        {"Authorization": "Bearer alice-token"},
-        {"Authorization": "Bearer bob-token"},
+        {"Authorization": "Bearer foo-token"},
+        {"Authorization": "Bearer underscored-token"},
     ]
-    assert {key.worker_key for key in manager._scoped_states} == {
-        alice_credential_target.worker_key,
-        bob_credential_target.worker_key,
+    assert len(manager._scoped_states) == 2
+    assert _scoped_worker_keys(manager) == {
+        ("shared", first_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_collision_failure_does_not_cross_distinct_raw_agent_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A colliding agent name must not make another credential scope lose its catalog."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    second_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
+
+    class _FakeToolkit:
+        def __init__(self, tool_name: str) -> None:
+            self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr(
+        "mindroom.mcp.surface_projection.get_tool_by_name",
+        lambda tool_name, *_args, **_kwargs: _FakeToolkit(tool_name),
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
+            "agents": {
+                "foo": {
+                    "display_name": "Foo",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "shared",
+                },
+                "_foo_": {
+                    "display_name": "Underscored Foo",
+                    "role": "Use local and MCP tools",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "shared",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    try:
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=first_target,
+        )
+        first_state = next(iter(manager._scoped_states.values()))
+
+        with pytest.raises(MCPProtocolError, match="demo_echo"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=second_target,
+            )
+
+        assert first_state.catalog is not None
+        assert first_state.last_error is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """A scoped OAuth MCP toolkit without request identity should remain constructible."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    worker_target = resolve_worker_target(worker_scope, "code", None)
+    assert worker_target.worker_key is None
+
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+
+    assert set(toolkit.get_async_functions()) == {
+        "demo_call_tool",
+        "demo_connection_status",
+        "demo_list_tools",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_scope", "expected_error"),
+    [
+        pytest.param(
+            "shared",
+            "MCP OAuth provider 'mcp_demo' requires a complete credential target",
+            id="shared",
+        ),
+        pytest.param(
+            "user",
+            "MCP OAuth provider 'mcp_demo' requires a requester identity",
+            id="user",
+        ),
+        pytest.param(
+            "user_agent",
+            "MCP OAuth provider 'mcp_demo' requires a requester identity",
+            id="user-agent",
+        ),
+    ],
+)
+async def test_requestless_incomplete_oauth_mcp_bridges_return_connection_required(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    expected_error: str,
+) -> None:
+    """Bridge calls without a complete scope target must return their structured recovery payload."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=resolve_worker_target(worker_scope, "code", None),
+    )
+    calls = {
+        "demo_call_tool": {"tool_name": "echo", "arguments": {}},
+        "demo_connection_status": {},
+        "demo_list_tools": {},
+    }
+    try:
+        for function_name, kwargs in calls.items():
+            payload = json.loads(await toolkit.get_async_functions()[function_name].entrypoint(**kwargs))
+            assert payload == {
+                "error": expected_error,
+                "oauth_connection_required": True,
+                "provider": "mcp_demo",
+                "connect_url": None,
+            }
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+async def test_requestless_oauth_scope_does_not_block_unrelated_dynamic_tool_load(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """An unavailable requester scope must not make unrelated deferred tools unloadable."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use local and MCP tools",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                    "worker_scope": worker_scope,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+    worker_target = resolve_worker_target(worker_scope, "code", None)
+    toolkit = DynamicToolsToolkit(
+        agent_name="code",
+        config=config,
+        session_id="thread-a",
+        worker_target=worker_target,
+    )
+
+    bind_mcp_server_manager(manager)
+    try:
+        payload = json.loads(toolkit.load_tool("shell"))
+    finally:
+        await manager.shutdown()
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "loaded"
+    assert payload["loaded_tools"] == ["shell"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_user_scope_reuses_account_across_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A user-scoped MCP OAuth account is shared across that requester's agents."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _worker_target("@alice:example.test", agent_name="code")
+    second_target = _worker_target("@alice:example.test", agent_name="research")
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
+    assert _scoped_worker_keys(manager) == {
+        ("user", first_target.worker_key),
+    }
+
+
+@pytest.mark.asyncio
+async def test_oauth_mcp_user_agent_scope_keeps_accounts_separate_per_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One requester can connect distinct MCP OAuth accounts for different agents."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    first_target = _worker_target(
+        "@alice:example.test",
+        worker_scope="user_agent",
+        agent_name="foo",
+    )
+    second_target = _worker_target(
+        "@alice:example.test",
+        worker_scope="user_agent",
+        agent_name="_foo_",
+    )
+    assert first_target.worker_key == second_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=first_target,
+    )
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=second_target,
+    )
+
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer foo-token"},
+        {"Authorization": "Bearer underscored-token"},
+    ]
+    assert len(manager._scoped_states) == 2
+    assert _scoped_worker_keys(manager) == {
+        ("user_agent", first_target.worker_key),
     }
 
 
@@ -2192,7 +2525,7 @@ async def test_mcp_provider_move_retires_current_provider_owner_not_old_server_i
     assert replacement_session is not None
     assert shared_session is not None
 
-    async with manager.retire_request_session(credential_context=old_context):
+    async with manager.retire_oauth_scope_session(credential_context=old_context):
         assert replacement_key in manager._scoped_states
         assert shared_key not in manager._scoped_states
 
@@ -2226,12 +2559,53 @@ async def test_mcp_manager_retires_requester_oauth_session(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(credential_context=credential_context):
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
         pass
 
     assert alice_session.closed is True
     assert bob_session.closed is False
     assert len(manager._scoped_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_retires_shared_agent_session_without_touching_other_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reset retirement follows the shared agent credential owner."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    code_target = _shared_worker_target("@alice:example.test", agent_name="foo")
+    research_target = _shared_worker_target("@alice:example.test", agent_name="_foo_")
+    assert code_target.worker_key == research_target.worker_key
+    _save_mcp_oauth_credentials(runtime_paths, code_target, "foo-token")
+    _save_mcp_oauth_credentials(runtime_paths, research_target, "underscored-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=code_target)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=research_target,
+    )
+    code_session = _FakeClientSession.sessions[0]
+    research_session = _FakeClientSession.sessions[1]
+    credential_context = manager._oauth_credential_context(
+        manager._states["demo"],
+        worker_target=code_target,
+        credentials_manager=credentials_manager,
+    )
+
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
+        pass
+
+    assert code_session.closed is True
+    assert research_session.closed is False
+    assert _scoped_worker_keys(manager) == {
+        ("shared", research_target.worker_key),
+    }
 
 
 @pytest.mark.asyncio
@@ -2267,7 +2641,7 @@ async def test_mcp_manager_retirement_waits_for_in_flight_requester_call(
     retirement_entered = asyncio.Event()
 
     async def retire() -> None:
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             retirement_entered.set()
 
     call_task = asyncio.create_task(
@@ -2327,7 +2701,7 @@ async def test_mcp_manager_retirement_fences_captured_state_and_new_requesters(
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(credential_context=credential_context):
+    async with manager.retire_oauth_scope_session(credential_context=credential_context):
         assert captured_state.retired is True
         with pytest.raises(_MCPAuthorizationChangedError):
             await manager._refresh_server_catalog(
@@ -2377,7 +2751,7 @@ async def test_mcp_manager_retirement_allows_new_catalog_after_cancellation(
     finish_body = asyncio.Event()
 
     async def retire() -> None:
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             body_entered.set()
             await finish_body.wait()
 
@@ -2425,11 +2799,11 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
         worker_target=worker_target,
         credentials_manager=credentials_manager,
     )
-    request_key = manager._request_session_key(
+    request_key = manager._scope_session_key(
         base_state,
         credential_context.worker_target,
         provider_id=credential_context.provider.id,
-    ).oauth_request_key
+    ).oauth_scope_key
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
     cancellation_turn = asyncio.Event()
@@ -2443,7 +2817,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
 
     async def retire() -> None:
         nonlocal body_entered
-        async with manager.retire_request_session(credential_context=credential_context):
+        async with manager.retire_oauth_scope_session(credential_context=credential_context):
             body_entered = True
 
     monkeypatch.setattr(manager, "_disconnect_state_when_idle", delayed_disconnect)
@@ -2456,7 +2830,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
     assert retirement.done() is False
     assert manager._scoped_states == {}
     assert manager._retiring_states == {id(state): state}
-    assert request_key in manager._retired_request_keys
+    assert request_key in manager._retired_scope_keys
     with pytest.raises(OAuthConnectionRequired):
         await manager.get_request_catalog(
             "demo",
@@ -2472,7 +2846,7 @@ async def test_mcp_manager_retirement_finishes_pre_yield_cleanup_before_cancella
     assert body_entered is False
     assert session.closed is True
     assert manager._retiring_states == {}
-    assert request_key not in manager._retired_request_keys
+    assert request_key not in manager._retired_scope_keys
 
 
 @pytest.mark.asyncio
@@ -2508,7 +2882,7 @@ async def test_mcp_manager_retires_stale_cached_session_for_current_connection_g
         credential_generation="stale-cached-generation",
     )
 
-    async with manager.retire_request_session(
+    async with manager.retire_oauth_scope_session(
         credential_context=credential_context,
         expected_connection_generation=approved_connection_generation,
     ):
@@ -2546,7 +2920,7 @@ async def test_mcp_manager_does_not_retire_session_from_later_connection_generat
         credentials_manager=credentials_manager,
     )
 
-    async with manager.retire_request_session(
+    async with manager.retire_oauth_scope_session(
         credential_context=credential_context,
         expected_connection_generation="older-approved-connection-generation",
     ):
@@ -2775,6 +3149,165 @@ async def test_mcp_manager_shutdown_is_terminal_for_later_sync(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reload_kind", ["agent_removed", "tool_removed", "scope_changed"])
+async def test_mcp_config_reload_retires_unreachable_oauth_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reload_kind: str,
+) -> None:
+    """Hot reload should close a scoped OAuth session after its configured access disappears."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+    initial_config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "shared",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    worker_target = _shared_worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(initial_config)
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    base_state = manager._states["demo"]
+    scoped_state = next(iter(manager._scoped_states.values()))
+    session = scoped_state.session
+    assert isinstance(session, _FakeClientSession)
+
+    reloaded_agents: dict[str, object]
+    if reload_kind == "agent_removed":
+        reloaded_agents = {}
+    else:
+        reloaded_agents = {
+            "code": {
+                "display_name": "Code",
+                "role": "Use MCP",
+                "tools": [] if reload_kind == "tool_removed" else ["mcp_demo"],
+                "worker_scope": "shared" if reload_kind == "tool_removed" else "user",
+            },
+        }
+    reloaded_config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+            "agents": reloaded_agents,
+        },
+        runtime_paths,
+    )
+
+    try:
+        await manager.sync_servers(reloaded_config)
+
+        assert manager._states["demo"] is base_state
+        assert manager._scoped_states == {}
+        assert manager._retiring_states == {}
+        assert scoped_state.retired is True
+        assert session.closed is True
+        transport_count = len(_FakeClientSession.transport_extra_headers)
+
+        with pytest.raises(MCPConnectionError, match="credential target is no longer configured"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+
+        assert manager._scoped_states == {}
+        assert len(_FakeClientSession.transport_extra_headers) == transport_count
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_config_reload_keeps_user_scope_reachable_from_another_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A requester-wide session should survive while another user-scoped agent can use it."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = _oauth_mcp_config()
+
+    def config_for_agents(agent_names: tuple[str, ...]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "defaults": {"tools": []},
+                "mcp_servers": {"demo": server_config.model_dump(exclude_none=True)},
+                "agents": {
+                    agent_name: {
+                        "display_name": agent_name.title(),
+                        "role": "Use MCP",
+                        "tools": ["mcp_demo"],
+                        "worker_scope": "user",
+                    }
+                    for agent_name in agent_names
+                },
+            },
+            runtime_paths,
+        )
+
+    worker_target = _worker_target("@alice:example.test", agent_name="code")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config_for_agents(("code", "research")))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    scoped_state = next(iter(manager._scoped_states.values()))
+    session = scoped_state.session
+    assert isinstance(session, _FakeClientSession)
+
+    try:
+        await manager.sync_servers(config_for_agents(("research",)))
+
+        assert tuple(manager._scoped_states.values()) == (scoped_state,)
+        assert scoped_state.retired is False
+        assert session.closed is False
+        assert manager.cached_request_catalog("demo", worker_target=worker_target) is None
+
+        with pytest.raises(MCPConnectionError, match="credential target is no longer configured"):
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+
+        research_target = _worker_target("@alice:example.test", agent_name="research")
+        assert manager.cached_request_catalog("demo", worker_target=research_target) is scoped_state.catalog
+        assert (
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=credentials_manager,
+                worker_target=research_target,
+            )
+        ).server_id == "demo"
+        assert tuple(manager._scoped_states.values()) == (scoped_state,)
+        assert session.closed is False
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_shutdown_drains_every_state_when_one_close_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2846,8 +3379,8 @@ async def test_request_retirement_drains_later_states_before_propagating_cleanup
 
     monkeypatch.setattr(manager, "_disconnect_state_when_idle", disconnect)
 
-    with pytest.raises(MCPConnectionError, match="requester session cleanup failed"):
-        await manager._drain_retired_request_states((first, second))
+    with pytest.raises(MCPConnectionError, match="credential-scope session cleanup failed"):
+        await manager._drain_retired_oauth_scope_states((first, second))
 
     assert drained == ["first", "second"]
     assert manager._retiring_states == {id(first): first}
@@ -3924,19 +4457,19 @@ async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_a
         ),
     ],
 )
-async def test_dynamic_load_rejects_requester_scoped_oauth_mcp_function_collision(
+async def test_dynamic_load_rejects_scoped_oauth_mcp_function_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     worker_scope: WorkerScope,
     requester_id: str,
     authorization: dict[str, object],
 ) -> None:
-    """Deferred tools should collide with the active requester's discovered OAuth MCP catalog."""
+    """Deferred tools should collide with the active credential scope's discovered OAuth MCP catalog."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("shell_command")]
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target(requester_id, worker_scope=worker_scope)
-    credential_target = _worker_target("@alice:example.test")
+    credential_target = _worker_target("@alice:example.test", worker_scope=worker_scope)
     _save_mcp_oauth_credentials(runtime_paths, credential_target, "alice-token")
     config = Config.validate_with_runtime(
         {
@@ -4457,6 +4990,94 @@ async def test_mcp_manager_allows_local_function_name_collisions_on_other_agents
 
     assert changed == {"demo"}
     assert manager.failed_server_ids() == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("catalog_scope", "other_agent_scope"),
+    [
+        pytest.param("shared", "shared", id="shared-owner"),
+        pytest.param("user_agent", "user_agent", id="user-agent-owner"),
+        pytest.param("user", "shared", id="user-vs-shared"),
+        pytest.param(None, "user", id="unscoped-vs-user"),
+    ],
+)
+async def test_oauth_catalog_ignores_unreachable_local_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    catalog_scope: WorkerScope | None,
+    other_agent_scope: WorkerScope,
+) -> None:
+    """An OAuth catalog should be projected only onto agents that can reach its scope."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    if catalog_scope is None:
+        worker_target = None
+        credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+        credentials_manager.save_credentials(
+            "mcp_demo_oauth",
+            {
+                "token": "installation-token",
+                "client_id": "public-client",
+                "scopes": [],
+                "_source": "oauth",
+                "_oauth_provider": "mcp_demo",
+            },
+        )
+    else:
+        worker_target = _worker_target(
+            "@alice:example.test",
+            worker_scope=catalog_scope,
+            agent_name="code",
+        )
+        _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
+
+    class _FakeToolkit:
+        def __init__(self, tool_name: str) -> None:
+            self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr(
+        "mindroom.mcp.surface_projection.get_tool_by_name",
+        lambda tool_name, *_args, **_kwargs: _FakeToolkit(tool_name),
+    )
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": catalog_scope,
+                },
+                "research": {
+                    "display_name": "Research",
+                    "role": "Use local and MCP tools",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": other_agent_scope,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(config)
+
+    catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert [tool.function_name for tool in catalog.tools] == ["demo_echo"]
+    assert next(iter(manager._scoped_states.values())).last_error is None
 
 
 @pytest.mark.asyncio

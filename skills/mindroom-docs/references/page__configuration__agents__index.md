@@ -372,8 +372,8 @@ A filtered public startup-runtime env payload can still propagate from exported 
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify` and `homeassistant`.
-Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers always use requester-scoped `user` credentials and sessions, while non-OAuth servers use the shared MCP session without requester credentials.
-`worker_scope` controls worker-runtime reuse but does not change generated MCP OAuth credential identity.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
+For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
 `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
 `spotify` can still be proxied through the sandbox.

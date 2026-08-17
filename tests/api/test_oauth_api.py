@@ -150,7 +150,7 @@ def _config_payload(
     return payload
 
 
-def _mcp_oauth_config_payload(worker_scope: str = "user_agent") -> dict[str, Any]:
+def _mcp_oauth_config_payload(worker_scope: str | None = "user_agent") -> dict[str, Any]:
     return {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
@@ -2265,7 +2265,7 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
     )
     api_app = _make_test_app(runtime_paths, _mcp_oauth_config_payload())
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = credentials_manager.for_primary_runtime_scope("@alice:example.org", None)
+    scoped_manager = credentials_manager.for_primary_runtime_scope("@alice:example.org", "general")
     wrong_key_manager = CredentialsManager(
         scoped_manager.base_path,
         shared_base_path=scoped_manager.shared_base_path,
@@ -2460,15 +2460,33 @@ async def test_callback_hides_provider_controlled_exchange_error(
     assert "provider-controlled-callback-secret" not in str(raised.value.detail)
 
 
-def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentials(
+@pytest.mark.parametrize(
+    ("authored_worker_scope", "private_scope", "expected_scope"),
+    [
+        pytest.param(None, None, None, id="unscoped"),
+        pytest.param("shared", None, "shared", id="shared"),
+        pytest.param("user", None, "user", id="user"),
+        pytest.param("user_agent", None, "user_agent", id="user-agent"),
+        pytest.param(None, "user_agent", "user_agent", id="private-per-user-agent"),
+    ],
+)
+def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_disconnect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authored_worker_scope: WorkerScope | None,
+    private_scope: WorkerScope | None,
+    expected_scope: WorkerScope | None,
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
     )
-    api_app = _make_test_app(runtime_paths, _mcp_oauth_config_payload(worker_scope="user_agent"))
+    config_payload = _mcp_oauth_config_payload(worker_scope=authored_worker_scope)
+    if private_scope is not None:
+        agent_payload = config_payload["agents"]["general"]
+        agent_payload.pop("worker_scope")
+        agent_payload["private"] = {"per": private_scope}
+    api_app = _make_test_app(runtime_paths, config_payload)
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
         "mcp_demo_oauth_client",
@@ -2502,6 +2520,9 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
             }
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    generated_provider = load_oauth_providers(config, runtime_paths)["mcp_demo"]
 
     with TestClient(api_app) as client:
         _login(client)
@@ -2512,6 +2533,11 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
             follow_redirects=False,
         )
         status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
+        connected_credentials = _stored_oauth_credentials(
+            generated_provider,
+            runtime_paths,
+            worker_scope=expected_scope,
+        )
         disconnect_response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
         disconnected_status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
 
@@ -2528,13 +2554,19 @@ def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentia
     assert fetch_kwargs["code_verifier"]
     assert status_response.status_code == 200
     assert status_response.json()["connected"] is True
+    assert connected_credentials is not None
+    assert connected_credentials["token"] == "mcp-access-token"
     assert disconnect_response.status_code == 200
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
-    scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
-        "mcp_demo_oauth",
+    assert (
+        _stored_oauth_credentials(
+            generated_provider,
+            runtime_paths,
+            worker_scope=expected_scope,
+        )
+        is None
     )
-    assert scoped_credentials is None
 
 
 @pytest.mark.parametrize("existing_token_client_id", ["old-client-id", None], ids=["previous-client", "unknown-client"])
@@ -3238,7 +3270,7 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
         raise MCPConnectionError(server_id, message)
         yield
 
-    monkeypatch.setattr(oauth_reset_execution, "retire_mcp_oauth_request_session", failed_retirement)
+    monkeypatch.setattr(oauth_reset_execution, "retire_mcp_oauth_scope_session", failed_retirement)
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
