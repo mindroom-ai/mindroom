@@ -320,7 +320,7 @@ async def oauth_credential_reader(
     """Read the last committed state without contending with an admitted writer."""
     database_path = _oauth_credential_database_path(context)
     _prepare_database_path(database_path)
-    if not await _store_is_initialized(context, database_path):
+    if await _reader_requires_write_preparation(context, database_path):
         async with oauth_credential_transaction(context) as transaction:
             await transaction.commit()
     connection = sqlite3.connect(database_path, isolation_level=None, timeout=0)
@@ -422,14 +422,8 @@ def _adopt_deferred_legacy_payload(
     row: sqlite3.Row,
 ) -> _LegacyCredentialPayload | None:
     """Adopt a retained legacy payload once the active codec can represent it."""
-    if (
-        not bool(row["credential_present"])
-        or not bool(row["credential_unreadable"])
-        or row["credential_payload"] is not None
-    ):
-        return None
-    legacy = _legacy_credential_payload(context)
-    if not legacy.present or legacy.payload is None:
+    legacy = _deferred_legacy_payload(context, row)
+    if legacy is None:
         return None
     connection.execute(
         """
@@ -448,11 +442,26 @@ def _adopt_deferred_legacy_payload(
     return legacy
 
 
-async def _store_is_initialized(
+def _deferred_legacy_payload(
+    context: _OAuthCredentialStoreContext,
+    row: sqlite3.Row,
+) -> _LegacyCredentialPayload | None:
+    """Return retained legacy bytes that the active codec can now represent."""
+    if (
+        not bool(row["credential_present"])
+        or not bool(row["credential_unreadable"])
+        or row["credential_payload"] is not None
+    ):
+        return None
+    legacy = _legacy_credential_payload(context)
+    return legacy if legacy.present and legacy.payload is not None else None
+
+
+async def _reader_requires_write_preparation(
     context: _OAuthCredentialStoreContext,
     database_path: Path,
 ) -> bool:
-    """Return whether a reader can open the already-bound store."""
+    """Return whether a reader needs store creation or deferred legacy adoption."""
     connection = sqlite3.connect(database_path, isolation_level=None, timeout=0)
     connection.row_factory = sqlite3.Row
     try:
@@ -463,7 +472,7 @@ async def _store_is_initialized(
             operation="read initialization",
         )
         if table is None:
-            return False
+            return True
         row = await _retry_sqlite_lock(
             lambda: connection.execute(
                 "SELECT * FROM oauth_credential_state WHERE singleton = 1",
@@ -471,9 +480,9 @@ async def _store_is_initialized(
             operation="read initialization",
         )
         if row is None:
-            return False
+            return True
         _validate_initialized_store(context, connection, row=row)
-        return True
+        return _deferred_legacy_payload(context, row) is not None
     finally:
         connection.close()
 
@@ -536,7 +545,11 @@ async def _begin_immediate(connection: sqlite3.Connection) -> None:
 
 
 async def _begin_read(connection: sqlite3.Connection) -> None:
-    await _retry_sqlite_lock(lambda: connection.execute("BEGIN"), operation="read lock")
+    connection.execute("BEGIN")
+    await _retry_sqlite_lock(
+        lambda: connection.execute("PRAGMA user_version").fetchone(),
+        operation="read lock",
+    )
 
 
 async def _set_synchronous_extra(connection: sqlite3.Connection) -> None:

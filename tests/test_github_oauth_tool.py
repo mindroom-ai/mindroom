@@ -1115,7 +1115,7 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
         assert payload["oauth_connection_required"] is True
         assert payload["reason"] == "access_rejected"
     else:
-        assert payload == {"error": f"{status_code} GitHub request failed"}
+        assert payload == {"error": "GitHub request failed"}
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
@@ -1142,7 +1142,33 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {"error": "500 GitHub request failed"}
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
+
+
+def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabled(tmp_path: Path) -> None:
+    """Sanitization cannot depend on the upstream logger emitting an exception record."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "provider-controlled-secret-with-logging-disabled"
+    tool.g = _ProviderControlledFailureGithub(500, sentinel)
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
     assert sentinel not in result
 
 

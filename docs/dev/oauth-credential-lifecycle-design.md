@@ -130,7 +130,7 @@ Readable credentials are normalized and encoded with the active credential encry
 Unreadable encrypted ciphertext is retained as an unreadable payload so restoring the key can recover it.
 Unreadable plaintext is represented as present but without storing the secret bytes when encryption is enabled.
 Generations and reset do not decode the payload, so a corrupt credential remains resettable.
-Legacy credential and sidecar files are removed only after their bytes are durably adopted into SQLite.
+Legacy credential and sidecar files are removed only after their bytes are durably adopted into SQLite or an explicit reset or replacement commits.
 When encryption is enabled and a plaintext legacy credential cannot be adopted, its file remains available for operator recovery until an explicit reset or replacement commits.
 If encryption is disabled before that commit, the retained plaintext file is adopted into the unencrypted store and the legacy file is then removed.
 

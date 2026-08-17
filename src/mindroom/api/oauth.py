@@ -365,6 +365,22 @@ def _script_json(value: object) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
 
+def _oauth_browser_conflict_response(message: str) -> HTMLResponse:
+    """Render a browser-readable conflict without exposing a raw API payload."""
+    escaped_message = escape(message)
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>OAuth connection changed</title></head>
+  <body>
+    <h1>OAuth connection changed</h1>
+    <p>{escaped_message}</p>
+  </body>
+</html>""",
+        status_code=409,
+    )
+
+
 def _oauth_success_origin(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
     success_url = oauth_success_redirect_url(provider, runtime_paths)
     parsed = urlparse(success_url)
@@ -459,19 +475,24 @@ async def reset_and_authorize(
     reset_token: str,
     agent_name: str | None = None,
     execution_scope: str | None = None,
-) -> RedirectResponse:
+) -> Response:
     """Commit one browser-confirmed reset and continue into provider authorization."""
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
-    context = _verify_browser_reset_intent(
-        request,
-        provider,
-        intent,
-        runtime_paths,
-        agent_name=agent_name,
-        execution_scope=execution_scope,
-    )
+    try:
+        context = _verify_browser_reset_intent(
+            request,
+            provider,
+            intent,
+            runtime_paths,
+            agent_name=agent_name,
+            execution_scope=execution_scope,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return _oauth_browser_conflict_response(str(exc.detail))
+        raise
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
@@ -489,8 +510,8 @@ async def reset_and_authorize(
             runtime_paths,
             agent_name=agent_name,
         )
-    except OAuthCredentialConflictError as exc:
-        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
+    except OAuthCredentialConflictError:
+        return _oauth_browser_conflict_response(_OAUTH_STALE_CONNECTION_MESSAGE)
     except OAuthResetPreparationError as exc:
         logger.warning(
             "oauth_connection_reset_preparation_failed",
@@ -538,23 +559,15 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
-@router.get("/{provider_id}/callback")
-async def callback(provider_id: str, request: Request) -> RedirectResponse:
-    """Handle a provider OAuth callback and store scoped credentials."""
-    error = request.query_params.get("error")
-    if error:
-        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
-
-    code = request.query_params.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="No authorization code received")
-
-    state = request.query_params.get("state")
-    if not state:
-        raise HTTPException(status_code=400, detail="No OAuth state received")
-
-    await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id)
+async def _store_callback_credentials(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    code: str,
+    state: str,
+) -> None:
+    """Resolve and store one callback's exact credential target."""
     pending = consume_pending_oauth_request(request, provider.id, state)
     target = _resolve_oauth_credentials_target(
         request,
@@ -573,12 +586,40 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
             expected_connection_generation=_pending_connection_generation(pending.payload),
         )
 
+    await run_coroutine_until_complete(verify_and_store())
+
+
+@router.get("/{provider_id}/callback")
+async def callback(provider_id: str, request: Request) -> Response:
+    """Handle a provider OAuth callback and store scoped credentials."""
+    error = request.query_params.get("error")
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
+
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="No authorization code received")
+
+    state = request.query_params.get("state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No OAuth state received")
+
+    await _require_oauth_api_user(request)
+    provider, runtime_paths = _load_provider(request, provider_id)
     try:
-        await run_coroutine_until_complete(verify_and_store())
-    except HTTPException:
+        await _store_callback_credentials(
+            request,
+            provider,
+            runtime_paths,
+            code=code,
+            state=state,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return _oauth_browser_conflict_response(str(exc.detail))
         raise
-    except OAuthCredentialConflictError as exc:
-        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
+    except OAuthCredentialConflictError:
+        return _oauth_browser_conflict_response(_OAUTH_STALE_CONNECTION_MESSAGE)
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:

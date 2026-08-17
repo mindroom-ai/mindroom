@@ -10,6 +10,7 @@ from agno.tools.function import Function
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.function_surface import local_mcp_function_name_collisions
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ def hide_mcp_catalog_function_collisions(toolkits: list[Toolkit]) -> dict[str, t
         catalog_function_names = {
             tool.function_name for tool in toolkit._filtered_tools() if tool.function_name in toolkit.async_functions
         }
-        hidden = tuple(sorted(catalog_function_names & local_function_names))
+        hidden = tuple(sorted(local_mcp_function_name_collisions(local_function_names, catalog_function_names)))
         if not hidden:
             continue
         for function_name in hidden:

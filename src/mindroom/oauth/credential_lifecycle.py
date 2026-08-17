@@ -12,7 +12,7 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_store import (
     OAuthCredentialTransaction,
@@ -227,27 +227,11 @@ async def _run_cancellable_oauth_transaction[Result](
     transaction_loop = await asyncio.to_thread(_get_oauth_transaction_loop)
     submission = transaction_loop.submit_cancellable(coroutine_factory())
     wrapped_future = asyncio.wrap_future(submission.future)
-    try:
-        return await asyncio.shield(wrapped_future)
-    except asyncio.CancelledError as cancellation:
-        submission.cancel()
-        source_error: BaseException | None = None
-        while not wrapped_future.done():
-            try:
-                await asyncio.shield(wrapped_future)
-            except asyncio.CancelledError:
-                continue
-            except BaseException as exc:
-                source_error = exc
-                break
-        if source_error is None:
-            try:
-                wrapped_future.result()
-            except BaseException as exc:
-                source_error = exc
-        if source_error is not None and not isinstance(source_error, asyncio.CancelledError):
-            raise cancellation from source_error
-        raise
+    return await wait_for_future_until_complete(
+        wrapped_future,
+        on_cancel=submission.cancel,
+        chain_cancelled_result=False,
+    )
 
 
 def _run_oauth_transaction_sync[Result](coroutine: Coroutine[Any, Any, Result]) -> Result:

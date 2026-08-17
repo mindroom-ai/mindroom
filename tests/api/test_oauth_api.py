@@ -1980,6 +1980,10 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
                 reset_url.replace("agent_name=general", "agent_name=devagent"),
                 follow_redirects=False,
             )
+            tampered_scope = client.get(
+                reset_url.replace("execution_scope=user_agent", "execution_scope=shared"),
+                follow_redirects=False,
+            )
             confirmation = client.get(reset_url, follow_redirects=False)
             before_confirmation = _stored_oauth_credentials(provider, runtime_paths)
             confirmed = client.post(reset_url, follow_redirects=False)
@@ -1989,6 +1993,7 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert unauthenticated_confirmation.headers["location"].startswith("/login")
     assert unauthenticated_reset.status_code == 401
     assert tampered_target.status_code == 400
+    assert tampered_scope.status_code == 400
     assert confirmation.status_code == 200
     assert "Reset and reconnect Test Drive" in confirmation.text
     assert "general" in confirmation.text
@@ -2000,6 +2005,87 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert retried.status_code == 303
     assert urlparse(retried.headers["location"]).netloc == "auth.example.test"
     assert _stored_oauth_credentials(provider, runtime_paths) is None
+
+
+def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> None:
+    """A reset link cannot delete credentials replaced after the link was issued."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    target = oauth_reset.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
+        "@alice:example.org",
+        "general",
+    )
+    scoped_manager.save_credentials(
+        provider.credential_service,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+
+    async def replace_credentials() -> None:
+        async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
+            transaction.publish(
+                {
+                    "token": "new-access-token",
+                    "refresh_token": "new-refresh-token",
+                    "client_id": "client-id",
+                    "scopes": list(provider.scopes),
+                    "_source": "oauth",
+                    "_oauth_provider": provider.id,
+                },
+                advance_connection_generation=True,
+            )
+            await transaction.commit()
+
+    asyncio.run(replace_credentials())
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
+            response = client.post(reset_url, follow_redirects=False)
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Start the connection again from the dashboard" in response.text
+    assert '"detail"' not in response.text
+    credentials = _stored_oauth_credentials(provider, runtime_paths)
+    assert credentials is not None
+    assert credentials["refresh_token"] == "new-refresh-token"
 
 
 def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -> None:
@@ -2302,13 +2388,11 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         },
     )
 
-    with pytest.raises(HTTPException) as raised:
-        await oauth_api.callback(provider.id, request)
+    response = await oauth_api.callback(provider.id, request)
 
-    assert raised.value.status_code == 409
-    assert raised.value.detail == (
-        "This OAuth connection changed before the request completed. Start the connection again from the dashboard."
-    )
+    assert response.status_code == 409
+    assert response.media_type == "text/html"
+    assert "Start the connection again from the dashboard" in response.body.decode()
 
 
 @pytest.mark.asyncio
@@ -3886,7 +3970,9 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
 
     assert authorize_response.status_code == 307
     assert callback_response.status_code == 409
-    assert "Start the connection again from the dashboard" in callback_response.json()["detail"]
+    assert callback_response.headers["content-type"].startswith("text/html")
+    assert "Start the connection again from the dashboard" in callback_response.text
+    assert '"detail"' not in callback_response.text
 
 
 def _config_payload_with_extra_google_agents(worker_scope: str = "user_agent") -> dict[str, Any]:

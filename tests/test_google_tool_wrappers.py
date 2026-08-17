@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -18,6 +19,7 @@ from agno.tools.function import Function
 from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from googleapiclient import http as google_http_module
 from googleapiclient.errors import HttpError
 
 from mindroom.config.auth import AuthorizationConfig
@@ -493,38 +495,59 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
     assert (stored is not None) is credential_remains
 
 
-@pytest.mark.parametrize(("status", "expected"), [(401, True), (403, False), (200, False)])
-def test_google_http_tracker_records_only_final_401(
-    monkeypatch: pytest.MonkeyPatch,
-    status: int,
-    expected: bool,
+@pytest.mark.parametrize(
+    ("statuses", "expected_rejection"),
+    [
+        ((401, 401, 200), False),
+        ((401, 401, 401), True),
+    ],
+)
+def test_google_http_tracker_records_only_final_401_after_authorized_http_retries(
+    statuses: tuple[int, ...],
+    expected_rejection: bool,
 ) -> None:
-    """The shared transport observes the final response returned after built-in retries."""
+    """The shared transport observes the real AuthorizedHttp recursion's final response."""
     tool = object.__new__(GoogleDriveTools)
-    tracked_http = tool._google_authorized_http(object())
+
+    class Credentials:
+        refresh_calls = 0
+
+        @staticmethod
+        def before_request(*_args: object, **_kwargs: object) -> None:
+            return
+
+        def refresh(self, _request: object) -> None:
+            self.refresh_calls += 1
+
+    credentials = Credentials()
+    tracked_http = tool._google_authorized_http(credentials)
+    remaining_statuses = iter(statuses)
 
     def return_response(*_args: object, **_kwargs: object) -> tuple[object, bytes]:
-        return SimpleNamespace(status=status), b"response"
+        status = next(remaining_statuses)
+        return SimpleNamespace(status=status), f"provider-response-{status}".encode()
 
-    monkeypatch.setattr("google_auth_httplib2.AuthorizedHttp.request", return_response)
+    tracked_http.http.request = return_response
 
-    _response, content = tracked_http.request("https://www.googleapis.com/example")
+    response, content = tracked_http.request("https://www.googleapis.com/example")
 
-    assert tool._consume_google_authorization_rejected() is expected
-    if status == 401:
-        assert content != b"response"
-        assert b"response" not in content
+    assert response.status == statuses[-1]
+    assert credentials.refresh_calls == len(statuses) - 1
+    assert tool._consume_google_authorization_rejected() is expected_rejection
+    if expected_rejection:
+        assert content == b'{"error":{"code":401,"message":"Google authorization rejected"}}'
     else:
-        assert content == b"response"
+        assert content == b"provider-response-200"
 
 
-def test_google_http_tracker_preserves_google_api_transport_defaults() -> None:
+def test_google_http_tracker_preserves_google_api_transport_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """The tracked transport keeps googleapiclient's timeout and resumable-upload handling."""
+    monkeypatch.setattr(socket, "getdefaulttimeout", lambda: None)
     tool = object.__new__(GoogleDriveTools)
 
     tracked_http = tool._google_authorized_http(object())
 
-    assert tracked_http.http.timeout == 60
+    assert tracked_http.http.timeout == google_http_module.DEFAULT_HTTP_TIMEOUT_SEC
     assert 308 not in tracked_http.http.redirect_codes
 
 
@@ -1493,6 +1516,12 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
     credentials = tool.creds
     credentials.refresh(object())
     assert provider_calls == 1
+    original_forced_refresh = credentials.refresh
+    forced_refresh_started = threading.Event()
+
+    def observed_forced_refresh(request: object) -> None:
+        forced_refresh_started.set()
+        original_forced_refresh(request)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         valid_request = executor.submit(
@@ -1503,8 +1532,10 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
             {},
         )
         assert valid_request_entered.wait(timeout=5)
-        forced_refresh = executor.submit(credentials.refresh, object())
+        forced_refresh = executor.submit(observed_forced_refresh, object())
         try:
+            assert forced_refresh_started.wait(timeout=5)
+            assert forced_refresh.running()
             assert not forced_refresh.done()
         finally:
             release_valid_request.set()

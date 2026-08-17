@@ -429,8 +429,8 @@ class ScopedOAuthClientMixin:
             return None
         return datetime.fromtimestamp(float(expires_at), tz=UTC).replace(tzinfo=None)
 
-    def _expires_at_from_credentials(self, credentials: Any) -> float | None:  # noqa: ANN401
-        expiry = getattr(credentials, "expiry", None)
+    def _expires_at_from_credentials(self, credentials: GoogleOAuthCredentials) -> float | None:
+        expiry = credentials.expiry
         if expiry is None:
             return None
         if expiry.tzinfo is None:

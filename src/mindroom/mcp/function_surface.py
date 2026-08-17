@@ -1,9 +1,20 @@
-"""Pure collision analysis for immutable MCP function surfaces."""
+"""Pure collision policy for immutable MCP function surfaces.
+
+No provider surface may contain the same function name twice.
+Static discovery invalidates conflicting catalogs, dynamic loading rejects the newly requested surface, and final agent
+construction hides any collision that appears between those validation boundaries.
+"""
 
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass
 
-__all__ = ["MCPFunctionCollisionReport", "MCPFunctionSurfaceSnapshot", "analyze_mcp_function_collisions"]
+__all__ = [
+    "MCPFunctionCollisionReport",
+    "MCPFunctionSurfaceSnapshot",
+    "analyze_mcp_function_collisions",
+    "local_mcp_function_name_collisions",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +37,14 @@ class MCPFunctionCollisionReport:
     function_name_collisions: tuple[tuple[str, str], ...]
 
 
+def local_mcp_function_name_collisions(
+    local_function_names: Collection[str],
+    mcp_function_names: Collection[str],
+) -> frozenset[str]:
+    """Return function names that violate the shared local/MCP uniqueness policy."""
+    return frozenset(local_function_names) & frozenset(mcp_function_names)
+
+
 def analyze_mcp_function_collisions(
     snapshots: tuple[MCPFunctionSurfaceSnapshot, ...],
 ) -> tuple[MCPFunctionCollisionReport, ...]:
@@ -45,9 +64,13 @@ def analyze_mcp_function_collisions(
             for function_name in function_name_counts:
                 server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
 
+        local_collision_names = local_mcp_function_name_collisions(
+            snapshot.local_function_names,
+            server_ids_by_function_name,
+        )
         for function_name, server_ids in server_ids_by_function_name.items():
             messages: list[str] = []
-            if function_name in snapshot.local_function_names:
+            if function_name in local_collision_names:
                 messages.append(
                     f"MCP function name '{function_name}' collides with an existing MindRoom tool function",
                 )

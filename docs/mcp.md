@@ -414,10 +414,11 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 ## Error Handling
 
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
-If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
+If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning for every affected server.
 
 By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
-MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+MindRoom keeps retrying transport and discovery failures in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+Function-name collisions remain failed because retrying the same invalid catalog cannot recover; after fixing the remote catalog or configured prefixes, reload `config.yaml` or restart MindRoom to retry those servers.
 Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.

@@ -17,7 +17,11 @@ import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
-from mindroom.oauth.credential_store import _oauth_credential_database_path, oauth_credential_transaction
+from mindroom.oauth.credential_store import (
+    _oauth_credential_database_path,
+    oauth_credential_reader,
+    oauth_credential_transaction,
+)
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -61,6 +65,42 @@ def _hold_sqlite_transaction(
         connection.execute("ROLLBACK")
     finally:
         connection.close()
+
+
+def _commit_sqlite_generation(database_path: str, committing: Event, committed: Event) -> None:
+    """Publish a generation while another process keeps COMMIT in the pending-lock window."""
+    connection = sqlite3.connect(database_path, isolation_level=None, timeout=5)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE oauth_credential_state SET generation = ? WHERE singleton = 1",
+            ("committed-generation",),
+        )
+        committing.set()
+        connection.execute("COMMIT")
+        committed.set()
+    finally:
+        connection.close()
+
+
+async def _wait_for_sqlite_pending_commit(database_path: Path) -> None:
+    """Wait until a committing writer prevents a new reader from taking a shared lock."""
+    deadline = asyncio.get_running_loop().time() + 5
+    while True:
+        probe = sqlite3.connect(database_path, isolation_level=None, timeout=0)
+        try:
+            probe.execute("BEGIN")
+            probe.execute("PRAGMA user_version").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            return
+        finally:
+            if probe.in_transaction:
+                probe.execute("ROLLBACK")
+            probe.close()
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
 
 
 def _open_cold_store_after_absence_barrier(storage_path: str, barrier: Barrier) -> None:
@@ -312,9 +352,8 @@ async def test_enabling_encryption_preserves_unadopted_plaintext_legacy_credenti
 
     assert legacy_path.read_bytes() == original_payload
 
-    async with oauth_credential_transaction(plaintext_context) as transaction:
-        recovered = transaction.snapshot()
-        await transaction.commit()
+    async with oauth_credential_reader(plaintext_context) as reader:
+        recovered = reader.snapshot()
 
     assert recovered.credentials == {"token": "recoverable", "refresh_token": "recoverable-refresh"}
     assert not legacy_path.exists()
@@ -569,3 +608,68 @@ async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) ->
     async with oauth_credential_transaction(context) as transaction:
         assert transaction.snapshot().credentials == {"token": "rotated"}
         await transaction.commit()
+
+
+@pytest.mark.asyncio
+async def test_reader_retries_while_writer_crosses_commit_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reader arriving during a writer's pending COMMIT waits for the committed snapshot."""
+    context = _context(tmp_path)
+    await _publish(context, "initial")
+    database_path = _oauth_credential_database_path(context)
+    process_context = multiprocessing.get_context("spawn")
+    reader_ready = process_context.Event()
+    release_reader = process_context.Event()
+    writer_committing = process_context.Event()
+    writer_committed = process_context.Event()
+    blocking_reader = process_context.Process(
+        target=_hold_sqlite_transaction,
+        args=(str(database_path), reader_ready, release_reader),
+        kwargs={"write": False},
+    )
+    writer = process_context.Process(
+        target=_commit_sqlite_generation,
+        args=(str(database_path), writer_committing, writer_committed),
+    )
+    reader_connection_open = asyncio.Event()
+    enter_reader = asyncio.Event()
+    original_begin_read = credential_store_module._begin_read
+
+    async def pause_before_read_lock(connection: sqlite3.Connection) -> None:
+        reader_connection_open.set()
+        await enter_reader.wait()
+        await original_begin_read(connection)
+
+    monkeypatch.setattr(credential_store_module, "_begin_read", pause_before_read_lock)
+    blocking_reader.start()
+    try:
+        assert await asyncio.to_thread(reader_ready.wait, 5)
+
+        async def read_generation() -> str:
+            async with oauth_credential_reader(context) as reader:
+                return reader.generations().generation
+
+        pending_read = asyncio.create_task(read_generation())
+        await asyncio.wait_for(reader_connection_open.wait(), timeout=5)
+        writer.start()
+        assert await asyncio.to_thread(writer_committing.wait, 5)
+        await _wait_for_sqlite_pending_commit(database_path)
+
+        enter_reader.set()
+        await asyncio.sleep(0.1)
+        assert not pending_read.done()
+        release_reader.set()
+        assert await asyncio.wait_for(pending_read, timeout=5) == "committed-generation"
+        assert await asyncio.to_thread(writer_committed.wait, 5)
+    finally:
+        release_reader.set()
+        await asyncio.to_thread(blocking_reader.join, 5)
+        await asyncio.to_thread(writer.join, 5)
+        for process in (blocking_reader, writer):
+            if process.is_alive():
+                process.terminate()
+                process.join()
+    assert blocking_reader.exitcode == 0
+    assert writer.exitcode == 0

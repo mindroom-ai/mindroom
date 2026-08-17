@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from agno.models.openai import OpenAIChat
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
+import mindroom.mcp.manager as mcp_manager_module
 from mindroom.agents import create_agent
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -34,7 +36,12 @@ from mindroom.mcp.errors import (
     MCPToolCallError,
     MCPToolUnavailableError,
 )
-from mindroom.mcp.manager import MCPServerManager, _discovery_retry_delay_seconds, _MCPAuthorizationChangedError
+from mindroom.mcp.manager import (
+    MCPServerManager,
+    _discovery_retry_delay_seconds,
+    _MCPAuthorizationChangedError,
+    _MCPConfigurationChangedError,
+)
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.mcp.types import MCPServerState
@@ -76,6 +83,22 @@ CHAIN_0 = "refresh-0"
 CHAIN_1 = "refresh-1"
 CHAIN_2 = "refresh-2"
 ALICE_ACCESS_0 = "access-alice-refresh-0"
+
+
+class _CapturingLogger:
+    def __init__(self) -> None:
+        self.debug_calls: list[tuple[str, dict[str, object]]] = []
+        self.warning_calls: list[tuple[str, dict[str, object]]] = []
+
+    def debug(self, event: str, **kwargs: object) -> None:
+        self.debug_calls.append((event, kwargs))
+
+    @staticmethod
+    def info(_event: str, **_kwargs: object) -> None:
+        return
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.warning_calls.append((event, kwargs))
 
 
 async def _publish_oauth_credentials(
@@ -299,6 +322,30 @@ def _oauth_mcp_config() -> MCPServerConfig:
             "authorization_url": "https://auth.example.test/authorize",
             "token_url": "https://auth.example.test/token",
         },
+    )
+
+
+def _cross_server_collision_config(runtime_paths: RuntimePaths, *, include_other: bool = True) -> Config:
+    servers: dict[str, object] = {
+        "demo": {"transport": "stdio", "command": "npx", "tool_prefix": "shared"},
+    }
+    tools = ["mcp_demo"]
+    if include_other:
+        servers["other"] = {"transport": "stdio", "command": "npx", "tool_prefix": "shared"}
+        tools.append("mcp_other")
+    return Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "mcp_servers": servers,
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": tools,
+                },
+            },
+        },
+        runtime_paths,
     )
 
 
@@ -1850,7 +1897,7 @@ async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
             self.async_functions = {}
             self.tools = ()
 
-    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {"demo": _oauth_mcp_config().model_dump(exclude_none=True)},
@@ -3096,31 +3143,9 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     manager = MCPServerManager(runtime_paths)
-    config = Config.validate_with_runtime(
-        {
-            "defaults": {"tools": []},
-            "mcp_servers": {
-                "demo": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "shared",
-                },
-                "other": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "shared",
-                },
-            },
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                    "tools": ["mcp_demo", "mcp_other"],
-                },
-            },
-        },
-        runtime_paths,
-    )
+    logger = _CapturingLogger()
+    monkeypatch.setattr(mcp_manager_module, "logger", logger)
+    config = _cross_server_collision_config(runtime_paths)
     changed = await manager.sync_servers(config)
     assert changed == set()
     assert manager.failed_server_ids() == {"demo", "other"}
@@ -3132,6 +3157,96 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     assert "demo, other" in str(demo_error)
     assert manager._states["demo"].refresh_task is None
     assert manager._states["other"].refresh_task is None
+    collision_warnings = [kwargs for event, kwargs in logger.warning_calls if event == "MCP server discovery failed"]
+    assert {warning["server_id"] for warning in collision_warnings} == {"demo", "other"}
+    assert all("shared_echo" in str(warning["error"]) for warning in collision_warnings)
+    assert not [event for event, _kwargs in logger.debug_calls if event == "MCP server discovery failed"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_marks_collision_introduced_by_later_sync_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A newly configured server cannot publish over an existing server's function surface."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    initial = _cross_server_collision_config(runtime_paths, include_other=False)
+    expanded = _cross_server_collision_config(runtime_paths)
+
+    assert await manager.sync_servers(initial) == {"demo"}
+    assert await manager.sync_servers(expanded) == set()
+
+    assert manager.failed_server_ids() == {"demo", "other"}
+    assert all(isinstance(manager._states[server_id].last_error, MCPProtocolError) for server_id in ("demo", "other"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "message"),
+    [
+        ("catalog", "authorization changed repeatedly during catalog resolution"),
+        ("tool", "authorization changed repeatedly during tool dispatch"),
+    ],
+)
+async def test_mcp_manager_bounds_repeated_authorization_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    message: str,
+) -> None:
+    """Credential churn eventually fails one request instead of retrying forever."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    monkeypatch.setattr(mcp_manager_module, "_MAX_REQUEST_STATE_RETRIES", 2)
+    state = manager._states["demo"]
+    authorization_lease = SimpleNamespace(headers={})
+    attempts = 0
+
+    async def request_state_and_headers(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        return state, authorization_lease
+
+    async def reject_changed_authorization(*_args: object, **_kwargs: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        raise _MCPAuthorizationChangedError
+
+    monkeypatch.setattr(manager, "_request_state_and_headers", request_state_and_headers)
+    monkeypatch.setattr(manager, "_refresh_server_catalog", reject_changed_authorization)
+
+    if operation == "catalog":
+        operation_call = manager.get_request_catalog("demo", credentials_manager=None, worker_target=None)
+    else:
+        operation_call = manager.call_tool("demo", "echo", {})
+    with pytest.raises(MCPConnectionError, match=message):
+        await operation_call
+
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_bounds_repeated_configuration_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config churn eventually fails one request instead of retrying forever."""
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    monkeypatch.setattr(mcp_manager_module, "_MAX_REQUEST_STATE_RETRIES", 2)
+    attempts = 0
+
+    async def reject_changed_configuration(*_args: object, **_kwargs: object) -> tuple[object, object]:
+        nonlocal attempts
+        attempts += 1
+        raise _MCPConfigurationChangedError
+
+    monkeypatch.setattr(manager, "_request_state_and_headers_once", reject_changed_configuration)
+
+    with pytest.raises(MCPConnectionError, match="configuration changed repeatedly during request resolution"):
+        await manager._request_state_and_headers("demo", credentials_manager=None, worker_target=None)
+
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
@@ -3187,7 +3302,7 @@ async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_
             self.async_functions = {}
             self.tools = ()
 
-    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -3915,7 +4030,7 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
             self.async_functions = {}
             self.tools = ()
 
-    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {

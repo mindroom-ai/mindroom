@@ -20,7 +20,6 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
-    mcp_oauth_bridge_function_names,
     resolved_mcp_tool_prefix,
     validate_mcp_function_name,
 )
@@ -32,10 +31,16 @@ from mindroom.mcp.errors import (
     MCPToolCallError,
     MCPToolUnavailableError,
 )
-from mindroom.mcp.function_surface import MCPFunctionSurfaceSnapshot, analyze_mcp_function_collisions
 from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
-from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
+from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.surface_projection import (
+    MCPFunctionSurfaceContext,
+    MCPScopedFunctionState,
+    function_collision_messages,
+    function_collision_reports,
+    mcp_tool_unavailable_messages,
+)
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import (
     MCPDiscoveredTool,
@@ -57,8 +62,6 @@ from mindroom.oauth.service import (
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
@@ -66,9 +69,7 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
 
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -80,6 +81,7 @@ _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 # unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
 _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
+# Bound request-local retries when concurrent credential or config publication keeps invalidating leases.
 _MAX_REQUEST_STATE_RETRIES = 8
 
 
@@ -151,6 +153,25 @@ class _MCPFunctionValidationError(MCPProtocolError):
     ) -> None:
         super().__init__(server_id, message)
         self.invalid_states = invalid_states
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveryRejection:
+    """One typed OAuth discovery rejection captured while state locks are held."""
+
+    authorization_lease: _MCPAuthorizationLease
+    connection_required: OAuthConnectionRequired
+    cause: MCPError
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogRefreshOutcome:
+    """Values computed under refresh locks and consumed after those locks release."""
+
+    changed: bool = False
+    should_notify_catalog_change: bool = False
+    discovery_rejection: _DiscoveryRejection | None = None
+    invalid_function_states: tuple[MCPServerState, ...] | None = None
 
 
 class MCPServerManager:
@@ -955,6 +976,33 @@ class MCPServerManager:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
         return tool_result_from_call_result(state.server_id, result)
 
+    async def _record_catalog_refresh_error(
+        self,
+        state: MCPServerState,
+        authorization_lease: _MCPAuthorizationLease | None,
+        error: MCPError,
+    ) -> _DiscoveryRejection | None:
+        """Record one refresh error and preserve a typed OAuth rejection for post-lock cleanup."""
+        connection_required: OAuthConnectionRequired | None = None
+        if authorization_lease is not None:
+            try:
+                connection_required = await self._oauth_transport_rejection(
+                    state,
+                    authorization_lease,
+                    error,
+                )
+            except _MCPAuthorizationChangedError:
+                await self._disconnect_state(state)
+                raise
+        await self._record_discovery_failure(state, error)
+        if authorization_lease is None or connection_required is None:
+            return None
+        return _DiscoveryRejection(
+            authorization_lease=authorization_lease,
+            connection_required=connection_required,
+            cause=error,
+        )
+
     async def _refresh_server_catalog(
         self,
         state: MCPServerState,
@@ -968,8 +1016,7 @@ class MCPServerManager:
         self._require_active_state(state)
         changed = False
         should_notify_catalog_change = False
-        authorization_rejection: OAuthConnectionRequired | None = None
-        authorization_rejection_cause: MCPError | None = None
+        discovery_rejection: _DiscoveryRejection | None = None
         invalid_function_states: tuple[MCPServerState, ...] | None = None
         async with state.lock:
             self._require_desired_oauth_lease(state, authorization_lease)
@@ -1005,90 +1052,54 @@ class MCPServerManager:
                         invalid_state for invalid_state in exc.invalid_states if invalid_state is not state
                     )
                 except MCPError as exc:
-                    authorization_rejection = await self._classify_discovery_authorization_rejection(
+                    discovery_rejection = await self._record_catalog_refresh_error(
                         state,
                         authorization_lease,
                         exc,
                     )
-                    await self._record_discovery_failure(state, exc)
-                    if authorization_rejection is None:
+                    if discovery_rejection is None:
                         return False
-                    authorization_rejection_cause = exc
                 else:
                     state.consecutive_failures = 0
                     changed = previous_hash != catalog.catalog_hash
                     should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+        outcome = _CatalogRefreshOutcome(
+            changed=changed,
+            should_notify_catalog_change=should_notify_catalog_change,
+            discovery_rejection=discovery_rejection,
+            invalid_function_states=invalid_function_states,
+        )
         return await self._finish_catalog_refresh(
             state,
-            authorization_lease=authorization_lease,
-            authorization_rejection=authorization_rejection,
-            authorization_rejection_cause=authorization_rejection_cause,
-            invalid_function_states=invalid_function_states,
-            should_notify_catalog_change=should_notify_catalog_change,
-            changed=changed,
+            outcome,
         )
 
     async def _finish_catalog_refresh(
         self,
         state: MCPServerState,
-        *,
-        authorization_lease: _MCPAuthorizationLease | None,
-        authorization_rejection: OAuthConnectionRequired | None,
-        authorization_rejection_cause: MCPError | None,
-        invalid_function_states: tuple[MCPServerState, ...] | None,
-        should_notify_catalog_change: bool,
-        changed: bool,
+        outcome: _CatalogRefreshOutcome,
     ) -> bool:
         """Finish refresh cleanup and notifications after state locks are released."""
-        if invalid_function_states is not None:
-            await self._disconnect_function_validation_states(invalid_function_states)
+        if outcome.invalid_function_states is not None:
+            await self._disconnect_function_validation_states(outcome.invalid_function_states)
             return False
-        await self._raise_discovery_authorization_rejection(
-            state,
-            authorization_lease,
-            authorization_rejection,
-            authorization_rejection_cause,
-        )
+        if outcome.discovery_rejection is not None:
+            rejection = outcome.discovery_rejection
+            await run_coroutine_until_complete(
+                self._disconnect_rejected_oauth_request_state(
+                    rejection.authorization_lease.session_key,
+                    state,
+                ),
+            )
+            raise rejection.connection_required from rejection.cause
         invalid_server_ids = await self._validate_global_function_names()
         if state.server_id in invalid_server_ids:
             return False
-        if should_notify_catalog_change and self._on_catalog_change is not None:
+        if outcome.should_notify_catalog_change and self._on_catalog_change is not None:
             await self._on_catalog_change(state.server_id)
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
-        return changed
-
-    async def _classify_discovery_authorization_rejection(
-        self,
-        state: MCPServerState,
-        authorization_lease: _MCPAuthorizationLease | None,
-        error: MCPError,
-    ) -> OAuthConnectionRequired | None:
-        """Classify a failed candidate before its transport rejection latch is cleared."""
-        if authorization_lease is None:
-            return None
-        try:
-            return await self._oauth_transport_rejection(state, authorization_lease, error)
-        except _MCPAuthorizationChangedError:
-            await self._disconnect_state(state)
-            raise
-
-    async def _raise_discovery_authorization_rejection(
-        self,
-        state: MCPServerState,
-        authorization_lease: _MCPAuthorizationLease | None,
-        rejection: OAuthConnectionRequired | None,
-        cause: MCPError | None,
-    ) -> None:
-        """Retire one rejected candidate after its state and call locks are released."""
-        if rejection is None:
-            return
-        assert authorization_lease is not None
-        assert cause is not None
-        await run_coroutine_until_complete(
-            self._disconnect_rejected_oauth_request_state(authorization_lease.session_key, state),
-        )
-        raise rejection from cause
+        return outcome.changed
 
     async def _connect_and_publish_catalog(
         self,
@@ -1138,12 +1149,29 @@ class MCPServerManager:
                 server_id=state.server_id,
                 error_type=type(close_error).__name__,
             )
-        repeated_error = state.last_error is not None and str(state.last_error) == str(error)
+        repeated_error = (
+            state.consecutive_failures > 0 and state.last_error is not None and str(state.last_error) == str(error)
+        )
         state.connected = False
         state.catalog = None
         state.function_validation_error = isinstance(error, _MCPFunctionValidationError)
         state.consecutive_failures += 1
         state.last_error = error
+        self._log_discovery_failure(state, error, repeated_error=repeated_error)
+        if state.config.auth is None and not state.function_validation_error:
+            self._schedule_refresh_task(
+                state,
+                delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
+            )
+
+    def _log_discovery_failure(
+        self,
+        state: MCPServerState,
+        error: MCPError,
+        *,
+        repeated_error: bool,
+    ) -> None:
+        """Report one discovery failure without exposing credentials or transport internals."""
         log = logger.debug if repeated_error else logger.warning
         log(
             "MCP server discovery failed",
@@ -1154,11 +1182,6 @@ class MCPServerManager:
             affected_entities=sorted(self._entities_referencing_server(state.server_id)),
             consecutive_failures=state.consecutive_failures,
         )
-        if state.config.auth is None and not state.function_validation_error:
-            self._schedule_refresh_task(
-                state,
-                delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
-            )
 
     async def _connect_and_discover(
         self,
@@ -1589,81 +1612,22 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' requester session generation is retired"
             raise MCPConnectionError(state.server_id, msg)
 
-    @staticmethod
-    def _normalized_tool_filter(value: object) -> set[str]:
-        """Normalize MCP per-assignment remote tool filters."""
-        if value is None:
-            return set()
-        if isinstance(value, str):
-            return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
-        if isinstance(value, list):
-            return {part.strip() for part in value if isinstance(part, str) and part.strip()}
-        return set()
-
-    def _catalog_function_names_for_tool_config(
-        self,
-        catalog: MCPServerCatalog,
-        tool_config: EffectiveToolConfig,
-    ) -> set[str]:
-        """Return catalog function names after one agent MCP assignment's filters."""
-        include_tools = self._normalized_tool_filter(tool_config.tool_config_overrides.get("include_tools"))
-        exclude_tools = self._normalized_tool_filter(tool_config.tool_config_overrides.get("exclude_tools"))
-        return {
-            tool.function_name
-            for tool in catalog.tools
-            if (not exclude_tools or tool.remote_name not in exclude_tools)
-            and (not include_tools or tool.remote_name in include_tools)
-        }
-
-    def _agent_function_surface_snapshot(
-        self,
-        agent_name: str,
-        *,
-        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
-        requester_surface: tuple[str, str] | None = None,
-        candidate_state: MCPServerState | None = None,
-        candidate_catalog: MCPServerCatalog | None = None,
-        configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]] | None = None,
-    ) -> MCPFunctionSurfaceSnapshot:
-        """Snapshot one agent and requester function surface from live manager state."""
-        resolved_surface = (
-            configured_surface
-            if configured_surface is not None
-            else self._configured_function_surface(agent_name, loaded_tools=loaded_tools)
-        )
-        local_function_names, configured_mcp_tool_configs = resolved_surface
-        server_function_sources: list[tuple[str, tuple[frozenset[str], ...]]] = []
-        for server_id in sorted(configured_mcp_tool_configs):
-            state = self._states.get(server_id)
-            if state is None or (state.last_error is not None and state is not candidate_state):
-                continue
-            function_sources: list[frozenset[str]] = []
-            if state.config.auth is not None:
-                function_sources.append(frozenset(mcp_oauth_bridge_function_names(server_id, state.config)))
-            catalogs = [candidate_catalog if state is candidate_state else state.catalog]
-            catalogs.extend(
-                candidate_catalog if scoped_state is candidate_state else scoped_state.catalog
-                for key, scoped_state in self._scoped_states.items()
-                if key.server_id == server_id
-                and requester_surface is not None
-                and (key.worker_scope, key.worker_key) == requester_surface
-                and (scoped_state.last_error is None or scoped_state is candidate_state)
-            )
-            function_sources.extend(
-                frozenset(
-                    function_name
-                    for tool_config in configured_mcp_tool_configs[server_id]
-                    for function_name in self._catalog_function_names_for_tool_config(catalog, tool_config)
+    def _function_surface_context(self) -> MCPFunctionSurfaceContext | None:
+        """Capture the manager-owned inputs consumed by surface projection."""
+        config = self._config
+        if config is None:
+            return None
+        return MCPFunctionSurfaceContext(
+            runtime_paths=self.runtime_paths,
+            config=config,
+            states=self._states,
+            scoped_states=tuple(
+                MCPScopedFunctionState(
+                    requester_surface=(key.worker_scope, key.worker_key),
+                    state=state,
                 )
-                for catalog in catalogs
-                if catalog is not None
-            )
-            server_function_sources.append((server_id, tuple(function_sources)))
-        return MCPFunctionSurfaceSnapshot(
-            agent_name=agent_name,
-            requester_surface=requester_surface,
-            local_function_names=frozenset(local_function_names),
-            server_function_sources=tuple(server_function_sources),
+                for key, state in self._scoped_states.items()
+            ),
         )
 
     def _function_name_collision_errors_by_state(
@@ -1673,30 +1637,15 @@ class MCPServerManager:
         candidate_catalog: MCPServerCatalog | None = None,
     ) -> dict[int, tuple[MCPServerState, set[str]]]:
         """Collect every state whose provider-visible function surface conflicts."""
-        requester_surface = candidate_state.oauth_request_scope if candidate_state is not None else None
-        requester_surfaces = {
-            (key.worker_scope, key.worker_key)
-            for key, state in self._scoped_states.items()
-            if state.catalog is not None and state.last_error is None
-        } | ({requester_surface} if requester_surface is not None else set())
-        agent_names = sorted(self._config.agents) if self._config is not None else []
-        configured_surfaces = {
-            agent_name: self._configured_function_surface(agent_name, loaded_tools=[]) for agent_name in agent_names
-        }
-        snapshots = tuple(
-            self._agent_function_surface_snapshot(
-                agent_name,
-                loaded_tools=[],
-                requester_surface=surface,
-                candidate_state=candidate_state,
-                candidate_catalog=candidate_catalog,
-                configured_surface=configured_surfaces[agent_name],
-            )
-            for surface in (None, *sorted(requester_surfaces))
-            for agent_name in agent_names
-        )
+        context = self._function_surface_context()
+        if context is None:
+            return {}
         errors_by_state: dict[int, tuple[MCPServerState, set[str]]] = {}
-        for report in analyze_mcp_function_collisions(snapshots):
+        for report in function_collision_reports(
+            context,
+            candidate_state=candidate_state,
+            candidate_catalog=candidate_catalog,
+        ):
             for state in self._function_validation_states_for_surface(
                 report.server_id,
                 report.requester_surface,
@@ -1762,6 +1711,10 @@ class MCPServerManager:
             async with state.lock:
                 if not state.function_validation_error:
                     continue
+                error = state.last_error
+                if error is not None:
+                    state.consecutive_failures += 1
+                    self._log_discovery_failure(state, error, repeated_error=False)
                 await self._disconnect_state_when_idle(state)
 
     async def _validate_global_function_names(self) -> set[str]:
@@ -1773,167 +1726,16 @@ class MCPServerManager:
         await self._disconnect_function_validation_states(marked_states)
         return {state.server_id for state in marked_states}
 
-    def _configured_tool_configs(
-        self,
-        agent_name: str,
-        *,
-        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None,
-    ) -> tuple[EffectiveToolConfig, ...]:
-        """Return provider-visible tool configs for one agent surface."""
-        config = cast("Config", self._config)
-        return visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            loaded_tools=loaded_tools,
-            enable_dynamic_tools_manager=True,
-            include_matrix_room_runtime_tools=True,
-        ).runtime_tool_configs
-
-    def _mcp_server_id_from_tool_config_name(self, tool_name: str) -> str | None:
-        """Return the MCP server id for a tool name visible in this manager's active config."""
-        config = self._config
-        if config is not None:
-            for server_id, server_config in config.mcp_servers.items():
-                if server_config.enabled and tool_name == mcp_tool_name(server_id):
-                    return server_id
-        registered_server_id = mcp_server_id_from_tool_name(tool_name)
-        return registered_server_id if registered_server_id in self._states else None
-
-    def _partition_tool_configs(
-        self,
-        tool_configs: tuple[EffectiveToolConfig, ...],
-    ) -> tuple[list[EffectiveToolConfig], dict[str, tuple[EffectiveToolConfig, ...]]]:
-        """Split tool configs into local tool configs and visible MCP server ids."""
-        local_tool_configs: list[EffectiveToolConfig] = []
-        mcp_tool_configs: dict[str, list[EffectiveToolConfig]] = {}
-        for tool_config in tool_configs:
-            if server_id := self._mcp_server_id_from_tool_config_name(tool_config.name):
-                mcp_tool_configs.setdefault(server_id, []).append(tool_config)
-                continue
-            local_tool_configs.append(tool_config)
-        return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
-
-    @staticmethod
-    def _metadata_only_tool_function_names(tool_name: str, *, config: Config, agent_name: str) -> set[str]:
-        """Return provider-visible names for context-built tools declared in metadata."""
-        metadata = TOOL_METADATA.get(tool_name)
-        if metadata is None or metadata.factory is not None:
-            return set()
-        if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
-            return set()
-        return set(metadata.function_names)
-
-    def _metadata_only_tool_function_names_for_surface(
-        self,
-        tool_names: set[str],
-        *,
-        config: Config,
-        agent_name: str,
-    ) -> set[str]:
-        """Return provider-visible function names for metadata-only configured tools."""
-        function_names: set[str] = set()
-        for tool_name in sorted(tool_names):
-            function_names.update(
-                self._metadata_only_tool_function_names(tool_name, config=config, agent_name=agent_name),
-            )
-        return function_names
-
-    def _tool_function_names_for_local_tools(
-        self,
-        tool_configs: list[EffectiveToolConfig],
-        *,
-        get_tool_by_name: Callable[..., object],
-        authorization: AuthorizationConfig,
-    ) -> set[str]:
-        """Return provider-visible function names exposed by one set of local tools."""
-        function_names: set[str] = set()
-        for tool_config in sorted(tool_configs, key=lambda entry: entry.name):
-            try:
-                toolkit = get_tool_by_name(
-                    tool_config.name,
-                    self.runtime_paths,
-                    worker_target=None,
-                    authorization=authorization,
-                    tool_config_overrides=dict(tool_config.tool_config_overrides),
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Skipping local tool during MCP function-name validation",
-                    tool_name=tool_config.name,
-                    error=str(exc),
-                )
-                continue
-            function_names.update(self._toolkit_function_names(toolkit))
-        return function_names
-
-    def _configured_function_surface(
-        self,
-        agent_name: str,
-        *,
-        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None,
-    ) -> tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]]:
-        """Return one agent's provider-visible local functions and MCP servers."""
-        config = self._config
-        if config is None:
-            return set(), {}
-
-        ensure_tool_registry_loaded(self.runtime_paths, config)
-        local_tool_configs, mcp_tool_configs = self._partition_tool_configs(
-            self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
-        )
-        local_tool_names = {entry.name for entry in local_tool_configs}
-        function_names = self._metadata_only_tool_function_names_for_surface(
-            local_tool_names,
-            config=config,
-            agent_name=agent_name,
-        )
-        function_names.update(
-            self._tool_function_names_for_local_tools(
-                [
-                    entry
-                    for entry in local_tool_configs
-                    if not self._metadata_only_tool_function_names(
-                        entry.name,
-                        config=config,
-                        agent_name=agent_name,
-                    )
-                ],
-                get_tool_by_name=get_tool_by_name,
-                authorization=config.authorization,
-            ),
-        )
-        return function_names, mcp_tool_configs
-
     def mcp_tool_unavailable_messages_for_loaded_tools(
         self,
         agent_name: str,
         loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
     ) -> list[str]:
         """Return unavailable non-OAuth MCP server messages for a candidate loaded dynamic-tool state."""
-        config = self._config
-        if config is None:
+        context = self._function_surface_context()
+        if context is None:
             return []
-
-        _local_tool_configs, mcp_tool_configs = self._partition_tool_configs(
-            self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
-        )
-        messages: list[str] = []
-        for server_id in sorted(mcp_tool_configs):
-            server_config = config.mcp_servers.get(server_id)
-            state = self._states.get(server_id)
-            if server_config is not None and server_config.auth is not None:
-                continue
-            if state is not None and state.config.auth is not None:
-                continue
-            if state is None:
-                messages.append(f"MCP server '{server_id}' is not configured or has not been synchronized.")
-                continue
-            if state.last_error is not None:
-                messages.append(f"MCP server '{server_id}' is unavailable: {state.last_error}")
-                continue
-            if state.catalog is None or state.session is None or not state.connected:
-                messages.append(f"MCP server '{server_id}' is not connected.")
-        return messages
+        return mcp_tool_unavailable_messages(context, agent_name, loaded_tools)
 
     def function_name_collision_messages_for_loaded_tools(
         self,
@@ -1943,11 +1745,8 @@ class MCPServerManager:
         worker_target: ResolvedWorkerTarget | None = None,
     ) -> list[str]:
         """Return collision messages for a candidate loaded dynamic-tool state."""
-        if not any(
-            state.last_error is None
-            and (state.catalog is not None or (state.oauth_request_scope is None and state.config.auth is not None))
-            for state in (*self._states.values(), *self._scoped_states.values())
-        ):
+        context = self._function_surface_context()
+        if context is None:
             return []
         requester_surfaces: set[tuple[str, str]] = set()
         if worker_target is not None:
@@ -1965,35 +1764,12 @@ class MCPServerManager:
                     and canonical_target.worker_key is not None
                 ):
                     requester_surfaces.add((canonical_target.worker_scope, canonical_target.worker_key))
-        configured_surface = self._configured_function_surface(agent_name, loaded_tools=loaded_tools)
-        snapshots = tuple(
-            self._agent_function_surface_snapshot(
-                agent_name,
-                loaded_tools=loaded_tools,
-                requester_surface=requester_surface,
-                configured_surface=configured_surface,
-            )
-            for requester_surface in (sorted(requester_surfaces) or [None])
+        return function_collision_messages(
+            context,
+            agent_name,
+            loaded_tools,
+            requester_surfaces=requester_surfaces,
         )
-        reports = analyze_mcp_function_collisions(snapshots)
-        return sorted(
-            {message for report in reports for _function_name, message in report.function_name_collisions},
-        )
-
-    @staticmethod
-    def _toolkit_function_names(toolkit: object) -> set[str]:
-        """Return provider-visible function names exposed by one toolkit instance."""
-        toolkit_functions = getattr(toolkit, "functions", {})
-        toolkit_async_functions = getattr(toolkit, "async_functions", {})
-        names = {name for name in {*toolkit_functions, *toolkit_async_functions} if isinstance(name, str) and name}
-        if names:
-            return names
-
-        for raw_tool in getattr(toolkit, "tools", ()):
-            function_name = getattr(raw_tool, "name", None)
-            if isinstance(function_name, str) and function_name:
-                names.add(function_name)
-        return names
 
     @classmethod
     def _runtime_exception_message(cls, exc: BaseException) -> str:

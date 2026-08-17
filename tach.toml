@@ -2105,17 +2105,28 @@ depends_on = [
 [[modules]]
 path = "mindroom.mcp.function_surface"
 depends_on = []
+visibility = [
+    "mindroom.mcp.surface_projection",
+    "mindroom.mcp.toolkit",
+]
+
+[[modules]]
+path = "mindroom.mcp.surface_projection"
+depends_on = [
+    "mindroom.mcp.function_surface",
+    "mindroom.mcp.registry",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
+]
 visibility = ["mindroom.mcp.manager"]
 
 [[modules]]
 path = "mindroom.mcp.manager"
 depends_on = [
     "mindroom.background_tasks",
-    "mindroom.mcp.function_surface",
     "mindroom.mcp.registry",
+    "mindroom.mcp.surface_projection",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.tool_system.catalog",
-    "mindroom.tool_system.dynamic_toolkits",
 ]
 
 [[modules]]
@@ -2128,7 +2139,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.mcp.toolkit"
-depends_on = []
+depends_on = ["mindroom.mcp.function_surface"]
 visibility = [
     "mindroom.agents",
     "mindroom.mcp.registry",
