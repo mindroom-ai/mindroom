@@ -149,12 +149,22 @@ class _AgentToolAssembly:
     selected_dynamic_tools: tuple[str, ...]
     # Authored toolkit names whose schemas use native deferred loading.
     deferred_tool_names: tuple[str, ...]
-    # Wire-level function names to send with defer_loading on the native
-    # server-side tool-search path (Anthropic and OpenAI Responses); empty on
-    # the homegrown dynamic-tools path.
-    deferred_wire_tool_names: frozenset[str]
+    # Toolkits whose surviving functions should use native deferred loading.
+    # Keep the owners rather than a pre-projection name snapshot because final
+    # MCP collision projection may remove a deferred function while preserving
+    # an eager local function with the same wire name.
+    deferred_toolkits: tuple[Toolkit, ...]
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
+
+    @property
+    def deferred_wire_tool_names(self) -> frozenset[str]:
+        """Return deferred wire names from the final projected toolkit surface."""
+        return frozenset(
+            function_name
+            for toolkit in self.deferred_toolkits
+            for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+        )
 
 
 @dataclass(frozen=True)
@@ -1549,7 +1559,7 @@ def _assemble_agent_toolkits(
     local_tool_names: list[str] = []
     worker_routed_tool_names: list[str] = []
     deferred_tool_names: list[str] = []
-    deferred_wire_tool_names: set[str] = set()
+    deferred_toolkits: list[Toolkit] = []
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
             runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
@@ -1596,8 +1606,7 @@ def _assemble_agent_toolkits(
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
                     suppress_fully_deferred_toolkit_instructions(toolkit)
                     deferred_tool_names.append(tool_entry.authored_name or tool_name)
-                    deferred_wire_tool_names.update(toolkit.get_functions())
-                    deferred_wire_tool_names.update(toolkit.get_async_functions())
+                    deferred_toolkits.append(toolkit)
         except _MatrixRoomRuntimeToolCollisionError:
             raise
         except (ValueError, ImportError) as exc:
@@ -1613,7 +1622,7 @@ def _assemble_agent_toolkits(
         hidden_toolkits=hidden_toolkits,
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
         deferred_tool_names=tuple(dict.fromkeys(deferred_tool_names)),
-        deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
+        deferred_toolkits=tuple(deferred_toolkits),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
     )
