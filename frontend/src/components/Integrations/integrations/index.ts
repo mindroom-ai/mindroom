@@ -89,10 +89,10 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       scope?.executionScope,
     );
     const integrationStatus: Partial<Integration> = {
-      status: status.resetRequired
-        ? "not_connected"
-        : status.connected
-          ? "connected"
+      status: status.connected
+        ? "connected"
+        : status.resetRequired
+          ? "not_connected"
           : status.hasClientConfig
             ? "available"
             : "not_connected",
@@ -108,7 +108,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     };
     if (status.resetRequired) {
       integrationStatus.helper_text =
-        "Stored OAuth credentials cannot be read. Reset the connection before reconnecting.";
+        "Stored OAuth credentials cannot be read. Reset the OAuth connection to remove them.";
     }
     if (status.statusError) {
       integrationStatus.helper_text = status.statusError;
