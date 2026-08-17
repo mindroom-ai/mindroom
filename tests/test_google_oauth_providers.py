@@ -26,6 +26,7 @@ from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    OAuthClientConfig,
     OAuthConnectionRequired,
     OAuthProviderError,
     is_terminal_oauth_refresh_error_code,
@@ -34,6 +35,7 @@ from mindroom.oauth.providers import (
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -233,6 +235,53 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
     assert provider.status_capabilities == ("Example read/write",)
     assert provider.token_parser is _google_token_parser
+
+
+def test_google_token_parser_bounds_identity_certificate_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity verification must not outlive the credential transaction lock budget."""
+    captured_timeouts: list[object] = []
+
+    class _Request:
+        def __call__(
+            self,
+            _url: str,
+            *,
+            method: str = "GET",
+            timeout: float = 120.0,
+        ) -> object:
+            assert method == "GET"
+            captured_timeouts.append(timeout)
+            return object()
+
+    def verify_token(
+        _id_token: str,
+        request: Callable[..., object],
+        _audience: str,
+    ) -> dict[str, object]:
+        request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
+        return {"sub": "subject-1", "email": "alice@example.com", "email_verified": True}
+
+    monkeypatch.setattr("mindroom.oauth.google.GoogleRequest", _Request)
+    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", verify_token)
+    provider = google_drive_oauth_provider()
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    result = _google_token_parser(
+        provider,
+        {"access_token": "access-token", "id_token": "identity-token"},
+        OAuthClientConfig(
+            client_id="client-id",
+            client_secret=PROVISIONED_CLIENT_SECRET,
+            redirect_uri="http://localhost:8765/api/oauth/google_drive/callback",
+        ),
+        runtime_paths,
+    )
+
+    assert result.claims["sub"] == "subject-1"
+    assert captured_timeouts == [20.0]
 
 
 def _install_provisioning_transport(
