@@ -359,6 +359,31 @@ def _cross_server_collision_config(runtime_paths: RuntimePaths, *, include_other
     )
 
 
+def _oauth_non_oauth_collision_config(runtime_paths: RuntimePaths) -> Config:
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    return Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "shared",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+
 def _worker_target(requester_id: str, *, worker_scope: WorkerScope = "user") -> ResolvedWorkerTarget:
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -3277,6 +3302,45 @@ async def test_mcp_manager_marks_collision_introduced_by_later_sync_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_requester_oauth_catalog_rejects_existing_non_oauth_catalog_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A requester catalog published second must fail and drain both collision owners."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    config = _oauth_non_oauth_collision_config(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    assert await manager.sync_servers(config) == {"other"}
+    other_state = manager._states["other"]
+    other_session = other_state.session
+    assert isinstance(other_session, _FakeClientSession)
+
+    with pytest.raises(MCPProtocolError, match="shared_echo"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    oauth_state = next(state for state in manager._scoped_states.values() if state.server_id == "demo")
+    oauth_session = _FakeClientSession.sessions[-1]
+    assert isinstance(other_state.last_error, MCPProtocolError)
+    assert isinstance(oauth_state.last_error, MCPProtocolError)
+    assert other_state.catalog is None
+    assert oauth_state.catalog is None
+    assert other_state.session is None
+    assert oauth_state.session is None
+    assert other_session.closed is True
+    assert oauth_session is not other_session
+    assert oauth_session.closed is True
+
+
+@pytest.mark.asyncio
 async def test_non_oauth_refresh_rejects_existing_requester_catalog_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3287,28 +3351,7 @@ async def test_non_oauth_refresh_rejects_existing_requester_catalog_collision(
     worker_target = _worker_target("@alice:example.test")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
-    config = Config.validate_with_runtime(
-        {
-            "mcp_servers": {
-                "demo": oauth_server.model_dump(exclude_none=True),
-                "other": {
-                    "transport": "stdio",
-                    "command": "npx",
-                    "tool_prefix": "shared",
-                },
-            },
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Use MCP",
-                    "tools": ["mcp_demo", "mcp_other"],
-                    "worker_scope": "user",
-                },
-            },
-        },
-        runtime_paths,
-    )
+    config = _oauth_non_oauth_collision_config(runtime_paths)
     manager = MCPServerManager(runtime_paths)
     _FakeClientSession.tool_list = [_tool("safe")]
     assert await manager.sync_servers(config) == {"other"}
