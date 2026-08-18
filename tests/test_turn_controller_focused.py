@@ -2152,6 +2152,14 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         event_id="$acknowledged:localhost",
     )
     assert await bot._response_recovery_ready(outbox_turn) is False
+    await harness.turn_store.record_responded_turn(
+        replace(
+            outbox_turn,
+            completed=True,
+            response_event_id="$different:localhost",
+        ),
+    )
+    assert await bot._response_recovery_ready(outbox_turn) is False
 
 
 @pytest.mark.asyncio

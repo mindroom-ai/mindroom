@@ -1550,7 +1550,7 @@ class AgentBot:
         )
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
-        """Prove that a terminal response still has one durable recovery owner."""
+        """Prove that a terminal response is complete or still durably owned."""
         if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
@@ -1568,7 +1568,18 @@ class AgentBot:
             turn_id=turn_id,
             stage=DeliveryStage.FINAL,
         )
-        return final_delivery is not None and final_delivery.acknowledged_event_id is None
+        if final_delivery is None:
+            return False
+        return final_delivery.acknowledged_event_id is None or all(
+            (
+                completed_turn is not None
+                and completed_turn.completed
+                and completed_turn.source_event_ids == turn_record.source_event_ids
+                and completed_turn.anchor_event_id == turn_record.anchor_event_id
+                and completed_turn.response_event_id == final_delivery.acknowledged_event_id
+            )
+            for completed_turn in map(self._turn_store.get_turn_record, turn_record.indexed_event_ids)
+        )
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
