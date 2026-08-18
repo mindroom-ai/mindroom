@@ -88,7 +88,7 @@ def _create_sqlite_state_storage(
     db_file = str(db_dir / f"{storage_name}.db")
     engine = _state_engine(db_file)
     if prompt_roles is not None:
-        return _PromptSanitizingSqliteDb(
+        return _ConversationSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
@@ -142,8 +142,8 @@ def _create_agent_session_db(
     )
 
 
-class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips prompt messages before durable persistence."""
+class _ConversationSqliteDb(SqliteDb):
+    """SQLite session DB with conversation-specific persistence semantics."""
 
     def __init__(
         self,
@@ -155,6 +155,22 @@ class _PromptSanitizingSqliteDb(SqliteDb):
     ) -> None:
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
+
+    def get_session(
+        self,
+        session_id: str,
+        session_type: SessionType | None = None,
+        user_id: str | None = None,
+        deserialize: bool | None = True,
+    ) -> Session | dict[str, Any] | None:
+        """Read a canonical conversation session without treating its requester as its owner."""
+        _ = user_id
+        return super().get_session(
+            session_id=session_id,
+            session_type=session_type,
+            user_id=None,
+            deserialize=deserialize,
+        )
 
     def upsert_session(
         self,
