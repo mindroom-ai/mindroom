@@ -2174,7 +2174,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                         _sync_live_turn_recorder()
                         yield tool_event
                     yield AttemptResolved(
-                        replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name),
+                        replace(
+                            paused_attempt,
+                            runtime_model_name=prepared_run.runtime_model_name,
+                            tool_trace=(
+                                paused_attempt.tool_trace
+                                if show_tool_calls
+                                else tuple(pending.trace_entry for pending in state.pending_tools)
+                            ),
+                        ),
                     )
                     return
                 paused_metadata = _build_interrupted_metadata(
