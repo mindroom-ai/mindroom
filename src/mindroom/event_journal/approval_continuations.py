@@ -578,8 +578,11 @@ def advance(
     if current is None:
         return None
     next_generation = claimant_generation + 1
-    state: ApprovalContinuationState = "ready" if all(call.decision is not None for call in calls) else "waiting"
-    publication_owner = None if state == "ready" else current.runtime_generation
+    # Every chained generation stays fenced until its ordered Matrix edit and
+    # any cards are published. Even an automatically decided generation must
+    # not become executable in the persist-before-ack crash window.
+    state: ApprovalContinuationState = "waiting"
+    publication_owner = current.runtime_generation
     advanced = replace(
         current,
         run_id=run_id,

@@ -38,7 +38,7 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
-from mindroom.streaming import StreamingLifecycleSuspensionError
+from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -373,6 +373,20 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
     def __init__(self, paused: PausedAttempt) -> None:
         super().__init__(f"Run {paused.run_id} is waiting for tool approval")
         self.paused = paused
+
+    def capture_collected_presentation(
+        self,
+        *,
+        response_text: str,
+        tool_trace: Sequence[ToolTraceEntry],
+    ) -> None:
+        """Attach an ordered in-memory presentation from a non-Matrix collector."""
+        self.capture_presentation(
+            StreamingPresentation(
+                response_text=response_text,
+                tool_trace=tuple(deepcopy(tool_trace)),
+            ),
+        )
 
 
 def paused_attempt_from_response(

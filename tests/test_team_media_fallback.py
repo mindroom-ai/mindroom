@@ -80,6 +80,7 @@ from mindroom.team_exact_members import (
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
+    _collect_team_continuation,
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
@@ -159,6 +160,49 @@ def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -
     assert "🔧" not in restored.render_body()
     assert restored.tool_trace[0].tool_call_id == "call-1"
     assert restored.tool_trace[0].type == "tool_call_completed"
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_appends_terminal_only_consensus() -> None:
+    """Terminal team content remains visible when the provider emitted no content deltas."""
+    presentation = _TeamStreamPresentation.new([], [], show_tool_calls=True)
+    presentation.append_consensus("Before approval. ")
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    response = await _collect_team_continuation(events(), presentation)
+
+    assert response is terminal
+    assert "Before approval. After approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_falls_back_per_unstreamed_slot() -> None:
+    """A streamed member delta must not suppress terminal-only team consensus."""
+    presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Consensus delta.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member delta.")
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    body = presentation.render_body()
+    assert "**GeneralAgent**: Member delta." in body
+    assert "**Team Consensus**:\n\nConsensus delta." in body
 
 
 def test_blocking_team_pause_uses_the_structured_member_slot() -> None:

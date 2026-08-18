@@ -51,19 +51,33 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+def _append_terminal_agent_content(
+    presentation: CollectedStreamPresentation,
+    terminal_content: str | None,
+    *,
+    saw_content_delta: bool,
+) -> None:
+    """Append terminal content only when the provider emitted no continuation delta."""
+    if not saw_content_delta and terminal_content:
+        presentation.append_text(terminal_content)
+
+
 async def _collect_agent_continuation(
     events: AsyncIterator[object],
     presentation: CollectedStreamPresentation,
 ) -> RunOutput:
     """Collect one ordered continuation stream and return its terminal run."""
     response: RunOutput | None = None
+    terminal_content: str | None = None
+    saw_content_delta = False
     async for event in events:
         if isinstance(event, RunOutput):
             response = event
         elif isinstance(event, RunContentEvent):
             presentation.append_text(event.content)
+            saw_content_delta = saw_content_delta or bool(event.content)
         elif isinstance(event, RunCompletedEvent) and event.content is not None:
-            presentation.canonical_final_body_candidate = str(event.content)
+            terminal_content = str(event.content)
         elif isinstance(event, ToolCallStartedEvent):
             presentation.start_tool(event.tool)
         elif isinstance(event, ToolCallCompletedEvent):
@@ -71,8 +85,15 @@ async def _collect_agent_continuation(
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
+    _append_terminal_agent_content(
+        presentation,
+        terminal_content,
+        saw_content_delta=saw_content_delta,
+    )
     for tool in response.tools or ():
-        if not tool.is_paused:
+        if tool.is_paused:
+            presentation.start_tool(tool)
+        else:
             presentation.complete_tool(tool)
     return response
 

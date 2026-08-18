@@ -25,7 +25,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
-from mindroom.tool_system.events import serialize_tool_trace
+from mindroom.tool_system.events import format_tool_started_event, serialize_tool_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
@@ -76,9 +76,9 @@ def identify_approval_tools(
 ) -> tuple[tuple[ToolExecution, str, str, str], ...]:
     """Resolve exact paused call IDs, names, and invoking member ownership."""
     owners = {
-        requirement.tool_execution.tool_call_id: requirement.member_agent_name
+        requirement.tool_execution.tool_call_id: requirement.member_agent_id
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.member_agent_name
+        if requirement.tool_execution is not None and requirement.member_agent_id
     }
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
@@ -94,6 +94,37 @@ def identify_approval_tools(
             ),
         )
     return tuple(identified)
+
+
+def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
+    """Reject a visible approval handoff whose pending tools have no ordered anchors."""
+    if not show_tool_calls:
+        return
+    requirements_by_call_id = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in paused.requirements
+        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+    }
+    for tool in paused.tools:
+        call_id = tool.tool_call_id
+        matches = [
+            (index, entry)
+            for index, entry in enumerate(paused.tool_trace, start=1)
+            if entry.type == "tool_call_started" and entry.tool_call_id == call_id
+        ]
+        if call_id is None or len(matches) != 1:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        index, entry = matches[0]
+        requirement = requirements_by_call_id.get(call_id)
+        member_id = requirement.member_agent_id if requirement is not None else None
+        if member_id is not None and entry.scope_key != f"agent:{member_id}":
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        marker, _trace = format_tool_started_event(tool, tool_index=index)
+        if marker.strip() not in paused.response_text:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
 
 
 def continuation_target(
@@ -273,6 +304,7 @@ class ApprovalResponseCoordinator:
         pending_text: str,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
+        require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
         approval_pending = plan.waiting_text is not None

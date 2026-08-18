@@ -82,6 +82,7 @@ from mindroom.response_turn import (
     DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
+    ResponsePausedForApproval,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
@@ -514,18 +515,25 @@ async def _collect_streamed_response_content(
         tool_trace=deepcopy(list(initial_tool_trace)),
     )
 
-    async for chunk in response_stream:
-        if isinstance(chunk, str):
-            state.append_text(chunk)
-        elif isinstance(chunk, RunContentEvent):
-            state.append_text(chunk.content)
-        elif isinstance(chunk, RunCompletedEvent):
-            if chunk.content is not None:
-                state.canonical_final_body_candidate = str(chunk.content)
-        elif isinstance(chunk, ToolCallStartedEvent):
-            state.start_tool(chunk.tool)
-        elif isinstance(chunk, ToolCallCompletedEvent):
-            state.complete_tool(chunk.tool)
+    try:
+        async for chunk in response_stream:
+            if isinstance(chunk, str):
+                state.append_text(chunk)
+            elif isinstance(chunk, RunContentEvent):
+                state.append_text(chunk.content)
+            elif isinstance(chunk, RunCompletedEvent):
+                if chunk.content is not None:
+                    state.canonical_final_body_candidate = str(chunk.content)
+            elif isinstance(chunk, ToolCallStartedEvent):
+                state.start_tool(chunk.tool)
+            elif isinstance(chunk, ToolCallCompletedEvent):
+                state.complete_tool(chunk.tool)
+    except ResponsePausedForApproval as error:
+        error.capture_collected_presentation(
+            response_text=state.final_text().rstrip(),
+            tool_trace=state.tool_trace,
+        )
+        raise
 
     return state.final_text(), state.tool_trace
 

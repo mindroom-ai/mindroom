@@ -34,6 +34,7 @@ from agno.tools.function import Function
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
+    _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _run_error_event_text,
@@ -77,7 +78,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -3758,6 +3759,37 @@ class TestUserIdPassthrough:
         assert persisted is not None
         assert persisted.status == RunStatus.paused
         assert len(persisted.requirements or []) == 1
+
+    @pytest.mark.asyncio
+    async def test_collected_agent_pause_carries_its_ordered_presentation(self) -> None:
+        """A non-Matrix stream collector must hand its body and trace to approval."""
+        tool = ToolExecution(
+            tool_call_id="call-1",
+            tool_name="inspect",
+            tool_args={"item": "report"},
+            requires_confirmation=True,
+        )
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id="session-1",
+                run_id="run-paused",
+                tools=(tool,),
+            ),
+        )
+
+        async def paused_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Before approval.")
+            yield ToolCallStartedEvent(tool=tool)
+            raise pause
+
+        with pytest.raises(ResponsePausedForApproval) as raised:
+            await _collect_streamed_response_content(paused_stream(), show_tool_calls=True)
+
+        assert raised.value is pause
+        assert pause.presentation is not None
+        assert pause.presentation.response_text == "Before approval.\n\n🔧 `inspect` [1] ⏳"
+        assert len(pause.presentation.tool_trace) == 1
+        assert pause.presentation.tool_trace[0].tool_call_id == "call-1"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:

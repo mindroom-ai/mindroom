@@ -5960,6 +5960,46 @@ class TestApprovalContinuations:
         assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
         assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
 
+    async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restart cannot execute a chained generation before its presentation is acknowledged."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        calls = (
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="read_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        )
+
+        publishing = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+
+        assert publishing is not None
+        assert publishing.state == "waiting"
+        assert publishing.runtime_generation == "runtime-a"
+        assert await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+
+        activated = await alice.activate_approval_continuation(
+            "approval-1",
+            expected_generation=publishing.generation,
+        )
+        assert activated is not None
+        assert activated.state == "ready"
+        assert activated.runtime_generation is None
+
     async def test_every_card_is_reserved_before_publication_activates(
         self,
         journal_store: EventJournalStore,

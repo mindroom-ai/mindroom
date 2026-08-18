@@ -556,35 +556,53 @@ def _merge_blocking_team_tool(
         raise RuntimeError(msg)
 
 
-def _collect_blocking_team_output(
+def _append_team_output_text(
     presentation: _TeamStreamPresentation,
     output: TeamRunOutput | RunOutput,
-    scoped_tools: dict[str, tuple[ToolExecution, str]],
     *,
     top_level: bool,
+    skip_scopes: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Collect aggregate text and tools into their structural owner slots."""
+    """Append terminal aggregate text only for slots without streamed deltas."""
     if isinstance(output, RunOutput):
         scope = _blocking_team_member_scope(
             presentation,
             member_id=output.agent_id,
             member_name=output.agent_name,
         )
-        presentation.append_member(scope.removeprefix("agent:"), _get_response_content(output))
+        if scope not in skip_scopes:
+            presentation.append_member(scope.removeprefix("agent:"), _get_response_content(output))
+    elif top_level and "team" not in skip_scopes:
+        presentation.append_consensus(_get_response_content(output))
+    if isinstance(output, TeamRunOutput):
+        for member_response in output.member_responses:
+            _append_team_output_text(
+                presentation,
+                member_response,
+                top_level=False,
+                skip_scopes=skip_scopes,
+            )
+
+
+def _collect_blocking_team_tools(
+    presentation: _TeamStreamPresentation,
+    output: TeamRunOutput | RunOutput,
+    scoped_tools: dict[str, tuple[ToolExecution, str]],
+) -> None:
+    """Collect aggregate tools into their structural owner scopes."""
+    if isinstance(output, RunOutput):
+        scope = _blocking_team_member_scope(
+            presentation,
+            member_id=output.agent_id,
+            member_name=output.agent_name,
+        )
     else:
         scope = "team"
-        if top_level:
-            presentation.append_consensus(_get_response_content(output))
     for tool in output.tools or ():
         _merge_blocking_team_tool(scoped_tools, tool, scope)
     if isinstance(output, TeamRunOutput):
         for member_response in output.member_responses:
-            _collect_blocking_team_output(
-                presentation,
-                member_response,
-                scoped_tools,
-                top_level=False,
-            )
+            _collect_blocking_team_tools(presentation, member_response, scoped_tools)
 
 
 def _merge_pending_team_tools(
@@ -630,7 +648,8 @@ def _attach_team_pause_presentation(
     """Render a blocking team pause into the same document used by continuation."""
     presentation = _TeamStreamPresentation.new(member_ids, display_names, show_tool_calls=show_tool_calls)
     scoped_tools: dict[str, tuple[ToolExecution, str]] = {}
-    _collect_blocking_team_output(presentation, response, scoped_tools, top_level=True)
+    _append_team_output_text(presentation, response, top_level=True)
+    _collect_blocking_team_tools(presentation, response, scoped_tools)
     pending_ids = _merge_pending_team_tools(presentation, paused, scoped_tools)
 
     for call_id, (tool, scope) in scoped_tools.items():
@@ -2288,18 +2307,47 @@ async def _collect_team_continuation(
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
+    content_delta_scopes: set[str] = set()
     async for event in events:
         if isinstance(event, TeamRunOutput):
             response = event
         else:
+            if isinstance(event, AgentRunContentEvent) and event.content:
+                member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+                content_delta_scopes.add(f"agent:{member_id}")
+            elif isinstance(event, TeamRunContentEvent) and event.content:
+                content_delta_scopes.add("team")
             _apply_team_continuation_event(event, presentation)
     if response is None:
         msg = "Team continuation returned an unexpected result"
         raise TypeError(msg)
+    _append_team_output_text(
+        presentation,
+        response,
+        top_level=True,
+        skip_scopes=content_delta_scopes,
+    )
     for tool in _collect_team_tool_executions(response):
         if not tool.is_paused:
             presentation.complete_tool("team", tool)
     return response
+
+
+def _continued_team_pause(
+    presentation: _TeamStreamPresentation,
+    paused: PausedAttempt,
+) -> PausedAttempt:
+    """Reconcile terminal-only pending calls and freeze the next team pause."""
+    scoped_pending: dict[str, tuple[ToolExecution, str]] = {}
+    _merge_pending_team_tools(presentation, paused, scoped_pending)
+    for tool, scope in scoped_pending.values():
+        presentation.start_tool(scope, tool)
+    return replace(
+        paused,
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
 
 
 async def continue_paused_team_run(
@@ -2409,12 +2457,7 @@ async def continue_paused_team_run(
             fallback_run_id=run_id,
         )
         if paused is not None:
-            return replace(
-                paused,
-                response_text=presentation.render_body(),
-                tool_trace=tuple(presentation.tool_trace),
-                response_presentation_state=presentation.to_state(),
-            )
+            return _continued_team_pause(presentation, paused)
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None and show_tool_calls:

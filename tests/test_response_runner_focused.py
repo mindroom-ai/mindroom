@@ -30,6 +30,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig
@@ -2568,7 +2569,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
     )
 
     with pytest.raises(RuntimeError, match="ordered presentation"):
-        response_runner._require_ordered_pause_presentation(paused, show_tool_calls=True)
+        require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
 def test_streaming_pause_handoff_uses_only_transport_committed_presentation() -> None:
@@ -2751,10 +2752,17 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert current is not None
-    committed_trace = ToolTraceEntry(
-        type="tool_call_started",
-        tool_name="conditional_read",
-        tool_call_id="call-read",
+    committed_trace = (
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="conditional_read",
+            tool_call_id="call-read",
+        ),
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="conditional_write",
+            tool_call_id="call-write",
+        ),
     )
     committed_state = {"kind": "team_stream", "version": 1, "consensus": "Committed before pause."}
     paused = PausedAttempt(
@@ -2764,8 +2772,8 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={}),
             ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={}),
         ),
-        response_text="Committed before pause.\n\n🔧 `conditional_read` [1] ⏳",
-        tool_trace=(committed_trace,),
+        response_text=("Committed before pause.\n\n🔧 `conditional_read` [1] ⏳\n\n🔧 `conditional_write` [2] ⏳"),
+        tool_trace=committed_trace,
         response_presentation_state=committed_state,
     )
     edit_text = AsyncMock(return_value=True)
@@ -2806,10 +2814,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted.response_presentation_state == committed_state
     assert presentation.response_text == paused.response_text
     assert presentation.approval_pending is (expected_text is not None)
-    assert presentation.tool_trace == (committed_trace,)
+    assert presentation.tool_trace == committed_trace
     edit_request = edit_text.await_args.args[0]
     assert edit_request.new_text == paused.response_text
-    assert edit_request.tool_trace == [committed_trace]
+    assert edit_request.tool_trace == list(committed_trace)
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
@@ -2833,6 +2841,68 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         )
     else:
         retry_sources.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_path: Path) -> None:
+    """Every chained pending call must have one exact visible trace slot before journal advance."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain-invalid",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    current = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert current is not None
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(
+            ToolExecution(tool_call_id="call-1", tool_name="first", tool_args={}),
+            ToolExecution(tool_call_id="call-2", tool_name="second", tool_args={}),
+        ),
+        response_text="Before.\n\n🔧 `first` [1] ⏳",
+        tool_trace=(
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="first",
+                tool_call_id="call-1",
+            ),
+        ),
+    )
+    edit_text = AsyncMock(return_value=True)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        pytest.raises(RuntimeError, match="ordered presentation"),
+    ):
+        await runner._approval_responses.advance_pause(
+            current,
+            paused,
+            target=_target(thread_id="$thread"),
+            pending_text="Thinking...",
+        )
+
+    persisted = await store.approval_continuation(continuation.approval_id)
+    assert persisted is not None
+    assert persisted.state == "claimed"
+    assert persisted.generation == 0
+    edit_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
