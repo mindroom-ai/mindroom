@@ -256,7 +256,7 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             separators=(",", ":"),
         )
         wire_arguments = json.loads(encoded)
-    except (TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         raise MindRoomToolCallError(
             _INVALID_ARGUMENTS_ERROR,
             kind="invalid_arguments",

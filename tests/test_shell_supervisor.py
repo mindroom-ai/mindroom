@@ -337,6 +337,36 @@ async def test_script_shim_does_not_treat_workspace_root_as_a_token_entry(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Path) -> None:
+    """Cleanup must leave a rejected token directory and preserve the validation error."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.mkdir()
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
+    assert token_path.is_dir()
+
+
+@pytest.mark.asyncio
 async def test_handles_are_namespace_scoped() -> None:
     """Handles must not be visible to callers from another namespace."""
     registry: dict[str, ProcessRecord] = {}

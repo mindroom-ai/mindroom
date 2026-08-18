@@ -161,6 +161,42 @@ def test_script_sdk_rejects_invalid_arguments_before_post(
     assert requests == []
 
 
+@pytest.mark.parametrize("container_kind", ["mapping", "sequence"])
+def test_script_sdk_rejects_cyclic_arguments_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    container_kind: str,
+) -> None:
+    """Cyclic arguments must use the stable local rejection instead of escaping as recursion errors."""
+    _configure(monkeypatch, tmp_path)
+    requests: list[Request] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        requests.append(request)
+        return io.BytesIO(b"{}")
+
+    if container_kind == "mapping":
+        cyclic_mapping: dict[str, object] = {}
+        cyclic_mapping["self"] = cyclic_mapping
+        cyclic: object = cyclic_mapping
+    else:
+        cyclic_sequence: list[object] = []
+        cyclic_sequence.append(cyclic_sequence)
+        cyclic = cyclic_sequence
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", payload=cyclic)
+
+    assert exc_info.value.kind == "invalid_arguments"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.call_id == "stable-call"
+    assert requests == []
+
+
 def test_script_sdk_ambiguous_submit_polls_without_resubmitting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

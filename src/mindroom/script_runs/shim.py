@@ -72,7 +72,16 @@ def _remove_token_entry(token_entry: Path | None, *, workspace_root: Path) -> No
         current_parent /= part
         if current_parent.is_symlink():
             return
-    token_entry.unlink(missing_ok=True)
+    try:
+        metadata = token_entry.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+        return
+    try:
+        token_entry.unlink()
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return
 
 
 def _main(argv: list[str]) -> int:
