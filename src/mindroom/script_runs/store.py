@@ -311,6 +311,49 @@ class ScriptRunStore:
             ).fetchall()
         return [_call_from_row(row) for row in rows]
 
+    def settle_orphaned_call(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        error: object,
+    ) -> ScriptCallRecord:
+        """Publish indeterminate only if no terminal execution receipt already won."""
+        receipt_json = _serialize_receipt(result=None, error=error)
+        with self._write_transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
+                (run_id, call_id),
+            ).fetchone()
+            if row is None:
+                raise ScriptCallNotFoundError(call_id)
+            existing = _call_from_row(row)
+            if existing.state in _TERMINAL_CALL_STATES:
+                return existing
+            now = _utc_now()
+            connection.execute(
+                """
+                UPDATE script_calls
+                SET state = ?, receipt_json = ?, updated_at = ?
+                WHERE run_id = ? AND call_id = ? AND state = ?
+                """,
+                (
+                    ScriptCallState.INDETERMINATE.value,
+                    receipt_json,
+                    now,
+                    run_id,
+                    call_id,
+                    ScriptCallState.PENDING.value,
+                ),
+            )
+        _result, stored_error = _receipt_values(receipt_json)
+        return replace(
+            existing,
+            state=ScriptCallState.INDETERMINATE,
+            error=stored_error,
+            updated_at=now,
+        )
+
     def publish_call_result(  # noqa: Vulture
         self,
         *,

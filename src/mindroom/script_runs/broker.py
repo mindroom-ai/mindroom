@@ -70,6 +70,7 @@ __all__ = [
     "ScriptToolBroker",
     "ScriptToolCallRequest",
     "digest_arguments",
+    "drain_script_tool_cleanup",
 ]
 
 _INDETERMINATE_ERROR = {
@@ -374,10 +375,9 @@ class ScriptToolBroker:
                 raise ScriptCallPreparationPendingError(msg) from None
             raise
         if record.state is ScriptCallState.PENDING and not self._call_is_owned(key):
-            record = self.store.publish_call_result(
+            record = self.store.settle_orphaned_call(
                 run_id=run_id,
                 call_id=call_id,
-                state=ScriptCallState.INDETERMINATE,
                 error=_INDETERMINATE_ERROR,
             )
         return _receipt_from_record(record)
@@ -497,7 +497,7 @@ class ScriptToolBroker:
                 correlation_id,
             )
             toolkit = prepared.toolkit
-            await _connect_toolkit(toolkit)
+            await self._connect_toolkit(toolkit)
             execution_started = True
             execution, materialized = await self._run_prepared_execution(
                 prepared,
@@ -540,6 +540,22 @@ class ScriptToolBroker:
                 else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
             )
             return await self._publish_async(call, state=state, error=error)
+
+    async def _connect_toolkit(self, toolkit: Toolkit) -> None:
+        if not toolkit.requires_connect:
+            return
+        if inspect.iscoroutinefunction(toolkit.connect):
+            await toolkit.connect()
+            return
+        completion_task = asyncio.create_task(
+            _run_sync_toolkit_lifecycle(toolkit.connect),
+            name="script-toolkit-connect",
+        )
+        try:
+            await asyncio.shield(completion_task)
+        except asyncio.CancelledError:
+            self._retain_toolkit_cleanup(completion_task, toolkit)
+            raise
 
     async def _run_prepared_execution(
         self,
@@ -621,8 +637,17 @@ class ScriptToolBroker:
     ) -> None:
         async def cleanup() -> None:
             try:
-                await completion_task
-            finally:
+                await asyncio.shield(completion_task)
+            except asyncio.CancelledError:
+                if completion_task.done():
+                    await _close_toolkit(toolkit)
+                else:
+                    self._retain_toolkit_cleanup(completion_task, toolkit)
+                raise
+            except BaseException:
+                await _close_toolkit(toolkit)
+                raise
+            else:
                 await _close_toolkit(toolkit)
 
         cleanup_task = asyncio.create_task(cleanup(), name="script-toolkit-cleanup")
@@ -701,6 +726,23 @@ class ScriptToolBroker:
             else:
                 return _receipt_from_record(replace(call, state=state, result=result, error=error))
         return _receipt_from_record(stored)
+
+
+async def drain_script_tool_cleanup(
+    broker: ScriptToolBroker,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    """Wait boundedly for retained resource owners without cancelling them."""
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+    while tasks := tuple(task for task in broker._cleanup_tasks if not task.done()):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return False
+        _done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        if pending and asyncio.get_running_loop().time() >= deadline:
+            return False
+    return True
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -866,11 +908,6 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
-async def _connect_toolkit(toolkit: Toolkit) -> None:
-    if toolkit.requires_connect:
-        await _run_toolkit_lifecycle(toolkit.connect)
-
-
 async def _close_toolkit(toolkit: Toolkit) -> None:
     if toolkit.requires_connect:
         await _run_toolkit_lifecycle(toolkit.close)
@@ -880,6 +917,10 @@ async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
     if inspect.iscoroutinefunction(operation):
         await operation()
         return
+    await _run_sync_toolkit_lifecycle(operation)
+
+
+async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
     result = await asyncio.to_thread(operation)
     await _maybe_await(result)
 

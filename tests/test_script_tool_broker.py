@@ -6,9 +6,11 @@ import asyncio
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from agno.tools import Toolkit
@@ -30,6 +32,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptCallPreparationPendingError,
@@ -38,8 +41,14 @@ from mindroom.script_runs.broker import (
     ScriptToolBroker,
     ScriptToolCallRequest,
 )
-from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptRunState, ScriptToolGrant
-from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.script_runs.models import (
+    ScriptCallRecord,
+    ScriptCallState,
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+)
+from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
 from mindroom.tool_approval import ToolApprovalDecision
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import WorkerScope, serialize_tool_execution_identity
@@ -767,6 +776,58 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_sync_connect_closes_only_after_connect_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation transfers a synchronous connect operation to the toolkit cleanup owner."""
+    connect_started = threading.Event()
+    release_connect = threading.Event()
+    close_started = threading.Event()
+    body_called = False
+
+    class BlockingConnectToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            connect_started.set()
+            release_connect.wait()
+
+        def close(self) -> None:
+            close_started.set()
+
+        def add(self, a: int, b: int) -> int:
+            nonlocal body_called
+            body_called = True
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-connect")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    assert await asyncio.to_thread(connect_started.wait, 1.0)
+    broker.store.request_cancel(request.run_id)
+
+    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=1.0)
+
+    assert body_called is False
+    assert close_started.is_set() is False
+    cleanup_retained = bool(broker._cleanup_tasks)
+    release_connect.set()
+    close_after_connect = await asyncio.to_thread(close_started.wait, 1.0)
+    await asyncio.sleep(0)
+
+    assert cleanup_retained is True
+    assert close_after_connect is True
+    assert broker.get_call(request.run_id, request.call_id).state is ScriptCallState.INDETERMINATE
+    assert broker._cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_script_broker_offloads_blocking_sync_toolkit_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -929,6 +990,73 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded shutdown drains retained cleanup without cancelling its completion owner."""
+    body_entered = threading.Event()
+    release_body = threading.Event()
+    close_started = threading.Event()
+
+    class BlockingSyncToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            close_started.set()
+
+        def add(self, a: int, b: int) -> int:
+            body_entered.set()
+            release_body.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="shutdown-sync-cleanup")
+    await broker.accept_authenticated(request, f"Bearer {token}")
+    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    broker.store.request_cancel(request.run_id)
+    await broker.cancel_run(request.run_id)
+    [original_cleanup] = broker._cleanup_tasks
+
+    lifecycle = ScriptRuntimeLifecycle(
+        runtime_paths=_runtime_paths(tmp_path),
+        store=broker.store,
+        broker=broker,
+        manager=SimpleNamespace(worker_backend=None, worker_backend_generation=None),
+        resolver=SimpleNamespace(),
+        config_provider=lambda: None,
+        worker_lease_provider=lambda: None,
+    )
+    lifecycle._activated_once = True
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", AsyncMock())
+    shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=0.05))
+    await asyncio.sleep(0.01)
+
+    shutdown_waited_for_cleanup = shutdown.done() is False
+    original_cleanup.cancel()
+    await asyncio.sleep(0)
+    close_started_before_body_returned = close_started.is_set()
+    await asyncio.wait_for(shutdown, timeout=0.2)
+    cleanup_owned_after_timeout = bool(broker._cleanup_tasks)
+
+    release_body.set()
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+    await asyncio.sleep(0)
+
+    assert shutdown_waited_for_cleanup is True
+    assert close_started_before_body_returned is False
+    assert cleanup_owned_after_timeout is True
+    assert broker._cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1033,6 +1161,57 @@ def test_script_broker_get_marks_unowned_pending_claim_indeterminate(tmp_path: P
     receipt = broker.get_call(request.run_id, request.call_id)
 
     assert receipt.state is ScriptCallState.INDETERMINATE
+    with pytest.raises(ScriptCallConflictError, match="terminal receipt"):
+        broker.store.publish_call_result(
+            run_id=request.run_id,
+            call_id=request.call_id,
+            state=ScriptCallState.COMPLETED,
+            result=3,
+        )
+    assert broker.get_call(request.run_id, request.call_id) == receipt
+
+
+def test_script_broker_get_returns_terminal_winner_when_publish_races_orphan_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale pending read cannot conflict with an execution receipt that wins durably."""
+    broker, _token = _broker(tmp_path, events=[])
+    request = _request(call_id="racing-poll")
+    broker.store.claim_call(
+        run_id=request.run_id,
+        call_id=request.call_id,
+        grant=request.grant,
+        arguments_digest=request.arguments_digest,
+    )
+    original_get_call = broker.store.get_call
+    pending_read = threading.Event()
+    release_stale_read = threading.Event()
+
+    def pause_after_pending_read(run_id: str, call_id: str) -> ScriptCallRecord:
+        record = original_get_call(run_id, call_id)
+        if record.state is ScriptCallState.PENDING:
+            pending_read.set()
+            assert release_stale_read.wait(timeout=1.0)
+        return record
+
+    monkeypatch.setattr(broker.store, "get_call", pause_after_pending_read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        polling = executor.submit(broker.get_call, request.run_id, request.call_id)
+        assert pending_read.wait(timeout=1.0)
+        published = broker.store.publish_call_result(
+            run_id=request.run_id,
+            call_id=request.call_id,
+            state=ScriptCallState.COMPLETED,
+            result=3,
+        )
+        release_stale_read.set()
+        receipt = polling.result(timeout=1.0)
+
+    assert published.state is ScriptCallState.COMPLETED
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == 3
+    assert original_get_call(request.run_id, request.call_id) == published
 
 
 @pytest.mark.asyncio

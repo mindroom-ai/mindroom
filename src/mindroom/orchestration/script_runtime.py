@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import math
+import socket
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -15,7 +16,7 @@ from mindroom import approval_manager
 from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
+from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
@@ -752,6 +753,7 @@ class ScriptRuntimeLifecycle:
 
     async def shutdown(self, *, timeout_seconds: float = 5.0) -> None:
         """Run bounded final reconciliation, then clear the process-local tool binding."""
+        shutdown_deadline = asyncio.get_running_loop().time() + timeout_seconds
         self._start_requested = False
         startup_task, self._startup_task = self._startup_task, None
         await cancel_task(startup_task)
@@ -764,9 +766,16 @@ class ScriptRuntimeLifecycle:
             await self._complete_pass()
 
         try:
-            await asyncio.wait_for(_cleanup(), timeout=timeout_seconds)
-        except TimeoutError:
-            logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
+            try:
+                await asyncio.wait_for(_cleanup(), timeout=timeout_seconds)
+            except TimeoutError:
+                logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
+            cleanup_drained = await drain_script_tool_cleanup(
+                self.broker,
+                timeout_seconds=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
+            )
+            if not cleanup_drained:
+                logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
         finally:
             bind_script_run_manager(None)
             self._started = False
@@ -882,12 +891,12 @@ def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> 
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:
         gateway_url = explicit_url.rstrip("/")
-        _reject_worker_loopback_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
         return gateway_url
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
     if public_url:
         gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
-        _reject_worker_loopback_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
         return gateway_url
     if worker_process_enabled:
         msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
@@ -896,14 +905,36 @@ def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> 
     return f"http://{gateway_host}:{port}/api/script-gateway"
 
 
-def _reject_worker_loopback_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
+def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
+    parsed = urlsplit(gateway_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
+    ):
+        msg = "Background-script gateway must be a valid HTTP(S) URL."
+        raise ValueError(msg)
     if not worker_process_enabled:
         return
-    hostname = (urlsplit(gateway_url).hostname or "").lower()
     try:
-        loopback = ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        loopback = hostname == "localhost" or hostname.endswith(".localhost")
-    if loopback:
+        resolved = socket.getaddrinfo(
+            parsed.hostname,
+            port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+        addresses = {
+            ipaddress.ip_address(str(sockaddr[0]).partition("%")[0])
+            for _family, _type, _protocol, _canonical_name, sockaddr in resolved
+        }
+    except (OSError, ValueError):
+        addresses = set()
+    if not addresses or any(address.is_loopback or address.is_unspecified for address in addresses):
         msg = "Background-script workers require a non-loopback gateway URL."
         raise ValueError(msg)

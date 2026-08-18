@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
 import time
 from contextlib import suppress
@@ -243,6 +244,51 @@ def test_worker_gateway_rejects_explicit_loopback_urls(
     )
 
     with pytest.raises(ValueError, match="non-loopback"):
+        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.parametrize(
+    "configured_url",
+    [
+        "http://127.1:8765/api/script-gateway",
+        "http://2130706433:8765/api/script-gateway",
+        "http://localtest.me:8765/api/script-gateway",
+    ],
+)
+def test_worker_gateway_rejects_every_hostname_that_resolves_to_loopback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_url: str,
+) -> None:
+    """Non-canonical IP spellings and DNS aliases cannot disguise primary loopback."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            "MINDROOM_SCRIPT_GATEWAY_URL": configured_url,
+        },
+    )
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 8765))])
+
+    with pytest.raises(ValueError, match="non-loopback"):
+        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
+    """Malformed explicit gateway configuration fails before any worker launch."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            "MINDROOM_SCRIPT_GATEWAY_URL": "not-a-url",
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
         script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
