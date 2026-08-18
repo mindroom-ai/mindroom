@@ -18,6 +18,7 @@ from mindroom.cancellation import (
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.stop import StopManager
 
 
 @dataclass
@@ -50,6 +51,10 @@ class _StopManager:
 
     def clear_message(self, message_id: str, _client: object, *, remove_button: bool) -> None:
         self.cleared_messages.append((message_id, remove_button))
+
+    def discard_message(self, message_id: str) -> None:
+        self.cleared_messages.append((message_id, False))
+        self.tracked_messages.pop(message_id, None)
 
 
 def _runner(
@@ -417,3 +422,42 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message
     assert log_call.kwargs["message_id"] == "$existing"
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_discards_tracking_without_delayed_cleanup_task() -> None:
+    """Orderly shutdown needs no five-second local-only tracking tail."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    stop_manager = StopManager()
+    runner = ResponseAttemptRunner(
+        ResponseAttemptDeps(
+            client=MagicMock(user_id="@mindroom_agent:localhost"),
+            stop_manager=stop_manager,
+            logger=MagicMock(),
+            show_stop_button=lambda: False,
+            config=Config(),
+        ),
+    )
+    response_started = asyncio.Event()
+
+    async def response_function(_message_id: str | None) -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    attempt = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+            ),
+        ),
+    )
+    await response_started.wait()
+    request_task_cancel(attempt, process_shutdown=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
+
+    assert stop_manager.tracked_messages == {}
+    assert stop_manager.cleanup_tasks == []

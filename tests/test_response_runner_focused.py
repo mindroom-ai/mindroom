@@ -9,6 +9,7 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -245,6 +246,40 @@ async def test_process_shutdown_reports_terminal_durable_response_as_drained() -
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_waits_for_durable_proof_to_become_ready() -> None:
+    """A terminal task may commit its recovery handoff just after cancellation."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_attempts = 0
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def eventually_durable_recovery() -> bool:
+        nonlocal proof_attempts
+        proof_attempts += 1
+        await asyncio.sleep(0)
+        return proof_attempts >= 3
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_eventually_durable_process_response",
+        recovery_proof_ready=eventually_durable_recovery,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    assert await runner.drain_inbox_responses(
+        cancel_after_seconds=0.05,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    assert proof_attempts == 3
+    assert runner.incomplete_inbox_responses_recoverable
+    assert response_task.done()
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() -> None:
     """Finite cancellation-resistant cleanup must not survive the shutdown budget."""
     runner = ResponseRunner(deps=MagicMock())
@@ -448,7 +483,67 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
         await asyncio.sleep(0)
         await asyncio.gather(response_task, return_exceptions=True)
 
+    assert await runner.finish_process_shutdown_recovery(timeout_seconds=0)
     assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_reuses_late_recovery_proof_on_cleanup_retry() -> None:
+    """A proof finishing after its deadline remains the one retry consumes."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    release_proof = asyncio.Event()
+    proof_finished = asyncio.Event()
+    proof_calls = 0
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def cancellation_resistant_proof() -> bool:
+        nonlocal proof_calls
+        proof_calls += 1
+        proof_started.set()
+        try:
+            while not release_proof.is_set():
+                with suppress(asyncio.CancelledError):
+                    await release_proof.wait()
+            return True
+        finally:
+            proof_finished.set()
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_late_recovery_proof_reuse",
+        recovery_proof_ready=cancellation_resistant_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    with pytest.raises(
+        response_runner.ResponseShutdownTimeoutError,
+        match="recovery proof",
+    ):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
+    assert proof_started.is_set()
+    assert runner.pending_inbox_response_count == 1
+    release_proof.set()
+    await asyncio.wait_for(proof_finished.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+
+    assert await runner.drain_inbox_responses(
+        cancel_after_seconds=0,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    assert runner.incomplete_inbox_responses_recoverable
+    assert runner.pending_inbox_response_count == 0
+    assert proof_calls == 1
+    await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -568,12 +663,73 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(0)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
 
     settle.assert_not_awaited()
     assert coordinator.pending_inbox_response_count == 0
     assert not coordinator._inbox_response_tasks
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_starts_terminal_proof_while_peer_unwinds() -> None:
+    """A terminal response uses the shared cleanup window to prove its handoff."""
+    runner = ResponseRunner(deps=MagicMock())
+    fast_started = asyncio.Event()
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+    release_slow = asyncio.Event()
+    proof_started = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def fast_response() -> None:
+        fast_started.set()
+        await asyncio.Event().wait()
+
+    async def slow_response() -> None:
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            slow_cancelled.set()
+            await release_slow.wait()
+            raise
+
+    async def fast_proof() -> bool:
+        proof_started.set()
+        await release_proof.wait()
+        return True
+
+    tasks = [
+        runner.track_inbox_response(
+            fast_response(),
+            name="test_fast_terminal_response",
+            recovery_proof_ready=fast_proof,
+        ),
+        runner.track_inbox_response(
+            slow_response(),
+            name="test_slow_unwinding_response",
+            recovery_proof_ready=lambda: True,
+        ),
+    ]
+    await fast_started.wait()
+    await slow_started.wait()
+    runner.begin_process_shutdown()
+    draining = asyncio.create_task(
+        runner.drain_inbox_responses(
+            cancel_after_seconds=0.1,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        ),
+    )
+
+    await slow_cancelled.wait()
+    await asyncio.wait_for(proof_started.wait(), timeout=0.02)
+    assert not draining.done()
+
+    release_proof.set()
+    release_slow.set()
+    assert await draining
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

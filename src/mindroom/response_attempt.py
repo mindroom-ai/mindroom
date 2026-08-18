@@ -190,11 +190,14 @@ class ResponseAttemptRunner:
             finally:
                 tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
-                self.deps.stop_manager.clear_message(
-                    tracked_message_id,
-                    self.deps.client,
-                    remove_button=show_stop_button and not button_already_removed and not process_shutdown,
-                )
+                if process_shutdown:
+                    self.deps.stop_manager.discard_message(tracked_message_id)
+                else:
+                    self.deps.stop_manager.clear_message(
+                        tracked_message_id,
+                        self.deps.client,
+                        remove_button=show_stop_button and not button_already_removed,
+                    )
 
             return message_id
 

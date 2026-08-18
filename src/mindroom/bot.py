@@ -64,7 +64,9 @@ from mindroom.response_delivery import TurnHandoff
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
+    RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
+    ResponseShutdownTimeoutError,
     RuntimeShutdownIntent,
     ShutdownBudget,
     restart_reason_category_for,
@@ -132,7 +134,6 @@ from .response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
-    ResponseShutdownTimeoutError,
     prepare_memory_and_model_context,
 )
 from .scheduling import (
@@ -329,6 +330,7 @@ class AgentBot:
     _first_sync_done: bool
     _sync_shutting_down: bool
     _sync_shutdown_budget: ShutdownBudget | None
+    _deferred_stop_required: bool
     _matrix_ingestion_quiesce_requested: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
@@ -405,6 +407,7 @@ class AgentBot:
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
+        self._deferred_stop_required = False
         self._matrix_ingestion_quiesce_requested = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
@@ -921,6 +924,11 @@ class AgentBot:
         return self._response_runner.pending_inbox_response_count
 
     @property
+    def deferred_stop_required(self) -> bool:
+        """Return whether response ownership deferred this bot's releases."""
+        return self._deferred_stop_required
+
+    @property
     def admission_gate(self) -> ResponseAdmissionGate:
         """Return the gate deciding whether responses may start right now."""
         return self._runtime_view.response_admission_gate
@@ -1216,6 +1224,7 @@ class AgentBot:
         """
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
+        self._deferred_stop_required = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1639,7 +1648,7 @@ class AgentBot:
         """Remember one local leave while its source echo is still outstanding."""
         self._local_departures_awaiting_sync.add(room_id)
 
-    async def stop(  # noqa: C901
+    async def stop(
         self,
         *,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
@@ -1667,11 +1676,53 @@ class AgentBot:
         )
         pending_response_count = self._response_runner.pending_inbox_response_count
         if pending_response_count > 0:
+            self._deferred_stop_required = True
             if failures:
                 raise failures[0]
             msg = f"{pending_response_count} response tasks still own runtime resources"
             raise ResponseShutdownTimeoutError(msg)
 
+        await self._release_stopped_resources(failures)
+        if failures:
+            # Every step ran, and the caller still has to hear about it.
+            # `stop_entities` pops from the runtime map only after its gather
+            # returns, so raising keeps this bot registered and stops the reload
+            # before it creates a replacement on a store that never closed.
+            # Swallowing is what would certify a partial stop as a clean one.
+            raise failures[0]
+        self._deferred_stop_required = False
+        self.logger.info("Stopped agent bot")
+
+    async def finish_deferred_stop(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+        timeout_seconds: float = RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
+    ) -> None:
+        """Finish releases deferred while a response still owned the runtime."""
+        if shutdown_intent.stop_reason != "shutdown":
+            msg = "deferred response finalization requires orderly process shutdown"
+            raise RuntimeError(msg)
+        if not self._deferred_stop_required:
+            return
+        recoverable = await self._response_runner.finish_process_shutdown_recovery(
+            timeout_seconds=timeout_seconds,
+        )
+        if not recoverable:
+            msg = "deferred response cleanup lacks durable recovery proof"
+            raise ResponseShutdownTimeoutError(msg)
+        failures: list[BaseException] = []
+        await self._release_stopped_resources(failures)
+        if failures:
+            raise failures[0]
+        self._deferred_stop_required = False
+        self.logger.info("Stopped agent bot after deferred response cleanup")
+
+    async def _release_stopped_resources(
+        self,
+        failures: list[BaseException],
+    ) -> None:
+        """Release resources after every response owner is terminal."""
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
             if cleared_queued_tasks > 0:
@@ -1694,14 +1745,6 @@ class AgentBot:
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)
-        if failures:
-            # Every step ran, and the caller still has to hear about it.
-            # `stop_entities` pops from the runtime map only after its gather
-            # returns, so raising keeps this bot registered and stops the reload
-            # before it creates a replacement on a store that never closed.
-            # Swallowing is what would certify a partial stop as a clean one.
-            raise failures[0]
-        self.logger.info("Stopped agent bot")
 
     async def _release(self, what: str, closing: Awaitable[None], failures: list[BaseException]) -> None:
         """Await one shutdown step, recording failure so the later steps still run."""

@@ -13,8 +13,10 @@ __all__ = [
     "ENTITY_REMOVED_SHUTDOWN",
     "GENERIC_SHUTDOWN",
     "ORDERLY_SHUTDOWN",
+    "RESPONSE_FINALIZATION_TIMEOUT_SECONDS",
     "SYNC_RESTART_SHUTDOWN",
     "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS",
+    "ResponseShutdownTimeoutError",
     "RestartReasonCategory",
     "RuntimeLifecycleAction",
     "RuntimeShutdownIntent",
@@ -27,6 +29,12 @@ __all__ = [
 StopReason = Literal["restart", "entity_removed", "shutdown"]
 
 SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS = 5.0
+RESPONSE_FINALIZATION_TIMEOUT_SECONDS = 15.0
+
+
+class ResponseShutdownTimeoutError(RuntimeError):
+    """Raised when a response still owns runtime resources after bounded cleanup."""
+
 
 # One taxonomy for the `restart_reason_category` and `resulting_action` fields that
 # the sync supervisor and the bot response runtime both log, so the two emitters

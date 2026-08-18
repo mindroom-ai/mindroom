@@ -64,7 +64,11 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import (
+    ORDERLY_SHUTDOWN,
+    RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
+    ResponseShutdownTimeoutError,
+)
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -1993,7 +1997,7 @@ class _MultiAgentOrchestrator:
             )
         return self._open_journal.store
 
-    async def stop(self) -> None:
+    async def stop(self) -> None:  # noqa: C901, PLR0915
         """Stop all agent bots."""
         self.running = False
         if self._runtime_shutdown_event is not None:
@@ -2050,13 +2054,31 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
+        stopping_bots = list(self.agent_bots.values())
+        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in stopping_bots]
         stop_results, cancellation = await _run_shutdown_step(
             "bot_stop",
             _gather_shutdown_phase(*stop_tasks),
         )
         if cancellation is not None:
             phase_cancellations.append(cancellation)
+        deferred_bots = [bot for bot in stopping_bots if bot.deferred_stop_required is True]
+        deferred_stop_results: list[object] = []
+        if deferred_bots:
+            deferred_stop_results, cancellation = await _run_shutdown_step(
+                "deferred_response_owners",
+                _gather_shutdown_phase(
+                    *(
+                        bot.finish_deferred_stop(
+                            shutdown_intent=ORDERLY_SHUTDOWN,
+                            timeout_seconds=RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
+                        )
+                        for bot in deferred_bots
+                    ),
+                ),
+            )
+            if cancellation is not None:
+                phase_cancellations.append(cancellation)
         pending_response_owner_count = sum(
             count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
         )
@@ -2077,12 +2099,27 @@ class _MultiAgentOrchestrator:
                 "orchestrator_shared_journal_close_deferred",
                 live_response_owner_count=pending_response_owner_count,
             )
+        finalized_response_timeout_bot_ids = {
+            id(bot)
+            for bot, result in zip(
+                deferred_bots,
+                deferred_stop_results,
+                strict=True,
+            )
+            if not isinstance(result, BaseException) and bot.deferred_stop_required is False
+        }
         cleanup_failures = [
             result
-            for results in (cancel_results, stop_results)
+            for bot, result in zip(stopping_bots, stop_results, strict=True)
+            if isinstance(result, BaseException)
+            and not (id(bot) in finalized_response_timeout_bot_ids and isinstance(result, ResponseShutdownTimeoutError))
+        ]
+        cleanup_failures.extend(
+            result
+            for results in (cancel_results, deferred_stop_results)
             for result in results
             if isinstance(result, BaseException)
-        ]
+        )
         failures = [
             *quiesce_failures,
             *phase_cancellations,

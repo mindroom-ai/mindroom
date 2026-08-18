@@ -615,7 +615,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
     response_task = runner.track_inbox_response(
         response(),
         name="test_early_process_shutdown_response",
-        recovery_proof_ready=lambda: False,
+        recovery_proof_ready=lambda: True,
     )
     await asyncio.wait_for(response_started.wait(), timeout=1.0)
     cancellation_seen_at_coalescing: list[bool] = []
@@ -3067,6 +3067,236 @@ async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_
     assert raised.value is response_failure
     journal.close.assert_not_awaited()
     assert orchestrator._open_journal is journal
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_retries_response_cleanup_after_late_owner_release(
+    tmp_path: Path,
+) -> None:
+    """A late response unwind finishes releases before the timeout is surfaced."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.deferred_stop_required = True
+    owner_released = asyncio.Event()
+
+    async def fail_bounded_stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        bot.pending_response_owner_count = 0
+        asyncio.get_running_loop().call_soon(owner_released.set)
+        raise response_failure
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        assert bot.pending_response_owner_count == 0
+        await owner_released.wait()
+        bot.deferred_stop_required = False
+
+    bot.stop = AsyncMock(side_effect=fail_bounded_stop)
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        await orchestrator.stop()
+
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    bot.finish_deferred_stop.assert_awaited_once_with(
+        shutdown_intent=ORDERLY_SHUTDOWN,
+        timeout_seconds=15.0,
+    )
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -> None:
+    """The real bot finalizer cannot release resources ahead of its proof owner."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    proof_cancelled = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def retained_proof() -> bool:
+        proof_started.set()
+        while not release_proof.is_set():
+            try:
+                await release_proof.wait()
+            except asyncio.CancelledError:
+                proof_cancelled.set()
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_response",
+        recovery_proof_ready=retained_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+    await proof_started.wait()
+    await proof_cancelled.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+    finalizing = asyncio.create_task(
+        AgentBot.finish_deferred_stop(
+            bot,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+            timeout_seconds=0.1,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    assert not finalizing.done()
+    bot._release_stopped_resources.assert_not_awaited()
+
+    release_proof.set()
+    await asyncio.wait_for(finalizing, timeout=0.1)
+
+    bot._release_stopped_resources.assert_awaited_once_with([])
+    assert not bot.deferred_stop_required
+    assert runner.pending_inbox_response_count == 0
+    await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner(
+    tmp_path: Path,
+) -> None:
+    """No shutdown deadline may close the shared journal under a live owner."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    release_owner = asyncio.Event()
+    finalizer_entered = asyncio.Event()
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.deferred_stop_required = True
+    bot.stop = AsyncMock(side_effect=response_failure)
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        finalizer_entered.set()
+        await release_owner.wait()
+        bot.pending_response_owner_count = 0
+        bot.deferred_stop_required = False
+
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+        await finalizer_entered.wait()
+        await asyncio.sleep(0.02)
+
+        assert not stopping.done()
+        journal.close.assert_not_awaited()
+
+        release_owner.set()
+        await stopping
+
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -> None:
+    """The explicit finalization deadline fails without releasing live owners."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def resistant_proof() -> bool:
+        proof_started.set()
+        while not release_proof.is_set():
+            with suppress(asyncio.CancelledError):
+                await release_proof.wait()
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_deadline_response",
+        recovery_proof_ready=resistant_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
+    bot = object.__new__(AgentBot)
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+
+    try:
+        with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+            await asyncio.wait_for(
+                AgentBot.finish_deferred_stop(
+                    bot,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                    timeout_seconds=0.02,
+                ),
+                timeout=0.08,
+            )
+        assert proof_started.is_set()
+        bot._release_stopped_resources.assert_not_awaited()
+        assert bot.deferred_stop_required
+    finally:
+        release_proof.set()
+        await asyncio.gather(response_task, return_exceptions=True)
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
