@@ -4041,6 +4041,7 @@ expose = [
     "select_model_for_team",
     "team_response",
     "team_response_stream",
+    "validated_empty_team_presentation_shell",
     "resolve_live_shared_agent_names",
 ]
 from = ["mindroom.teams"]

@@ -535,6 +535,37 @@ class _TeamStreamPresentation:
         return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
 
 
+def validated_empty_team_presentation_shell(
+    state: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Return a canonical empty team snapshot containing only frozen slot identity."""
+    if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
+        return None
+    members = state.get("members")
+    if not isinstance(members, list) or state.get("consensus") != "":
+        return None
+    member_ids: list[str] = []
+    for member in members:
+        if not isinstance(member, dict):
+            return None
+        stored_member = cast("dict[str, object]", member)
+        member_id = stored_member.get("id")
+        if stored_member.get("content") != "" or not isinstance(member_id, str) or not member_id:
+            return None
+        member_ids.append(member_id)
+    try:
+        presentation = _TeamStreamPresentation.restore(
+            member_ids=member_ids,
+            show_tool_calls=False,
+            state=state,
+            tool_trace=(),
+            prior_response_text="",
+        )
+    except RuntimeError:
+        return None
+    return presentation.to_state()
+
+
 def _team_pause_requirement_scope(
     presentation: _TeamStreamPresentation,
     requirement: RunRequirement | None,
@@ -3673,12 +3704,19 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         fallback_run_id=attempt_run_id,
                     )
                     if paused_attempt is not None:
+                        response_text = presentation.render_body()
+                        if not response_text:
+                            yield StructuredStreamChunk(
+                                content="",
+                                tool_trace=presentation.tool_trace.copy(),
+                                presentation_state=presentation.to_state(),
+                            )
                         yield AttemptResolved(
                             replace(
                                 paused_attempt,
                                 runtime_model_name=prepared_execution.runtime_model_name,
                                 team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                                response_text=presentation.render_body(),
+                                response_text=response_text,
                                 tool_trace=tuple(presentation.tool_trace),
                                 response_presentation_state=presentation.to_state(),
                             ),
@@ -3901,4 +3939,5 @@ __all__ = [
     "select_model_for_team",
     "team_response",
     "team_response_stream",
+    "validated_empty_team_presentation_shell",
 ]

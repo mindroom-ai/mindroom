@@ -96,6 +96,7 @@ from mindroom.teams import (
     select_model_for_team,
     team_response,
     team_response_stream,
+    validated_empty_team_presentation_shell,
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
@@ -182,21 +183,17 @@ def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> Pau
     """Reconcile transport-committed output with the pause's private renderer state."""
     if error.presentation is None:
         return error.paused
-    tool_trace = error.presentation.tool_trace
     presentation_state = error.presentation.state or {}
-    if error.paused.response_text == error.presentation.response_text:
-        # Hidden tool events can advance continuation identity without changing
-        # the rendered body.  That private state is safe to retain only while
-        # it still reproduces the exact raw body acknowledged by the transport.
-        if error.paused.tool_trace:
-            tool_trace = error.paused.tool_trace
-        if error.paused.response_presentation_state:
-            presentation_state = error.paused.response_presentation_state
+    if not presentation_state and not error.presentation.response_text:
+        # Before any team body exists, retain only the validated static slot
+        # shell. Pending tool identity is rebuilt from the paused requirements
+        # after this handoff; no buffered dynamic renderer state crosses it.
+        presentation_state = validated_empty_team_presentation_shell(error.paused.response_presentation_state) or {}
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
         visible_response_text=error.presentation.visible_response_text,
-        tool_trace=tool_trace,
+        tool_trace=error.presentation.tool_trace,
         response_presentation_state=presentation_state,
     )
 

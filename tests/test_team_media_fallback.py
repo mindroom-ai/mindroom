@@ -44,6 +44,7 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
 )
 from mindroom.approval_receipt import approval_receipt_context
+from mindroom.approval_response import durable_pause_tool_trace, identify_approval_tools
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -103,7 +104,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
@@ -3184,6 +3185,20 @@ async def test_hidden_team_tool_can_continue_when_pause_precedes_visible_output(
         requires_confirmation=True,
     )
     requirement = RunRequirement(tool)
+    streamed_chunks: list[object] = []
+
+    async def collect_until_pause() -> None:
+        async for chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            turn_recorder=TurnRecorder(user_message="Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-paused", session_id="session-team"),
+            mode=TeamMode.COORDINATE,
+            show_tool_calls=False,
+        ):
+            streamed_chunks.extend((chunk,))
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield TeamToolCallStartedEvent(tool=tool)
@@ -3212,27 +3227,29 @@ async def test_hidden_team_tool_can_continue_when_pause_precedes_visible_output(
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        async for _chunk in team_response_stream(
-            agent_ids=team_agent_ids,
-            message="Analyze this.",
-            turn_recorder=TurnRecorder(user_message="Analyze this."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(run_id="run-paused", session_id="session-team"),
-            mode=TeamMode.COORDINATE,
-            show_tool_calls=False,
-        ):
-            pass
+        await collect_until_pause()
+
+    assert len(streamed_chunks) == 1
+    state_only_chunk = streamed_chunks[0]
+    assert isinstance(state_only_chunk, StructuredStreamChunk)
+    assert state_only_chunk.content == ""
+    assert state_only_chunk.presentation_state == raised.value.paused.response_presentation_state
+    assert state_only_chunk.tool_trace == list(raised.value.paused.tool_trace)
 
     raised.value.capture_presentation(
         StreamingPresentation(response_text="", visible_response_text="Thinking..."),
     )
     paused = _paused_with_committed_presentation(raised.value)
+    durable_trace = durable_pause_tool_trace(
+        paused,
+        identify_approval_tools(paused, default_agent_name="research"),
+        entity_kind="team",
+    )
     presentation = _TeamStreamPresentation.restore(
         member_ids=["general"],
         show_tool_calls=False,
         state=paused.response_presentation_state,
-        tool_trace=paused.tool_trace,
+        tool_trace=durable_trace,
         prior_response_text=paused.response_text,
     )
     tool.confirmed = True
@@ -3250,6 +3267,50 @@ async def test_hidden_team_tool_can_continue_when_pause_precedes_visible_output(
     assert [(entry.tool_call_id, entry.type) for entry in presentation.tool_trace] == [
         ("call-hidden-team-approval", "tool_call_completed"),
     ]
+
+
+def test_pause_handoff_does_not_promote_uncommitted_trimmed_team_content() -> None:
+    """Equal rendered bodies cannot promote buffered dynamic slot content."""
+    committed = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
+    committed.append_member("general", "A")
+    buffered = _TeamStreamPresentation.restore(
+        member_ids=["general"],
+        show_tool_calls=False,
+        state=committed.to_state(),
+        tool_trace=(),
+        prior_response_text=committed.render_body(),
+    )
+    buffered.append_member("general", " ")
+    assert buffered.render_body() == committed.render_body()
+    paused = PausedAttempt(
+        session_id="session-team",
+        run_id="run-paused",
+        tools=(),
+        response_text=buffered.render_body(),
+        response_presentation_state=buffered.to_state(),
+    )
+    error = ResponsePausedForApproval(paused)
+    error.capture_presentation(
+        StreamingPresentation(
+            response_text=committed.render_body(),
+            visible_response_text=committed.render_body(),
+            state=committed.to_state(),
+        ),
+    )
+
+    handed_off = _paused_with_committed_presentation(error)
+    restored = _TeamStreamPresentation.restore(
+        member_ids=["general"],
+        show_tool_calls=False,
+        state=handed_off.response_presentation_state,
+        tool_trace=handed_off.tool_trace,
+        prior_response_text=handed_off.response_text,
+    )
+    restored.append_member("general", "B")
+
+    resumed_body = restored.render_body()
+    assert "**GeneralAgent**: AB" in resumed_body
+    assert "**GeneralAgent**: A B" not in resumed_body
 
 
 @pytest.mark.asyncio

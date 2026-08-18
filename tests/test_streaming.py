@@ -337,6 +337,48 @@ async def test_lifecycle_suspension_captures_committed_structured_state(config: 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
+async def test_lifecycle_suspension_flushes_state_only_presentation(config: Config) -> None:
+    """A controlled pause commits private structured state before lifecycle handoff."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+    trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="inspect",
+        tool_call_id="call-hidden",
+        scope_key="team",
+    )
+    state = {
+        "kind": "team_stream",
+        "version": 2,
+        "members": [],
+        "consensus": "",
+    }
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(
+            content="",
+            tool_trace=[trace],
+            presentation_state=state,
+        )
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_stream(config, suspended_stream(), show_tool_calls=False)
+
+    assert [operation.display_text for operation in gateway.ops] == ["Thinking..."]
+    assert raised.value.presentation is not None
+    assert raised.value.presentation.response_text == ""
+    assert raised.value.presentation.visible_response_text == "Thinking..."
+    assert raised.value.presentation.tool_trace == (trace,)
+    assert raised.value.presentation.state == state
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
 async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config) -> None:
     """A scripted stream produces placeholder → progressive edits → final tool trace."""
     gateway = _FakeGateway()

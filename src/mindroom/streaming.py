@@ -930,6 +930,7 @@ class StreamingResponse:
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
         boundary_refresh: bool = False,
+        force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
@@ -948,6 +949,7 @@ class StreamingResponse:
             is_final=is_final,
             durable_terminal=durable_terminal,
             boundary_refresh=boundary_refresh,
+            force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
             retry_on_failure=retry_on_failure and is_final,
             retry_without_backoff=retry_without_backoff and is_final,
@@ -961,13 +963,19 @@ class StreamingResponse:
         is_final: bool,
         durable_terminal: bool = False,
         boundary_refresh: bool = False,
+        force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
-        if not is_final and not is_initial_send and not self._should_send_prepared_nonterminal_edit(prepared_delivery):
+        if (
+            not is_final
+            and not is_initial_send
+            and not force_nonterminal_delivery
+            and not self._should_send_prepared_nonterminal_edit(prepared_delivery)
+        ):
             _complete_capture_completions(capture_completions)
             return True
         if not durable_terminal and not await self._direct_transport_allowed():
@@ -1142,6 +1150,14 @@ class StreamingResponse:
             visible_response_text=self._last_committed_rendered_body or "",
             tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
             state=deepcopy(self._last_delivered_presentation_state),
+        )
+
+    def has_uncommitted_presentation(self) -> bool:
+        """Return whether live renderer state is newer than the last delivered snapshot."""
+        return not (
+            _normalize_stream_accumulated_text(self.accumulated_text) == self._last_delivered_text
+            and _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
+            and self.presentation_state == self._last_delivered_presentation_state
         )
 
     def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
@@ -2093,6 +2109,21 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                             terminal_status="error",
                             tool_trace_collector=tool_trace_collector,
                         ) from delivery_cleanup_error
+                if delivery_cleanup_error is None and streaming.has_uncommitted_presentation():
+                    # The queue owner is fully stopped above. Transfer transport
+                    # ownership here, as terminal finalization does, so the pause
+                    # snapshot is acknowledged before lifecycle handoff.
+                    try:
+                        await streaming._send_or_edit_message(
+                            client,
+                            allow_empty_progress=True,
+                            force_nonterminal_delivery=True,
+                        )
+                    except Exception as suspension_flush_error:
+                        logger.warning(
+                            "Stream suspension flush failed; retaining the prior committed presentation",
+                            error=str(suspension_flush_error),
+                        )
                 exc.capture_presentation(streaming.committed_presentation())
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc

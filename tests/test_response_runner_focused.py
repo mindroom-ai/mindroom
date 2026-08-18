@@ -2600,7 +2600,7 @@ def test_streaming_pause_handoff_preserves_state_only_private_presentation() -> 
 
     assert paused.response_text == ""
     assert paused.visible_response_text == "Thinking..."
-    assert paused.tool_trace == (trace,)
+    assert paused.tool_trace == ()
     assert paused.response_presentation_state == state
 
 
