@@ -568,6 +568,33 @@ def test_team_continuation_reconciles_restart_snapshot_without_member_responses(
     ]
 
 
+def test_team_continuation_does_not_repeat_skipped_consensus_fallback() -> None:
+    """Completed aggregate content must not re-add a consensus message already in the snapshot."""
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Final consensus.",
+        messages=[Message(id="consensus-before-pause", role="assistant", content="Final consensus.")],
+    )
+    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**Team Consensus**:\n\nFinal consensus."
+
+    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[],
+        paused=None,
+        prior_response_text=prior_text,
+        prior_tool_trace=[],
+        prior_message_ids={"consensus-before-pause"},
+        show_tool_calls=True,
+    )
+
+    assert response_text == prior_text
+    assert response_trace == []
+    assert presentation_tools == []
+
+
 @pytest.mark.asyncio
 async def test_team_continuation_reloads_chained_member_output_after_restart() -> None:
     """A restarted member's newly persisted prose and second pause must rejoin the outer transcript."""

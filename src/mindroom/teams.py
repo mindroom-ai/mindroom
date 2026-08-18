@@ -350,12 +350,12 @@ def _format_terminal_team_response(
     return _format_team_header(team_display_names) + _team_response_text(response)
 
 
-def _approval_member_content(
-    response: RunOutput,
+def _approval_response_content(
+    response: TeamRunOutput | RunOutput,
     rendered_content: str,
     skip_message_ids: set[str] | frozenset[str],
 ) -> str:
-    """Use raw member content only when it is not entirely from the paused snapshot."""
+    """Use raw content only when it is not control state or an already-rendered snapshot."""
     if rendered_content:
         return rendered_content
     assistant_messages = [
@@ -363,11 +363,6 @@ def _approval_member_content(
     ]
     if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
         return ""
-    return "" if response.status == RunStatus.paused else _get_response_content(response)
-
-
-def _approval_response_fallback_text(response: TeamRunOutput | RunOutput) -> str:
-    """Use aggregate run content only for terminal provider-gap recovery."""
     return "" if response.status == RunStatus.paused else _get_response_content(response)
 
 
@@ -411,7 +406,7 @@ def _format_approval_contributions_recursive(
                     show_tool_calls=show_tool_calls,
                     skip_message_ids=skip_message_ids,
                 )
-                content = _approval_member_content(member_response, content, skip_message_ids)
+                content = _approval_response_content(member_response, content, skip_message_ids)
                 if content.strip():
                     parts.append(
                         _format_member_contribution(
@@ -431,7 +426,7 @@ def _format_approval_contributions_recursive(
                 show_tool_calls=show_tool_calls,
                 skip_message_ids=skip_message_ids,
             )
-            consensus = consensus or _approval_response_fallback_text(response)
+            consensus = _approval_response_content(response, consensus, skip_message_ids)
             if consensus.strip():
                 parts.extend(_format_team_consensus(consensus, indent))
             elif parts:
@@ -446,7 +441,7 @@ def _format_approval_contributions_recursive(
             show_tool_calls=show_tool_calls,
             skip_message_ids=skip_message_ids,
         )
-        content = _approval_member_content(response, content, skip_message_ids)
+        content = _approval_response_content(response, content, skip_message_ids)
         if content.strip():
             parts.append(_format_member_contribution(response.agent_name or "Agent", content, indent))
         trace.extend(response_trace)
@@ -473,7 +468,7 @@ def _format_approval_team_response(
         include_consensus=True,
         skip_message_ids=skip_message_ids,
     )
-    body = "\n\n".join(parts) if parts else _approval_response_fallback_text(response)
+    body = "\n\n".join(parts) if parts else _approval_response_content(response, "", skip_message_ids)
     return (_format_team_header(team_display_names) + body if body else ""), trace
 
 
@@ -1502,7 +1497,11 @@ def _continued_team_approval_presentation(
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text=_approval_response_fallback_text(continued).lstrip("\n"),
+        fallback_text=_approval_response_content(
+            continued,
+            "",
+            prior_message_ids if prior_response_text else frozenset(),
+        ).lstrip("\n"),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )
