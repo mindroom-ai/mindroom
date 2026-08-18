@@ -2186,7 +2186,31 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         "mixed_source_pending",
         "terminal_turn_mismatch",
     ]
-    assert all(set(call.kwargs) <= {"reason", "source_count", "pending_source_count"} for call in diagnostic_calls)
+    terminal_mismatch = diagnostic_calls[-1]
+    assert terminal_mismatch.kwargs == {
+        "reason": "terminal_turn_mismatch",
+        "source_count": 1,
+        "pending_source_count": 0,
+        "missing_completed_turn_count": 0,
+        "incomplete_completed_turn_count": 1,
+        "source_identity_mismatch_count": 0,
+        "anchor_mismatch_count": 0,
+        "response_event_mismatch_count": 1,
+    }
+    assert all(
+        set(call.kwargs)
+        <= {
+            "reason",
+            "source_count",
+            "pending_source_count",
+            "missing_completed_turn_count",
+            "incomplete_completed_turn_count",
+            "source_identity_mismatch_count",
+            "anchor_mismatch_count",
+            "response_event_mismatch_count",
+        }
+        for call in diagnostic_calls
+    )
 
 
 @pytest.mark.asyncio

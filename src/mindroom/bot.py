@@ -1605,21 +1605,42 @@ class AgentBot:
             )
             if event_id is not None
         }
-        ready = final_delivery.acknowledged_event_id is None or all(
+        completed_turns = tuple(map(self._turn_store.get_turn_record, turn_record.indexed_event_ids))
+        missing_completed_turn_count = sum(completed_turn is None for completed_turn in completed_turns)
+        incomplete_completed_turn_count = sum(
+            completed_turn is not None and not completed_turn.completed for completed_turn in completed_turns
+        )
+        source_identity_mismatch_count = sum(
+            completed_turn is not None and completed_turn.source_event_ids != turn_record.source_event_ids
+            for completed_turn in completed_turns
+        )
+        anchor_mismatch_count = sum(
+            completed_turn is not None and completed_turn.anchor_event_id != turn_record.anchor_event_id
+            for completed_turn in completed_turns
+        )
+        response_event_mismatch_count = sum(
+            completed_turn is not None and completed_turn.response_event_id not in completed_response_event_ids
+            for completed_turn in completed_turns
+        )
+        ready = final_delivery.acknowledged_event_id is None or not any(
             (
-                completed_turn is not None
-                and completed_turn.completed
-                and completed_turn.source_event_ids == turn_record.source_event_ids
-                and completed_turn.anchor_event_id == turn_record.anchor_event_id
-                and completed_turn.response_event_id in completed_response_event_ids
-            )
-            for completed_turn in map(self._turn_store.get_turn_record, turn_record.indexed_event_ids)
+                missing_completed_turn_count,
+                incomplete_completed_turn_count,
+                source_identity_mismatch_count,
+                anchor_mismatch_count,
+                response_event_mismatch_count,
+            ),
         )
         if not ready:
             self._record_response_recovery_not_ready(
                 reason="terminal_turn_mismatch",
                 source_count=len(turn_record.source_event_ids),
                 pending_source_count=0,
+                missing_completed_turn_count=missing_completed_turn_count,
+                incomplete_completed_turn_count=incomplete_completed_turn_count,
+                source_identity_mismatch_count=source_identity_mismatch_count,
+                anchor_mismatch_count=anchor_mismatch_count,
+                response_event_mismatch_count=response_event_mismatch_count,
             )
         return ready
 
@@ -1629,16 +1650,35 @@ class AgentBot:
         reason: str,
         source_count: int,
         pending_source_count: int | None,
+        missing_completed_turn_count: int | None = None,
+        incomplete_completed_turn_count: int | None = None,
+        source_identity_mismatch_count: int | None = None,
+        anchor_mismatch_count: int | None = None,
+        response_event_mismatch_count: int | None = None,
     ) -> None:
         """Log each non-sensitive recovery boundary once per bot lifetime."""
         if reason in self._response_recovery_diagnostic_classes:
             return
         self._response_recovery_diagnostic_classes.add(reason)
+        mismatch_counts = {}
+        if missing_completed_turn_count is not None:
+            assert incomplete_completed_turn_count is not None
+            assert source_identity_mismatch_count is not None
+            assert anchor_mismatch_count is not None
+            assert response_event_mismatch_count is not None
+            mismatch_counts = {
+                "missing_completed_turn_count": missing_completed_turn_count,
+                "incomplete_completed_turn_count": incomplete_completed_turn_count,
+                "source_identity_mismatch_count": source_identity_mismatch_count,
+                "anchor_mismatch_count": anchor_mismatch_count,
+                "response_event_mismatch_count": response_event_mismatch_count,
+            }
         self.logger.info(
             "response_recovery_proof_not_ready",
             reason=reason,
             source_count=source_count,
             pending_source_count=pending_source_count,
+            **mismatch_counts,
         )
 
     async def try_start(self) -> bool:
