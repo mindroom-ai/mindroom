@@ -1068,6 +1068,23 @@ async def test_reconcile_enforces_runtime_limit_through_revocation_path(
 
 
 @pytest.mark.asyncio
+async def test_isolation_interruption_remains_retryable_until_supervisor_truth(tmp_path: Path) -> None:
+    """An ambiguous isolation stop retains its interrupted terminal intent."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus.unknown_handle()
+
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await manager.interrupt(context, run_id=run.run_id, force=True)
+
+    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
+    reconciled = await manager.reconcile(context, run_id=run.run_id)
+
+    assert reconciled.state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
 async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

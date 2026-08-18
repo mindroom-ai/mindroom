@@ -367,6 +367,50 @@ class TestAgentBot(AgentBotTestBase):
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
+    async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
+        """The API gateway must receive the lifecycle-owned broker without replacing it."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
+                pass
+
+            async def serve(self) -> None:
+                set_api_server_address("127.0.0.1", 8765)
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        script_runtime = SimpleNamespace(
+            broker=MagicMock(),
+            bind_api=MagicMock(),
+            touch_live_workers=MagicMock(),
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                self._runtime_paths(tmp_path),
+                script_runtime=script_runtime,
+                shutdown_requested=shutdown_requested,
+            )
+
+        bind_script_runtime.assert_called_once_with(
+            ANY,
+            broker=script_runtime.broker,
+            touch_live_workers=script_runtime.touch_live_workers,
+        )
+        script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:8765/api/script-gateway")
+
+    @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
         """server.serve() returning after an intentional shutdown should not be fatal."""
 
@@ -555,6 +599,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -629,6 +674,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -694,6 +740,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -2927,6 +2974,41 @@ class TestMultiAgentOrchestrator:
 
         assert calls == ["transport", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_config_update_forwards_plan_to_stable_script_runtime_before_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reload policy reaches the process-local runtime before any bot is replaced."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        apply_update_plan = AsyncMock(side_effect=RuntimeError("script reload boundary"))
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(runtime), "apply_update_plan", new=apply_update_plan),
+            pytest.raises(RuntimeError, match="script reload boundary"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        apply_update_plan.assert_awaited_once_with(plan)
+        assert orchestrator.script_runtime is runtime
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:

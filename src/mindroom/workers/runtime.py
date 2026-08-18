@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PrimaryWorkerManagerLease",
     "clear_worker_validation_snapshot_cache",
+    "configured_primary_worker_manager",
     "get_primary_worker_manager",
     "lease_primary_worker_manager",
     "primary_worker_backend_available",
@@ -228,6 +229,46 @@ def primary_worker_backend_available(
     except WorkerBackendError:
         return False
     return True
+
+
+def configured_primary_worker_manager(
+    runtime_paths: RuntimePaths,
+    *,
+    runtime_config: Config | None,
+) -> WorkerBackend | None:
+    """Return the config-aware primary manager shared by runtime maintenance."""
+    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
+
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    if not primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+    ):
+        return None
+    backend_name = primary_worker_backend_name(runtime_paths)
+    if runtime_config is None and backend_name == "kubernetes":
+        return None
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    kubernetes_config_snapshot: dict[str, object] | None = None
+    worker_grantable_credentials: frozenset[str] | None = None
+    if runtime_config is not None:
+        worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
+        if backend_name == "kubernetes":
+            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+                runtime_paths,
+                runtime_config=runtime_config,
+            )
+            kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
+    return get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=runtime_paths.storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=kubernetes_config_snapshot,
+        worker_grantable_credentials=worker_grantable_credentials,
+    )
 
 
 def _require_kubernetes_tool_validation_snapshot(

@@ -41,6 +41,7 @@ from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -850,10 +851,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         runtime_paths: constants.RuntimePaths,
         *,
         runtime_config: object | None = None,
-        worker_grantable_credentials: frozenset[str] | None = None,
+        touch_live_workers: Callable[[WorkerBackend], None] | None = None,
     ) -> int:
         del runtime_config
-        assert worker_grantable_credentials == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        assert touch_live_workers is None
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -882,6 +883,28 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+def test_worker_cleanup_touches_live_script_workers_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active script workers must have their leases refreshed before idle cleanup."""
+    actions: list[str] = []
+    worker_manager = MagicMock()
+    worker_manager.backend_name = "test"
+    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    monkeypatch.setattr(
+        main,
+        "maintain_workers",
+        lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
+    )
+
+    main._cleanup_workers_once(
+        main._app_runtime_paths(main.app),
+        touch_live_workers=lambda backend: actions.append("touch") if backend is worker_manager else None,
+    )
+
+    assert actions == ["touch", "maintain"]
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -1113,29 +1136,16 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
-    assert (
-        main._cleanup_workers_once(
-            main._app_runtime_paths(main.app),
-            worker_grantable_credentials=constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-        )
-        == 0
-    )
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
 
 def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kubernetes cleanup should skip the cycle when no committed runtime config is available."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-
-    def _unexpected_get_primary_worker_manager(*_args: object, **_kwargs: object) -> object:
-        msg = "cleanup should not build a Kubernetes worker manager without a committed snapshot"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _unexpected_get_primary_worker_manager)
+    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
@@ -1164,34 +1174,16 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
             assert now is None
             return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+    worker_manager = _FakeWorkerManager()
+    monkeypatch.setattr(
+        main,
+        "configured_primary_worker_manager",
+        lambda *_args, **_kwargs: worker_manager,
+    )
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert (
-        main._cleanup_workers_once(
-            runtime_paths,
-            runtime_config=runtime_config,
-            worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-        )
-        == 1
-    )
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] == (
-        main.serialized_kubernetes_worker_config_snapshot(runtime_config)
-    )
-    assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
+    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1210,19 +1202,14 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
             return WorkerMaintenanceResult(cleaned=(), reconciled=())
 
     worker_manager = _FakeWorkerManager()
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    monkeypatch.setattr(
+        main,
+        "configured_primary_worker_manager",
+        lambda *_args, **_kwargs: worker_manager,
+    )
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    main._cleanup_workers_once(
-        runtime_paths,
-        runtime_config=runtime_config,
-        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-    )
+    main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config)
 
     assert maintained_managers == [worker_manager]
 

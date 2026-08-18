@@ -22,6 +22,7 @@ from .approval_continuations import (
 )
 from .approvals import (
     ApprovalCardReservation,
+    BackgroundApprovalDecision,
     RecordedApprovalDecision,
     StoredApprovalCard,
     UnreadableApprovalCard,
@@ -78,6 +79,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
+    "BackgroundApprovalDecision",
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
     from .approvals import (
         ApprovalCardReservation,
+        BackgroundApprovalDecision,
         RecordedApprovalDecision,
         StoredApprovalCard,
         UnreadableApprovalCard,
@@ -397,6 +398,24 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         expected_generation: int,
         cards: tuple[ApprovalCardReservation, ...],
     ) -> bool: ...
+
+    async def reserve_background_approval_card(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        run_id: str,
+        call_id: str,
+        expires_at_ns: int,
+        card: ApprovalCardReservation,
+    ) -> bool: ...
+
+    async def background_approval_decision(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None: ...
 
     async def resolve_continuation_approval_card(  # noqa: D102
         self,

@@ -261,6 +261,19 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS background_approval_calls (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, delivery_id),
+        UNIQUE (principal_id, run_id, call_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS approval_action_tombstones (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
@@ -409,6 +422,10 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_cards_continuation
     ON approval_cards (continuation_id/*bytes*/, continuation_generation, tool_call_id/*bytes*/)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS background_approval_calls_room_lookup
+    ON background_approval_calls (principal_id, run_id/*bytes*/, call_id/*bytes*/)
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan

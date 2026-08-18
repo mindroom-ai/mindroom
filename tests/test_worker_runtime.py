@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -276,3 +277,31 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_plu
     )
 
     assert calls == 2
+
+
+def test_configured_primary_worker_manager_uses_one_committed_config_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Lifecycle and cleanup should resolve the same config-aware primary manager."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config()
+    expected = MagicMock()
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    get_manager = MagicMock(return_value=expected)
+    monkeypatch.setattr(workers_runtime_module, "get_primary_worker_manager", get_manager)
+
+    resolved = workers_runtime_module.configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=runtime_config,
+    )
+
+    assert resolved is expected
+    assert get_manager.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    assert get_manager.call_args.kwargs["worker_grantable_credentials"] == (
+        runtime_config.get_worker_grantable_credentials()
+    )

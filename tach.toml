@@ -607,6 +607,7 @@ depends_on = [
 visibility = [
     "mindroom.approval_response",
     "mindroom.approval_transport",
+    "mindroom.orchestration.script_runtime",
     "mindroom.tool_approval",
 ]
 
@@ -702,6 +703,7 @@ visibility = [
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.matrix_rtc.call_tools",
+    "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -1689,6 +1691,24 @@ path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
 [[modules]]
+path = "mindroom.orchestration.script_runtime"
+depends_on = [
+    "mindroom.approval_manager",
+    "mindroom.custom_tools.script",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.orchestration.runtime",
+    "mindroom.script_runs.broker",
+    "mindroom.script_runs.manager",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.store",
+    "mindroom.script_runs.worker_client",
+    "mindroom.tool_approval",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agent_reply_membership_sync",
@@ -1719,12 +1739,14 @@ depends_on = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
+    "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
+    "mindroom.workers.runtime",
 ]
 
 [[modules]]

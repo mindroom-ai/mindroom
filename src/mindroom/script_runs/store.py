@@ -426,6 +426,23 @@ class ScriptRunStore:
             )
         return updated
 
+    def prune_terminal_run(self, run_id: str, *, finished_before: str) -> bool:
+        """Delete one terminal run and its receipts only after the retention cutoff."""
+        with self._write_transaction() as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM script_runs
+                WHERE run_id = ? AND finished_at IS NOT NULL AND finished_at <= ?
+                  AND state IN (?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    finished_before,
+                    *(state.value for state in sorted(_TERMINAL_RUN_STATES, key=lambda state: state.value)),
+                ),
+            )
+        return deleted.rowcount == 1
+
     def _initialize_database(self) -> None:
         with self._write_transaction() as connection:
             for statement in _SCHEMA_STATEMENTS:

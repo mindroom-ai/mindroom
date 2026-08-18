@@ -64,6 +64,7 @@ _TERMINAL_STATES = frozenset(
         ScriptRunState.INTERRUPTED,
     },
 )
+_ISOLATION_INTERRUPTION_REASON = "Agent isolation changed during configuration reload."
 
 
 class ScriptRunManagerError(ValueError):
@@ -334,6 +335,40 @@ class ScriptRunManager:
         reason: str = "Cancellation requested by the owning agent.",
     ) -> ScriptRunRecord:
         """Revoke one run durably before signalling its existing supervisor."""
+        return await self._terminate_run(
+            context,
+            run_id=run_id,
+            force=force,
+            reason=reason,
+            terminal_state=ScriptRunState.CANCELLED,
+        )
+
+    async def interrupt(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        run_id: str,
+        force: bool = False,
+    ) -> ScriptRunRecord:
+        """Revoke and stop one run whose process isolation is no longer valid."""
+        return await self._terminate_run(
+            context,
+            run_id=run_id,
+            force=force,
+            reason=_ISOLATION_INTERRUPTION_REASON,
+            terminal_state=ScriptRunState.INTERRUPTED,
+        )
+
+    async def _terminate_run(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        run_id: str,
+        force: bool,
+        reason: str,
+        terminal_state: ScriptRunState,
+    ) -> ScriptRunRecord:
+        """Revoke, signal, and publish one confirmed terminal process outcome."""
         run = self._owned_run(context, run_id)
         if run.state in _TERMINAL_STATES:
             try:
@@ -365,7 +400,7 @@ class ScriptRunManager:
         return await asyncio.to_thread(
             self.store.transition_run,
             run_id,
-            state=ScriptRunState.CANCELLED,
+            state=terminal_state,
             exit_code=process_status.exit_code,
         )
 
@@ -398,10 +433,17 @@ class ScriptRunManager:
                 await self._cleanup_token(context, run)
             return run
         if run.cancel_requested_at is not None:
-            return await self.cancel(
+            terminal_state = (
+                ScriptRunState.INTERRUPTED
+                if run.cancellation_reason == _ISOLATION_INTERRUPTION_REASON
+                else ScriptRunState.CANCELLED
+            )
+            return await self._terminate_run(
                 context,
                 run_id=run.run_id,
+                force=False,
                 reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
+                terminal_state=terminal_state,
             )
         if _runtime_expired(run):
             return await self.cancel(
@@ -747,6 +789,20 @@ class ScriptRunManager:
         except Exception:
             logger.warning("script_capability_cleanup_failed", run_id=run.run_id, exc_info=True)
 
+    async def cleanup_snapshot(self, context: ToolRuntimeContext, run: ScriptRunRecord) -> bool:
+        """Remove one terminal run's bounded source snapshot before record pruning."""
+        workspace: Path | None
+        if run.local_unsafe:
+            workspace = _agent_workspace(context)
+        else:
+            worker = await self._worker_handle(run)
+            workspace = (
+                _worker_workspace(context, worker) if worker is not None else _worker_workspace_from_run(context, run)
+            )
+        if workspace is None:
+            return True
+        return await asyncio.to_thread(_remove_snapshot, workspace, run.run_id)
+
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
     execution_identity = build_execution_identity_from_runtime_context(context)
@@ -848,6 +904,35 @@ def _remove_snapshot_token(workspace: Path, run_id: str) -> None:
         for descriptor in reversed(descriptors):
             with suppress(OSError):
                 os.close(descriptor)
+
+
+def _remove_snapshot(workspace: Path, run_id: str) -> bool:
+    """Remove only the two known files and empty directory for one run snapshot."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        current_descriptor = os.open(workspace, directory_flags)
+        descriptors.append(current_descriptor)
+        for part in _snapshot_relative_dir(run_id).parts:
+            current_descriptor = os.open(part, directory_flags, dir_fd=current_descriptor)
+            descriptors.append(current_descriptor)
+        for filename in ("capability", "source.py"):
+            try:
+                metadata = os.stat(filename, dir_fd=current_descriptor, follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                os.unlink(filename, dir_fd=current_descriptor)
+        os.rmdir(run_id, dir_fd=descriptors[-2])
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    finally:
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
+    return True
 
 
 def _parse_local_status(message: str) -> WorkerScriptStatus:

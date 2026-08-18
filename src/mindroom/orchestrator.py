@@ -89,7 +89,11 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    clear_worker_validation_snapshot_cache,
+    configured_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -118,6 +122,7 @@ from .orchestration.runtime import (
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
 )
+from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 
 if TYPE_CHECKING:
@@ -270,6 +275,7 @@ class _MultiAgentOrchestrator:
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
+    _script_runtime: ScriptRuntimeLifecycle = field(init=False, repr=False)
     agent_reply_memberships: AgentReplyMembershipIndex = field(
         default_factory=AgentReplyMembershipIndex,
         init=False,
@@ -294,6 +300,16 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+        )
+        self._script_runtime = build_script_runtime(
+            self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            worker_backend_provider=lambda: configured_primary_worker_manager(
+                self.runtime_paths,
+                runtime_config=self.config,
+            ),
+            api_enabled=self.api_enabled,
         )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
@@ -329,6 +345,11 @@ class _MultiAgentOrchestrator:
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
         )
+
+    @property
+    def script_runtime(self) -> ScriptRuntimeLifecycle:
+        """Return the process-local background-script lifecycle collaborator."""
+        return self._script_runtime
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
@@ -1362,6 +1383,7 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)
+        await self._script_runtime.start()
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         async with self.config_reload.startup_publication_admission():
@@ -1758,6 +1780,7 @@ class _MultiAgentOrchestrator:
             new_config.authorization,
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
+        await self._script_runtime.apply_update_plan(plan)
         replay_startup_maintenance = await self._startup_maintenance.cancel()
 
         try:
@@ -2139,6 +2162,7 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
+        await self._script_runtime.shutdown()
         await self._approval_transport.close()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
@@ -2242,6 +2266,7 @@ async def _run_api_server(
     log_level: str,
     runtime_paths: RuntimePaths,
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    script_runtime: ScriptRuntimeLifecycle | None = None,
     shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
@@ -2249,6 +2274,13 @@ async def _run_api_server(
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
+    if script_runtime is not None:
+        api_main.bind_script_runtime(
+            api_main.app,
+            broker=script_runtime.broker,
+            touch_live_workers=script_runtime.touch_live_workers,
+        )
+        script_runtime.bind_api(script_gateway_url(runtime_paths, host=host, port=port))
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(
@@ -2610,6 +2642,7 @@ async def main(
                     log_level,
                     runtime_paths,
                     orchestrator.knowledge_refresh_scheduler,
+                    orchestrator.script_runtime,
                     shutdown_requested,
                 ),
                 name="api_server",

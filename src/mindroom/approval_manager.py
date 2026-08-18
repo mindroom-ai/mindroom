@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.approval_events import PendingApproval, PendingApprovalStatus, parse_approval_datetime
 from mindroom.event_journal import (
     ApprovalCardReservation,
+    BackgroundApprovalDecision,
     DeliveryStage,
     MatrixDelivery,
     StoredApprovalCard,
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision
+    from mindroom.tool_approval import BackgroundScriptToolOrigin
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
@@ -289,6 +292,91 @@ class _ApprovalManager:
             payload=prepared,
         )
 
+    async def request_background_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        room_id: str,
+        thread_id: str | None,
+        agent_name: str,
+        requester_id: str,
+        approver_user_id: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> BackgroundApprovalDecision:
+        """Publish and await one durable exact-call background approval."""
+        cards = self.cards
+        if self.prepare_event is None or cards is None or self.send_delivery is None:
+            return BackgroundApprovalDecision(status="denied", reason="Tool approval runtime is not ready.")
+        delivery_id = f"script-approval:{origin.run_id}:{origin.call_id}"
+        expires_at_ns = time.time_ns() + max(0, round(timeout_seconds * 1_000_000_000))
+        requested_at = _utcnow()
+        expires_at = datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC)
+        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+        )
+        content = self._pending_event_content(
+            approval_id=delivery_id,
+            tool_name=tool_name,
+            arguments=event_arguments,
+            arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            requested_at=requested_at,
+            expires_at=expires_at,
+            status="pending",
+        )
+        content.update(
+            approval_target="background_script",
+            background_run_id=origin.run_id,
+            background_call_id=origin.call_id,
+        )
+        prepared = await self.prepare_event(room_id, thread_id, content)
+        if prepared is None:
+            return BackgroundApprovalDecision(status="denied", reason="Tool approval card could not be prepared.")
+        reservation = ApprovalCardReservation(
+            delivery_id=delivery_id,
+            tool_call_id=origin.call_id,
+            event_type=_EVENT_TYPE,
+            payload=prepared,
+        )
+        reserved = await cards.reserve_background_approval_card(
+            room_id=room_id,
+            thread_id=thread_id,
+            run_id=origin.run_id,
+            call_id=origin.call_id,
+            expires_at_ns=expires_at_ns,
+            card=reservation,
+        )
+        if reserved:
+            try:
+                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+            except Exception:
+                logger.warning(
+                    "approval_card_initial_delivery_deferred",
+                    delivery_id=delivery_id,
+                    exc_info=True,
+                )
+        self._ensure_deadline_sweep()
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        while True:
+            decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
+            if decision is not None:
+                return decision
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await self.recover_cards_on_startup()
+                decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
+                if decision is not None:
+                    return decision
+                return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
+            await asyncio.sleep(min(0.1, remaining))
+
     async def reserve_and_publish(
         self,
         *,
@@ -536,7 +624,7 @@ class _ApprovalManager:
                         if stored.continuation_id == continuation_id:
                             complete = False
                         continue
-                    if stored.continuation_id == continuation_id:
+                    if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
                         complete = await self._expire_stored(room_id, stored) and complete
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                     break
