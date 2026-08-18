@@ -16,6 +16,7 @@ from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,
     ScriptCallState,
+    ScriptRunEntityKind,
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
@@ -29,10 +30,12 @@ if TYPE_CHECKING:
 
 
 _MAX_RECEIPT_BYTES = 64 * 1024
+_MAX_RUN_ERROR_BYTES = 64 * 1024
 _CONTROL_STATE_UNAVAILABLE = "Background script control state is unavailable."
 _INVALID_CAPABILITY = "Background script capability is invalid."
 _REVOKED_CAPABILITY = "Background script capability has been revoked."
 _CALLS_NOT_ACCEPTED = "Background script run cannot accept new calls."
+_GRANT_NOT_GRANTED = "Requested script tool grant was not granted at launch."
 _RECEIPT_NOT_SERIALIZABLE = "Script call receipt must be JSON serializable."
 _TERMINAL_RUN_STATES = frozenset(
     {
@@ -123,17 +126,20 @@ class ScriptRunStore:
         if run.state is not ScriptRunState.STARTING:
             msg = "A new script run must begin in the starting state."
             raise ScriptRunStoreError(msg)
+        if run.entity_kind is not ScriptRunEntityKind.AGENT:
+            msg = "Background script runs must be agent-owned."
+            raise ScriptRunStoreError(msg)
         with self._write_transaction() as connection:
             try:
                 connection.execute(
                     """
                     INSERT INTO script_runs (
-                        run_id, agent_name, owner_user_id, room_id, thread_root_event_id,
+                        run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash,
                         worker_id, supervisor_handle, local_unsafe, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
                         cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -217,7 +223,7 @@ class ScriptRunStore:
                 return ScriptCallClaim(call=existing_call, created=False)
 
             run_row = connection.execute(
-                "SELECT state, cancel_requested_at FROM script_runs WHERE run_id = ?",
+                "SELECT state, cancel_requested_at, grants_json FROM script_runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
             if run_row is None:
@@ -227,6 +233,8 @@ class ScriptRunStore:
                 ScriptRunState.RUNNING,
             }:
                 raise ScriptCapabilityError(_CALLS_NOT_ACCEPTED)
+            if grant not in _grants_from_json(str(run_row["grants_json"])):
+                raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
             now = _utc_now()
             connection.execute(
                 """
@@ -294,7 +302,7 @@ class ScriptRunStore:
                 raise ScriptCallNotFoundError(call_id)
             existing = _call_from_row(row)
             if existing.state in _TERMINAL_CALL_STATES:
-                if existing.state is state and existing.result == result and existing.error == error:
+                if existing.state is state and str(row["receipt_json"]) == receipt_json:
                     return existing
                 msg = f"Script call '{call_id}' already has a terminal receipt."
                 raise ScriptCallConflictError(msg)
@@ -307,7 +315,8 @@ class ScriptRunStore:
                 """,
                 (state.value, receipt_json, now, run_id, call_id),
             )
-        return replace(existing, state=state, result=result, error=error, updated_at=now)
+        stored_result, stored_error = _receipt_values(receipt_json)
+        return replace(existing, state=state, result=stored_result, error=stored_error, updated_at=now)
 
     def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:  # noqa: Vulture
         """Durably revoke a run before any cancellation signal is sent."""
@@ -340,6 +349,7 @@ class ScriptRunStore:
         error: str | None = None,
     ) -> ScriptRunRecord:
         """Validate and atomically apply one durable run-state transition."""
+        _validate_run_error(error)
         with self._write_transaction() as connection:
             row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
@@ -365,6 +375,11 @@ class ScriptRunStore:
                 exit_code=exit_code if exit_code is not None else run.exit_code,
                 error=error if error is not None else run.error,
             )
+            if run.state in _TERMINAL_RUN_STATES:
+                if updated == run:
+                    return run
+                msg = f"Terminal script run '{run_id}' cannot be mutated."
+                raise ScriptRunStoreError(msg)
             connection.execute(
                 """
                 UPDATE script_runs
@@ -418,6 +433,7 @@ _SCHEMA_STATEMENTS = (
                 CREATE TABLE IF NOT EXISTS script_runs (
                     run_id TEXT PRIMARY KEY,
                     agent_name TEXT NOT NULL,
+                    entity_kind TEXT NOT NULL CHECK (entity_kind = 'agent'),
                     owner_user_id TEXT NOT NULL,
                     room_id TEXT NOT NULL,
                     thread_root_event_id TEXT,
@@ -478,6 +494,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
     return (
         run.run_id,
         run.agent_name,
+        run.entity_kind.value,
         run.owner_user_id,
         run.room_id,
         run.thread_root_event_id,
@@ -504,17 +521,16 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
 
 
 def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
-    grants_value = json.loads(str(row["grants_json"]))
     execution_identity = json.loads(str(row["execution_identity_json"]))
-    grants = tuple(ScriptToolGrant(str(pair[0]), str(pair[1])) for pair in grants_value)
     return ScriptRunRecord(
         run_id=str(row["run_id"]),
         agent_name=str(row["agent_name"]),
         owner_user_id=str(row["owner_user_id"]),
         room_id=str(row["room_id"]),
         source_digest=str(row["source_digest"]),
-        grants=grants,
+        grants=_grants_from_json(str(row["grants_json"])),
         token_hash=str(row["token_hash"]),
+        entity_kind=ScriptRunEntityKind(str(row["entity_kind"])),
         thread_root_event_id=_nullable_string(row["thread_root_event_id"]),
         execution_identity=cast("dict[str, object]", execution_identity),
         worker_id=_nullable_string(row["worker_id"]),
@@ -536,9 +552,7 @@ def _call_from_row(row: sqlite3.Row) -> ScriptCallRecord:
     result: object | None = None
     error: object | None = None
     if row["receipt_json"] is not None:
-        receipt = cast("dict[str, object]", json.loads(str(row["receipt_json"])))
-        result = receipt.get("result")
-        error = receipt.get("error")
+        result, error = _receipt_values(str(row["receipt_json"]))
     return ScriptCallRecord(
         run_id=str(row["run_id"]),
         call_id=str(row["call_id"]),
@@ -561,6 +575,22 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
         msg = f"Script call receipt exceeds the {_MAX_RECEIPT_BYTES}-byte limit."
         raise ScriptRunStoreError(msg)
     return serialized
+
+
+def _receipt_values(receipt_json: str) -> tuple[object | None, object | None]:
+    receipt = cast("dict[str, object]", json.loads(receipt_json))
+    return receipt.get("result"), receipt.get("error")
+
+
+def _grants_from_json(grants_json: str) -> tuple[ScriptToolGrant, ...]:
+    pairs = json.loads(grants_json)
+    return tuple(ScriptToolGrant(str(pair[0]), str(pair[1])) for pair in pairs)
+
+
+def _validate_run_error(error: str | None) -> None:
+    if error is not None and len(error.encode("utf-8")) > _MAX_RUN_ERROR_BYTES:
+        msg = f"Script run error exceeds the {_MAX_RUN_ERROR_BYTES}-byte limit."
+        raise ScriptRunStoreError(msg)
 
 
 def _nullable_string(value: object) -> str | None:

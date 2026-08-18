@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.constants import RuntimePaths
-from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptRunState, ScriptToolGrant
-from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
+from mindroom.script_runs.models import (
+    ScriptCallState,
+    ScriptRunEntityKind,
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+)
+from mindroom.script_runs.store import (
+    ScriptCallConflictError,
+    ScriptCapabilityError,
+    ScriptRunStore,
+    ScriptRunStoreError,
+    mint_script_capability,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,6 +94,82 @@ def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths:
             grant=ScriptToolGrant("website", "read_url"),
             arguments_digest="digest-b",
         )
+
+
+@pytest.mark.parametrize("entity_kind", [ScriptRunEntityKind.TEAM, ScriptRunEntityKind.ROUTER])
+def test_run_store_rejects_non_agent_owned_run(
+    runtime_paths: RuntimePaths,
+    entity_kind: ScriptRunEntityKind,
+) -> None:
+    """Team and router records cannot enter the agent-only durable store."""
+    store = ScriptRunStore(runtime_paths)
+    non_agent_run = replace(_new_run(), entity_kind=entity_kind)
+
+    with pytest.raises(ScriptRunStoreError, match="agent-owned"):
+        store.create_run(non_agent_run)
+
+
+def test_run_store_rejects_call_grant_outside_launch_snapshot(runtime_paths: RuntimePaths) -> None:
+    """A durable call cannot expand its run's captured grant surface."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+
+    with pytest.raises(ScriptCapabilityError, match="not granted"):
+        store.claim_call(
+            run_id="run-1",
+            call_id="call-1",
+            grant=ScriptToolGrant("shell", "run_shell_command"),
+            arguments_digest="digest-a",
+        )
+
+    assert store.get_run("run-1").call_count == 0
+
+
+def test_run_store_replays_equivalent_serialized_terminal_receipt(runtime_paths: RuntimePaths) -> None:
+    """Retries compare the durable JSON receipt rather than Python container types."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.claim_call(
+        run_id="run-1",
+        call_id="call-1",
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest="digest-a",
+    )
+
+    first = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result=("page body",),
+    )
+    duplicate = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result=["page body"],
+    )
+
+    assert first == duplicate
+    assert duplicate.result == ["page body"]
+
+
+def test_run_store_rejects_terminal_run_mutation(runtime_paths: RuntimePaths) -> None:
+    """A terminal lifecycle record cannot change mutable process details."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.transition_run("run-1", state=ScriptRunState.FAILED, error="initial failure")
+
+    with pytest.raises(ScriptRunStoreError, match=r"(?i)terminal"):
+        store.transition_run("run-1", state=ScriptRunState.FAILED, error="rewritten failure")
+
+
+def test_run_store_rejects_oversized_run_error(runtime_paths: RuntimePaths) -> None:
+    """Run error text is bounded before it becomes durable control state."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+
+    with pytest.raises(ScriptRunStoreError, match="error exceeds"):
+        store.transition_run("run-1", state=ScriptRunState.FAILED, error="x" * (128 * 1024))
 
 
 def test_run_store_rejects_terminal_run_transition(runtime_paths: RuntimePaths) -> None:

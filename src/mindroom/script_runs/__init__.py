@@ -1,6 +1,14 @@
 """Primary-owned durable background script runtime state."""
 
-from .models import ScriptCallClaim, ScriptCallRecord, ScriptCallState, ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from .models import (
+    ScriptCallClaim,
+    ScriptCallRecord,
+    ScriptCallState,
+    ScriptRunEntityKind,
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+)
 from .store import (
     ScriptCallConflictError,
     ScriptCallNotFoundError,
@@ -18,6 +26,7 @@ __all__ = [
     "ScriptCallRecord",
     "ScriptCallState",
     "ScriptCapabilityError",
+    "ScriptRunEntityKind",
     "ScriptRunNotFoundError",
     "ScriptRunRecord",
     "ScriptRunState",

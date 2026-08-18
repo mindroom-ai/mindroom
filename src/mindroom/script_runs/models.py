@@ -29,6 +29,14 @@ class ScriptCallState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ScriptRunEntityKind(StrEnum):
+    """Kinds of runtime entity that may request a background script run."""
+
+    AGENT = "agent"
+    TEAM = "team"
+    ROUTER = "router"  # noqa: Vulture
+
+
 @dataclass(frozen=True, slots=True)
 class ScriptToolGrant:
     """One permitted toolkit/function pair captured at script launch."""
@@ -48,6 +56,7 @@ class ScriptRunRecord:
     source_digest: str
     grants: tuple[ScriptToolGrant, ...]
     token_hash: str
+    entity_kind: ScriptRunEntityKind = ScriptRunEntityKind.AGENT
     thread_root_event_id: str | None = None
     execution_identity: dict[str, object] = field(default_factory=dict)
     worker_id: str | None = None
