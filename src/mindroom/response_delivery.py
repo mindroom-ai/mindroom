@@ -475,15 +475,19 @@ class ResponseDelivery:
 
     async def _finish_flush(self, turn_id: str, outcome: _FlushOutcome) -> str | None:
         """Run post-lock bookkeeping and return the visible event."""
-        if (
-            outcome.publish_committed_terminal
-            and outcome.event_id is not None
-            and self.terminal_turn_committed is not None
-        ):
-            await self.terminal_turn_committed(turn_id, outcome.event_id)
+        event_id = outcome.event_id
+        terminal_turn_committed = self.terminal_turn_committed
+        if outcome.publish_committed_terminal and event_id is not None and terminal_turn_committed is not None:
+
+            async def publish_committed_terminal() -> None:
+                await terminal_turn_committed(turn_id, event_id)
+
+            await run_coroutine_until_complete(
+                publish_committed_terminal(),
+            )
         if outcome.propagate_cancellation is not None:
             raise outcome.propagate_cancellation
-        return outcome.event_id
+        return event_id
 
     def _terminal_turn(self, turn_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.

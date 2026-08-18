@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     )
     from mindroom.event_journal.backend import Transaction
     from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.turn_store import TurnStore
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -133,6 +134,17 @@ def _gateway(
             terminal_turn_committed=terminal_turn_committed,
         ),
     )
+
+
+def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnStore) -> AgentBot:
+    """Return the minimal real proof owner used by delivery integration tests."""
+    bot = object.__new__(AgentBot)
+    bot._journal_store = journal_store
+    bot._journal_principal_id = "agent@alice"
+    bot._turn_store = turn_store
+    bot._response_recovery_diagnostic_classes = set()
+    bot.logger = MagicMock()
+    return bot
 
 
 class TestTurnDeliveryGoesThroughTheOutbox:
@@ -1770,10 +1782,7 @@ class TestTurnDeliverySerialization:
             terminal_turn_committed=turn_store.publish_committed_response,
             turn_handoff=handoff,
         )
-        bot = object.__new__(AgentBot)
-        bot._journal_store = journal_store
-        bot._journal_principal_id = "agent@alice"
-        bot._turn_store = turn_store
+        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -1806,6 +1815,110 @@ class TestTurnDeliverySerialization:
             )
             is True
         )
+        assert response_task.cancelled()
+        stored = await alice.load_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == response_event_id
+        completed_turn = turn_store.get_turn_record(source_event_id)
+        assert completed_turn is not None
+        assert completed_turn.completed
+        assert completed_turn.response_event_id == response_event_id
+
+    async def test_process_shutdown_finishes_terminal_publication_across_second_cancel(
+        self,
+        tmp_path: Path,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A repeated shutdown cancel cannot strand memory behind the atomic ack."""
+        source_event_id = "$source"
+        response_event_id = "$answer"
+        turn = TurnRecord.create([source_event_id], completed=False)
+        turn_store = await _store(journal_store, agent_name="agent")
+        await turn_store.record_pending_turn(turn)
+        await alice.admit(
+            InboundEvent(
+                event_id=source_event_id,
+                room_id=_ROOM_ID,
+                thread_id=source_event_id,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1_000,
+                source={
+                    "event_id": source_event_id,
+                    "content": {"msgtype": "m.text", "body": "question"},
+                },
+            ),
+        )
+        handoff = TurnHandoff(
+            sources_for_turn=lambda turn_id: turn.source_event_ids if turn_id == source_event_id else (),
+            released=lambda _source_event_ids: None,
+        )
+        publication_started = asyncio.Event()
+        allow_publication = asyncio.Event()
+
+        async def publish_committed_response(turn_id: str, event_id: str) -> None:
+            publication_started.set()
+            await allow_publication.wait()
+            await turn_store.publish_committed_response(turn_id, event_id)
+
+        gateway = _gateway(
+            tmp_path,
+            alice,
+            terminal_turn_for=turn_store.terminal_turn_record,
+            terminal_turn_committed=publish_committed_response,
+            turn_handoff=handoff,
+        )
+        bot = _response_recovery_bot(journal_store, turn_store)
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+
+        async def send(_delivery: OutboxDelivery) -> str:
+            send_started.set()
+            await finish_send.wait()
+            return response_event_id
+
+        delivery = gateway._response_delivery(send, handoff=handoff)
+        runner = ResponseRunner(deps=MagicMock())
+        response_task = runner.track_inbox_response(
+            delivery.deliver(
+                turn_id=source_event_id,
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=source_event_id,
+                payload={"msgtype": "m.text", "body": "answer"},
+            ),
+            name="test_process_shutdown_repeated_cancel_after_final_ack",
+            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        )
+        await send_started.wait()
+        original_request_task_cancel = request_task_cancel
+        cancellation_count = 0
+
+        def cancel_and_release_publication(task: asyncio.Task[None], **kwargs: object) -> None:
+            nonlocal cancellation_count
+            cancellation_count += 1
+            original_request_task_cancel(task, **kwargs)  # type: ignore[arg-type]
+            if cancellation_count == 2:
+                allow_publication.set()
+
+        with patch(
+            "mindroom.response_runner.request_task_cancel",
+            side_effect=cancel_and_release_publication,
+        ):
+            runner.begin_process_shutdown()
+            finish_send.set()
+            await publication_started.wait()
+            assert (
+                await runner.drain_inbox_responses(
+                    cancel_after_seconds=0.05,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                )
+                is True
+            )
+
+        assert cancellation_count >= 2
         assert response_task.cancelled()
         stored = await alice.load_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL)
         assert stored is not None
@@ -1859,10 +1972,7 @@ class TestTurnDeliverySerialization:
             terminal_turn_committed=turn_store.publish_committed_response,
             turn_handoff=handoff,
         )
-        bot = object.__new__(AgentBot)
-        bot._journal_store = journal_store
-        bot._journal_principal_id = "agent@alice"
-        bot._turn_store = turn_store
+        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
