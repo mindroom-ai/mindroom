@@ -75,12 +75,7 @@ from mindroom.response_terminal import (
     TerminalFailureStatus,
     build_terminal_stream_transport_outcome,
 )
-from mindroom.response_turn import (
-    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
-    CompletedApprovalRun,
-    PausedAttempt,
-    ResponsePausedForApproval,
-)
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -184,13 +179,14 @@ def _merge_response_extra_content(
 
 
 def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> PausedAttempt:
-    """Attach the last transport-committed body and trace to an approval pause."""
+    """Attach only the response state acknowledged before the stream suspended."""
     if error.presentation is None:
         return error.paused
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
         tool_trace=error.presentation.tool_trace,
+        response_presentation_state=error.presentation.state or {},
     )
 
 
@@ -847,7 +843,6 @@ class ResponseRunner:
             show_tool_calls = self._show_tool_calls()
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
-            snapshot_tool_trace = visible_tool_trace if snapshot_text else ()
             visible_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery_kind: Literal["sent", "edited"] | None = None
@@ -865,7 +860,7 @@ class ResponseRunner:
                 )
                 delivery_kind = "sent"
                 final_visible_body = visible_text
-            elif (approval_pending or bool(paused.response_text)) and not await self.deps.delivery_gateway.edit_text(
+            elif (approval_pending or bool(snapshot_text)) and not await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
                     target=target,
                     event_id=response_event_id,
@@ -875,7 +870,7 @@ class ResponseRunner:
                 ),
             ):
                 response_event_id = None
-            elif approval_pending or bool(paused.response_text):
+            elif approval_pending or bool(snapshot_text):
                 delivery_kind = "edited"
                 final_visible_body = visible_text
             if response_event_id is None:
@@ -900,7 +895,9 @@ class ResponseRunner:
                     calls=plan.calls,
                     state=continuation_state,
                     response_text=snapshot_text,
-                    response_tool_trace=serialize_tool_trace(snapshot_tool_trace, include_tool_call_ids=True),
+                    response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+                    response_presentation_state=paused.response_presentation_state,
+                    show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
@@ -982,7 +979,7 @@ class ResponseRunner:
         )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
-            show_tool_calls = self._show_tool_calls(claimed.entity_name)
+            show_tool_calls = claimed.show_tool_calls
             visible_tool_trace = tool_trace if show_tool_calls else []
             return (
                 await self.deps.delivery_gateway.deliver_final(
@@ -1005,19 +1002,11 @@ class ResponseRunner:
                 ),
                 current,
             )
-        show_tool_calls = self._show_tool_calls(claimed.entity_name)
-        visible_tool_trace = (
-            tuple(result.tool_trace) or tuple(deserialize_tool_trace(claimed.response_tool_trace))
-            if show_tool_calls
-            else ()
-        )
         presentation = await self._approval_responses.advance_pause(
             claimed,
             result,
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
-            tool_trace=visible_tool_trace,
-            response_tool_trace=serialize_tool_trace(visible_tool_trace, include_tool_call_ids=True),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -1145,7 +1134,7 @@ class ResponseRunner:
             interactive_metadata = InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
         body = semantic_body if isinstance(semantic_body, str) else visible.get("body")
         if not isinstance(body, str):
-            body = APPROVAL_CONTINUATION_COMPLETED_NOTICE
+            body = "Tool approval continuation completed"
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=event_id,
@@ -1435,7 +1424,6 @@ class ResponseRunner:
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
-        show_tool_calls = self._show_tool_calls(continuation.entity_name)
         with approval_receipt_context(build_approval_receipt(continuation.calls)):
             if continuation.entity_kind == "team":
 
@@ -1464,10 +1452,11 @@ class ResponseRunner:
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
-                        tool_trace_collector=tool_trace_collector,
-                        show_tool_calls=show_tool_calls,
                         prior_response_text=continuation.response_text,
                         prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+                        prior_presentation_state=continuation.response_presentation_state or None,
+                        show_tool_calls=continuation.show_tool_calls,
+                        tool_trace_collector=tool_trace_collector,
                     )
 
                 async with typing_indicator(self._client(), continuation.room_id):
@@ -1483,7 +1472,6 @@ class ResponseRunner:
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     tool_trace_collector=tool_trace_collector,
-                    show_tool_calls=show_tool_calls,
                 )
         return response_text
 
@@ -3349,7 +3337,6 @@ class ResponseRunner:
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
-                                    show_tool_calls=show_tool_calls,
                                 )
 
                             try:

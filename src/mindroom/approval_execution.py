@@ -8,7 +8,13 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
@@ -19,31 +25,21 @@ from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
-    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
     CompletedApprovalRun,
     PausedAttempt,
     apply_exact_approval_decisions,
     paused_attempt_from_response,
-    reconciled_tool_count,
-    resolve_approval_response_content,
-    response_content_text,
-    stable_assistant_message_ids,
 )
-from mindroom.tool_system.events import (
-    deserialize_tool_trace,
-    enrich_tool_executions_from_assistant_calls,
-    format_assistant_tool_transcript,
-    merge_tool_executions_for_presentation,
-    reconcile_tool_presentation,
-)
+from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
     import nio
-    from agno.models.response import ToolExecution
+    from agno.agent import Agent
+    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -55,49 +51,57 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _approval_response_presentation(
-    response: RunOutput,
-    paused: PausedAttempt | None,
-    *,
+async def _collect_agent_continuation(
+    events: AsyncIterator[object],
+    presentation: CollectedStreamPresentation,
+) -> RunOutput:
+    """Collect one ordered continuation stream and return its terminal run."""
+    response: RunOutput | None = None
+    async for event in events:
+        if isinstance(event, RunOutput):
+            response = event
+        elif isinstance(event, RunContentEvent):
+            presentation.append_text(event.content)
+        elif isinstance(event, RunCompletedEvent) and event.content is not None:
+            presentation.canonical_final_body_candidate = str(event.content)
+        elif isinstance(event, ToolCallStartedEvent):
+            presentation.start_tool(event.tool)
+        elif isinstance(event, ToolCallCompletedEvent):
+            presentation.complete_tool(event.tool)
+    if response is None:
+        msg = "Agent continuation did not yield its final run"
+        raise RuntimeError(msg)
+    for tool in response.tools or ():
+        if not tool.is_paused:
+            presentation.complete_tool(tool)
+    return response
+
+
+async def _continue_persisted_agent(
+    agent: Agent,
     continuation: ApprovalContinuation,
-    requirement_tools: Sequence[ToolExecution] = (),
-    prior_message_ids: set[str] | frozenset[str] = frozenset(),
-    show_tool_calls: bool,
-) -> tuple[str, list[ToolTraceEntry], list[ToolExecution]]:
-    """Reconcile one continued agent run with its durable visible snapshot."""
-    presentation_tools = merge_tool_executions_for_presentation(
-        enrich_tool_executions_from_assistant_calls(response.messages or (), response.tools or ()),
-        requirement_tools,
-        paused.tools if paused is not None else (),
+    persisted: RunOutput,
+    requirements: list[RunRequirement],
+) -> tuple[RunOutput, CollectedStreamPresentation]:
+    """Resume a persisted agent with event streaming so presentation order is retained."""
+    events = agent.acontinue_run(
+        run_id=continuation.run_id,
+        requirements=requirements,
+        session_id=continuation.session_id,
+        user_id=continuation.requester_id,
+        metadata=deepcopy(persisted.metadata),
+        stream=True,
+        stream_events=True,
+        yield_run_output=True,
     )
-    pending_tool_call_ids = (
-        {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=continuation.show_tool_calls,
+        response_text=continuation.response_text,
+        tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+        track_hidden_tools=True,
     )
-    prior_tool_trace = deserialize_tool_trace(continuation.response_tool_trace)
-    skipped_message_ids = prior_message_ids if continuation.response_text else frozenset()
-    current_text, current_tool_trace = format_assistant_tool_transcript(
-        response.messages or (),
-        presentation_tools,
-        pending_tool_call_ids=pending_tool_call_ids,
-        start_index=len(prior_tool_trace) + 1,
-        show_tool_calls=show_tool_calls,
-        skip_message_ids=skipped_message_ids,
-    )
-    current_text = resolve_approval_response_content(
-        response,
-        current_text,
-        terminal_content=response_content_text(response.content),
-    )
-    response_text, response_tool_trace = reconcile_tool_presentation(
-        prior_text=continuation.response_text,
-        prior_tool_trace=prior_tool_trace,
-        current_text=current_text,
-        current_tool_trace=current_tool_trace,
-        tools=presentation_tools,
-        pending_tool_call_ids=pending_tool_call_ids,
-        show_tool_calls=show_tool_calls,
-    )
-    return response_text, response_tool_trace, presentation_tools
+    response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
+    return response, presentation
 
 
 @dataclass(frozen=True)
@@ -120,7 +124,6 @@ class AgentApprovalExecution:
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
-        show_tool_calls: bool = True,
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
         config = self.config()
@@ -171,30 +174,23 @@ class AgentApprovalExecution:
             if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
-            prior_message_ids = stable_assistant_message_ids(persisted.messages or ())
             requirements = apply_exact_approval_decisions(
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
                 denial_reasons=denial_reasons,
             )
 
-            async def continue_run() -> RunOutput:
-                result = agent.acontinue_run(
-                    run_id=continuation.run_id,
-                    requirements=requirements,
-                    session_id=continuation.session_id,
-                    user_id=continuation.requester_id,
-                    metadata=deepcopy(persisted.metadata),
-                    stream=False,
-                )
-                return await cast("Awaitable[RunOutput]", result)
-
             async with typing_indicator(self.client(), continuation.room_id):
-                response = await self.tool_runtime.run_in_context(
+                response, presentation = await self.tool_runtime.run_in_context(
                     tool_context=runtime_context_from_dispatch_context(tool_dispatch),
                     operation=lambda: run_with_tool_execution_identity(
                         tool_dispatch.execution_identity,
-                        operation=continue_run,
+                        operation=lambda: _continue_persisted_agent(
+                            agent,
+                            continuation,
+                            persisted,
+                            requirements,
+                        ),
                     ),
                 )
         finally:
@@ -220,28 +216,19 @@ class AgentApprovalExecution:
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
         )
-        response_text, response_tool_trace, presentation_tools = _approval_response_presentation(
-            response,
-            paused,
-            continuation=continuation,
-            requirement_tools=[
-                requirement.tool_execution for requirement in requirements if requirement.tool_execution is not None
-            ],
-            prior_message_ids=prior_message_ids,
-            show_tool_calls=show_tool_calls,
-        )
         if paused is not None:
             return replace(
                 paused,
-                response_text=response_text,
-                tool_trace=tuple(response_tool_trace),
+                response_text=presentation.final_text(),
+                tool_trace=tuple(presentation.tool_trace),
             )
         if response.status != RunStatus.completed:
             raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-        tool_trace_collector.extend(response_tool_trace)
+        if continuation.show_tool_calls:
+            tool_trace_collector.extend(presentation.tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(
-            response_text=response_text or str(response.content or APPROVAL_CONTINUATION_COMPLETED_NOTICE),
+            response_text=presentation.final_text() or str(response.content or "Tool approval continuation completed"),
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,
@@ -251,6 +238,6 @@ class AgentApprovalExecution:
                 model=response.model,
                 model_provider=response.model_provider,
                 metrics=response.metrics,
-                tool_count=reconciled_tool_count(presentation_tools, response_tool_trace),
+                tool_count=len(response.tools or ()),
             ),
         )

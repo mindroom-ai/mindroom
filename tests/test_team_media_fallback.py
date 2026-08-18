@@ -31,7 +31,6 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
-from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
 from agno.tools.function import Function
@@ -71,7 +70,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -80,10 +79,10 @@ from mindroom.team_exact_members import (
 )
 from mindroom.teams import (
     TeamMode,
-    _continued_team_approval_presentation,
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
+    _TeamStreamPresentation,
     build_materialized_team_instance,
     continue_paused_team_run,
     materialize_exact_team_members,
@@ -92,7 +91,6 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
@@ -110,6 +108,78 @@ if TYPE_CHECKING:
 _TEST_MODEL = "openai:gpt-5.4"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+def test_team_stream_presentation_resumes_exact_order_without_parsing_markdown() -> None:
+    """A continuation restores structured slots and matches tools only by their stable IDs."""
+    first_start = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"query": "same"},
+    )
+    presentation = _TeamStreamPresentation.new(["GeneralAgent"], show_tool_calls=True)
+    presentation.append_member("GeneralAgent", "Before.\n\n🔧 `authored` [99] ⏳")
+    presentation.start_member_tool("GeneralAgent", first_start)
+
+    restored = _TeamStreamPresentation.restore(
+        display_names=["GeneralAgent"],
+        show_tool_calls=True,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+        prior_response_text=presentation.render_body(),
+    )
+    restored.complete_member_tool(
+        "GeneralAgent",
+        ToolExecution(
+            tool_call_id="call-1",
+            tool_name="inspect",
+            tool_args={"query": "same"},
+            result="first result",
+        ),
+    )
+    restored.append_member("GeneralAgent", "\n\nAfter.")
+    restored.start_member_tool(
+        "GeneralAgent",
+        ToolExecution(
+            tool_call_id="call-2",
+            tool_name="inspect",
+            tool_args={"query": "same"},
+        ),
+    )
+
+    body = restored.render_body()
+    assert body.index("Before.") < body.index("🔧 `inspect` [1]") < body.index("After.")
+    assert body.index("After.") < body.index("🔧 `inspect` [2] ⏳")
+    assert "🔧 `authored` [99] ⏳" in body
+    assert [entry.tool_call_id for entry in restored.tool_trace] == ["call-1", "call-2"]
+    assert [entry.type for entry in restored.tool_trace] == ["tool_call_completed", "tool_call_started"]
+
+
+def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -> None:
+    """Frozen hidden rendering keeps restart identity without adding markers to the body."""
+    presentation = _TeamStreamPresentation.new(["GeneralAgent"], show_tool_calls=False)
+    presentation.append_member("GeneralAgent", "Before.")
+    presentation.start_member_tool(
+        "GeneralAgent",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}),
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        display_names=["GeneralAgent"],
+        show_tool_calls=False,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+        prior_response_text=presentation.render_body(),
+    )
+    restored.complete_member_tool(
+        "GeneralAgent",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"),
+    )
+    restored.append_member("GeneralAgent", " After.")
+
+    assert "🔧" not in restored.render_body()
+    assert restored.tool_trace[0].tool_call_id == "call-1"
+    assert restored.tool_trace[0].type == "tool_call_completed"
 
 
 def _make_test_agent(name: str) -> AgnoAgent:
@@ -429,6 +499,17 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
+    prior = _TeamStreamPresentation.new([], show_tool_calls=True)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(
+            tool_call_id=tool_call_id,
+            tool_name=requirement.tool_execution.tool_name,
+            tool_args=requirement.tool_execution.tool_args,
+        ),
+    )
+    collected_trace = []
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     members = ResolvedExactTeamMembers(
@@ -450,7 +531,6 @@ async def test_team_continuation_executes_real_agno_confirmation(
     persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
     storage_factory = MagicMock()
     scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
-    tool_trace: list[ToolTraceEntry] = []
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
@@ -479,769 +559,36 @@ async def test_team_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
-            tool_trace_collector=tool_trace,
+            prior_response_text=prior.render_body(),
+            prior_tool_trace=prior.tool_trace,
+            prior_presentation_state=prior.to_state(),
+            show_tool_calls=True,
+            tool_trace_collector=collected_trace,
         )
 
     assert isinstance(result, CompletedApprovalRun)
-    marker = "🔧 `run_shell_command` [1]"
-    assert str(paused.content) in result.response_text
-    assert result.response_text.count(marker) == 1
-    assert result.response_text.index(str(paused.content)) < result.response_text.index(marker)
-    assert [entry.tool_name for entry in tool_trace] == ["run_shell_command"]
     assert AI_RUN_METADATA_KEY in result.metadata_content
     assert bool(executed) is approved
     assert observed_metadata == ([original_metadata] if approved else [])
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
     assert continue_run.call_args.kwargs["metadata"] == original_metadata
     assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
+    assert continue_run.call_args.kwargs["stream"] is True
+    assert continue_run.call_args.kwargs["stream_events"] is True
+    assert continue_run.call_args.kwargs["yield_run_output"] is True
     assert continued_requirement.tool_execution is not None
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
     assert open_scope.call_args.kwargs["scope"] == persisted_scope
+    assert result.response_text.index("Before approval.") < result.response_text.index("🔧 `run_shell_command` [1]")
+    assert collected_trace[0].tool_call_id == tool_call_id
+    assert collected_trace[0].type == "tool_call_completed"
     register_notice.assert_called_once_with(
         storage_factory=storage_factory,
         session_id="session-1",
         session_type=SessionType.TEAM,
         entity_name="research",
     )
-
-
-def test_team_continuation_reconciles_restart_snapshot_without_member_responses() -> None:
-    """A restarted team must retain member output when Agno stores only the leader continuation."""
-    completed_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        tool_args={"path": "report.txt"},
-        result="details",
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        content="Final consensus.",
-        tools=[completed_tool],
-        member_responses=[
-            RunOutput(
-                run_id="member-run-1",
-                agent_name="GeneralAgent",
-                content="Prior analysis.",
-                messages=[Message(id="member-message-before-pause", role="assistant", content="Prior analysis.")],
-            ),
-        ],
-    )
-    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Prior analysis.\n\n🔧 `inspect` [1] ⏳"
-    prior_trace = [
-        ToolTraceEntry(
-            type="tool_call_started",
-            tool_name="inspect",
-            args_preview="path=report.txt",
-            tool_call_id="call-1",
-        ),
-    ]
-
-    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[completed_tool],
-        paused=None,
-        prior_response_text=prior_text,
-        prior_tool_trace=prior_trace,
-        prior_message_ids={"member-message-before-pause"},
-        show_tool_calls=True,
-    )
-
-    assert "Prior analysis." in response_text
-    assert response_text.count("Prior analysis.") == 1
-    assert response_text.count("🔧 `inspect` [1]") == 1
-    assert "🔧 `inspect` [1] ⏳" not in response_text
-    assert response_text.index("Prior analysis.") < response_text.index("🔧 `inspect` [1]")
-    assert response_text.index("🔧 `inspect` [1]") < response_text.index("Final consensus.")
-    assert presentation_tools == [completed_tool]
-    assert response_trace == [
-        ToolTraceEntry(
-            type="tool_call_completed",
-            tool_name="inspect",
-            args_preview="path=report.txt",
-            result_preview="details",
-            tool_call_id="call-1",
-        ),
-    ]
-
-
-def test_team_continuation_does_not_repeat_skipped_consensus_fallback() -> None:
-    """Completed aggregate content must not re-add a consensus message already in the snapshot."""
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        content="Final consensus.",
-        messages=[Message(id="consensus-before-pause", role="assistant", content="Final consensus.")],
-    )
-    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**Team Consensus**:\n\nFinal consensus."
-
-    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[],
-        paused=None,
-        prior_response_text=prior_text,
-        prior_tool_trace=[],
-        prior_message_ids={"consensus-before-pause"},
-        show_tool_calls=True,
-    )
-
-    assert response_text == prior_text
-    assert response_trace == []
-    assert presentation_tools == []
-
-
-def test_team_continuation_merges_idless_execution_with_stable_requirement() -> None:
-    """A team provider's identity loss cannot create duplicate presentation tools."""
-    provider_tool = ToolExecution(tool_name="inspect", result="details")
-    requirement_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        tool_args={"path": "report.txt"},
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        messages=[
-            Message(
-                role="assistant",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
-                    },
-                ],
-            ),
-        ],
-        tools=[provider_tool],
-    )
-
-    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[requirement_tool],
-        paused=None,
-        prior_response_text="",
-        prior_tool_trace=[],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    assert response_text.count("🔧 `inspect` [1]") == 1
-    assert "🔧 `inspect` [2]" not in response_text
-    assert len(response_trace) == len(presentation_tools) == 1
-    assert response_trace[0].tool_call_id == presentation_tools[0].tool_call_id == "call-1"
-    assert response_trace[0].result_preview == presentation_tools[0].result == "details"
-
-
-@pytest.mark.asyncio
-async def test_completed_hidden_tool_only_team_continuation_has_neutral_text() -> None:
-    """A completed continuation remains deliverable when its only output is hidden."""
-    config = _build_test_config()
-    runtime_paths = runtime_paths_for(config)
-    paused_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        requires_confirmation=True,
-    )
-    requirement = RunRequirement(paused_tool)
-    persisted = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        requirements=[requirement],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")],
-    )
-    session = TeamSession(session_id="session-1", team_id="research", runs=[persisted])
-    team = MagicMock()
-    team.db = None
-    team.model = None
-    team.aget_session = AsyncMock(return_value=session)
-    team.acontinue_run = AsyncMock(return_value=continued)
-    members = ResolvedExactTeamMembers(
-        requested_agent_names=[],
-        agents=[],
-        display_names=[],
-        materialized_agent_names=set(),
-        failed_agent_names=[],
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="research",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-
-    with (
-        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-        patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
-        ),
-        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-        patch("mindroom.teams.close_team_runtime_state_dbs"),
-    ):
-        result = await continue_paused_team_run(
-            member_names=(),
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=identity,
-            session_id="session-1",
-            run_id="run-1",
-            user_id="@user:localhost",
-            configured_team_name="research",
-            model_name="default",
-            decisions={"call-1": True},
-            denial_reasons={"call-1": None},
-            refresh_scheduler=None,
-            show_tool_calls=False,
-        )
-
-    assert isinstance(result, CompletedApprovalRun)
-    assert result.response_text == "Tool approval continuation completed"
-
-
-def test_team_continuation_omits_empty_replayed_nested_team_shell() -> None:
-    """A replayed nested team with no new output must not append headings or consensus notes."""
-    nested_member = RunOutput(
-        run_id="nested-member-run",
-        agent_name="NestedMember",
-        status=RunStatus.completed,
-        content="Prior analysis.",
-        messages=[Message(id="nested-before-pause", role="assistant", content="Prior analysis.")],
-    )
-    nested = TeamRunOutput(
-        run_id="nested-run",
-        team_name="NestedTeam",
-        status=RunStatus.completed,
-        member_responses=[nested_member],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        member_responses=[nested],
-    )
-    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**NestedTeam** (Team):\n\n  **NestedMember**: Prior analysis."
-
-    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[],
-        paused=None,
-        prior_response_text=prior_text,
-        prior_tool_trace=[],
-        prior_message_ids={"nested-before-pause"},
-        show_tool_calls=True,
-    )
-
-    assert response_text == prior_text
-    assert response_trace == []
-    assert presentation_tools == []
-
-
-def test_team_continuation_keeps_nested_team_tools_inside_nested_section() -> None:
-    """A nested leader's recovery marker follows its nested member contributions."""
-    member_tool = ToolExecution(tool_call_id="member-call", tool_name="member_tool", result="member result")
-    nested_tool = ToolExecution(tool_call_id="nested-call", tool_name="nested_tool", result="nested result")
-    nested = TeamRunOutput(
-        run_id="nested-run",
-        team_name="NestedTeam",
-        status=RunStatus.completed,
-        tools=[nested_tool],
-        member_responses=[
-            RunOutput(
-                run_id="nested-member-run",
-                agent_name="NestedMember",
-                status=RunStatus.completed,
-                content="Nested answer.",
-                messages=[Message(role="assistant", content="Nested answer.")],
-                tools=[member_tool],
-            ),
-        ],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        member_responses=[nested],
-    )
-
-    response_text, response_trace, _ = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["NestedMember"],
-        requirement_tools=[],
-        paused=None,
-        prior_response_text="",
-        prior_tool_trace=[],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    ordered_parts = ["**NestedTeam** (Team):", "🔧 `member_tool` [1]", "Nested answer.", "🔧 `nested_tool` [2]"]
-    positions = [response_text.index(part) for part in ordered_parts]
-    assert positions == sorted(positions)
-    assert [entry.tool_call_id for entry in response_trace] == ["member-call", "nested-call"]
-
-
-def test_team_continuation_recovers_member_content_after_marker_only_messages() -> None:
-    """A member's terminal content follows tool markers when its messages contain no prose."""
-    completed_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        result="details",
-    )
-    member = RunOutput(
-        run_id="member-run",
-        agent_name="GeneralAgent",
-        status=RunStatus.completed,
-        content="Final member answer.",
-        messages=[
-            Message(
-                role="assistant",
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": "{}"},
-                    },
-                ],
-            ),
-        ],
-        tools=[completed_tool],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        member_responses=[member],
-    )
-
-    response_text, response_trace, _ = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[],
-        paused=None,
-        prior_response_text="",
-        prior_tool_trace=[],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    assert "Final member answer." in response_text
-    assert response_text.index("🔧 `inspect` [1]") < response_text.index("Final member answer.")
-    assert response_trace[0].result_preview == "details"
-
-
-def test_team_continuation_starts_marker_only_member_content_on_new_line() -> None:
-    """Member labels must not hide tool markers from visibility cleanup."""
-    pending_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        requires_confirmation=True,
-    )
-    member = RunOutput(
-        run_id="member-run",
-        agent_name="GeneralAgent",
-        status=RunStatus.paused,
-        messages=[
-            Message(
-                role="assistant",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": "{}"},
-                    },
-                ],
-            ),
-        ],
-        tools=[pending_tool],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        member_responses=[member],
-    )
-    paused = PausedAttempt(session_id="session-1", run_id="run-1", tools=(pending_tool,))
-
-    response_text, response_trace, _ = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[],
-        paused=paused,
-        prior_response_text="",
-        prior_tool_trace=[],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    assert "**GeneralAgent**:\n\n🔧 `inspect` [1] ⏳" in response_text
-    assert "**GeneralAgent**: 🔧" not in response_text
-
-    completed_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
-    completed = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        content="Done.",
-        messages=[Message(role="assistant", content="Done.")],
-    )
-    hidden_text, hidden_trace, _ = _continued_team_approval_presentation(
-        completed,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[completed_tool],
-        paused=None,
-        prior_response_text=response_text,
-        prior_tool_trace=response_trace,
-        prior_message_ids=set(),
-        show_tool_calls=False,
-    )
-
-    assert "🔧" not in hidden_text
-    assert "**GeneralAgent**:" not in hidden_text
-    assert "Done." in hidden_text
-    assert hidden_trace == []
-
-
-def test_paused_team_continuation_does_not_claim_missing_consensus() -> None:
-    """A temporary approval pause cannot become a permanent no-consensus statement."""
-    pending_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        member_responses=[
-            RunOutput(
-                run_id="member-run",
-                agent_name="GeneralAgent",
-                status=RunStatus.paused,
-                content="Need approval.",
-                messages=[Message(role="assistant", content="Need approval.")],
-            ),
-        ],
-    )
-    paused = PausedAttempt(session_id="session-1", run_id="run-1", tools=(pending_tool,))
-
-    response_text, _response_trace, _ = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[],
-        paused=paused,
-        prior_response_text="",
-        prior_tool_trace=[],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    assert "Need approval." in response_text
-    assert "No team consensus" not in response_text
-
-
-def test_team_continuation_recovers_unanchored_tools_in_contribution_order() -> None:
-    """Recovery-only tool markers stay with their member and consensus prose."""
-    approved_tool = ToolExecution(tool_call_id="approved-call", tool_name="approved_tool", result="approved")
-    member_tool = ToolExecution(tool_call_id="member-call", tool_name="member_tool", result="member result")
-    leader_tool = ToolExecution(tool_call_id="leader-call", tool_name="leader_tool", result="leader result")
-    member = RunOutput(
-        run_id="member-run",
-        agent_name="GeneralAgent",
-        status=RunStatus.completed,
-        content="Member answer.",
-        messages=[Message(role="assistant", content="Member answer.")],
-        tools=[member_tool],
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.completed,
-        content="Leader consensus.",
-        messages=[Message(role="assistant", content="Leader consensus.")],
-        tools=[leader_tool],
-        member_responses=[member],
-    )
-
-    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[approved_tool],
-        paused=None,
-        prior_response_text="Before approval.\n\n🔧 `approved_tool` [1] ⏳",
-        prior_tool_trace=[
-            ToolTraceEntry(type="tool_call_started", tool_name="approved_tool", tool_call_id="approved-call"),
-        ],
-        prior_message_ids=set(),
-        show_tool_calls=True,
-    )
-
-    ordered_parts = [
-        "Before approval.",
-        "🔧 `approved_tool` [1]",
-        "**GeneralAgent**:",
-        "🔧 `member_tool` [2]",
-        "Member answer.",
-        "**Team Consensus**:",
-        "🔧 `leader_tool` [3]",
-        "Leader consensus.",
-    ]
-    positions = [response_text.index(part) for part in ordered_parts]
-    assert positions == sorted(positions)
-    assert [entry.tool_call_id for entry in response_trace] == ["approved-call", "member-call", "leader-call"]
-    assert [tool.tool_call_id for tool in presentation_tools] == ["member-call", "leader-call", "approved-call"]
-
-
-@pytest.mark.asyncio
-async def test_team_continuation_reloads_chained_member_output_after_restart() -> None:
-    """A restarted member's newly persisted prose and second pause must rejoin the outer transcript."""
-    config = _build_test_config()
-    runtime_paths = runtime_paths_for(config)
-    first_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        requires_confirmation=True,
-    )
-    first_requirement = RunRequirement(first_tool)
-    first_requirement.member_agent_id = "general"
-    first_requirement.member_agent_name = "GeneralAgent"
-    first_requirement.member_run_id = "member-run-1"
-    persisted = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        content="Team run paused. Please resolve the member requirements to continue.",
-        requirements=[first_requirement],
-        member_responses=[],
-    )
-    prior_member = RunOutput(
-        run_id="member-run-1",
-        parent_run_id="run-1",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-1",
-        status=RunStatus.paused,
-        messages=[
-            Message(
-                id="member-message-before-pause",
-                role="assistant",
-                content="Prior analysis.",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": "{}"},
-                    },
-                ],
-            ),
-        ],
-        tools=[first_tool],
-        requirements=[first_requirement],
-    )
-    second_tool = ToolExecution(
-        tool_call_id="call-2",
-        tool_name="inspect",
-        requires_confirmation=True,
-    )
-    second_requirement = RunRequirement(second_tool)
-    second_requirement.member_agent_id = "general"
-    second_requirement.member_agent_name = "GeneralAgent"
-    second_requirement.member_run_id = "member-run-1"
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        content="Team run paused. Please resolve the member requirements to continue.",
-        requirements=[second_requirement],
-        member_responses=[],
-    )
-    completed_first_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="inspect",
-        confirmed=True,
-        result="details",
-    )
-    updated_member = RunOutput(
-        run_id="member-run-1",
-        parent_run_id="run-1",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-1",
-        status=RunStatus.paused,
-        messages=[
-            *prior_member.messages,
-            Message(
-                id="member-message-second-pause",
-                role="assistant",
-                content="New finding.",
-                tool_calls=[
-                    {
-                        "id": "call-2",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": "{}"},
-                    },
-                ],
-            ),
-        ],
-        tools=[completed_first_tool, second_tool],
-        requirements=[second_requirement],
-    )
-    initial_session = TeamSession(
-        session_id="session-1",
-        team_id="research",
-        runs=[persisted, prior_member],
-    )
-    refreshed_session = TeamSession(
-        session_id="session-1",
-        team_id="research",
-        runs=[continued, updated_member],
-    )
-    team = MagicMock()
-    team.db = None
-    team.model = None
-    team.aget_session = AsyncMock(side_effect=[initial_session, refreshed_session])
-    team.acontinue_run = AsyncMock(return_value=continued)
-    members = ResolvedExactTeamMembers(
-        requested_agent_names=[],
-        agents=[],
-        display_names=["GeneralAgent"],
-        materialized_agent_names=set(),
-        failed_agent_names=[],
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="research",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Prior analysis.\n\n🔧 `inspect` [1] ⏳"
-    prior_trace = [
-        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1"),
-    ]
-
-    with (
-        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-        patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
-        ),
-        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-        patch("mindroom.teams.close_team_runtime_state_dbs"),
-    ):
-        result = await continue_paused_team_run(
-            member_names=(),
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=identity,
-            session_id="session-1",
-            run_id="run-1",
-            user_id="@user:localhost",
-            configured_team_name="research",
-            model_name="default",
-            decisions={"call-1": True},
-            denial_reasons={"call-1": None},
-            refresh_scheduler=None,
-            prior_response_text=prior_text,
-            prior_tool_trace=prior_trace,
-        )
-
-    assert isinstance(result, PausedAttempt)
-    assert result.response_text.count("Prior analysis.") == 1
-    assert result.response_text.count("New finding.") == 1
-    assert result.response_text.count("🔧 `inspect` [1]") == 1
-    assert "🔧 `inspect` [1] ⏳" not in result.response_text
-    assert result.response_text.count("🔧 `inspect` [2] ⏳") == 1
-    assert result.response_text.index("Prior analysis.") < result.response_text.index("🔧 `inspect` [1]")
-    assert result.response_text.index("🔧 `inspect` [1]") < result.response_text.index("New finding.")
-    assert result.response_text.index("New finding.") < result.response_text.index("🔧 `inspect` [2] ⏳")
-    assert "Team run paused" not in result.response_text
-
-
-@pytest.mark.parametrize("show_tool_calls", [True, False])
-def test_team_continuation_excludes_framework_pause_status(*, show_tool_calls: bool) -> None:
-    """A chained team tool-only pause must keep Agno's status summary out of the transcript."""
-    completed_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
-    pending_tool = ToolExecution(
-        tool_call_id="call-2",
-        tool_name="inspect",
-        requires_confirmation=True,
-    )
-    continued = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        status=RunStatus.paused,
-        content="Team run paused. Please resolve the member requirements to continue.",
-        messages=[
-            Message(
-                id="team-second-pause",
-                role="assistant",
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call-2",
-                        "type": "function",
-                        "function": {"name": "inspect", "arguments": "{}"},
-                    },
-                ],
-            ),
-        ],
-        tools=[completed_tool, pending_tool],
-    )
-    paused = PausedAttempt(
-        session_id="session-1",
-        run_id="run-1",
-        tools=(pending_tool,),
-    )
-    prior_text = (
-        "🤝 **Team Response** (GeneralAgent):\n\nBefore approval.\n\n🔧 `inspect` [1] ⏳"
-        if show_tool_calls
-        else "🤝 **Team Response** (GeneralAgent):\n\nBefore approval."
-    )
-    prior_trace = (
-        [ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")]
-        if show_tool_calls
-        else []
-    )
-
-    response_text, response_trace, _ = _continued_team_approval_presentation(
-        continued,
-        team_display_names=["GeneralAgent"],
-        requirement_tools=[completed_tool],
-        paused=paused,
-        prior_response_text=prior_text,
-        prior_tool_trace=prior_trace,
-        prior_message_ids=frozenset(),
-        show_tool_calls=show_tool_calls,
-    )
-
-    assert "Team run paused" not in response_text
-    if show_tool_calls:
-        assert response_text.count("🔧 `inspect` [1]") == 1
-        assert "🔧 `inspect` [1] ⏳" not in response_text
-        assert "🔧 `inspect` [2] ⏳" in response_text
-        assert [entry.type for entry in response_trace] == ["tool_call_completed", "tool_call_started"]
-    else:
-        assert response_text == prior_text
-        assert response_trace == []
 
 
 @pytest.mark.parametrize(
@@ -1418,81 +765,6 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert first_prompt[-1].audio == [audio_input]
     assert second_prompt[-1].audio is None
     assert "Inline media unavailable for this model" in second_prompt[-1].content
-
-
-@pytest.mark.parametrize("show_tool_calls", [True, False])
-@pytest.mark.asyncio
-async def test_team_response_excludes_framework_status_from_tool_only_pause(*, show_tool_calls: bool) -> None:
-    """A blocking team tool-only pause exposes only canonical messages and tool metadata."""
-    config = _build_test_config()
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.knowledge_managers = {}
-    orchestrator.agent_bots = {"general": MagicMock()}
-    paused_tool = ToolExecution(
-        tool_call_id="call-1",
-        tool_name="dangerous",
-        tool_args={"value": 1},
-        requires_confirmation=True,
-    )
-    paused_run = TeamRunOutput(
-        run_id="run-paused",
-        session_id="session-team",
-        status=RunStatus.paused,
-        content="Team run paused. Please resolve the member requirements to continue.",
-        messages=[
-            Message(
-                id="team-before-approval",
-                role="assistant",
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "dangerous", "arguments": '{"value":1}'},
-                    },
-                ],
-            ),
-        ],
-        tools=[paused_tool],
-        requirements=[RunRequirement(paused_tool)],
-    )
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=paused_run)
-    fake_agent = _make_test_agent("GeneralAgent")
-
-    with (
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        pytest.raises(ResponsePausedForApproval) as raised,
-    ):
-        await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            turn_recorder=_team_turn_recorder("Analyze this."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-team"),
-            show_tool_calls=show_tool_calls,
-        )
-
-    marker = "🔧 `dangerous` [1] ⏳"
-    assert "Team run paused" not in raised.value.paused.response_text
-    assert (marker in raised.value.paused.response_text) is show_tool_calls
-    if show_tool_calls:
-        assert raised.value.paused.tool_trace == (
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="dangerous",
-                args_preview="value=1",
-            ),
-        )
-    else:
-        assert raised.value.paused.response_text == ""
-        assert raised.value.paused.tool_trace == ()
 
 
 @pytest.mark.asyncio
@@ -3597,6 +2869,8 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Before approval.")
+        yield TeamToolCallStartedEvent(tool=tool)
         yield TeamRunPausedEvent(
             run_id="run-paused",
             session_id="session-team",
@@ -3636,6 +2910,10 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert raised.value.paused.run_id == "run-paused"
     assert raised.value.paused.tools == (tool,)
     assert raised.value.paused.team_member_model_names == (("general", "large"),)
+    assert "Before approval." in raised.value.paused.response_text
+    assert "🔧 `dangerous` [1] ⏳" in raised.value.paused.response_text
+    assert raised.value.paused.tool_trace[0].tool_call_id == "call-team-stream-approval"
+    assert raised.value.paused.response_presentation_state["kind"] == "team_stream"
 
 
 @pytest.mark.asyncio

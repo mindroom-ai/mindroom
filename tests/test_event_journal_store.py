@@ -5767,23 +5767,36 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation_for_source("$source-1") == continuation
         assert await alice.approval_continuation_for_source("$source-2") == continuation
 
-    async def test_continuation_round_trips_presentation_snapshot(self, alice: PrincipalStore) -> None:
-        """The visible transcript and trace must survive their opaque journal encoding."""
+    async def test_continuation_round_trips_committed_presentation_and_visibility(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restart restores the exact pause presentation without consulting current config."""
         await self.admit_sources(alice)
         continuation = replace(
             self.continuation(),
-            response_text="Before.\n\n🔧 `shell` [1] ⏳",
+            response_text="Before.\n\n🔧 `inspect` [1] ⏳",
             response_tool_trace=(
                 {
                     "type": "tool_call_started",
-                    "tool_name": "shell",
-                    "args_preview": "cmd=pwd",
+                    "tool_name": "inspect",
+                    "tool_call_id": "call-1",
                 },
             ),
+            response_presentation_state={"kind": "team", "members": {"GeneralAgent": "Before."}},
+            show_tool_calls=False,
         )
 
-        assert await alice.create_approval_continuation(continuation) == continuation
-        assert await alice.approval_continuation("approval-1") == continuation
+        await alice.create_approval_continuation(continuation)
+        restored = await alice.approval_continuation("approval-1")
+
+        assert restored == continuation
+        assert restored is not None
+        assert restored.response_presentation_state == {
+            "kind": "team",
+            "members": {"GeneralAgent": "Before."},
+        }
+        assert restored.show_tool_calls is False
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted Agno run."""
@@ -5925,11 +5938,15 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
-            response_text="Before.\n\n🔧 `shell` [1]\n\nAfter.\n\n🔧 `write_file` [2] ⏳",
+            response_text="Before.\n\n🔧 `write_file` [2] ⏳",
             response_tool_trace=(
-                {"type": "tool_call_completed", "tool_name": "shell", "result_preview": "ok"},
-                {"type": "tool_call_started", "tool_name": "write_file"},
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "write_file",
+                    "tool_call_id": "call-2",
+                },
             ),
+            response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
         assert stale is None
@@ -5940,10 +5957,8 @@ class TestApprovalContinuations:
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
         assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
-        assert advanced.response_tool_trace[-1] == {
-            "type": "tool_call_started",
-            "tool_name": "write_file",
-        }
+        assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
+        assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
 
     async def test_every_card_is_reserved_before_publication_activates(
         self,

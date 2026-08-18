@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
@@ -13,7 +12,7 @@ from agno.models.response import ToolExecution
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
+    from collections.abc import Mapping, Sequence
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -42,7 +41,9 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
+    # Internal continuation identity; public Matrix metadata omits this field.
     tool_call_id: str | None = field(default=None, compare=False)
+    scope_key: str | None = field(default=None, compare=False)
 
 
 @dataclass(slots=True)
@@ -51,6 +52,7 @@ class StructuredStreamChunk:
 
     content: str
     tool_trace: list[ToolTraceEntry] | None = None
+    presentation_state: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,9 @@ class StreamingToolTracker:
         tool_index: int | None = None,
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker."""
+        call_id = _streaming_tool_call_id(tool)
+        if call_id is not None and any(pending.tool_call_id == call_id for pending in self.pending_tools):
+            return "", None
         visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
         if trace_entry is not None:
             self.pending_tools.append(
@@ -85,7 +90,7 @@ class StreamingToolTracker:
                     scope_key=scope_key,
                     tool_name=trace_entry.tool_name,
                     trace_entry=trace_entry,
-                    tool_call_id=_streaming_tool_call_id(tool),
+                    tool_call_id=call_id,
                     visible_tool_index=tool_index,
                     visible_text=visible_text,
                 ),
@@ -128,6 +133,22 @@ class StreamingToolTracker:
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
         return True
 
+    def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Restore only exact pending slots from a durable presentation snapshot."""
+        for tool_index, trace_entry in enumerate(tool_trace, start=1):
+            if trace_entry.type == "tool_call_completed":
+                self.completed_tools.append(trace_entry)
+                continue
+            self.pending_tools.append(
+                _PendingStreamingTool(
+                    scope_key=trace_entry.scope_key or "",
+                    tool_name=trace_entry.tool_name,
+                    trace_entry=trace_entry,
+                    tool_call_id=trace_entry.tool_call_id,
+                    visible_tool_index=tool_index,
+                ),
+            )
+
     def _find_pending_tool_index(
         self,
         *,
@@ -138,7 +159,7 @@ class StreamingToolTracker:
         if call_id is not None:
             for pos in range(len(self.pending_tools) - 1, -1, -1):
                 pending_tool = self.pending_tools[pos]
-                if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
+                if pending_tool.tool_call_id == call_id:
                     return pos
         info = extract_tool_completed_info(tool)
         if info is None:
@@ -153,6 +174,64 @@ class StreamingToolTracker:
             ):
                 return pos
         return None
+
+
+@dataclass(slots=True)
+class CollectedStreamPresentation:
+    """Ordered stream presentation collected without incremental delivery."""
+
+    show_tool_calls: bool
+    response_text: str = ""
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    track_hidden_tools: bool = False
+    canonical_final_body_candidate: str | None = None
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+
+    def __post_init__(self) -> None:
+        """Restore pending tool identity from the durable trace."""
+        self.tool_tracker.restore_pending(self.tool_trace)
+
+    def append_text(self, content: object | None) -> None:
+        """Append one provider content delta when it is non-empty."""
+        if content:
+            self.response_text += str(content)
+
+    def start_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
+        """Record one tool start and append its marker when visible."""
+        if not self.show_tool_calls and not self.track_hidden_tools:
+            return
+        tool_index = len(self.tool_trace) + 1
+        text, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        if trace_entry is None:
+            return
+        trace_entry.scope_key = scope_key or None
+        self.tool_trace.append(trace_entry)
+        if self.show_tool_calls:
+            self.response_text += text
+
+    def complete_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
+        """Complete the exact pending slot represented by a provider event."""
+        if not self.show_tool_calls and not self.track_hidden_tools:
+            return
+        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
+        if completion is None:
+            return
+        tool_name, result, pending_tool, completed_trace = completion
+        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+            return
+        completed_trace.scope_key = scope_key or pending_tool.scope_key or None
+        if self.show_tool_calls:
+            self.response_text, _ = complete_pending_tool_block(
+                self.response_text,
+                tool_name,
+                result,
+                tool_index=pending_tool.visible_tool_index,
+            )
+        self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def final_text(self) -> str:
+        """Return collected deltas, falling back to the provider's canonical final body."""
+        return self.response_text or self.canonical_final_body_candidate or ""
 
 
 def _streaming_tool_call_id(tool: ToolExecution | None) -> str | None:
@@ -449,753 +528,6 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
-def _assistant_message_content(message: Message) -> str:
-    """Return visible text without exposing multimodal blocks as a Python repr."""
-    content = message.content
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-
-    text_parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            text_parts.append(block)
-        elif isinstance(block, Mapping):
-            text = block.get("text")
-            if isinstance(text, str):
-                text_parts.append(text)
-    return "".join(text_parts)
-
-
-@dataclass(frozen=True, slots=True)
-class _AssistantToolCall:
-    call_id: str | None
-    tool_name: str
-    tool_args: dict[str, object]
-    has_tool_args_evidence: bool
-
-
-def _assistant_tool_call(raw_call: object) -> _AssistantToolCall | None:
-    """Normalize one persisted assistant tool-call payload."""
-    if not isinstance(raw_call, Mapping):
-        return None
-    call = cast("Mapping[str, object]", raw_call)
-    call_id_value = call.get("id")
-    if not isinstance(call_id_value, str):
-        call_id_value = call.get("call_id")
-    call_id = call_id_value if isinstance(call_id_value, str) else None
-    raw_function = call.get("function")
-    function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
-    raw_tool_name = function.get("name") or call.get("name")
-    tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
-    raw_args = function.get("arguments") if "arguments" in function else call.get("arguments")
-    parsed_args: object = raw_args
-    if isinstance(raw_args, str):
-        try:
-            parsed_args = json.loads(raw_args)
-        except json.JSONDecodeError:
-            parsed_args = None
-    if isinstance(parsed_args, Mapping):
-        tool_args = {str(key): value for key, value in parsed_args.items()}
-        has_tool_args_evidence = True
-    else:
-        tool_args = {}
-        has_tool_args_evidence = False
-    return _AssistantToolCall(
-        call_id=call_id,
-        tool_name=tool_name,
-        tool_args=tool_args,
-        has_tool_args_evidence=has_tool_args_evidence,
-    )
-
-
-def _execution_with_call_metadata(tool: ToolExecution, call: _AssistantToolCall) -> ToolExecution:
-    """Fill provider execution gaps from its persisted assistant call."""
-    updates: dict[str, object] = {}
-    if tool.tool_call_id is None and call.call_id is not None:
-        updates["tool_call_id"] = call.call_id
-    if not tool.tool_name:
-        updates["tool_name"] = call.tool_name
-    if not tool.tool_args and call.tool_args:
-        updates["tool_args"] = call.tool_args
-    return replace(tool, **updates) if updates else tool
-
-
-def _assistant_tool_calls(
-    messages: Sequence[Message],
-) -> list[tuple[tuple[int, int], _AssistantToolCall]]:
-    """Collect normalized assistant calls with stable message positions."""
-    calls: list[tuple[tuple[int, int], _AssistantToolCall]] = []
-    for message_index, message in enumerate(messages):
-        if message.role != "assistant" or message.from_history:
-            continue
-        for call_index, raw_call in enumerate(message.tool_calls or ()):
-            if (call := _assistant_tool_call(raw_call)) is not None:
-                calls.append(((message_index, call_index), call))
-    return calls
-
-
-def _reserve_exact_tool_matches(
-    calls: Sequence[tuple[tuple[int, int], _AssistantToolCall]],
-    tools: Sequence[ToolExecution],
-) -> tuple[dict[tuple[int, int], int], set[int]]:
-    """Reserve execution slots for every assistant call with an exact stable ID."""
-    matched_indexes: dict[tuple[int, int], int] = {}
-    used_tool_indexes: set[int] = set()
-    tools_by_id = {
-        tool.tool_call_id: index for index, tool in reversed(list(enumerate(tools))) if tool.tool_call_id is not None
-    }
-    for key, call in calls:
-        if call.call_id is None:
-            continue
-        tool_index = tools_by_id.get(call.call_id)
-        if tool_index is not None and tool_index not in used_tool_indexes:
-            matched_indexes[key] = tool_index
-            used_tool_indexes.add(tool_index)
-    return matched_indexes, used_tool_indexes
-
-
-def _normalized_execution_args(tool: ToolExecution) -> dict[str, object] | None:
-    """Return comparable execution arguments only when the provider supplied them."""
-    if not isinstance(tool.tool_args, Mapping):
-        return None
-    return {str(key): value for key, value in tool.tool_args.items()}
-
-
-def _assistant_tool_call_is_compatible(call: _AssistantToolCall, tool: ToolExecution) -> bool:
-    """Reject execution candidates that contradict an assistant call's explicit evidence."""
-    if (tool.tool_name or "tool") != call.tool_name:
-        return False
-    if call.call_id is not None and tool.tool_call_id is not None:
-        return False
-    execution_args = _normalized_execution_args(tool)
-    return not (
-        call.has_tool_args_evidence
-        and execution_args is not None
-        and call.tool_args
-        and execution_args
-        and call.tool_args != execution_args
-    )
-
-
-def _assistant_tool_call_has_matching_args(call: _AssistantToolCall, tool: ToolExecution) -> bool:
-    """Return whether both records carry the same explicit argument payload."""
-    execution_args = _normalized_execution_args(tool)
-    return (
-        _assistant_tool_call_is_compatible(call, tool)
-        and call.has_tool_args_evidence
-        and execution_args is not None
-        and call.tool_args == execution_args
-    )
-
-
-def _reserve_unambiguous_assistant_argument_matches(
-    calls: Sequence[tuple[tuple[int, int], _AssistantToolCall]],
-    tools: Sequence[ToolExecution],
-    matched_indexes: dict[tuple[int, int], int],
-    used_tool_indexes: set[int],
-) -> None:
-    """Reserve one-to-one argument matches before occurrence fallback."""
-    while True:
-        candidates_by_call: dict[tuple[int, int], list[int]] = {}
-        candidates_by_tool: dict[int, list[tuple[int, int]]] = {}
-        for key, call in calls:
-            if key in matched_indexes:
-                continue
-            for tool_index, tool in enumerate(tools):
-                if tool_index in used_tool_indexes or not _assistant_tool_call_has_matching_args(call, tool):
-                    continue
-                candidates_by_call.setdefault(key, []).append(tool_index)
-                candidates_by_tool.setdefault(tool_index, []).append(key)
-
-        unambiguous_pairs = [
-            (key, tool_indexes[0])
-            for key, tool_indexes in candidates_by_call.items()
-            if len(tool_indexes) == 1 and len(candidates_by_tool[tool_indexes[0]]) == 1
-        ]
-        if not unambiguous_pairs:
-            return
-        for key, tool_index in unambiguous_pairs:
-            matched_indexes[key] = tool_index
-            used_tool_indexes.add(tool_index)
-
-
-def _assistant_tool_match_indexes(
-    messages: Sequence[Message],
-    tools: Sequence[ToolExecution],
-) -> tuple[list[tuple[tuple[int, int], _AssistantToolCall]], dict[tuple[int, int], int]]:
-    """Match exact IDs first, then assign remaining current calls by occurrence."""
-    calls = _assistant_tool_calls(messages)
-    matched_indexes, used_tool_indexes = _reserve_exact_tool_matches(calls, tools)
-    _reserve_unambiguous_assistant_argument_matches(calls, tools, matched_indexes, used_tool_indexes)
-
-    for key, call in calls:
-        if key in matched_indexes:
-            continue
-        for tool_index, tool in enumerate(tools):
-            if tool_index in used_tool_indexes or not _assistant_tool_call_is_compatible(call, tool):
-                continue
-            matched_indexes[key] = tool_index
-            used_tool_indexes.add(tool_index)
-            break
-    return calls, matched_indexes
-
-
-def _match_assistant_tool_calls(
-    messages: Sequence[Message],
-    tools: Sequence[ToolExecution],
-) -> dict[tuple[int, int], tuple[str | None, ToolExecution]]:
-    """Return presentation metadata for assistant calls backed by executions."""
-    calls, matched_indexes = _assistant_tool_match_indexes(messages, tools)
-
-    matches: dict[tuple[int, int], tuple[str | None, ToolExecution]] = {}
-    for key, call in calls:
-        tool_index = matched_indexes.get(key)
-        if tool_index is None:
-            continue
-        tool = tools[tool_index]
-        matches[key] = (call.call_id, _execution_with_call_metadata(tool, call))
-    return matches
-
-
-def enrich_tool_executions_from_assistant_calls(
-    messages: Sequence[Message],
-    tools: Sequence[ToolExecution],
-) -> list[ToolExecution]:
-    """Recover missing execution identity and arguments from owning assistant calls."""
-    calls, matched_indexes = _assistant_tool_match_indexes(messages, tools)
-    calls_by_tool_index = {
-        tool_index: call for key, call in calls if (tool_index := matched_indexes.get(key)) is not None
-    }
-    enriched_tools = [
-        _execution_with_call_metadata(tool, calls_by_tool_index[index]) if index in calls_by_tool_index else tool
-        for index, tool in enumerate(tools)
-    ]
-    unmatched_tool_indexes = set(range(len(tools))) - set(matched_indexes.values())
-    duplicate_candidates_by_owner: dict[int, list[int]] = {}
-    owners_by_duplicate_candidate: dict[int, list[int]] = {}
-    for key, call in calls:
-        owner_index = matched_indexes.get(key)
-        if owner_index is None or call.call_id is None:
-            continue
-        owner = enriched_tools[owner_index]
-        if owner.tool_call_id != call.call_id:
-            continue
-        for candidate_index in unmatched_tool_indexes:
-            candidate = tools[candidate_index]
-            if candidate.tool_call_id is not None or not _assistant_tool_call_has_matching_args(call, candidate):
-                continue
-            duplicate_candidates_by_owner.setdefault(owner_index, []).append(candidate_index)
-            owners_by_duplicate_candidate.setdefault(candidate_index, []).append(owner_index)
-
-    collapsed_indexes: set[int] = set()
-    for owner_index, candidate_indexes in duplicate_candidates_by_owner.items():
-        if len(candidate_indexes) != 1:
-            continue
-        candidate_index = candidate_indexes[0]
-        if len(owners_by_duplicate_candidate[candidate_index]) != 1:
-            continue
-        enriched_tools[owner_index] = _merge_presentation_tool_metadata(
-            enriched_tools[owner_index],
-            enriched_tools[candidate_index],
-        )
-        collapsed_indexes.add(candidate_index)
-    return [tool for index, tool in enumerate(enriched_tools) if index not in collapsed_indexes]
-
-
-def format_assistant_tool_transcript(
-    messages: Sequence[Message],
-    tools: Sequence[ToolExecution],
-    *,
-    pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
-    start_index: int = 1,
-    show_tool_calls: bool = True,
-    skip_message_ids: set[str] | frozenset[str] = frozenset(),
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Rebuild one run's visible assistant transcript from its persisted message order."""
-    matched_calls = _match_assistant_tool_calls(messages, tools)
-    transcript_parts: list[str] = []
-    tool_trace: list[ToolTraceEntry] = []
-
-    for message_index, message in enumerate(messages):
-        if message.role != "assistant":
-            continue
-        render_message = not message.from_history and message.id not in skip_message_ids
-        if render_message:
-            content_text = _assistant_message_content(message)
-            if content_text.strip():
-                transcript_parts.append(content_text)
-        if not show_tool_calls:
-            continue
-        for call_index, _raw_call in enumerate(message.tool_calls or ()):
-            resolved_call = matched_calls.get((message_index, call_index))
-            if resolved_call is None or not render_message:
-                continue
-            call_id, tool = resolved_call
-            tool_index = start_index + len(tool_trace)
-            if call_id is not None and call_id in pending_tool_call_ids:
-                marker, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
-            else:
-                marker, trace_entry = format_tool_completed_event(tool, tool_index=tool_index)
-            transcript_parts.append(marker.strip())
-            if trace_entry is not None:
-                trace_entry.tool_call_id = call_id or trace_entry.tool_call_id
-                tool_trace.append(trace_entry)
-
-    return "\n\n".join(transcript_parts), tool_trace
-
-
-def serialize_tool_trace(
-    tool_trace: Sequence[ToolTraceEntry],
-    *,
-    include_tool_call_ids: bool = False,
-) -> tuple[dict[str, object], ...]:
-    """Serialize structured tool trace for an opaque durable response snapshot."""
-    serialized: list[dict[str, object]] = []
-    for entry in tool_trace:
-        event: dict[str, object] = {
-            "type": entry.type,
-            "tool_name": entry.tool_name,
-        }
-        if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
-        if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
-        if entry.truncated:
-            event["truncated"] = True
-        if include_tool_call_ids and entry.tool_call_id is not None:
-            event["tool_call_id"] = entry.tool_call_id
-        serialized.append(event)
-    return tuple(serialized)
-
-
-def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
-    """Restore structured tool trace from an opaque durable response snapshot."""
-    tool_trace: list[ToolTraceEntry] = []
-    for event in stored:
-        event_type = event.get("type")
-        tool_name = event.get("tool_name")
-        args_preview = event.get("args_preview")
-        result_preview = event.get("result_preview")
-        truncated = event.get("truncated", False)
-        tool_call_id = event.get("tool_call_id")
-        if event_type not in {"tool_call_started", "tool_call_completed"}:
-            msg = f"Invalid persisted tool trace type: {event_type!r}"
-            raise ValueError(msg)
-        if not isinstance(tool_name, str):
-            msg = "Persisted tool trace entry is missing its tool name"
-            raise TypeError(msg)
-        if args_preview is not None and not isinstance(args_preview, str):
-            msg = "Persisted tool trace args preview must be text"
-            raise TypeError(msg)
-        if result_preview is not None and not isinstance(result_preview, str):
-            msg = "Persisted tool trace result preview must be text"
-            raise TypeError(msg)
-        if not isinstance(truncated, bool):
-            msg = "Persisted tool trace truncated flag must be boolean"
-            raise TypeError(msg)
-        if tool_call_id is not None and not isinstance(tool_call_id, str):
-            msg = "Persisted tool trace call ID must be text"
-            raise TypeError(msg)
-        tool_trace.append(
-            ToolTraceEntry(
-                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
-                tool_name=tool_name,
-                args_preview=args_preview,
-                result_preview=result_preview,
-                truncated=truncated,
-                tool_call_id=tool_call_id,
-            ),
-        )
-    return tool_trace
-
-
-def visible_text_without_tool_markers(text: str) -> str:
-    """Return presentation prose while ignoring display-only tool marker lines."""
-    lines = text.splitlines()
-    if not any(_is_visible_tool_marker_line(line) for line in lines):
-        return text
-    return "\n".join(line for line in lines if not _is_visible_tool_marker_line(line)).strip()
-
-
-def _trace_entry_for_tool(
-    tool: ToolExecution,
-    *,
-    pending_tool_call_ids: set[str] | frozenset[str],
-    tool_index: int,
-) -> tuple[str, ToolTraceEntry]:
-    pending = tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids
-    if pending:
-        marker, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
-    else:
-        marker, trace_entry = format_tool_completed_event(tool, tool_index=tool_index)
-    assert trace_entry is not None
-    return marker.strip(), trace_entry
-
-
-def _append_presentation_part(body: str, part: str) -> str:
-    """Append one known-new presentation part without rewriting durable bytes."""
-    return f"{body}\n\n{part}" if body and part else body or part
-
-
-def _merge_presentation_tool_metadata(primary: ToolExecution, supplemental: ToolExecution) -> ToolExecution:
-    """Fill display-relevant provider gaps from a second copy of the same call."""
-    updates: dict[str, object] = {}
-    if primary.tool_call_id is None and supplemental.tool_call_id is not None:
-        updates["tool_call_id"] = supplemental.tool_call_id
-    if not primary.tool_name and supplemental.tool_name:
-        updates["tool_name"] = supplemental.tool_name
-    if not primary.tool_args and supplemental.tool_args:
-        updates["tool_args"] = supplemental.tool_args
-    if primary.result is None and supplemental.result is not None:
-        updates["result"] = supplemental.result
-    return replace(primary, **updates) if updates else primary
-
-
-def merge_tool_executions_for_presentation(
-    primary_tools: Sequence[ToolExecution],
-    *additional_groups: Sequence[ToolExecution],
-) -> list[ToolExecution]:
-    """Merge overlapping execution snapshots without losing stable call identity."""
-    tools: list[ToolExecution] = []
-    indexes_by_id: dict[str, int] = {}
-
-    for group in (primary_tools, *additional_groups):
-        for tool in group:
-            if tool.tool_call_id is not None and (existing_index := indexes_by_id.get(tool.tool_call_id)) is not None:
-                tools[existing_index] = _merge_presentation_tool_metadata(tools[existing_index], tool)
-                continue
-            if tool.tool_call_id is not None:
-                indexes_by_id[tool.tool_call_id] = len(tools)
-            tools.append(tool)
-    return tools
-
-
-def _exact_tool_trace_matches(
-    tools: Sequence[ToolExecution],
-    trace: Sequence[ToolTraceEntry],
-) -> list[int | None]:
-    """Match stable tool-call identities without making occurrence guesses."""
-    matches: list[int | None] = [None] * len(tools)
-    used_trace_indexes: set[int] = set()
-    for tool_index, tool in enumerate(tools):
-        if tool.tool_call_id is None:
-            continue
-        for index, entry in enumerate(trace):
-            if index not in used_trace_indexes and entry.tool_call_id == tool.tool_call_id:
-                matches[tool_index] = index
-                used_trace_indexes.add(index)
-                break
-    return matches
-
-
-def _tool_trace_legacy_evidence_is_compatible(
-    tool: ToolExecution,
-    entry: ToolTraceEntry,
-    *,
-    allow_result_update: bool = False,
-) -> bool:
-    """Return whether an occurrence match would preserve all explicit preview evidence."""
-    if (tool.tool_name or "tool") != entry.tool_name:
-        return False
-    if tool.tool_call_id is not None and entry.tool_call_id is not None:
-        return False
-    _, candidate = format_tool_completed_event(tool)
-    assert candidate is not None
-    for attribute in ("args_preview", "result_preview"):
-        stored_value = getattr(entry, attribute)
-        candidate_value = getattr(candidate, attribute)
-        if stored_value is None or candidate_value is None:
-            continue
-        if stored_value != candidate_value and not (allow_result_update and attribute == "result_preview"):
-            return False
-    return True
-
-
-def _tool_trace_has_matching_legacy_evidence(tool: ToolExecution, entry: ToolTraceEntry) -> bool:
-    """Return whether preview metadata positively links a trace slot to one execution."""
-    if not _tool_trace_legacy_evidence_is_compatible(tool, entry):
-        return False
-    _, candidate = format_tool_completed_event(tool)
-    assert candidate is not None
-    return any(
-        getattr(entry, attribute) is not None and getattr(entry, attribute) == getattr(candidate, attribute)
-        for attribute in ("args_preview", "result_preview")
-    )
-
-
-def _reserve_unambiguous_legacy_evidence_matches(
-    tools: Sequence[ToolExecution],
-    trace: Sequence[ToolTraceEntry],
-    matches: list[int | None],
-    used_trace_indexes: set[int],
-) -> None:
-    """Reserve one-to-one preview matches before falling back to occurrence order."""
-    while True:
-        candidates_by_tool: dict[int, list[int]] = {}
-        candidates_by_trace: dict[int, list[int]] = {}
-        for tool_index, tool in enumerate(tools):
-            if matches[tool_index] is not None:
-                continue
-            for trace_index, entry in enumerate(trace):
-                if trace_index in used_trace_indexes or not _tool_trace_has_matching_legacy_evidence(tool, entry):
-                    continue
-                candidates_by_tool.setdefault(tool_index, []).append(trace_index)
-                candidates_by_trace.setdefault(trace_index, []).append(tool_index)
-
-        unambiguous_pairs = [
-            (tool_index, trace_indexes[0])
-            for tool_index, trace_indexes in candidates_by_tool.items()
-            if len(trace_indexes) == 1 and len(candidates_by_trace[trace_indexes[0]]) == 1
-        ]
-        if not unambiguous_pairs:
-            return
-        for tool_index, trace_index in unambiguous_pairs:
-            matches[tool_index] = trace_index
-            used_trace_indexes.add(trace_index)
-
-
-def _tool_trace_matches(
-    tools: Sequence[ToolExecution],
-    trace: Sequence[ToolTraceEntry],
-    *,
-    prefer_latest_tools: bool = False,
-    allow_result_updates: bool = False,
-) -> list[int | None]:
-    """Match exact IDs first, then remaining legacy entries by name and occurrence."""
-    matches = _exact_tool_trace_matches(tools, trace)
-    used_trace_indexes = {match for match in matches if match is not None}
-    _reserve_unambiguous_legacy_evidence_matches(tools, trace, matches, used_trace_indexes)
-
-    tool_indexes = range(len(tools) - 1, -1, -1) if prefer_latest_tools else range(len(tools))
-    trace_indexes = range(len(trace) - 1, -1, -1) if prefer_latest_tools else range(len(trace))
-    for tool_index in tool_indexes:
-        if matches[tool_index] is not None:
-            continue
-        tool = tools[tool_index]
-        tool_name = tool.tool_name or "tool"
-        for index in trace_indexes:
-            entry = trace[index]
-            if index in used_trace_indexes or entry.tool_name != tool_name:
-                continue
-            if not _tool_trace_legacy_evidence_is_compatible(
-                tool,
-                entry,
-                allow_result_update=allow_result_updates,
-            ):
-                continue
-            matches[tool_index] = index
-            used_trace_indexes.add(index)
-            break
-    return matches
-
-
-def partition_tools_by_trace(
-    tools: Sequence[ToolExecution],
-    trace: Sequence[ToolTraceEntry],
-) -> tuple[list[ToolExecution], list[ToolExecution]]:
-    """Partition executions into one-to-one represented and missing groups."""
-    matches = _tool_trace_matches(tools, trace)
-    represented = [tool for tool, match in zip(tools, matches, strict=True) if match is not None]
-    missing = [tool for tool, match in zip(tools, matches, strict=True) if match is None]
-    return represented, missing
-
-
-def tools_not_represented_in_trace(
-    tools: Sequence[ToolExecution],
-    trace: Sequence[ToolTraceEntry],
-) -> list[ToolExecution]:
-    """Return executions without a one-to-one stable or legacy trace match."""
-    return partition_tools_by_trace(tools, trace)[1]
-
-
-def _filter_tool_trace_presentation(
-    text: str,
-    trace: Sequence[ToolTraceEntry],
-    *,
-    excluded_indexes: set[int],
-    start_index: int,
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Remove replayed markers and compact the remaining marker indexes."""
-    filtered_trace: list[ToolTraceEntry] = []
-    for offset, entry in enumerate(trace):
-        pending = entry.type == "tool_call_started"
-        old_marker = _tool_marker_line(entry.tool_name, start_index + offset, pending=pending)
-        if offset in excluded_indexes:
-            text = text.replace(old_marker, "", 1)
-            continue
-        new_marker = _tool_marker_line(entry.tool_name, start_index + len(filtered_trace), pending=pending)
-        text = text.replace(old_marker, new_marker, 1)
-        filtered_trace.append(replace(entry))
-    text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", text).strip("\n")
-    return text, filtered_trace
-
-
-def _merge_current_tool_presentation(
-    text: str,
-    trace: Sequence[ToolTraceEntry],
-    tools: Sequence[ToolExecution],
-    matches: Sequence[int | None],
-    *,
-    pending_tool_call_ids: set[str] | frozenset[str],
-    start_index: int,
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Insert recovery-only markers beside anchored calls in execution order."""
-    token_entries: dict[str, ToolTraceEntry] = {}
-    trace_tokens: list[str] = []
-    for trace_index, entry in enumerate(trace):
-        token = f"\x00mindroom-tool-{trace_index}\x00"
-        marker = _tool_marker_line(
-            entry.tool_name,
-            start_index + trace_index,
-            pending=entry.type == "tool_call_started",
-        )
-        text = text.replace(marker, token, 1)
-        token_entries[token] = replace(entry)
-        trace_tokens.append(token)
-
-    tool_tokens = [trace_tokens[match] if match is not None else None for match in matches]
-    for tool_index, tool in enumerate(tools):
-        if tool_tokens[tool_index] is not None:
-            continue
-        token = f"\x00mindroom-recovery-{tool_index}\x00"
-        _, trace_entry = _trace_entry_for_tool(
-            tool,
-            pending_tool_call_ids=pending_tool_call_ids,
-            tool_index=1,
-        )
-        token_entries[token] = trace_entry
-        next_token = next((candidate for candidate in tool_tokens[tool_index + 1 :] if candidate), None)
-        previous_token = next((candidate for candidate in reversed(tool_tokens[:tool_index]) if candidate), None)
-        if next_token is not None:
-            text = text.replace(next_token, f"{token}\n\n{next_token}", 1)
-        elif tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids:
-            text = _append_presentation_part(text, token)
-        elif previous_token is not None:
-            text = text.replace(previous_token, f"{previous_token}\n\n{token}", 1)
-        else:
-            text = f"{token}\n\n{text}" if text else token
-        tool_tokens[tool_index] = token
-
-    ordered_tokens = sorted(token_entries, key=text.index)
-    merged_trace: list[ToolTraceEntry] = []
-    for token in ordered_tokens:
-        entry = token_entries[token]
-        marker = _tool_marker_line(
-            entry.tool_name,
-            start_index + len(merged_trace),
-            pending=entry.type == "tool_call_started",
-        )
-        text = text.replace(token, marker, 1)
-        merged_trace.append(entry)
-    return text, merged_trace
-
-
-def _complete_prior_tool_presentation(
-    body: str,
-    trace: list[ToolTraceEntry],
-    tools: Sequence[ToolExecution],
-    matches: Sequence[int | None],
-    pending_tool_call_ids: set[str] | frozenset[str],
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Complete tools already represented in the durable snapshot."""
-    for tool, prior_index in zip(tools, matches, strict=True):
-        if prior_index is None:
-            continue
-        previous_entry = trace[prior_index]
-        matched_call_id = tool.tool_call_id or previous_entry.tool_call_id
-        if matched_call_id is not None and matched_call_id in pending_tool_call_ids:
-            continue
-        marker_index = prior_index + 1
-        body, _ = complete_pending_tool_block(
-            body,
-            previous_entry.tool_name,
-            tool.result,
-            marker_index,
-        )
-        _, completed_entry = format_tool_completed_event(tool, tool_index=marker_index)
-        assert completed_entry is not None
-        trace[prior_index] = replace(
-            completed_entry,
-            tool_call_id=completed_entry.tool_call_id or previous_entry.tool_call_id,
-            tool_name=previous_entry.tool_name,
-            args_preview=completed_entry.args_preview or previous_entry.args_preview,
-            result_preview=completed_entry.result_preview or previous_entry.result_preview,
-            truncated=completed_entry.truncated or previous_entry.truncated,
-        )
-    return body, trace
-
-
-def reconcile_tool_presentation(
-    *,
-    prior_text: str,
-    prior_tool_trace: Sequence[ToolTraceEntry],
-    current_text: str,
-    current_tool_trace: Sequence[ToolTraceEntry],
-    tools: Sequence[ToolExecution],
-    pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
-    show_tool_calls: bool = True,
-    current_start_index: int | None = None,
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Reconcile a continued run against the last transport-committed presentation."""
-    if not show_tool_calls:
-        body = visible_text_without_tool_markers(prior_text)
-        return _append_presentation_part(body, current_text), []
-
-    body = prior_text
-    trace = [replace(entry) for entry in prior_tool_trace]
-    current_start_index = current_start_index or len(prior_tool_trace) + 1
-    if current_start_index < len(prior_tool_trace) + 1:
-        msg = "Current tool marker index overlaps the prior trace"
-        raise ValueError(msg)
-    exact_prior_matches = _exact_tool_trace_matches(tools, trace)
-    original_current_matches = _tool_trace_matches(tools, current_tool_trace, prefer_latest_tools=True)
-    current_owned_tool_indexes = {
-        tool_index
-        for tool_index, current_match in enumerate(original_current_matches)
-        if current_match is not None and exact_prior_matches[tool_index] is None
-    }
-    prior_candidate_indexes = [index for index in range(len(tools)) if index not in current_owned_tool_indexes]
-    prior_candidate_matches = _tool_trace_matches(
-        [tools[index] for index in prior_candidate_indexes],
-        trace,
-        allow_result_updates=True,
-    )
-    prior_matches: list[int | None] = [None] * len(tools)
-    for tool_index, prior_match in zip(prior_candidate_indexes, prior_candidate_matches, strict=True):
-        prior_matches[tool_index] = prior_match
-    body, trace = _complete_prior_tool_presentation(body, trace, tools, prior_matches, pending_tool_call_ids)
-    replayed_current_indexes = {
-        current_match
-        for tool, prior_match, current_match in zip(tools, prior_matches, original_current_matches, strict=True)
-        if prior_match is not None
-        and current_match is not None
-        and tool.tool_call_id is not None
-        and trace[prior_match].tool_call_id == tool.tool_call_id
-    }
-    current_text, filtered_current_trace = _filter_tool_trace_presentation(
-        current_text,
-        current_tool_trace,
-        excluded_indexes=replayed_current_indexes,
-        start_index=current_start_index,
-    )
-    current_tools = [tool for tool, prior_match in zip(tools, prior_matches, strict=True) if prior_match is None]
-    current_matches = _tool_trace_matches(current_tools, filtered_current_trace, prefer_latest_tools=True)
-    current_text, merged_current_trace = _merge_current_tool_presentation(
-        current_text,
-        filtered_current_trace,
-        current_tools,
-        current_matches,
-        pending_tool_call_ids=pending_tool_call_ids,
-        start_index=current_start_index,
-    )
-    body = _append_presentation_part(body, current_text)
-    trace.extend(merged_current_trace)
-
-    return body, trace
-
-
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False
@@ -1344,6 +676,59 @@ def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, object
     return tool_name, tool.result
 
 
+def serialize_tool_trace(
+    tool_trace: Sequence[ToolTraceEntry],
+    *,
+    include_internal: bool = False,
+) -> tuple[dict[str, object], ...]:
+    """Serialize trace entries, optionally retaining restart-only identity."""
+    serialized: list[dict[str, object]] = []
+    for entry in tool_trace:
+        event: dict[str, object] = {
+            "type": entry.type,
+            "tool_name": entry.tool_name,
+        }
+        if entry.args_preview is not None:
+            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+        if entry.result_preview is not None:
+            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+        if entry.truncated:
+            event["truncated"] = True
+        if include_internal:
+            if entry.tool_call_id is not None:
+                event["tool_call_id"] = entry.tool_call_id
+            if entry.scope_key is not None:
+                event["scope_key"] = entry.scope_key
+        serialized.append(event)
+    return tuple(serialized)
+
+
+def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
+    """Restore a trace snapshot while rejecting malformed event records."""
+    restored: list[ToolTraceEntry] = []
+    for event in stored:
+        event_type = event.get("type")
+        tool_name = event.get("tool_name")
+        if event_type not in {"tool_call_started", "tool_call_completed"} or not isinstance(tool_name, str):
+            continue
+        args_preview = event.get("args_preview")
+        result_preview = event.get("result_preview")
+        tool_call_id = event.get("tool_call_id")
+        scope_key = event.get("scope_key")
+        restored.append(
+            ToolTraceEntry(
+                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
+                tool_name=tool_name,
+                args_preview=args_preview if isinstance(args_preview, str) else None,
+                result_preview=result_preview if isinstance(result_preview, str) else None,
+                truncated=event.get("truncated") is True,
+                tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
+                scope_key=scope_key if isinstance(scope_key, str) else None,
+            ),
+        )
+    return restored
+
+
 def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:
     """Build message content payload for tool trace metadata."""
     if not tool_trace:
@@ -1351,8 +736,21 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
 
     trace_list = list(tool_trace)
 
-    events = list(serialize_tool_trace(trace_list))
-    has_truncated_content = any(event.get("truncated") is True for event in events)
+    events: list[dict[str, object]] = []
+    has_truncated_content = False
+    for entry in trace_list:
+        event: dict[str, object] = {
+            "type": entry.type,
+            "tool_name": entry.tool_name,
+        }
+        if entry.args_preview is not None:
+            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+        if entry.result_preview is not None:
+            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+        if entry.truncated:
+            event["truncated"] = True
+            has_truncated_content = True
+        events.append(event)
 
     payload: dict[str, object] = {
         "version": _TOOL_TRACE_VERSION,

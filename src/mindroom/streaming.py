@@ -94,10 +94,11 @@ _PROGRESS_PLACEHOLDER = "Thinking..."
 
 @dataclass(frozen=True, slots=True)
 class StreamingPresentation:
-    """The ordered response state known to have reached Matrix before a suspension."""
+    """Ordered response state known to have reached Matrix before suspension."""
 
     response_text: str
     tool_trace: tuple[ToolTraceEntry, ...] = ()
+    state: dict[str, object] | None = None
 
 
 class StreamingLifecycleSuspensionError(Exception):
@@ -301,6 +302,7 @@ class _CommittedDeliveryState:
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
+    presentation_state: dict[str, object] | None
     placeholder_progress_sent: bool
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
@@ -383,6 +385,7 @@ class _StreamingDeliverySnapshot:
     room_mode: bool
     show_tool_calls: bool
     tool_trace: tuple[ToolTraceEntry, ...]
+    presentation_state: dict[str, object] | None
     extra_content: dict[str, Any] | None
     warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
@@ -448,6 +451,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         committed_state=_CommittedDeliveryState(
             accumulated_text=_normalize_stream_accumulated_text(snapshot.accumulated_text),
             tool_trace=tool_trace,
+            presentation_state=deepcopy(snapshot.presentation_state),
             placeholder_progress_sent=not snapshot.accumulated_text.strip(),
             rendered_body=canonical_visible_body,
             visible_body_state=(
@@ -493,6 +497,7 @@ class StreamingResponse:
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    presentation_state: dict[str, object] | None = None
     extra_content: dict[str, Any] | None = None
     interactive_creator_agent: str | None = None
     interactive_source_event_id: str | None = None
@@ -529,6 +534,7 @@ class StreamingResponse:
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
+    _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
     _last_committed_interactive_metadata: interactive.InteractiveMetadata | None = field(
@@ -620,6 +626,7 @@ class StreamingResponse:
         delivery_matches_live_state = (
             _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
             and self.tool_trace == committed_state.tool_trace
+            and self.presentation_state == committed_state.presentation_state
         )
         if delivery_matches_live_state:
             self.last_update = now
@@ -642,6 +649,7 @@ class StreamingResponse:
             _normalize_stream_accumulated_text(self.accumulated_text)
             == self._inflight_nonterminal_capture_state.accumulated_text
             and self.tool_trace == self._inflight_nonterminal_capture_state.tool_trace
+            and self.presentation_state == self._inflight_nonterminal_capture_state.presentation_state
         ):
             return self._inflight_nonterminal_capture
         return None
@@ -1054,6 +1062,7 @@ class StreamingResponse:
             room_mode=self.room_mode,
             show_tool_calls=self.show_tool_calls,
             tool_trace=tuple(deepcopy(self.tool_trace)),
+            presentation_state=deepcopy(self.presentation_state),
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
@@ -1097,6 +1106,7 @@ class StreamingResponse:
         """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
+        self._last_delivered_presentation_state = deepcopy(committed_state.presentation_state)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
@@ -1120,14 +1130,16 @@ class StreamingResponse:
         """Discard buffered state that never reached Matrix after a delivery failure."""
         self.accumulated_text = self._last_delivered_text
         self.tool_trace = deepcopy(self._last_delivered_tool_trace)
+        self.presentation_state = deepcopy(self._last_delivered_presentation_state)
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
 
     def committed_presentation(self) -> StreamingPresentation:
-        """Return the ordered text and trace that the latest successful update carried."""
+        """Return the text and trace carried by the latest successful update."""
         return StreamingPresentation(
             response_text=_normalize_stream_accumulated_text(self._last_delivered_text).rstrip(),
             tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
+            state=deepcopy(self._last_delivered_presentation_state),
         )
 
     def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
@@ -1493,6 +1505,8 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
                 streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+            if chunk.presentation_state is not None:
+                streaming.presentation_state = deepcopy(chunk.presentation_state)
         elif isinstance(chunk, RunContentEvent):
             if chunk.content:
                 text_chunk = str(chunk.content)

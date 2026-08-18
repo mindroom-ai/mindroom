@@ -81,7 +81,6 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
-    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
     AttemptResolved,
     BlockingAttemptResolution,
     BlockingTurnAdapter,
@@ -99,11 +98,7 @@ from mindroom.response_turn import (
     build_matrix_run_metadata,
     paused_attempt_from_event,
     paused_attempt_from_response,
-    reconciled_tool_count,
-    resolve_approval_response_content,
-    response_content_text,
     run_blocking_response_turn,
-    stable_assistant_message_ids,
     stream_response_turn,
 )
 from mindroom.team_exact_members import (
@@ -118,14 +113,7 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
-    enrich_tool_executions_from_assistant_calls,
-    format_assistant_tool_transcript,
     format_tool_completed_event,
-    merge_tool_executions_for_presentation,
-    partition_tools_by_trace,
-    reconcile_tool_presentation,
-    tools_not_represented_in_trace,
-    visible_text_without_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -135,7 +123,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
-    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -301,6 +288,189 @@ def _format_no_consensus_note(indent: int = 0) -> str:
     return f"\n{indent_str}*No team consensus - showing individual responses only*"
 
 
+def _render_team_parts(
+    display_names: Sequence[str],
+    *,
+    per_member: Mapping[str, str],
+    consensus: str,
+) -> list[str]:
+    """Render stable member slots followed by the optional team consensus."""
+    parts: list[str] = []
+    for display in display_names:
+        body = per_member.get(display, "").strip()
+        if body:
+            parts.append(_format_member_contribution(display, body))
+    for display, body in per_member.items():
+        if display not in display_names and body.strip():
+            parts.append(_format_member_contribution(display, body.strip()))
+
+    if consensus.strip():
+        parts.extend(_format_team_consensus(consensus.strip()))
+    elif parts:
+        parts.append(_format_no_consensus_note())
+    return parts
+
+
+@dataclass
+class _TeamStreamPresentation:
+    """Structured team document that survives an approval continuation."""
+
+    display_names: list[str]
+    show_tool_calls: bool
+    per_member: dict[str, str]
+    consensus: str = ""
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+
+    def __post_init__(self) -> None:
+        """Restore pending tool identity from the durable trace."""
+        self.tool_tracker.restore_pending(self.tool_trace)
+
+    @classmethod
+    def new(cls, display_names: Sequence[str], *, show_tool_calls: bool) -> _TeamStreamPresentation:
+        """Create an empty presentation for a new team run."""
+        names = list(display_names)
+        return cls(
+            display_names=names,
+            show_tool_calls=show_tool_calls,
+            per_member=dict.fromkeys(names, ""),
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        display_names: Sequence[str],
+        show_tool_calls: bool,
+        state: Mapping[str, object] | None,
+        tool_trace: Sequence[ToolTraceEntry],
+        prior_response_text: str,
+    ) -> _TeamStreamPresentation:
+        """Restore a durable structured snapshot without interpreting its rendered Markdown."""
+        if state is None:
+            if prior_response_text or tool_trace:
+                msg = "Team continuation presentation snapshot is missing"
+                raise RuntimeError(msg)
+            return cls.new(display_names, show_tool_calls=show_tool_calls)
+        if state.get("kind") != "team_stream" or state.get("version") != 1:
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+
+        stored_names = state.get("display_names")
+        names = (
+            cast("list[str]", stored_names).copy()
+            if isinstance(stored_names, list) and all(isinstance(name, str) for name in stored_names)
+            else list(display_names)
+        )
+        stored_members = state.get("per_member")
+        per_member = dict.fromkeys(names, "")
+        if isinstance(stored_members, dict):
+            per_member.update(
+                {
+                    name: content
+                    for name, content in stored_members.items()
+                    if isinstance(name, str) and isinstance(content, str)
+                },
+            )
+        consensus = state.get("consensus")
+        restored = cls(
+            display_names=names,
+            show_tool_calls=show_tool_calls,
+            per_member=per_member,
+            consensus=consensus if isinstance(consensus, str) else "",
+            tool_trace=list(deepcopy(tool_trace)),
+        )
+        if restored.render_body() != prior_response_text:
+            msg = "Team continuation presentation snapshot does not match its response text"
+            raise RuntimeError(msg)
+        return restored
+
+    def to_state(self) -> dict[str, object]:
+        """Serialize only the structure needed to reproduce the current body."""
+        return {
+            "kind": "team_stream",
+            "version": 1,
+            "display_names": list(self.display_names),
+            "per_member": dict(self.per_member),
+            "consensus": self.consensus,
+        }
+
+    def append_member(self, member_name: str, content: object | None) -> None:
+        """Append a member content delta to its stable document slot."""
+        if content:
+            self.per_member[member_name] = self.per_member.get(member_name, "") + str(content)
+
+    def append_consensus(self, content: object | None) -> None:
+        """Append a coordinator content delta to the consensus slot."""
+        if content:
+            self.consensus += str(content)
+
+    def _append_tool_marker(self, scope_key: str, marker: str) -> None:
+        if scope_key == "team":
+            self.consensus += marker
+            return
+        member_name = scope_key.removeprefix("agent:")
+        self.per_member[member_name] = self.per_member.get(member_name, "") + marker
+
+    def _slot_text(self, scope_key: str) -> str:
+        if scope_key == "team":
+            return self.consensus
+        return self.per_member.get(scope_key.removeprefix("agent:"), "")
+
+    def _set_slot_text(self, scope_key: str, text: str) -> None:
+        if scope_key == "team":
+            self.consensus = text
+            return
+        self.per_member[scope_key.removeprefix("agent:")] = text
+
+    def start_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+        """Record a tool start in its exact member or coordinator slot."""
+        tool_index = len(self.tool_trace) + 1
+        marker, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        if trace_entry is None:
+            return
+        trace_entry.scope_key = scope_key
+        self.tool_trace.append(trace_entry)
+        if self.show_tool_calls:
+            self._append_tool_marker(scope_key, marker)
+
+    def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+        """Complete only the pending slot identified by this tool event."""
+        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
+        if completion is None:
+            return
+        tool_name, result, pending_tool, completed_trace = completion
+        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+            return
+        completed_trace.scope_key = pending_tool.scope_key or scope_key
+        if self.show_tool_calls:
+            updated_text, _ = complete_pending_tool_block(
+                self._slot_text(pending_tool.scope_key),
+                tool_name,
+                result,
+                tool_index=pending_tool.visible_tool_index,
+            )
+            self._set_slot_text(pending_tool.scope_key, updated_text)
+        self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def start_member_tool(self, member_name: str, tool: ToolExecution | None) -> None:
+        """Record a member tool start."""
+        self.start_tool(f"agent:{member_name}", tool)
+
+    def complete_member_tool(self, member_name: str, tool: ToolExecution | None) -> None:
+        """Record a member tool completion."""
+        self.complete_tool(f"agent:{member_name}", tool)
+
+    def render_body(self) -> str:
+        """Render the current structured document."""
+        parts = _render_team_parts(
+            self.display_names,
+            per_member=self.per_member,
+            consensus=self.consensus,
+        )
+        return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+
+
 def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
     """Format a complete team response with member contributions.
 
@@ -358,221 +528,6 @@ def _format_terminal_team_response(
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
     return _format_team_header(team_display_names) + _team_response_text(response)
-
-
-def _approval_response_content(
-    response: TeamRunOutput | RunOutput,
-    rendered_content: str,
-) -> str:
-    """Include raw terminal content only when messages do not already represent it."""
-    return resolve_approval_response_content(
-        response,
-        rendered_content,
-        terminal_content=_get_response_content(response),
-    )
-
-
-def _with_nested_team_header(team_name: str, nested_parts: list[str], indent: str) -> list[str]:
-    """Prefix a nested team only when its continued subtree has visible output."""
-    if not nested_parts:
-        return []
-    return [f"{indent}**{team_name}** (Team):", *nested_parts]
-
-
-def _local_approval_recovery_tools(
-    response: TeamRunOutput | RunOutput,
-    recovery_tools: Sequence[ToolExecution],
-) -> list[ToolExecution]:
-    """Select globally unmatched executions owned by one response segment."""
-    return [tool for tool in response.tools or () if any(tool is candidate for candidate in recovery_tools)]
-
-
-def _local_approval_presentation_tools(
-    response: TeamRunOutput | RunOutput,
-    trace: Sequence[ToolTraceEntry],
-    recovery_tools: Sequence[ToolExecution],
-) -> list[ToolExecution]:
-    """Keep anchored and recovery-eligible executions in local run order."""
-    anchored_tools, _ = partition_tools_by_trace(response.tools or (), trace)
-    return [
-        tool
-        for tool in response.tools or ()
-        if any(tool is candidate for candidate in (*anchored_tools, *recovery_tools))
-    ]
-
-
-def _format_approval_response_segment(
-    response: TeamRunOutput | RunOutput,
-    *,
-    pending_tool_call_ids: set[str],
-    show_tool_calls: bool,
-    start_index: int,
-    skip_message_ids: set[str] | frozenset[str],
-    recovery_tools: Sequence[ToolExecution],
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Render one response and keep unanchored tools beside its own prose."""
-    content, trace = format_assistant_tool_transcript(
-        response.messages or (),
-        response.tools or (),
-        pending_tool_call_ids=pending_tool_call_ids,
-        start_index=start_index,
-        show_tool_calls=show_tool_calls,
-        skip_message_ids=skip_message_ids,
-    )
-    content = _approval_response_content(response, content)
-    return reconcile_tool_presentation(
-        prior_text="",
-        prior_tool_trace=(),
-        current_text=content,
-        current_tool_trace=trace,
-        tools=_local_approval_presentation_tools(response, trace, recovery_tools),
-        pending_tool_call_ids=pending_tool_call_ids,
-        show_tool_calls=show_tool_calls,
-        current_start_index=start_index,
-    )
-
-
-def _format_nested_team_recovery_tools(
-    response: TeamRunOutput,
-    *,
-    pending_tool_call_ids: set[str],
-    show_tool_calls: bool,
-    start_index: int,
-    indent: str,
-    recovery_tools: Sequence[ToolExecution],
-) -> tuple[list[str], list[ToolTraceEntry]]:
-    """Place a nested leader's unanchored tools after its member transcript."""
-    tool_text, tool_trace = reconcile_tool_presentation(
-        prior_text="",
-        prior_tool_trace=(),
-        current_text="",
-        current_tool_trace=(),
-        tools=_local_approval_recovery_tools(response, recovery_tools),
-        pending_tool_call_ids=pending_tool_call_ids,
-        show_tool_calls=show_tool_calls,
-        current_start_index=start_index,
-    )
-    return ([f"{indent}{tool_text}"] if tool_text else []), tool_trace
-
-
-def _format_approval_contributions_recursive(
-    response: TeamRunOutput | RunOutput,
-    *,
-    pending_tool_call_ids: set[str],
-    show_tool_calls: bool,
-    start_index: int,
-    indent: int,
-    include_consensus: bool,
-    skip_message_ids: set[str] | frozenset[str],
-    recovery_tools: Sequence[ToolExecution],
-) -> tuple[list[str], list[ToolTraceEntry]]:
-    """Render one continued team's contributions with globally indexed tool anchors."""
-    parts: list[str] = []
-    trace: list[ToolTraceEntry] = []
-    indent_str = "  " * indent
-
-    if isinstance(response, TeamRunOutput):
-        for member_response in response.member_responses or ():
-            if isinstance(member_response, TeamRunOutput):
-                team_name = member_response.team_name or "Nested Team"
-                nested_parts, nested_trace = _format_approval_contributions_recursive(
-                    member_response,
-                    pending_tool_call_ids=pending_tool_call_ids,
-                    show_tool_calls=show_tool_calls,
-                    start_index=start_index + len(trace),
-                    indent=indent + 1,
-                    include_consensus=False,
-                    skip_message_ids=skip_message_ids,
-                    recovery_tools=recovery_tools,
-                )
-                parts.extend(_with_nested_team_header(team_name, nested_parts, indent_str))
-                trace.extend(nested_trace)
-            elif isinstance(member_response, RunOutput):
-                content, member_trace = _format_approval_response_segment(
-                    member_response,
-                    pending_tool_call_ids=pending_tool_call_ids,
-                    start_index=start_index + len(trace),
-                    show_tool_calls=show_tool_calls,
-                    skip_message_ids=skip_message_ids,
-                    recovery_tools=recovery_tools,
-                )
-                if content.strip():
-                    member_name = member_response.agent_name or "Team Member"
-                    first_line = content.splitlines()[0]
-                    marker_first = bool(first_line.strip()) and not visible_text_without_tool_markers(first_line)
-                    parts.append(
-                        (
-                            f"{'  ' * indent}**{member_name}**:\n\n{content}"
-                            if marker_first
-                            else _format_member_contribution(member_name, content, indent)
-                        ),
-                    )
-                trace.extend(member_trace)
-
-        if include_consensus:
-            consensus, consensus_trace = _format_approval_response_segment(
-                response,
-                pending_tool_call_ids=pending_tool_call_ids,
-                start_index=start_index + len(trace),
-                show_tool_calls=show_tool_calls,
-                skip_message_ids=skip_message_ids,
-                recovery_tools=recovery_tools,
-            )
-            if consensus.strip():
-                parts.extend(_format_team_consensus(consensus, indent))
-            elif parts and response.status == RunStatus.completed:
-                parts.append(_format_no_consensus_note(indent))
-            trace.extend(consensus_trace)
-        else:
-            tool_parts, tool_trace = _format_nested_team_recovery_tools(
-                response,
-                pending_tool_call_ids=pending_tool_call_ids,
-                show_tool_calls=show_tool_calls,
-                start_index=start_index + len(trace),
-                indent=indent_str,
-                recovery_tools=recovery_tools,
-            )
-            parts.extend(tool_parts)
-            trace.extend(tool_trace)
-    else:
-        content, response_trace = _format_approval_response_segment(
-            response,
-            pending_tool_call_ids=pending_tool_call_ids,
-            start_index=start_index,
-            show_tool_calls=show_tool_calls,
-            skip_message_ids=skip_message_ids,
-            recovery_tools=recovery_tools,
-        )
-        if content.strip():
-            parts.append(_format_member_contribution(response.agent_name or "Agent", content, indent))
-        trace.extend(response_trace)
-
-    return parts, trace
-
-
-def _format_approval_team_response(
-    response: TeamRunOutput | RunOutput,
-    *,
-    team_display_names: list[str],
-    pending_tool_call_ids: set[str],
-    show_tool_calls: bool,
-    start_index: int = 1,
-    skip_message_ids: set[str] | frozenset[str] = frozenset(),
-    recovery_tools: Sequence[ToolExecution] = (),
-) -> tuple[str, list[ToolTraceEntry]]:
-    """Render a continued team run and its trace from persisted message order."""
-    parts, trace = _format_approval_contributions_recursive(
-        response,
-        pending_tool_call_ids=pending_tool_call_ids,
-        show_tool_calls=show_tool_calls,
-        start_index=start_index,
-        indent=0,
-        include_consensus=True,
-        skip_message_ids=skip_message_ids,
-        recovery_tools=recovery_tools,
-    )
-    body = "\n\n".join(parts) if parts else _approval_response_content(response, "")
-    return (_format_team_header(team_display_names) + body if body else ""), trace
 
 
 def _register_team_notice_storage(
@@ -663,12 +618,12 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     a content-less run cannot recycle earlier turns' text as its output.
     """
     if response.content:
-        return response_content_text(response.content)
+        return str(response.content)
 
     if response.messages:
         messages_list: list[Any] = response.messages
         content_parts = [
-            response_content_text(msg.content)
+            str(msg.content)
             for msg in messages_list
             if isinstance(msg, Message) and msg.role == "assistant" and msg.content and not msg.from_history
         ]
@@ -1469,174 +1424,12 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
     The rerun is bounded by the continuation budget and prior attempts stay
     in session history for the rerun to reuse.
     """
-    tools: list[ToolExecution] = []
+    tools: list[ToolExecution] = list(response.tools or [])
     if isinstance(response, TeamRunOutput):
         for member_response in response.member_responses:
             if isinstance(member_response, TeamRunOutput | RunOutput):
                 tools.extend(_collect_team_tool_executions(member_response))
-    tools.extend(response.tools or [])
     return tools
-
-
-def _assistant_message_ids(response: TeamRunOutput | RunOutput) -> set[str]:
-    """Collect stable assistant-message identities from a nested persisted run."""
-    message_ids = stable_assistant_message_ids(response.messages or ())
-    if isinstance(response, TeamRunOutput):
-        for member_response in response.member_responses:
-            if isinstance(member_response, TeamRunOutput | RunOutput):
-                message_ids.update(_assistant_message_ids(member_response))
-    return message_ids
-
-
-def _requirement_member_run_ids(requirements: Sequence[RunRequirement]) -> set[str]:
-    """Collect the persisted sibling runs referenced by member approval requirements."""
-    return {requirement.member_run_id for requirement in requirements if requirement.member_run_id is not None}
-
-
-def _team_session_member_runs(
-    session: TeamSession | None,
-    member_run_ids: set[str],
-) -> list[TeamRunOutput | RunOutput]:
-    """Load referenced member runs from Agno's canonical sibling-run storage."""
-    if session is None or not member_run_ids:
-        return []
-    return [
-        run for run in session.runs or () if run.run_id in member_run_ids and isinstance(run, TeamRunOutput | RunOutput)
-    ]
-
-
-def _with_approval_member_runs(
-    response: TeamRunOutput,
-    member_runs: Sequence[TeamRunOutput | RunOutput],
-) -> TeamRunOutput:
-    """Attach refreshed sibling runs to a presentation-only team response."""
-    merged = list(response.member_responses or ())
-    positions = {member_response.run_id: index for index, member_response in enumerate(merged)}
-    for member_run in member_runs:
-        position = positions.get(member_run.run_id)
-        if position is None:
-            positions[member_run.run_id] = len(merged)
-            merged.append(member_run)
-        else:
-            merged[position] = member_run
-    return replace(response, member_responses=merged)
-
-
-def _approval_prior_message_ids(
-    persisted: TeamRunOutput,
-    session: TeamSession | None,
-    member_run_ids: set[str],
-) -> set[str]:
-    """Collect the outer and sibling assistant messages already in the durable snapshot."""
-    message_ids = _assistant_message_ids(persisted)
-    for member_run in _team_session_member_runs(session, member_run_ids):
-        message_ids.update(_assistant_message_ids(member_run))
-    return message_ids
-
-
-async def _refreshed_approval_team_response(
-    team: Team,
-    response: TeamRunOutput,
-    *,
-    existing_member_run_ids: set[str],
-    session_id: str,
-    user_id: str,
-) -> TeamRunOutput:
-    """Rejoin referenced sibling runs after Agno persists a team continuation."""
-    member_run_ids = existing_member_run_ids | _requirement_member_run_ids(response.requirements or ())
-    if not member_run_ids:
-        return response
-    refreshed_session = await team.aget_session(session_id=session_id, user_id=user_id)
-    return _with_approval_member_runs(
-        response,
-        _team_session_member_runs(refreshed_session, member_run_ids),
-    )
-
-
-def _merge_approval_presentation_tools(
-    response: TeamRunOutput | RunOutput,
-    *additional_groups: Sequence[ToolExecution],
-) -> list[ToolExecution]:
-    """Merge persisted and continued executions by stable call identity."""
-    primary_tools: list[ToolExecution] = []
-    if isinstance(response, TeamRunOutput):
-        for member_response in response.member_responses:
-            if isinstance(member_response, TeamRunOutput | RunOutput):
-                primary_tools.extend(_merge_approval_presentation_tools(member_response))
-    primary_tools.extend(enrich_tool_executions_from_assistant_calls(response.messages or (), response.tools or ()))
-    return merge_tool_executions_for_presentation(primary_tools, *additional_groups)
-
-
-def _is_team_section_heading(line: str) -> bool:
-    """Return whether one line is a standalone member, nested-team, or consensus heading."""
-    stripped = line.strip()
-    return stripped.startswith("**") and stripped.endswith(("**:", "** (Team):"))
-
-
-def _without_tool_only_team_sections(text: str) -> str:
-    """Remove team section headings whose body consisted only of visible tool markers."""
-    lines = text.splitlines()
-    filtered_lines: list[str] = []
-    index = 0
-    while index < len(lines):
-        if not _is_team_section_heading(lines[index]):
-            filtered_lines.append(lines[index])
-            index += 1
-            continue
-
-        next_heading = index + 1
-        while next_heading < len(lines) and not _is_team_section_heading(lines[next_heading]):
-            next_heading += 1
-        section_body = lines[index + 1 : next_heading]
-        has_tool_marker = any(line.strip() and not visible_text_without_tool_markers(line) for line in section_body)
-        has_visible_body = bool(visible_text_without_tool_markers("\n".join(section_body)).strip())
-        if not has_tool_marker or has_visible_body:
-            filtered_lines.extend(lines[index:next_heading])
-        index = next_heading
-    return "\n".join(filtered_lines)
-
-
-def _continued_team_approval_presentation(
-    continued: TeamRunOutput | RunOutput,
-    *,
-    team_display_names: list[str],
-    requirement_tools: Sequence[ToolExecution],
-    paused: PausedAttempt | None,
-    prior_response_text: str,
-    prior_tool_trace: Sequence[ToolTraceEntry],
-    prior_message_ids: set[str] | frozenset[str],
-    show_tool_calls: bool,
-) -> tuple[str, list[ToolTraceEntry], list[ToolExecution]]:
-    """Reconcile one continued team result with its transport-committed snapshot."""
-    paused_tools = paused.tools if paused is not None else ()
-    pending_tool_call_ids = {tool.tool_call_id for tool in paused_tools if tool.tool_call_id}
-    response_tools = _collect_team_tool_executions(continued)
-    recovery_tools = tools_not_represented_in_trace(response_tools, prior_tool_trace)
-    current_text, current_tool_trace = _format_approval_team_response(
-        continued,
-        team_display_names=team_display_names,
-        pending_tool_call_ids=pending_tool_call_ids,
-        start_index=len(prior_tool_trace) + 1,
-        show_tool_calls=show_tool_calls,
-        skip_message_ids=prior_message_ids if prior_response_text else frozenset(),
-        recovery_tools=recovery_tools,
-    )
-    if prior_response_text:
-        current_text = current_text.removeprefix(_format_team_header(team_display_names))
-    presentation_tools = _merge_approval_presentation_tools(continued, requirement_tools, paused_tools)
-    reconciled_prior_text = (
-        prior_response_text if show_tool_calls else _without_tool_only_team_sections(prior_response_text)
-    )
-    response_text, response_tool_trace = reconcile_tool_presentation(
-        prior_text=reconciled_prior_text,
-        prior_tool_trace=prior_tool_trace,
-        current_text=current_text,
-        current_tool_trace=current_tool_trace,
-        tools=presentation_tools,
-        pending_tool_call_ids=pending_tool_call_ids,
-        show_tool_calls=show_tool_calls,
-    )
-    return response_text, response_tool_trace, presentation_tools
 
 
 def _aggregate_team_usage_metrics(
@@ -2296,6 +2089,42 @@ def build_materialized_team_instance(
     )
 
 
+def _apply_team_continuation_event(event: object, presentation: _TeamStreamPresentation) -> None:
+    """Apply one Agno team event to the shared ordered presentation."""
+    if isinstance(event, AgentRunContentEvent) and event.agent_name:
+        presentation.append_member(event.agent_name, event.content)
+    elif isinstance(event, AgentToolCallStartedEvent) and event.agent_name:
+        presentation.start_member_tool(event.agent_name, event.tool)
+    elif isinstance(event, AgentToolCallCompletedEvent) and event.agent_name:
+        presentation.complete_member_tool(event.agent_name, event.tool)
+    elif isinstance(event, TeamRunContentEvent):
+        presentation.append_consensus(event.content)
+    elif isinstance(event, TeamToolCallStartedEvent):
+        presentation.start_tool("team", event.tool)
+    elif isinstance(event, TeamToolCallCompletedEvent):
+        presentation.complete_tool("team", event.tool)
+
+
+async def _collect_team_continuation(
+    events: AsyncIterator[object],
+    presentation: _TeamStreamPresentation,
+) -> TeamRunOutput:
+    """Collect one team continuation stream and return its terminal run output."""
+    response: TeamRunOutput | None = None
+    async for event in events:
+        if isinstance(event, TeamRunOutput):
+            response = event
+        else:
+            _apply_team_continuation_event(event, presentation)
+    if response is None:
+        msg = "Team continuation returned an unexpected result"
+        raise TypeError(msg)
+    for tool in _collect_team_tool_executions(response):
+        if not tool.is_paused:
+            presentation.complete_tool("team", tool)
+    return response
+
+
 async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
@@ -2313,10 +2142,11 @@ async def continue_paused_team_run(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None = None,
     history_scope: HistoryScope | None = None,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
-    show_tool_calls: bool = True,
     prior_response_text: str = "",
     prior_tool_trace: Sequence[ToolTraceEntry] = (),
+    prior_presentation_state: Mapping[str, object] | None = None,
+    show_tool_calls: bool = True,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
@@ -2370,63 +2200,53 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
-        member_run_ids = _requirement_member_run_ids(persisted.requirements or ())
-        prior_message_ids = _approval_prior_message_ids(persisted, session, member_run_ids)
         requirements = apply_exact_approval_decisions(
             persisted.requirements or (),
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
-        continued = await cast(
-            "Any",
-            team.acontinue_run(
-                run_response=persisted,
-                requirements=requirements,
-                session_id=session_id,
-                user_id=user_id,
-                metadata=deepcopy(persisted.metadata),
-                stream=False,
-            ),
+        presentation = _TeamStreamPresentation.restore(
+            display_names=members.display_names,
+            show_tool_calls=show_tool_calls,
+            state=prior_presentation_state,
+            tool_trace=prior_tool_trace,
+            prior_response_text=prior_response_text,
         )
-        if not isinstance(continued, TeamRunOutput):
-            msg = "Team continuation returned an unexpected result"
-            raise TypeError(msg)
-        presentation_response = await _refreshed_approval_team_response(
-            team,
-            continued,
-            existing_member_run_ids=member_run_ids,
+        continuation_stream = team.acontinue_run(
+            run_response=persisted,
+            requirements=requirements,
             session_id=session_id,
             user_id=user_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+        continued = await _collect_team_continuation(
+            cast("AsyncIterator[object]", continuation_stream),
+            presentation,
         )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
             fallback_run_id=run_id,
         )
-        response_text, response_tool_trace, presentation_tools = _continued_team_approval_presentation(
-            presentation_response,
-            team_display_names=members.display_names,
-            requirement_tools=tuple(
-                requirement.tool_execution for requirement in requirements if requirement.tool_execution is not None
-            ),
-            paused=paused,
-            prior_response_text=prior_response_text,
-            prior_tool_trace=prior_tool_trace,
-            prior_message_ids=prior_message_ids,
-            show_tool_calls=show_tool_calls,
-        )
         if paused is not None:
             return replace(
                 paused,
-                response_text=response_text,
-                tool_trace=tuple(response_tool_trace),
+                response_text=presentation.render_body(),
+                tool_trace=tuple(presentation.tool_trace),
+                response_presentation_state=presentation.to_state(),
             )
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
-        if tool_trace_collector is not None:
-            tool_trace_collector.extend(response_tool_trace)
+        if tool_trace_collector is not None and show_tool_calls:
+            tool_trace_collector.extend(presentation.tool_trace)
+        response_text = presentation.render_body()
+        if not response_text:
+            response_text = _format_terminal_team_response(continued, team_display_names=members.display_names)
         return CompletedApprovalRun(
-            response_text=response_text or APPROVAL_CONTINUATION_COMPLETED_NOTICE,
+            response_text=response_text,
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,
@@ -2436,7 +2256,7 @@ async def continue_paused_team_run(
                 model=continued.model,
                 model_provider=continued.model_provider,
                 metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
-                tool_count=reconciled_tool_count(presentation_tools, response_tool_trace),
+                tool_count=len(_collect_team_tool_executions(continued)),
             ),
         )
     finally:
@@ -2555,7 +2375,6 @@ async def team_response(  # noqa: C901, PLR0915
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
-    show_tool_calls: bool = True,
     reason_prefix: str = "Team request",
     member_model_names: Mapping[str, str] | None = None,
 ) -> str:
@@ -2832,22 +2651,10 @@ async def team_response(  # noqa: C901, PLR0915
                 fallback_run_id=attempt_run_id,
             )
             if paused_attempt is not None:
-                response_text, paused_tool_trace, _ = _continued_team_approval_presentation(
-                    response,
-                    team_display_names=attempt_members.display_names,
-                    requirement_tools=(),
-                    paused=paused_attempt,
-                    prior_response_text="",
-                    prior_tool_trace=(),
-                    prior_message_ids=frozenset(),
-                    show_tool_calls=show_tool_calls,
-                )
                 return replace(
                     paused_attempt,
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                    response_text=response_text,
-                    tool_trace=tuple(paused_tool_trace),
                 )
             original_status = response.status if isinstance(response.status, RunStatus) else RunStatus.error
             partial_text = _extract_interrupted_team_partial_text(response)
@@ -3221,51 +3028,14 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
         canonical_per_member: dict[str, str] = {}
         canonical_consensus = ""
-        tool_tracker = StreamingToolTracker()
-        completed_tools = tool_tracker.completed_tools
-        pending_tools = tool_tracker.pending_tools
-        visible_per_member: dict[str, str] = {}
-        visible_consensus: str = ""
-        tool_trace: list[ToolTraceEntry] = []
-        next_tool_index = 1
-
-        def _scope_key_for_agent(agent_name: str) -> str:
-            return f"agent:{agent_name}"
-
-        def _get_visible_consensus() -> str:
-            return visible_consensus
-
-        def _append_to_visible_consensus(text: str) -> None:
-            nonlocal visible_consensus
-            visible_consensus += text
-
-        def _set_visible_consensus(value: str) -> None:
-            nonlocal visible_consensus
-            visible_consensus = value
-
-        def _render_team_parts(
-            *,
-            per_member: dict[str, str],
-            consensus: str,
-        ) -> list[str]:
-            parts: list[str] = []
-            for display in display_names:
-                body = per_member.get(display, "").strip()
-                if body:
-                    parts.append(_format_member_contribution(display, body))
-            for display, body in per_member.items():
-                if display not in display_names and body.strip():
-                    parts.append(_format_member_contribution(display, body.strip()))
-
-            if consensus.strip():
-                parts.extend(_format_team_consensus(consensus.strip()))
-            elif parts:
-                parts.append(_format_no_consensus_note())
-            return parts
+        presentation = _TeamStreamPresentation.new(display_names, show_tool_calls=show_tool_calls)
+        completed_tools = presentation.tool_tracker.completed_tools
+        pending_tools = presentation.tool_tracker.pending_tools
 
         def _current_canonical_partial_text() -> str:
             return "\n\n".join(
                 _render_team_parts(
+                    display_names,
                     per_member=canonical_per_member,
                     consensus=canonical_consensus,
                 ),
@@ -3299,92 +3069,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 _record_interrupted_team_turn()
                 raise
 
-        def _start_tool(
-            *,
-            scope_key: str,
-            apply_visible_text: Callable[[str], None],
-            tool: ToolExecution | None,
-        ) -> None:
-            nonlocal next_tool_index
-            tool_index = next_tool_index if show_tool_calls else None
-            tool_msg, trace_entry = tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
-            if not show_tool_calls or tool_index is None:
-                return
-            if tool_msg:
-                apply_visible_text(tool_msg)
-            if trace_entry is not None:
-                tool_trace.append(trace_entry)
-            next_tool_index += 1
-
-        def _complete_tool(
-            *,
-            scope_key: str,
-            get_visible_text: Callable[[], str],
-            set_visible_text: Callable[[str], None],
-            tool: ToolExecution | None,
-        ) -> None:
-            completion = tool_tracker.complete(tool, scope_key=scope_key)
-            if completion is None:
-                return
-            tool_name, result, pending_tool, completed_trace = completion
-
-            if not show_tool_calls:
-                return
-
-            if pending_tool is None or pending_tool.visible_tool_index is None:
-                logger.warning(
-                    "Missing pending tool start in team stream; skipping completion marker",
-                    tool_name=tool_name,
-                    scope=scope_key,
-                )
-                return
-
-            updated_text, _ = complete_pending_tool_block(
-                get_visible_text(),
-                tool_name,
-                result,
-                tool_index=pending_tool.visible_tool_index,
-            )
-            set_visible_text(updated_text)
-
-            if not tool_tracker.update_visible_trace_entry(tool_trace, pending_tool, completed_trace):
-                logger.warning(
-                    "Missing tool trace slot in team stream for completion",
-                    tool_name=tool_name,
-                    tool_index=pending_tool.visible_tool_index,
-                    trace_len=len(tool_trace),
-                )
-
-        def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-            if agent_name not in visible_per_member:
-                visible_per_member[agent_name] = ""
-
-            def _apply_visible_text(text: str) -> None:
-                visible_per_member[agent_name] += text
-
-            _start_tool(
-                scope_key=_scope_key_for_agent(agent_name),
-                apply_visible_text=_apply_visible_text,
-                tool=tool,
-            )
-
-        def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-            if agent_name not in visible_per_member:
-                visible_per_member[agent_name] = ""
-
-            def _get_visible_text() -> str:
-                return visible_per_member[agent_name]
-
-            def _set_visible_text(value: str) -> None:
-                visible_per_member[agent_name] = value
-
-            _complete_tool(
-                scope_key=_scope_key_for_agent(agent_name),
-                get_visible_text=_get_visible_text,
-                set_visible_text=_set_visible_text,
-                tool=tool,
-            )
-
         def _emit_tool_timing(
             *,
             phase: str,
@@ -3407,15 +3091,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
         pending_retry_decision: MediaRetryDecision | None = None
         for retried_after_media_fallback in (False, True):
             canonical_per_member = dict.fromkeys(display_names, "")
-            visible_per_member = dict.fromkeys(display_names, "")
             canonical_consensus = ""
-            visible_consensus = ""
-            tool_trace = []
-            tool_tracker = StreamingToolTracker()
-            completed_tools = tool_tracker.completed_tools
-            next_tool_index = 1
-            pending_tools = tool_tracker.pending_tools
-            holder.tool_tracker = tool_tracker
+            presentation = _TeamStreamPresentation.new(display_names, show_tool_calls=show_tool_calls)
+            completed_tools = presentation.tool_tracker.completed_tools
+            pending_tools = presentation.tool_tracker.pending_tools
+            holder.tool_tracker = presentation.tool_tracker
             completed_tool_executions: list[ToolExecution] = []
             emitted_output = False
             media_fallback_retry_requested = False
@@ -3681,6 +3361,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                                 paused_attempt,
                                 runtime_model_name=prepared_execution.runtime_model_name,
                                 team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                                response_text=presentation.render_body(),
+                                tool_trace=tuple(presentation.tool_trace),
+                                response_presentation_state=presentation.to_state(),
                             ),
                         )
                         return
@@ -3702,10 +3385,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     if member_name:
                         if member_name not in canonical_per_member:
                             canonical_per_member[member_name] = ""
-                            visible_per_member[member_name] = ""
                         content = str(event.content or "")
                         canonical_per_member[member_name] += content
-                        visible_per_member[member_name] += content
+                        presentation.append_member(member_name, content)
                 elif isinstance(event, AgentToolCallStartedEvent):
                     member_name = event.agent_name
                     if member_name:
@@ -3715,7 +3397,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             agent_name=member_name,
                             tool=event.tool,
                         )
-                        _start_tool_for_member(member_name, event.tool)
+                        presentation.start_member_tool(member_name, event.tool)
                 elif isinstance(event, AgentToolCallCompletedEvent):
                     member_name = event.agent_name
                     if member_name:
@@ -3727,12 +3409,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         )
                         if event.tool is not None:
                             completed_tool_executions.append(event.tool)
-                        _complete_tool_for_member(member_name, event.tool)
+                        presentation.complete_member_tool(member_name, event.tool)
                 elif isinstance(event, TeamRunContentEvent):
                     if event.content:
                         content = str(event.content)
                         canonical_consensus += content
-                        visible_consensus += content
+                        presentation.append_consensus(content)
                     else:
                         logger.debug("Empty team consensus event received")
                 elif isinstance(event, TeamToolCallStartedEvent):
@@ -3742,11 +3424,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         agent_name=None,
                         tool=event.tool,
                     )
-                    _start_tool(
-                        scope_key="team",
-                        apply_visible_text=_append_to_visible_consensus,
-                        tool=event.tool,
-                    )
+                    presentation.start_tool("team", event.tool)
                 elif isinstance(event, TeamToolCallCompletedEvent):
                     _emit_tool_timing(
                         phase="agno_tool_call_completed",
@@ -3756,12 +3434,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     )
                     if event.tool is not None:
                         completed_tool_executions.append(event.tool)
-                    _complete_tool(
-                        scope_key="team",
-                        get_visible_text=_get_visible_consensus,
-                        set_visible_text=_set_visible_consensus,
-                        tool=event.tool,
-                    )
+                    presentation.complete_tool("team", event.tool)
                 elif isinstance(event, TeamRunCompletedEvent):
                     # Real Agno team streams never yield a terminal run output;
                     # this event is the stream's usage/identity source instead.
@@ -3777,16 +3450,14 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     continue
 
                 _sync_live_turn_recorder()
-                parts = _render_team_parts(
-                    per_member=visible_per_member,
-                    consensus=visible_consensus,
-                )
-                if parts:
+                rendered_body = presentation.render_body()
+                if rendered_body:
                     emitted_output = True
-                    header = _format_team_header(team_members.display_names)
-                    full_text = "\n\n".join(parts)
-                    chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
-                    yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
+                    yield StructuredStreamChunk(
+                        content=rendered_body,
+                        tool_trace=presentation.tool_trace.copy(),
+                        presentation_state=presentation.to_state(),
+                    )
 
             if media_fallback_retry_requested:
                 continue

@@ -25,8 +25,17 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
+from mindroom.tool_system.events import serialize_tool_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
+
+
+def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
+    """Raise when a chained pause was not made visible."""
+    if not succeeded:
+        raise RuntimeError(failure_reason)
+
+
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
@@ -262,16 +271,13 @@ class ApprovalResponseCoordinator:
         *,
         target: MessageTarget,
         pending_text: str,
-        tool_trace: tuple[ToolTraceEntry, ...],
-        response_tool_trace: tuple[dict[str, object], ...],
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
         approval_pending = plan.waiting_text is not None
-        snapshot_text = paused.response_text
-        snapshot_tool_trace = response_tool_trace if snapshot_text else ()
-        visible_text = snapshot_text or plan.waiting_text or pending_text
+        visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
+        visible_text = paused.response_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         publishing = await self.store.advance_approval_continuation(
             current.approval_id,
@@ -279,29 +285,25 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            response_text=snapshot_text,
-            response_tool_trace=snapshot_tool_trace,
+            response_text=paused.response_text,
+            response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+            response_presentation_state=paused.response_presentation_state,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         failure_reason = "Chained approval publication failed"
-        edit_request = EditTextRequest(
-            target=target,
-            event_id=current.response_event_id,
-            new_text=visible_text,
-            extra_content={STREAM_STATUS_KEY: stream_status},
-            tool_trace=list(tool_trace) or None,
-        )
         try:
-            edit_succeeded = await self.delivery_gateway.edit_text(edit_request)
-        except (asyncio.CancelledError, Exception):
-            await self.request_failure(publishing, failure_reason)
-            raise
-        if not edit_succeeded:
-            await self.request_failure(publishing, failure_reason)
-            raise RuntimeError(failure_reason)
-        try:
+            edit_succeeded = await self.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=current.response_event_id,
+                    new_text=visible_text,
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
+                ),
+            )
+            _require_successful_edit(edit_succeeded, failure_reason)
             await self.publish_generation(
                 publishing,
                 plan,
@@ -309,14 +311,11 @@ class ApprovalResponseCoordinator:
                 failure_reason=failure_reason,
             )
         except (asyncio.CancelledError, Exception):
-            await self.request_failure(
-                publishing,
-                failure_reason,
-            )
+            await self.request_failure(publishing, failure_reason)
             raise
         return _ApprovalPausePresentation(
             response_text=visible_text,
-            tool_trace=tool_trace,
+            tool_trace=visible_tool_trace,
             approval_pending=approval_pending,
         )
 
