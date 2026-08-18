@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 OAUTH_CONNECT_TOKEN_TTL_MINUTES = 10
 OAUTH_ACCESS_REJECTED_REASON = "access_rejected"
+OAUTH_REFRESH_FAILED_REASON = "refresh_failed"
 OAUTH_REFRESH_REJECTED_REASON = "refresh_rejected"
 OAUTH_MISSING_WRITE_SCOPE_REASON = "missing_write_scope"
 OAUTH_RESET_REQUIRED_REASON = "reset_required"
@@ -46,6 +47,7 @@ __all__ = [
     "OAUTH_ACCESS_REJECTED_REASON",
     "OAUTH_CONNECT_TOKEN_TTL_MINUTES",
     "OAUTH_MISSING_WRITE_SCOPE_REASON",
+    "OAUTH_REFRESH_FAILED_REASON",
     "OAUTH_REFRESH_REJECTED_REASON",
     "OAUTH_RESET_REQUIRED_REASON",
     "OAuthConnectTarget",
@@ -283,6 +285,12 @@ def oauth_connection_required(
     )
     if reason in {OAUTH_ACCESS_REJECTED_REASON, OAUTH_REFRESH_REJECTED_REASON}:
         instruction = build_oauth_reconnect_instruction(context.provider, connect_url, retry_safe=retry_safe)
+    elif reason == OAUTH_REFRESH_FAILED_REASON:
+        instruction = (
+            f"{context.provider.display_name} OAuth session for this agent could not be refreshed. "
+            "Retry the request. If refresh continues to fail, reconnect with this MindRoom link, then retry: "
+            f"{connect_url}"
+        )
     elif reason == OAUTH_MISSING_WRITE_SCOPE_REASON:
         instruction = (
             f"{context.provider.display_name} reconnect required to grant write access. "
