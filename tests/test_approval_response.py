@@ -170,6 +170,37 @@ async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> N
 
 
 @pytest.mark.asyncio
+async def test_agent_continuation_reuses_an_existing_visible_tool_separator() -> None:
+    """A restored marker suffix must not become two blank paragraphs."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=True,
+        response_text="Before approval.\n\n🔧 `inspect` [1] ⏳\n\n",
+        tool_trace=[
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="inspect",
+                tool_call_id="call-1",
+            ),
+        ],
+    )
+    terminal = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="After approval.")
+        yield terminal
+
+    await _collect_agent_continuation(events(), presentation)
+
+    assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+
+
+@pytest.mark.asyncio
 async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary() -> None:
     """Hidden approval tools must not concatenate pre- and post-approval prose."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")

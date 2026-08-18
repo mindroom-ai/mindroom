@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
@@ -27,6 +27,7 @@ _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d+(?=\](?: ⏳)?\s*$)")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 
@@ -149,6 +150,18 @@ class StreamingToolTracker:
                     visible_tool_index=tool_index,
                 ),
             )
+
+    def sync_visible_indices(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Synchronize pending completion targets after visible trace reordering."""
+        visible_indices = {id(trace_entry): tool_index for tool_index, trace_entry in enumerate(tool_trace, start=1)}
+        synchronized: list[_PendingStreamingTool] = []
+        for pending_tool in self.pending_tools:
+            tool_index = visible_indices.get(id(pending_tool.trace_entry))
+            if tool_index is None:
+                msg = "Pending tool is missing from its visible trace"
+                raise RuntimeError(msg)
+            synchronized.append(replace(pending_tool, visible_tool_index=tool_index))
+        self.pending_tools = synchronized
 
     def _find_pending_tool_index(
         self,
@@ -532,6 +545,25 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     return "".join(spaced_lines)
 
 
+def remap_visible_tool_marker_indices(text: str, index_map: Mapping[int, int]) -> str:
+    """Remap standalone visible marker indices while preserving all other text."""
+    remapped_lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        line_text = line.rstrip("\r\n")
+        if not is_visible_tool_marker_line(line_text):
+            remapped_lines.append(line)
+            continue
+
+        match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line_text)
+        if match is None:
+            remapped_lines.append(line)
+            continue
+        old_index = int(match.group())
+        new_index = index_map.get(old_index, old_index)
+        remapped_lines.append(f"{line[: match.start()]}{new_index}{line[match.end() :]}")
+    return "".join(remapped_lines)
+
+
 def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
     """Append one delta while preserving explicit and visible-tool boundaries."""
     if not content:
@@ -539,7 +571,14 @@ def append_stream_text(existing_text: str, content: object | None, *, separate: 
     delta = str(content)
     last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
     needs_separator = separate or is_visible_tool_marker_line(last_line)
-    separator = "\n\n" if existing_text and not delta.startswith(("\n", "\r")) and needs_separator else ""
+    separator = ""
+    if existing_text and not delta.startswith(("\n", "\r")) and needs_separator:
+        if existing_text.endswith(("\n\n", "\r\n\r\n")):
+            separator = ""
+        elif existing_text.endswith(("\n", "\r")):
+            separator = "\n"
+        else:
+            separator = "\n\n"
     return f"{existing_text}{separator}{delta}"
 
 

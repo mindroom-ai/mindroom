@@ -136,6 +136,52 @@ def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slot
     assert presentation.render_body().count("**Same**:") == 2
 
 
+def test_team_pause_reindexes_interleaved_member_tools_to_document_order() -> None:
+    """Trace slots and completion indices must follow rendered member-slot order."""
+    presentation = _TeamStreamPresentation.new(
+        config_names=["first", "second"],
+        display_names=["First", "Second"],
+        show_tool_calls=True,
+    )
+    first = ToolExecution(
+        tool_call_id="call-first",
+        tool_name="inspect_first",
+        requires_confirmation=True,
+    )
+    second = ToolExecution(
+        tool_call_id="call-second",
+        tool_name="inspect_second",
+        requires_confirmation=True,
+    )
+    presentation.start_member_tool("second", second)
+    presentation.start_member_tool("first", first)
+    first_requirement = RunRequirement(first)
+    first_requirement.member_agent_id = "first"
+    second_requirement = RunRequirement(second)
+    second_requirement.member_agent_id = "second"
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(first, second),
+        requirements=(first_requirement, second_requirement),
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+    assert [entry.tool_call_id for entry in presentation.tool_trace] == ["call-first", "call-second"]
+    assert "🔧 `inspect_first` [1] ⏳" in presentation.per_member["first"]
+    assert "🔧 `inspect_second` [2] ⏳" in presentation.per_member["second"]
+    presentation.complete_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done"),
+    )
+    assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
+    assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
+
+
 def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -> None:
     """Frozen hidden rendering keeps restart identity without adding markers to the body."""
     presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
@@ -241,6 +287,38 @@ async def test_hidden_team_continuation_separates_text_across_the_tool_boundary(
     await _collect_team_continuation(events(), presentation)
 
     assert "Before approval.\n\nAfter approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_reuses_an_existing_visible_tool_separator() -> None:
+    """A restored team marker suffix must not become two blank paragraphs."""
+    prior = _TeamStreamPresentation.new([], [], show_tool_calls=True)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    presentation = _TeamStreamPresentation.restore(
+        config_names=[],
+        show_tool_calls=True,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+        tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval." in presentation.render_body()
 
 
 @pytest.mark.asyncio

@@ -117,6 +117,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_tool_completed_event,
     is_visible_tool_marker_line,
+    remap_visible_tool_marker_indices,
 )
 
 if TYPE_CHECKING:
@@ -516,6 +517,25 @@ class _TeamStreamPresentation:
             return
         self.per_member[scope_key.removeprefix("agent:")] = text
 
+    def _align_tool_trace_with_document(self) -> None:
+        """Keep trace slots and visible indices in rendered document order."""
+        scope_order = {
+            **{f"agent:{member_id}": index for index, member_id in enumerate(self.member_ids)},
+            "team": len(self.member_ids),
+        }
+        old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
+        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
+        index_map = {
+            old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
+        }
+        if self.show_tool_calls:
+            self.per_member = {
+                member_id: remap_visible_tool_marker_indices(member_text, index_map)
+                for member_id, member_text in self.per_member.items()
+            }
+            self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
+        self.tool_tracker.sync_visible_indices(self.tool_trace)
+
     def start_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
         """Record a tool start in its exact member or coordinator slot."""
         tool_index = len(self.tool_trace) + 1
@@ -526,6 +546,7 @@ class _TeamStreamPresentation:
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
             self._append_tool_marker(scope_key, marker)
+        self._align_tool_trace_with_document()
 
     def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
         """Complete only the pending slot identified by this tool event."""
