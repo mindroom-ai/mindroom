@@ -528,6 +528,43 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
 
 
 @pytest.mark.asyncio
+async def test_preallocation_cancel_releases_capacity_when_broker_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known-no-child cancellation is terminal even when broker coordination fails."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    limits = ScriptRunLimits(max_concurrent_runs=1)
+    created = threading.Event()
+    release_create = threading.Event()
+    original_create = manager.store.create_run
+
+    def create_then_pause(run: ScriptRunRecord) -> None:
+        original_create(run)
+        created.set()
+        assert release_create.wait(timeout=5)
+
+    monkeypatch.setattr(manager.store, "create_run", create_then_pause)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n", limits=limits))
+    assert await asyncio.to_thread(created.wait, 5)
+    [starting] = manager.store.list_runs(include_finished=False)
+
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await manager.cancel(context, run_id=starting.run_id, force=True)
+    manager.broker.failures.append(RuntimeError("broker unavailable"))
+    release_create.set()
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        await launch
+
+    assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
+    assert client.requested_handles == []
+    replacement = await manager.run(context, source="print('ok')\n", limits=limits)
+    assert replacement.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
 async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -574,6 +611,61 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
 
     assert launch_result.state is ScriptRunState.CANCELLED
     assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal control retries broker cancellation after a known-no-child broker failure."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    worker_assigned = threading.Event()
+    release_assignment = threading.Event()
+    original_transition = manager.store.transition_run
+
+    def transition_then_pause(
+        run_id: str,
+        *,
+        state: ScriptRunState,
+        worker_id: str | None = None,
+        supervisor_handle: str | None = None,
+        exit_code: int | None = None,
+        error: str | None = None,
+    ) -> ScriptRunRecord:
+        result = original_transition(
+            run_id,
+            state=state,
+            worker_id=worker_id,
+            supervisor_handle=supervisor_handle,
+            exit_code=exit_code,
+            error=error,
+        )
+        if state is ScriptRunState.STARTING and worker_id is not None:
+            worker_assigned.set()
+            assert release_assignment.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(manager.store, "transition_run", transition_then_pause)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(worker_assigned.wait, 5)
+    [starting] = manager.store.list_runs(include_finished=False)
+    client.next_status = WorkerScriptStatus.unknown_handle()
+
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await manager.cancel(context, run_id=starting.run_id, force=True)
+    manager.broker.failures.append(RuntimeError("broker unavailable"))
+    release_assignment.set()
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        await launch
+
+    assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
+    assert client.requested_handles == []
+    status = await manager.status(context, run_id=starting.run_id)
+    assert status.run.state is ScriptRunState.CANCELLED
+    assert manager.broker.cancelled_states[-1] is ScriptRunState.CANCELLED
 
 
 @pytest.mark.asyncio

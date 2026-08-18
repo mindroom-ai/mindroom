@@ -281,15 +281,21 @@ class ScriptRunManager:
         context: ToolRuntimeContext,
         run: ScriptRunRecord,
     ) -> ScriptRunRecord:
+        broker_error: BaseException | None = None
         try:
             await self.broker.cancel_run(run.run_id)
+        except BaseException as exc:
+            broker_error = exc
         finally:
             await self._cleanup_token(context, run)
-        return await asyncio.to_thread(
+        cancelled = await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
             state=ScriptRunState.CANCELLED,
         )
+        if broker_error is not None:
+            raise broker_error
+        return cancelled
 
     async def status(
         self,
