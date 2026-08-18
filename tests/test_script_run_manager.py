@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import stat
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -28,6 +30,8 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
+    import os
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -45,22 +49,34 @@ def _runtime_paths(tmp_path: Path, *, mode: str | None = "all") -> RuntimePaths:
 def _context(
     tmp_path: Path,
     *,
+    agent_name: str = "watcher",
     requester_id: str = "@alice:example.test",
     mode: str | None = "all",
+    private: bool = False,
+    worker_scope: str = "user_agent",
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(tmp_path, mode=mode)
+    watcher: dict[str, object] = {
+        "display_name": "Watcher",
+        "worker_scope": worker_scope,
+        "tools": ["script", "calculator"],
+    }
+    if private:
+        watcher.pop("worker_scope")
+        watcher["private"] = {"per": "user_agent", "root": "private/watcher"}
     config = Config(
         agents={
-            "watcher": {
-                "display_name": "Watcher",
-                "worker_scope": "user_agent",
+            "watcher": watcher,
+            "analyzer": {
+                "display_name": "Analyzer",
+                "worker_scope": worker_scope,
                 "tools": ["script", "calculator"],
             },
         },
         defaults={"tools": []},
     )
     return make_test_tool_runtime_context(
-        agent_name="watcher",
+        agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id="!room:example.test",
             thread_id="$thread:example.test",
@@ -81,6 +97,7 @@ class _Broker:
     store: ScriptRunStore
     cancelled_runs: list[str] = field(default_factory=list)
     cancelled_states: list[ScriptRunState] = field(default_factory=list)
+    failures: list[BaseException] = field(default_factory=list)
 
     async def cancel_run(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
@@ -92,6 +109,8 @@ class _Broker:
         }
         self.cancelled_runs.append(run_id)
         self.cancelled_states.append(run.state)
+        if self.failures:
+            raise self.failures.pop(0)
 
 
 @dataclass
@@ -99,7 +118,9 @@ class _WorkerBackend:
     store: ScriptRunStore
     runtime_paths: RuntimePaths
     handles: dict[str, WorkerHandle] = field(default_factory=dict)
+    specs: list[WorkerSpec] = field(default_factory=list)
     saw_starting: bool = False
+    list_worker_thread_ids: list[int] = field(default_factory=list)
 
     def ensure_worker(
         self,
@@ -111,6 +132,7 @@ class _WorkerBackend:
         del now, progress_sink
         active = self.store.list_runs(include_finished=False)
         self.saw_starting = len(active) == 1 and active[0].state is ScriptRunState.STARTING
+        self.specs.append(spec)
         root = worker_root_path(self.runtime_paths.storage_root, spec.worker_key)
         (root / "workspace").mkdir(parents=True, exist_ok=True)
         handle = WorkerHandle(
@@ -129,6 +151,7 @@ class _WorkerBackend:
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
         del include_idle, now
+        self.list_worker_thread_ids.append(threading.get_ident())
         return list(self.handles.values())
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
@@ -153,7 +176,16 @@ class _WorkerClient:
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
-    next_status: WorkerScriptStatus = field(default_factory=lambda: WorkerScriptStatus(state="running"))
+    cancel_handles: list[str] = field(default_factory=list)
+    requested_handles: list[str] = field(default_factory=list)
+    next_status: WorkerScriptStatus = field(
+        default_factory=lambda: WorkerScriptStatus(state="exited", exit_code=-15),
+    )
+    status_results: list[WorkerScriptStatus] = field(default_factory=list)
+    cancel_failures: list[BaseException] = field(default_factory=list)
+    launch_failure: BaseException | None = None
+    launch_entered: asyncio.Event | None = None
+    launch_release: asyncio.Event | None = None
 
     async def launch(
         self,
@@ -164,6 +196,7 @@ class _WorkerClient:
         source_digest: str,
         token_path: str,
         gateway_url: str,
+        supervisor_handle: str,
         private_agent_names: tuple[str, ...] | None = None,
         tail_lines: int = 200,
     ) -> WorkerScriptLaunch:
@@ -171,6 +204,9 @@ class _WorkerClient:
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
+        assert starting.supervisor_handle == supervisor_handle
+        assert len(supervisor_handle) == len("shell:") + 32
+        self.requested_handles.append(supervisor_handle)
         workspace = Path(worker.debug_metadata["state_root"]) / "workspace"
         source = workspace / source_path
         token = workspace / token_path
@@ -179,7 +215,13 @@ class _WorkerClient:
         assert stat.S_IMODE(token.stat().st_mode) == 0o600
         assert stat.S_IMODE(source.parent.stat().st_mode) == 0o700
         self.launch_paths[run_id] = (source, token)
-        return WorkerScriptLaunch(supervisor_handle="shell:1234abcd")
+        if self.launch_entered is not None:
+            self.launch_entered.set()
+        if self.launch_release is not None:
+            await self.launch_release.wait()
+        if self.launch_failure is not None:
+            raise self.launch_failure
+        return WorkerScriptLaunch(supervisor_handle=supervisor_handle)
 
     async def status(
         self,
@@ -189,6 +231,8 @@ class _WorkerClient:
         supervisor_handle: str,
     ) -> WorkerScriptStatus:
         del worker, run_id, supervisor_handle
+        if self.status_results:
+            return self.status_results.pop(0)
         return self.next_status
 
     async def cancel(
@@ -199,9 +243,12 @@ class _WorkerClient:
         supervisor_handle: str,
         force: bool = False,
     ) -> WorkerScriptCancel:
-        del worker, supervisor_handle
+        del worker
         self.cancel_forces.append(force)
+        self.cancel_handles.append(supervisor_handle)
         self.cancel_observed_revocation = self.store.get_run(run_id).cancel_requested_at is not None
+        if self.cancel_failures:
+            raise self.cancel_failures.pop(0)
         return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
 
 
@@ -217,6 +264,8 @@ def _manager(tmp_path: Path, *, mode: str | None = "all") -> tuple[ScriptRunMana
         worker_backend=backend,
         gateway_url="http://primary.test/api/script-gateway",
         grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
     )
     return manager, backend, client
 
@@ -236,7 +285,7 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
     assert run.state is ScriptRunState.RUNNING
     assert run.worker_key is not None
     assert run.worker_id == "worker-1"
-    assert run.supervisor_handle == "shell:1234abcd"
+    assert run.supervisor_handle == client.requested_handles[0]
     assert run.max_tool_calls_per_minute == 4
     assert run.max_runtime_seconds == 3600
     assert client.launch_paths[run.run_id][0].is_file()
@@ -272,6 +321,103 @@ async def test_worker_keys_are_requester_and_agent_scoped(tmp_path: Path) -> Non
     assert alice.worker_id != bob.worker_id
 
 
+@pytest.mark.parametrize("configured_scope", ["shared", "user"])
+@pytest.mark.asyncio
+async def test_script_process_scope_is_user_agent_independent_of_tool_scope(
+    tmp_path: Path,
+    configured_scope: str,
+) -> None:
+    """Script processes never reuse a worker across requesters or agents."""
+    manager, _backend, _client = _manager(tmp_path)
+
+    alice_watcher = await manager.run(
+        _context(tmp_path, worker_scope=configured_scope),
+        source="print('ok')\n",
+    )
+    bob_watcher = await manager.run(
+        _context(tmp_path, requester_id="@bob:example.test", worker_scope=configured_scope),
+        source="print('ok')\n",
+    )
+    alice_analyzer = await manager.run(
+        _context(tmp_path, agent_name="analyzer", worker_scope=configured_scope),
+        source="print('ok')\n",
+    )
+
+    assert alice_watcher.worker_key is not None
+    assert ":user_agent:" in alice_watcher.worker_key
+    assert len({alice_watcher.worker_key, bob_watcher.worker_key, alice_analyzer.worker_key}) == 3
+
+
+@pytest.mark.asyncio
+async def test_script_process_target_preserves_private_agent_visibility(tmp_path: Path) -> None:
+    """Dedicated script workers retain the private-agent visibility required by their workspace."""
+    manager, backend, _client = _manager(tmp_path)
+
+    await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
+
+    assert backend.specs[-1].private_agent_names == frozenset({"watcher"})
+
+
+@pytest.mark.asyncio
+async def test_starting_run_with_durable_handle_can_be_reconciled_and_signalled(tmp_path: Path) -> None:
+    """Restart reconciliation can observe and control a pre-spawn persisted handle."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    launched = await manager.run(context, source="print('ok')\n")
+    orphan = replace(
+        launched,
+        run_id="script-orphaned-launch",
+        state=ScriptRunState.STARTING,
+        started_at=None,
+    )
+    manager.store.create_run(orphan)
+    client.status_results = [WorkerScriptStatus(state="running")]
+
+    observed = await manager.reconcile(context, run_id=orphan.run_id)
+
+    assert observed.state is ScriptRunState.STARTING
+    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
+    cancelled = await manager.cancel(context, run_id=orphan.run_id, force=True)
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert client.cancel_handles[-1] == orphan.supervisor_handle
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_worker_launch_failure_force_signals_durable_handle(tmp_path: Path) -> None:
+    """A returned launch error cannot leak a process that already accepted the durable handle."""
+    manager, _backend, client = _manager(tmp_path)
+    client.launch_failure = RuntimeError("launch response lost")
+
+    with pytest.raises(RuntimeError, match="launch response lost"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    stored = manager.store.list_runs()[0]
+    assert stored.state is ScriptRunState.FAILED
+    assert stored.supervisor_handle is not None
+    assert client.cancel_forces == [True]
+    assert client.cancel_handles == [stored.supervisor_handle]
+
+
+@pytest.mark.asyncio
+async def test_launch_adopts_cancellation_that_finishes_before_running_transition(tmp_path: Path) -> None:
+    """Launch completion cannot overwrite or error on a concurrently confirmed cancellation."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    client.launch_entered = asyncio.Event()
+    client.launch_release = asyncio.Event()
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    await client.launch_entered.wait()
+    [starting] = manager.store.list_runs(include_finished=False)
+
+    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    client.launch_release.set()
+    launch_result = await launch
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert launch_result.state is ScriptRunState.CANCELLED
+    assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
+
+
 @pytest.mark.asyncio
 async def test_configured_worker_backend_is_used_without_execution_mode_override(tmp_path: Path) -> None:
     """An enabled primary worker backend remains the default when no mode override is authored."""
@@ -282,6 +428,21 @@ async def test_configured_worker_backend_is_used_without_execution_mode_override
     assert run.state is ScriptRunState.RUNNING
     assert run.worker_id == "worker-1"
     assert run.local_unsafe is False
+
+
+@pytest.mark.asyncio
+async def test_worker_lookup_is_offloaded_from_event_loop(tmp_path: Path) -> None:
+    """Docker or Kubernetes worker discovery cannot block the primary event loop."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(state="running")
+    event_loop_thread = threading.get_ident()
+
+    await manager.status(context, run_id=run.run_id)
+
+    assert backend.list_worker_thread_ids
+    assert all(thread_id != event_loop_thread for thread_id in backend.list_worker_thread_ids)
 
 
 def test_worker_workspace_symlink_cannot_escape_primary_storage(tmp_path: Path) -> None:
@@ -305,7 +466,7 @@ def test_worker_workspace_symlink_cannot_escape_primary_storage(tmp_path: Path) 
     )
 
     with pytest.raises(ScriptRunManagerError, match="inside its worker state root"):
-        manager_module._worker_workspace(context, worker)  # noqa: SLF001
+        manager_module._worker_workspace(context, worker)
 
 
 @pytest.mark.asyncio
@@ -321,6 +482,200 @@ async def test_cancel_revokes_before_signal_and_removes_force_kill_token(tmp_pat
     assert client.cancel_observed_revocation is True
     assert cancelled.state is ScriptRunState.CANCELLED
     assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_graceful_cancel_escalates_and_confirms_exit_before_terminal_state(tmp_path: Path) -> None:
+    """A process still running after SIGTERM receives SIGKILL before CANCELLED is durable."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.status_results = [
+        WorkerScriptStatus(state="running"),
+        WorkerScriptStatus(state="exited", exit_code=-9),
+    ]
+
+    cancelled = await manager.cancel(context, run_id=run.run_id)
+
+    assert client.cancel_forces == [False, True]
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert cancelled.exit_code == -9
+
+
+@pytest.mark.asyncio
+async def test_broker_failure_does_not_skip_signal_and_status_retries_cancel(tmp_path: Path) -> None:
+    """Revoked cancellation remains retryable when broker coordination fails after signaling."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    manager.broker.failures.append(RuntimeError("broker unavailable"))
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        await manager.cancel(context, run_id=run.run_id)
+
+    pending = manager.store.get_run(run.run_id)
+    assert pending.state is ScriptRunState.RUNNING
+    assert pending.cancel_requested_at is not None
+    assert client.cancel_forces == [False]
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.state is ScriptRunState.CANCELLED
+    assert client.cancel_forces == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_signal_failure_stays_nonterminal_and_repeat_cancel_retries(tmp_path: Path) -> None:
+    """An unconfirmed failed signal preserves cancellation intent for a later retry."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.cancel_failures.append(RuntimeError("worker unavailable"))
+    client.next_status = WorkerScriptStatus(state="running")
+
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        await manager.cancel(context, run_id=run.run_id, force=True)
+
+    pending = manager.store.get_run(run.run_id)
+    assert pending.state is ScriptRunState.RUNNING
+    assert pending.cancel_requested_at is not None
+
+    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
+    cancelled = await manager.cancel(context, run_id=run.run_id, force=True)
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert client.cancel_forces == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_token_cleanup_failure_does_not_mask_cancel_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort capability cleanup cannot replace a confirmed cancellation result."""
+    manager, _backend, _client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+
+    def deny_cleanup(_workspace: Path, _run_id: str) -> None:
+        message = "cleanup denied"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(manager_module, "_remove_snapshot_token", deny_cleanup)
+
+    cancelled = await manager.cancel(context, run_id=run.run_id, force=True)
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+
+
+def test_token_cleanup_does_not_follow_parent_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing a checked run directory cannot redirect capability deletion."""
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".mindroom" / "script-runs" / "run-race"
+    run_dir.mkdir(parents=True)
+    (run_dir / "capability").write_text("original", encoding="utf-8")
+    outside_run = tmp_path / "outside-run"
+    outside_run.mkdir()
+    outside_token = outside_run / "capability"
+    outside_token.write_text("outside", encoding="utf-8")
+    saved_run_dir = run_dir.with_name("run-race-saved")
+    original_is_symlink = Path.is_symlink
+    original_stat = manager_module.os.stat
+    swapped = False
+
+    def swap_directory() -> None:
+        nonlocal swapped
+        run_dir.rename(saved_run_dir)
+        run_dir.symlink_to(outside_run, target_is_directory=True)
+        swapped = True
+
+    def swap_after_path_check(path: Path) -> bool:
+        if path == run_dir and not swapped:
+            swap_directory()
+            return False
+        return original_is_symlink(path)
+
+    def swap_before_descriptor_stat(
+        path: str,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if path == "capability" and dir_fd is not None and not swapped:
+            swap_directory()
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "is_symlink", swap_after_path_check)
+    monkeypatch.setattr(manager_module.os, "stat", swap_before_descriptor_stat)
+
+    manager_module._remove_snapshot_token(workspace, "run-race")
+
+    assert swapped is True
+    assert outside_token.read_text(encoding="utf-8") == "outside"
+
+
+def test_token_cleanup_ignores_directory_and_partial_snapshot(tmp_path: Path) -> None:
+    """Directory mutation and an absent token are harmless cleanup outcomes."""
+    workspace = tmp_path / "workspace"
+    directory_token = workspace / ".mindroom" / "script-runs" / "run-directory" / "capability"
+    directory_token.mkdir(parents=True)
+    partial_run = workspace / ".mindroom" / "script-runs" / "run-partial"
+    partial_run.mkdir()
+
+    manager_module._remove_snapshot_token(workspace, "run-directory")
+    manager_module._remove_snapshot_token(workspace, "run-partial")
+
+    assert directory_token.is_dir()
+
+
+def test_token_cleanup_ignores_descriptor_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Descriptor close errors cannot replace the best-effort cleanup outcome."""
+    workspace = tmp_path / "workspace"
+    token = workspace / ".mindroom" / "script-runs" / "run-close" / "capability"
+    token.parent.mkdir(parents=True)
+    token.write_text("secret", encoding="utf-8")
+    original_close = manager_module.os.close
+
+    def close_then_fail(descriptor: int) -> None:
+        original_close(descriptor)
+        message = "close failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(manager_module.os, "close", close_then_fail)
+
+    manager_module._remove_snapshot_token(workspace, "run-close")
+
+    assert not token.exists()
+
+
+@pytest.mark.asyncio
+async def test_partial_snapshot_cleanup_preserves_original_launch_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token-write failure remains the launch error after partial snapshot cleanup."""
+    manager, _backend, _client = _manager(tmp_path)
+    original_write = manager_module._write_private_file
+    calls = 0
+
+    def fail_token_write(path: Path, content: bytes) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            message = "token write denied"
+            raise PermissionError(message)
+        original_write(path, content)
+
+    monkeypatch.setattr(manager_module, "_write_private_file", fail_token_write)
+
+    with pytest.raises(PermissionError, match="token write denied"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
 
 
 @pytest.mark.asyncio
@@ -452,6 +807,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         cwd: str | None,
         tail: int,
         timeout: float,  # noqa: ASYNC109
+        handle: str | None = None,
     ) -> str:
         observed.update(
             socket_path=socket_path,
@@ -461,8 +817,12 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
             cwd=cwd,
             tail=tail,
             timeout=timeout,
+            handle=handle,
         )
-        return "Started background process\nHandle: shell:1234abcd"
+        assert handle is not None
+        starting = manager.store.list_runs(include_finished=False)[0]
+        assert starting.supervisor_handle == handle
+        return f"Started background process\nHandle: {handle}"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
@@ -472,6 +832,106 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
     assert run.local_unsafe is True
     assert run.worker_id is None
     assert run.worker_key is None
-    assert run.supervisor_handle == "shell:1234abcd"
+    assert run.supervisor_handle == observed["handle"]
     assert observed["socket_path"] == "/control/shell.sock"
     assert observed["namespace"] == f"script:local:{run.run_id}"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_local_launch_failure_force_signals_durable_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local launch error force-signals the handle that was durable before spawn."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    killed_handles: list[str] = []
+
+    async def failed_launch(*_args: object, **_kwargs: object) -> str:
+        return "Error: launch response lost"
+
+    def kill_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        handle: str,
+        force: bool,
+    ) -> str:
+        del namespace
+        assert force is True
+        killed_handles.append(handle)
+        return "Force-killed process"
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", failed_launch)
+    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
+
+    with pytest.raises(ScriptRunManagerError, match="launch response lost"):
+        await manager.run(context, source="print('ok')\n")
+
+    stored = manager.store.list_runs()[0]
+    assert killed_handles == [stored.supervisor_handle]
+
+
+@pytest.mark.asyncio
+async def test_local_launch_adopts_cancellation_before_running_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local launch completion cannot overwrite a concurrently confirmed cancellation."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    launch_entered = asyncio.Event()
+    launch_release = asyncio.Event()
+
+    async def launch_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        argv: list[str],
+        env: dict[str, str],
+        cwd: str | None,
+        tail: int,
+        timeout: float,  # noqa: ASYNC109
+        handle: str | None = None,
+    ) -> str:
+        del namespace, argv, env, cwd, tail, timeout
+        assert handle is not None
+        launch_entered.set()
+        await launch_release.wait()
+        return f"Started background process\nHandle: {handle}"
+
+    def kill_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        handle: str,
+        force: bool,
+    ) -> str:
+        del namespace, handle, force
+        return "Force-killed process"
+
+    def check_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        handle: str,
+    ) -> str:
+        del namespace, handle
+        return "Status: FINISHED (exit code -9)"
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(manager_module, "check_command_via_supervisor", check_local)
+
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    await launch_entered.wait()
+    [starting] = manager.store.list_runs(include_finished=False)
+    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    launch_release.set()
+
+    launch_result = await launch
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert launch_result.state is ScriptRunState.CANCELLED
+    assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED

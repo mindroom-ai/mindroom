@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _WORKER_TOKEN = "worker-token"  # noqa: S105
+_SUPERVISOR_HANDLE = f"shell:{'a' * 32}"
 
 
 def _handle(*, token: str | None = _WORKER_TOKEN) -> WorkerHandle:
@@ -51,7 +52,7 @@ async def test_script_worker_client_launches_with_worker_auth_and_validates_rece
         observed["url"] = str(request.url)
         observed["token"] = request.headers.get("x-mindroom-sandbox-token")
         observed["payload"] = request.read().decode()
-        return httpx.Response(200, json={"ok": True, "supervisor_handle": "shell:1234abcd"})
+        return httpx.Response(200, json={"ok": True, "supervisor_handle": _SUPERVISOR_HANDLE})
 
     result = await _client(handler).launch(
         _handle(),
@@ -60,14 +61,16 @@ async def test_script_worker_client_launches_with_worker_auth_and_validates_rece
         source_digest="a" * 64,
         token_path=".mindroom-script-runs/run-1/capability",  # noqa: S106
         gateway_url="http://primary.test/api/script-gateway",
+        supervisor_handle=_SUPERVISOR_HANDLE,
         tail_lines=80,
     )
 
-    assert result == WorkerScriptLaunch(supervisor_handle="shell:1234abcd")
+    assert result == WorkerScriptLaunch(supervisor_handle=_SUPERVISOR_HANDLE)
     assert observed["url"] == "http://worker.test/api/sandbox-runner/scripts/run"
     assert observed["token"] == _WORKER_TOKEN
     assert '"worker_key":"v1:test:shared:scripts"' in str(observed["payload"])
     assert '"run_id":"run-1"' in str(observed["payload"])
+    assert f'"supervisor_handle":"{_SUPERVISOR_HANDLE}"' in str(observed["payload"])
 
 
 @pytest.mark.asyncio
@@ -93,8 +96,8 @@ async def test_script_worker_client_returns_normalized_status_and_cancel_receipt
     client = _client(handler)
     handle = _handle()
 
-    status = await client.status(handle, run_id="run-1", supervisor_handle="shell:1234abcd")
-    cancelled = await client.cancel(handle, run_id="run-1", supervisor_handle="shell:1234abcd")
+    status = await client.status(handle, run_id="run-1", supervisor_handle=_SUPERVISOR_HANDLE)
+    cancelled = await client.cancel(handle, run_id="run-1", supervisor_handle=_SUPERVISOR_HANDLE)
 
     assert status == WorkerScriptStatus(state="exited", output="done", exit_code=7)
     assert cancelled == WorkerScriptCancel(cancel_requested=False, already_finished=True, unknown_handle=False)
@@ -110,7 +113,7 @@ async def test_script_worker_client_exposes_unknown_handle_as_status() -> None:
     status = await _client(handler).status(
         _handle(),
         run_id="run-1",
-        supervisor_handle="shell:1234abcd",
+        supervisor_handle=_SUPERVISOR_HANDLE,
     )
 
     assert status == WorkerScriptStatus.unknown_handle()
@@ -147,6 +150,7 @@ async def test_script_worker_client_classifies_request_and_worker_failures(
             source_digest="a" * 64,
             token_path="capability",  # noqa: S106
             gateway_url="http://primary.test/api/script-gateway",
+            supervisor_handle=_SUPERVISOR_HANDLE,
         )
 
     assert exc_info.value.failure_kind == expected_kind
@@ -163,7 +167,7 @@ async def test_script_worker_client_rejects_missing_worker_token_before_transpor
         await _client(handler).status(
             _handle(token=None),
             run_id="run-1",
-            supervisor_handle="shell:1234abcd",
+            supervisor_handle=_SUPERVISOR_HANDLE,
         )
 
     assert exc_info.value.failure_kind == "worker"

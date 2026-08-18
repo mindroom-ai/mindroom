@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 _TOKEN = "worker-secret"  # noqa: S105
 _HEADERS = {"x-mindroom-sandbox-token": _TOKEN}
 _WORKER_KEY = "v1:test:shared:scripts"
+_SUPERVISOR_HANDLE = f"shell:{'a' * 32}"
 
 
 def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
@@ -100,6 +101,7 @@ def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, obje
         "source_path": source_path,
         "source_digest": source_digest,
         "token_path": token_path,
+        "supervisor_handle": _SUPERVISOR_HANDLE,
         "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": "http://primary:8765/api/script-gateway"},
         "tail_lines": 100,
     }
@@ -125,6 +127,7 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     launch = response.json()
     assert launch["ok"] is True
     handle = launch["supervisor_handle"]
+    assert handle == _SUPERVISOR_HANDLE
 
     status = client.get(
         f"/api/sandbox-runner/scripts/{run_id}",
@@ -298,6 +301,7 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
             "source_path": "source.py",
             "source_digest": "a" * 64,
             "token_path": "capability",
+            "supervisor_handle": _SUPERVISOR_HANDLE,
             "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": "http://primary.test/api/script-gateway"},
         },
     )
@@ -366,7 +370,7 @@ def test_worker_script_cancel_rejects_handle_with_valid_prefix(
     response = client.post(
         "/api/sandbox-runner/scripts/run-safe/cancel",
         headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "supervisor_handle": "shell:1234abcd-suffix"},
+        json={"worker_key": _WORKER_KEY, "supervisor_handle": f"{_SUPERVISOR_HANDLE}-suffix"},
     )
 
     assert response.status_code == 422

@@ -38,9 +38,9 @@ _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_TOKEN_BYTES = 4096
 _ALLOWED_ENVIRONMENT_NAMES = frozenset({"MINDROOM_SCRIPT_GATEWAY_URL"})
 _RUN_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-_HANDLE_PATTERN = r"shell:[0-9a-f]{8}"
+_HANDLE_PATTERN = r"shell:[0-9a-f]{32}"
 _HANDLE_RE = re.compile(r"^" + _HANDLE_PATTERN + r"$")
-_LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{8})$", re.MULTILINE)
+_LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{32})$", re.MULTILINE)
 _FINISHED_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+),")
 
 __all__ = [
@@ -135,6 +135,7 @@ class SandboxScriptRunRequest(BaseModel):
     source_path: str = Field(min_length=1, max_length=1024)
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     token_path: str = Field(min_length=1, max_length=1024)
+    supervisor_handle: _SupervisorHandle
     environment: dict[str, str] = Field(default_factory=dict, max_length=4)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
     tail_lines: int = Field(default=200, ge=1, le=1000)
@@ -349,6 +350,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         cwd=str(workspace),
         tail=payload.tail_lines,
         timeout=0,
+        handle=payload.supervisor_handle,
     )
     return _parse_launch_message(message)
 

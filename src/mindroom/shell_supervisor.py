@@ -85,6 +85,10 @@ async def _handle_run(
     if not isinstance(argv_payload, list) or not isinstance(env_payload, dict):
         msg = "run request requires an 'argv' list and an 'env' object"
         raise TypeError(msg)
+    handle_payload = payload.get("handle")
+    if handle_payload is not None and not isinstance(handle_payload, str):
+        msg = "run request 'handle' must be a string"
+        raise TypeError(msg)
     run_task = asyncio.create_task(
         run_command(
             registry,
@@ -94,6 +98,7 @@ async def _handle_run(
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
             timeout=float(payload["timeout"]),  # ty: ignore[invalid-argument-type]
+            handle=handle_payload,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -208,6 +213,7 @@ async def run_command_via_supervisor(
     cwd: str | None,
     tail: int,
     timeout: float,  # noqa: ASYNC109
+    handle: str | None = None,
 ) -> str:
     """Run one shell command through the supervisor and return its message."""
     request = {
@@ -219,6 +225,8 @@ async def run_command_via_supervisor(
         "tail": tail,
         "timeout": timeout,
     }
+    if handle is not None:
+        request["handle"] = handle
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:

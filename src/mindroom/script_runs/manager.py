@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import stat
 import sys
 import uuid
 from contextlib import suppress
@@ -16,11 +17,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
-from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptStatus
+from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
 from mindroom.shell_supervisor import (
     check_command_via_supervisor,
     ensure_shell_supervisor,
@@ -47,10 +49,12 @@ if TYPE_CHECKING:
 
 __all__ = ["ScriptRunLimits", "ScriptRunManager", "ScriptRunManagerError", "ScriptRunStatus"]
 
+logger = get_logger(__name__)
+
 _MAX_SOURCE_BYTES = 128 * 1024
 _LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 _WORKER_EXECUTION_MODES = frozenset({"all", "sandbox_all", "selective", "sandbox_selective"})
-_HANDLE_RE = re.compile(r"shell:[0-9a-f]{8}")
+_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 _FINISHED_RE = re.compile(r"Status: FINISHED \(exit code (-?\d+)\)")
 _TERMINAL_STATES = frozenset(
     {
@@ -123,6 +127,8 @@ class ScriptRunManager:
     worker_backend: WorkerBackend | None
     gateway_url: str
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
+    cancellation_grace_seconds: float = 2.0
+    cancellation_poll_interval_seconds: float = 0.05
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def run(
@@ -140,7 +146,7 @@ class ScriptRunManager:
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = build_execution_identity_from_runtime_context(context)
         worker_target = build_agent_toolkit_worker_target(
-            context.config.resolve_entity(context.agent_name).execution_scope,
+            "user_agent",
             context.agent_name,
             is_private=context.config.get_agent(context.agent_name).private is not None,
             execution_identity=execution_identity,
@@ -162,6 +168,7 @@ class ScriptRunManager:
 
         token, token_hash = mint_script_capability()
         run_id = f"script-{uuid.uuid4().hex}"
+        supervisor_handle = f"shell:{uuid.uuid4().hex}"
         launch_grants = self.grant_resolver(context)
         if effective_limits.allowed_tools:
             allowed_tools = frozenset(effective_limits.allowed_tools)
@@ -177,6 +184,7 @@ class ScriptRunManager:
             grants=launch_grants,
             token_hash=token_hash,
             worker_key=worker_key,
+            supervisor_handle=supervisor_handle,
             name=_validated_name(name),
             local_unsafe=local_unsafe,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
@@ -222,7 +230,7 @@ class ScriptRunManager:
                 try:
                     await self.broker.cancel_run(run.run_id)
                 finally:
-                    self._cleanup_token(context, run)
+                    await self._cleanup_token(context, run)
                 raise
 
     async def status(
@@ -237,8 +245,15 @@ class ScriptRunManager:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                self._cleanup_token(context, run)
+                await self._cleanup_token(context, run)
             return ScriptRunStatus(run=run)
+        if run.cancel_requested_at is not None:
+            reconciled = await self.cancel(
+                context,
+                run_id=run.run_id,
+                reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
+            )
+            return ScriptRunStatus(run=reconciled)
         if _runtime_expired(run):
             reconciled = await self.reconcile(context, run_id=run.run_id)
             return ScriptRunStatus(run=reconciled)
@@ -260,29 +275,35 @@ class ScriptRunManager:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                self._cleanup_token(context, run)
+                await self._cleanup_token(context, run)
             return run
         revoked = await asyncio.to_thread(self.store.request_cancel, run_id, reason=reason)
+        broker_error: BaseException | None = None
+        process_error: BaseException | None = None
+        process_status: WorkerScriptStatus | None = None
         try:
             await self.broker.cancel_run(run_id)
-            if revoked.supervisor_handle is not None:
-                await self._signal_process(revoked, force=force)
-            terminal = await asyncio.to_thread(
-                self.store.transition_run,
-                run_id,
-                state=ScriptRunState.CANCELLED,
-            )
         except BaseException as exc:
-            terminal = await asyncio.to_thread(
-                self.store.transition_run,
-                run_id,
-                state=ScriptRunState.INTERRUPTED,
-                error=_bounded_error(exc),
-            )
-            raise
+            broker_error = exc
+        try:
+            process_status = await self._terminate_and_confirm(revoked, force=force)
+        except BaseException as exc:
+            process_error = exc
         finally:
-            self._cleanup_token(context, revoked)
-        return terminal
+            await self._cleanup_token(context, revoked)
+        if broker_error is not None:
+            raise broker_error
+        if process_error is not None:
+            raise process_error
+        if process_status is None or process_status.state != "exited":
+            msg = "Background script termination is not yet confirmed; retry cancellation."
+            raise ScriptRunManagerError(msg)
+        return await asyncio.to_thread(
+            self.store.transition_run,
+            run_id,
+            state=ScriptRunState.CANCELLED,
+            exit_code=process_status.exit_code,
+        )
 
     async def list(
         self,
@@ -310,8 +331,14 @@ class ScriptRunManager:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                self._cleanup_token(context, run)
+                await self._cleanup_token(context, run)
             return run
+        if run.cancel_requested_at is not None:
+            return await self.cancel(
+                context,
+                run_id=run.run_id,
+                reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
+            )
         if _runtime_expired(run):
             return await self.cancel(
                 context,
@@ -342,17 +369,36 @@ class ScriptRunManager:
         )
         workspace = _worker_workspace(context, worker)
         source_path, token_path = _write_snapshot(workspace, run.run_id, source=source, token=token)
-        receipt = await self.worker_client.launch(
-            worker,
-            run_id=run.run_id,
-            source_path=str(source_path.relative_to(workspace)),
-            source_digest=run.source_digest,
-            token_path=str(token_path.relative_to(workspace)),
-            gateway_url=self.gateway_url,
-            private_agent_names=(
-                tuple(sorted(worker_spec.private_agent_names)) if worker_spec.private_agent_names is not None else None
-            ),
-        )
+        supervisor_handle = _require_supervisor_handle(run.supervisor_handle)
+        try:
+            receipt = await self.worker_client.launch(
+                worker,
+                run_id=run.run_id,
+                source_path=str(source_path.relative_to(workspace)),
+                source_digest=run.source_digest,
+                token_path=str(token_path.relative_to(workspace)),
+                gateway_url=self.gateway_url,
+                supervisor_handle=supervisor_handle,
+                private_agent_names=(
+                    tuple(sorted(worker_spec.private_agent_names))
+                    if worker_spec.private_agent_names is not None
+                    else None
+                ),
+            )
+        except BaseException:
+            with suppress(Exception):
+                await self.worker_client.cancel(
+                    worker,
+                    run_id=run.run_id,
+                    supervisor_handle=supervisor_handle,
+                    force=True,
+                )
+            durable: ScriptRunRecord | None = None
+            with suppress(Exception):
+                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if durable is not None and (durable.cancel_requested_at is not None or durable.state in _TERMINAL_STATES):
+                return durable
+            raise
         try:
             return await asyncio.to_thread(
                 self.store.transition_run,
@@ -369,6 +415,11 @@ class ScriptRunManager:
                     supervisor_handle=receipt.supervisor_handle,
                     force=True,
                 )
+            durable = None
+            with suppress(Exception):
+                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if durable is not None and (durable.cancel_requested_at is not None or durable.state in _TERMINAL_STATES):
+                return durable
             raise
 
     async def _launch_local(
@@ -394,20 +445,19 @@ class ScriptRunManager:
                 "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
             },
         )
-        message = await run_command_via_supervisor(
-            socket_path,
-            namespace=_local_namespace(run.run_id),
-            argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-            env=environment,
-            cwd=str(workspace),
-            tail=200,
-            timeout=0,
-        )
-        match = _HANDLE_RE.search(message)
-        if match is None:
-            raise ScriptRunManagerError(message)
-        supervisor_handle = match.group(0)
+        supervisor_handle = _require_supervisor_handle(run.supervisor_handle)
         try:
+            message = await run_command_via_supervisor(
+                socket_path,
+                namespace=_local_namespace(run.run_id),
+                argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+                env=environment,
+                cwd=str(workspace),
+                tail=200,
+                timeout=0,
+                handle=supervisor_handle,
+            )
+            _validate_local_launch_message(message, expected_handle=supervisor_handle)
             return await asyncio.to_thread(
                 self.store.transition_run,
                 run.run_id,
@@ -423,6 +473,11 @@ class ScriptRunManager:
                     handle=supervisor_handle,
                     force=True,
                 )
+            durable: ScriptRunRecord | None = None
+            with suppress(Exception):
+                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if durable is not None and (durable.cancel_requested_at is not None or durable.state in _TERMINAL_STATES):
+                return durable
             raise
 
     def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
@@ -475,7 +530,7 @@ class ScriptRunManager:
                 handle=run.supervisor_handle,
             )
             return _parse_local_status(message)
-        worker = self._worker_handle(run)
+        worker = await self._worker_handle(run)
         if worker is None:
             return WorkerScriptStatus.unknown_handle()
         return await self.worker_client.status(
@@ -513,52 +568,110 @@ class ScriptRunManager:
         try:
             await self.broker.cancel_run(run.run_id)
         finally:
-            self._cleanup_token(context, terminal)
+            await self._cleanup_token(context, terminal)
         return terminal
 
-    async def _signal_process(self, run: ScriptRunRecord, *, force: bool) -> None:
+    async def _terminate_and_confirm(
+        self,
+        run: ScriptRunRecord,
+        *,
+        force: bool,
+    ) -> WorkerScriptStatus | None:
+        status, signal_error = await self._signal_and_wait(run, force=force)
+        if status.state == "exited":
+            return status
+        if force or status.state != "running":
+            if signal_error is not None:
+                raise signal_error
+            return status
+        forced_status, force_error = await self._signal_and_wait(run, force=True)
+        if forced_status.state == "exited":
+            return forced_status
+        if signal_error is not None:
+            raise signal_error
+        if force_error is not None:
+            raise force_error
+        return forced_status
+
+    async def _signal_and_wait(
+        self,
+        run: ScriptRunRecord,
+        *,
+        force: bool,
+    ) -> tuple[WorkerScriptStatus, BaseException | None]:
+        signal_error: BaseException | None = None
+        try:
+            receipt = await self._signal_process(run, force=force)
+            _validate_cancel_receipt(receipt)
+        except BaseException as exc:
+            signal_error = exc
+        try:
+            status = await self._wait_for_process_exit(run)
+        except BaseException as status_error:
+            if signal_error is not None:
+                raise signal_error from status_error
+            raise
+        return status, signal_error
+
+    async def _wait_for_process_exit(self, run: ScriptRunRecord) -> WorkerScriptStatus:
+        deadline = asyncio.get_running_loop().time() + self.cancellation_grace_seconds
+        while True:
+            status = await self._process_status(run)
+            if status.state != "running":
+                return status
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return status
+            await asyncio.sleep(min(self.cancellation_poll_interval_seconds, remaining))
+
+    async def _signal_process(self, run: ScriptRunRecord, *, force: bool) -> WorkerScriptCancel:
         if run.supervisor_handle is None:
-            return
+            return WorkerScriptCancel(cancel_requested=False, already_finished=False, unknown_handle=True)
         if run.local_unsafe:
-            await asyncio.to_thread(
+            message = await asyncio.to_thread(
                 kill_command_via_supervisor,
                 ensure_shell_supervisor(),
                 namespace=_local_namespace(run.run_id),
                 handle=run.supervisor_handle,
                 force=force,
             )
-            return
-        worker = self._worker_handle(run)
+            return _parse_local_cancel(message)
+        worker = await self._worker_handle(run)
         if worker is None:
-            return
-        await self.worker_client.cancel(
+            return WorkerScriptCancel(cancel_requested=False, already_finished=False, unknown_handle=True)
+        return await self.worker_client.cancel(
             worker,
             run_id=run.run_id,
             supervisor_handle=run.supervisor_handle,
             force=force,
         )
 
-    def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
+    async def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
         if self.worker_backend is None or run.worker_id is None or run.worker_key is None:
             return None
-        workers = self.worker_backend.list_workers(include_idle=True)
+        workers = await asyncio.to_thread(self.worker_backend.list_workers, include_idle=True)
         return next(
             (worker for worker in workers if worker.worker_id == run.worker_id and worker.worker_key == run.worker_key),
             None,
         )
 
-    def _cleanup_token(self, context: ToolRuntimeContext, run: ScriptRunRecord) -> None:
-        workspace: Path | None
-        if run.local_unsafe:
-            workspace = _agent_workspace(context)
-        else:
-            worker = self._worker_handle(run)
-            workspace = (
-                _worker_workspace(context, worker) if worker is not None else _worker_workspace_from_run(context, run)
-            )
-        if workspace is None:
-            return
-        _remove_snapshot_token(workspace, run.run_id)
+    async def _cleanup_token(self, context: ToolRuntimeContext, run: ScriptRunRecord) -> None:
+        try:
+            workspace: Path | None
+            if run.local_unsafe:
+                workspace = _agent_workspace(context)
+            else:
+                worker = await self._worker_handle(run)
+                workspace = (
+                    _worker_workspace(context, worker)
+                    if worker is not None
+                    else _worker_workspace_from_run(context, run)
+                )
+            if workspace is None:
+                return
+            await asyncio.to_thread(_remove_snapshot_token, workspace, run.run_id)
+        except Exception:
+            logger.warning("script_capability_cleanup_failed", run_id=run.run_id, exc_info=True)
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
@@ -605,7 +718,7 @@ def _worker_workspace_from_run(context: ToolRuntimeContext, run: ScriptRunRecord
     if run.worker_key is None:
         return None
     workspace = worker_root_path(context.runtime_paths.storage_root, run.worker_key) / "workspace"
-    return workspace.resolve() if workspace.exists() else None
+    return workspace if workspace.exists() else None
 
 
 def _snapshot_relative_dir(run_id: str) -> Path:
@@ -640,13 +753,27 @@ def _write_private_file(path: Path, content: bytes) -> None:
 
 
 def _remove_snapshot_token(workspace: Path, run_id: str) -> None:
-    token_path = workspace / _snapshot_relative_dir(run_id) / "capability"
-    current = workspace
-    for part in token_path.parent.relative_to(workspace).parts:
-        current /= part
-        if current.is_symlink():
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        current_descriptor = os.open(workspace, directory_flags)
+        descriptors.append(current_descriptor)
+        for part in _snapshot_relative_dir(run_id).parts:
+            current_descriptor = os.open(part, directory_flags, dir_fd=current_descriptor)
+            descriptors.append(current_descriptor)
+        try:
+            metadata = os.stat("capability", dir_fd=current_descriptor, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
             return
-    token_path.unlink(missing_ok=True)
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+            return
+        os.unlink("capability", dir_fd=current_descriptor)
+    except OSError:
+        return
+    finally:
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def _parse_local_status(message: str) -> WorkerScriptStatus:
@@ -656,6 +783,29 @@ def _parse_local_status(message: str) -> WorkerScriptStatus:
     if finished is not None:
         return WorkerScriptStatus(state="exited", output=message, exit_code=int(finished.group(1)))
     return WorkerScriptStatus.unknown_handle()
+
+
+def _validate_local_launch_message(message: str, *, expected_handle: str) -> None:
+    match = _HANDLE_RE.search(message)
+    if match is None or match.group(0) != expected_handle:
+        raise ScriptRunManagerError(message)
+
+
+def _parse_local_cancel(message: str) -> WorkerScriptCancel:
+    if message.startswith(("Terminated process", "Force-killed process")):
+        return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
+    if message.startswith(("Process already finished", "Process ")):
+        return WorkerScriptCancel(cancel_requested=False, already_finished=True, unknown_handle=False)
+    if message.startswith("Error: Unknown handle"):
+        return WorkerScriptCancel(cancel_requested=False, already_finished=False, unknown_handle=True)
+    raise ScriptRunManagerError(message)
+
+
+def _validate_cancel_receipt(receipt: WorkerScriptCancel) -> None:
+    if receipt.cancel_requested or receipt.already_finished or receipt.unknown_handle:
+        return
+    msg = "Worker returned an empty script cancellation receipt."
+    raise ScriptRunManagerError(msg)
 
 
 def _local_namespace(run_id: str) -> str:
@@ -690,3 +840,10 @@ def _require_worker_key(worker_key: str | None) -> str:
         msg = "Background script worker scope is unavailable."
         raise ScriptRunManagerError(msg)
     return worker_key
+
+
+def _require_supervisor_handle(supervisor_handle: str | None) -> str:
+    if supervisor_handle is None:
+        msg = "Background script supervisor handle is unavailable."
+        raise ScriptRunManagerError(msg)
+    return supervisor_handle

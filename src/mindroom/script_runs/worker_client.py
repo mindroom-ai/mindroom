@@ -12,7 +12,7 @@ import httpx
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
-_HANDLE_RE = re.compile(r"shell:[0-9a-f]{8}")
+_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 
 __all__ = [
@@ -78,6 +78,7 @@ class ScriptWorkerClient:
         source_digest: str,
         token_path: str,
         gateway_url: str,
+        supervisor_handle: str,
         private_agent_names: tuple[str, ...] | None = None,
         tail_lines: int = 200,
     ) -> WorkerScriptLaunch:
@@ -92,17 +93,22 @@ class ScriptWorkerClient:
                 "source_path": source_path,
                 "source_digest": source_digest,
                 "token_path": token_path,
+                "supervisor_handle": supervisor_handle,
                 "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": gateway_url},
                 "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,
                 "tail_lines": tail_lines,
             },
         )
         self._raise_structured_failure(data)
-        supervisor_handle = data.get("supervisor_handle")
-        if not isinstance(supervisor_handle, str) or _HANDLE_RE.fullmatch(supervisor_handle) is None:
+        returned_handle = data.get("supervisor_handle")
+        if (
+            not isinstance(returned_handle, str)
+            or _HANDLE_RE.fullmatch(returned_handle) is None
+            or returned_handle != supervisor_handle
+        ):
             message = "Worker returned an invalid script launch receipt."
             raise ScriptWorkerError(message, failure_kind="worker")
-        return WorkerScriptLaunch(supervisor_handle=supervisor_handle)
+        return WorkerScriptLaunch(supervisor_handle=returned_handle)
 
     async def status(
         self,

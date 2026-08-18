@@ -56,7 +56,14 @@ async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[s
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
-async def _run(socket_path: str, argv: list[str], *, namespace: str = "ns", timeout: float = 30) -> str:  # noqa: ASYNC109
+async def _run(
+    socket_path: str,
+    argv: list[str],
+    *,
+    namespace: str = "ns",
+    timeout: float = 30,  # noqa: ASYNC109
+    handle: str | None = None,
+) -> str:
     return await run_command_via_supervisor(
         socket_path,
         namespace=namespace,
@@ -65,6 +72,7 @@ async def _run(socket_path: str, argv: list[str], *, namespace: str = "ns", time
         cwd=None,
         tail=100,
         timeout=timeout,
+        handle=handle,
     )
 
 
@@ -423,6 +431,33 @@ async def test_handles_are_namespace_scoped() -> None:
             assert "Unknown handle" in await _kill(socket_path, handle, namespace="ns-b", force=True)
         finally:
             await _kill(socket_path, handle, namespace="ns-a", force=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_handle_is_registered_once() -> None:
+    """A durable caller handle names exactly one supervised process."""
+    registry: dict[str, ProcessRecord] = {}
+    requested_handle = f"shell:{'a' * 32}"
+    async with _running_server(registry) as socket_path:
+        first = await _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle)
+        duplicate = await _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle)
+        try:
+            assert _extract_handle(first) == requested_handle
+            assert "already registered" in duplicate
+            assert list(registry) == [requested_handle]
+        finally:
+            await _kill(socket_path, requested_handle, force=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_handle_requires_full_random_identifier() -> None:
+    """Short or malformed caller handles are rejected before process registration."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        result = await _run(socket_path, ["sleep", "300"], timeout=0, handle="shell:1234abcd")
+
+    assert "Invalid caller-supplied shell handle" in result
+    assert registry == {}
 
 
 @pytest.mark.asyncio

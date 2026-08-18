@@ -640,14 +640,21 @@ def _validate_resolved_authority(
         raise ValueError(msg)
     live_identity = build_execution_identity_from_runtime_context(context)
     live_config = context.current_config
-    expected_worker_target = build_agent_toolkit_worker_target(
+    expected_process_worker_target = build_agent_toolkit_worker_target(
+        "user_agent",
+        context.agent_name,
+        is_private=live_config.get_agent(context.agent_name).private is not None,
+        execution_identity=durable_identity,
+        runtime_paths=context.runtime_paths,
+    )
+    expected_tool_worker_target = build_agent_toolkit_worker_target(
         live_config.resolve_entity(context.agent_name).execution_scope,
         context.agent_name,
         is_private=live_config.get_agent(context.agent_name).private is not None,
         execution_identity=durable_identity,
         runtime_paths=context.runtime_paths,
     )
-    expected_durable_worker_key = None if run.local_unsafe else expected_worker_target.worker_key
+    expected_durable_worker_key = None if run.local_unsafe else expected_process_worker_target.worker_key
     if (
         durable_identity != live_identity
         or durable_identity.agent_name != run.agent_name
@@ -657,7 +664,7 @@ def _validate_resolved_authority(
         or run.worker_key != expected_durable_worker_key
         or worker_authority.worker_id != run.worker_id
         or worker_authority.local_unsafe != run.local_unsafe
-        or worker_authority.worker_target != expected_worker_target
+        or worker_authority.worker_target != expected_tool_worker_target
     ):
         msg = "Live script runtime context does not match the durable run owner."
         raise ValueError(msg)

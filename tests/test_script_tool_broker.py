@@ -42,7 +42,7 @@ from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, Script
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.tool_approval import ToolApprovalDecision
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import WorkerScope, serialize_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -94,11 +94,18 @@ def _context(
     require_approval: bool = False,
     log_tool_calls: bool = False,
     preapprove_script_tool: bool = False,
+    worker_scope: WorkerScope | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
-            agents={"watcher": AgentConfig(display_name="Watcher", tools=["calculator"])},
+            agents={
+                "watcher": AgentConfig(
+                    display_name="Watcher",
+                    tools=["calculator"],
+                    worker_scope=worker_scope,
+                ),
+            },
             defaults=DefaultsConfig(tools=[]),
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={
@@ -206,8 +213,9 @@ def _broker(
     live_worker_id: str | None = None,
     live_private_agent_names: frozenset[str] | None = None,
     preapprove_script_tool: bool = False,
-    durable_local_unsafe: bool = False,
-    live_local_unsafe: bool = False,
+    durable_local_unsafe: bool | None = None,
+    live_local_unsafe: bool | None = None,
+    worker_scope: WorkerScope | None = None,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -215,9 +223,12 @@ def _broker(
         require_approval=require_approval,
         log_tool_calls=log_tool_calls,
         preapprove_script_tool=preapprove_script_tool,
+        worker_scope=worker_scope,
     )
     store = ScriptRunStore(context.runtime_paths)
     token, token_hash = mint_script_capability()
+    resolved_durable_local_unsafe = durable_worker_key is None if durable_local_unsafe is None else durable_local_unsafe
+    resolved_live_local_unsafe = resolved_durable_local_unsafe if live_local_unsafe is None else live_local_unsafe
     store.create_run(
         ScriptRunRecord(
             run_id="run-1",
@@ -235,7 +246,7 @@ def _broker(
             token_hash=token_hash,
             worker_key=durable_worker_key,
             worker_id=durable_worker_id,
-            local_unsafe=durable_local_unsafe,
+            local_unsafe=resolved_durable_local_unsafe,
         ),
     )
     return (
@@ -247,7 +258,7 @@ def _broker(
                 approval_decision=approval_decision,
                 worker_id=live_worker_id,
                 private_agent_names=live_private_agent_names,
-                local_unsafe=live_local_unsafe,
+                local_unsafe=resolved_live_local_unsafe,
             ),
         ),
         token,
@@ -302,6 +313,29 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
     assert events == ["tool:before_call", "tool:after_call"]
+
+
+@pytest.mark.parametrize("tool_worker_scope", ["shared", "user"])
+@pytest.mark.asyncio
+async def test_script_broker_separates_process_scope_from_tool_routing(
+    tmp_path: Path,
+    tool_worker_scope: WorkerScope,
+) -> None:
+    """The isolated script process does not override the called tool's configured worker target."""
+    events: list[str] = []
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        worker_scope=tool_worker_scope,
+        durable_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        durable_worker_id="script-process-worker",
+        live_worker_id="script-process-worker",
+    )
+
+    receipt = await _call_through_gateway(broker, _request(token))
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == '{"operation": "addition", "result": 3}'
 
 
 @pytest.mark.asyncio

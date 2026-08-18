@@ -12,6 +12,7 @@ import asyncio
 import codecs
 import contextlib
 import os
+import re
 import signal
 import time
 import uuid
@@ -27,6 +28,7 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
+_CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 
 
 @dataclass
@@ -134,6 +136,7 @@ async def run_command(
     cwd: str | None,
     tail: int,
     timeout: float,  # noqa: ASYNC109
+    handle: str | None = None,
 ) -> _RunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -144,6 +147,11 @@ async def run_command(
     Cancellation terminates the process group and drops any registered handle.
     """
     _sweep_stale_records(registry)
+    if handle is not None:
+        if _CALLER_HANDLE_RE.fullmatch(handle) is None:
+            return _RunResult(message="Error: Invalid caller-supplied shell handle.")
+        if handle in registry:
+            return _RunResult(message=f"Error: Shell handle '{handle}' is already registered.")
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -159,9 +167,6 @@ async def run_command(
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
-    background_handle: str | None = None
-    background_monitor_task: asyncio.Task[None] | None = None
-
     stdout_reader = asyncio.create_task(_read_stream(process.stdout, stdout_buf))
     stderr_reader = asyncio.create_task(_read_stream(process.stderr, stderr_buf))
 
@@ -169,43 +174,18 @@ async def run_command(
         try:
             await _await_foreground_process_exit(process, timeout_seconds=timeout)
         except TimeoutError:
-            active = sum(1 for r in registry.values() if not r.finished)
-            if active >= _MAX_BACKGROUNDED:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                await _cancel_pending_tasks(stdout_reader, stderr_reader)
-                return _RunResult(
-                    message=(
-                        f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
-                        "Kill or wait for existing ones before running more."
-                    ),
-                )
-            handle = f"shell:{uuid.uuid4().hex[:8]}"
-            record = ProcessRecord(
+            return await _background_process(
+                registry,
                 namespace=namespace,
-                handle=handle,
-                pid=process.pid,
-                args=argv,
+                argv=argv,
                 process=process,
                 stdout_buf=stdout_buf,
                 stderr_buf=stderr_buf,
                 tail=tail,
-            )
-            record._monitor_task = asyncio.create_task(
-                _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
-            )
-            registry[handle] = record
-            background_handle = handle
-            background_monitor_task = record._monitor_task
-            await asyncio.sleep(0)
-            return _RunResult(
-                message=(
-                    f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
-                    f"Handle: {handle}\n"
-                    f"Use check_shell_command('{handle}') to poll or "
-                    f"kill_shell_command('{handle}') to stop."
-                ),
-                handle=handle,
+                timeout=timeout,
+                requested_handle=handle,
+                stdout_reader=stdout_reader,
+                stderr_reader=stderr_reader,
             )
 
         await _await_reader_tasks_with_grace(
@@ -214,21 +194,88 @@ async def run_command(
             grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
         )
     except asyncio.CancelledError:
-        if background_handle is not None:
-            registry.pop(background_handle, None)
-        if background_monitor_task is not None:
-            background_monitor_task.cancel()
         if process.returncode is None:
             await _terminate_process_group(process)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
-        if background_monitor_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await background_monitor_task
         raise
 
     if process.returncode != 0:
         return _RunResult(message=f"Error: {stderr_buf.render()}")
     return _RunResult(message=stdout_buf.render(tail=tail))
+
+
+async def _background_process(
+    registry: dict[str, ProcessRecord],
+    *,
+    namespace: str,
+    argv: list[str],
+    process: asyncio.subprocess.Process,
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+    tail: int,
+    timeout: float,  # noqa: ASYNC109
+    requested_handle: str | None,
+    stdout_reader: asyncio.Task[None],
+    stderr_reader: asyncio.Task[None],
+) -> _RunResult:
+    active = sum(1 for record in registry.values() if not record.finished)
+    if active >= _MAX_BACKGROUNDED:
+        await _discard_unregistered_process(process, stdout_reader, stderr_reader)
+        return _RunResult(
+            message=(
+                f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
+                "Kill or wait for existing ones before running more."
+            ),
+        )
+    handle = requested_handle or f"shell:{uuid.uuid4().hex[:8]}"
+    if handle in registry:
+        await _discard_unregistered_process(process, stdout_reader, stderr_reader)
+        return _RunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+    record = ProcessRecord(
+        namespace=namespace,
+        handle=handle,
+        pid=process.pid,
+        args=argv,
+        process=process,
+        stdout_buf=stdout_buf,
+        stderr_buf=stderr_buf,
+        tail=tail,
+    )
+    monitor_task = asyncio.create_task(
+        _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
+    )
+    record._monitor_task = monitor_task
+    registry[handle] = record
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        registry.pop(handle, None)
+        monitor_task.cancel()
+        if process.returncode is None:
+            await _terminate_process_group(process)
+        await _cancel_pending_tasks(stdout_reader, stderr_reader)
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor_task
+        raise
+    return _RunResult(
+        message=(
+            f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
+            f"Handle: {handle}\n"
+            f"Use check_shell_command('{handle}') to poll or "
+            f"kill_shell_command('{handle}') to stop."
+        ),
+        handle=handle,
+    )
+
+
+async def _discard_unregistered_process(
+    process: asyncio.subprocess.Process,
+    stdout_reader: asyncio.Task[None],
+    stderr_reader: asyncio.Task[None],
+) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
 def check_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: str) -> str:
