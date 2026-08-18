@@ -158,6 +158,7 @@ def test_script_sdk_rejects_invalid_arguments_before_post(
     assert exc_info.value.kind == "invalid_arguments"
     assert exc_info.value.retryable is False
     assert exc_info.value.call_id == "stable-call"
+    assert exc_info.value.__cause__ is None
     assert requests == []
 
 
@@ -194,6 +195,7 @@ def test_script_sdk_rejects_cyclic_arguments_before_post(
     assert exc_info.value.kind == "invalid_arguments"
     assert exc_info.value.retryable is False
     assert exc_info.value.call_id == "stable-call"
+    assert exc_info.value.__cause__ is None
     assert requests == []
 
 

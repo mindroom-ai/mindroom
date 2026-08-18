@@ -20,6 +20,7 @@ import pytest
 from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
+from mindroom.script_runs import shim as script_run_shim
 from mindroom.shell_execution import run_command
 from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
@@ -364,6 +365,50 @@ async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Pa
 
     assert result.message.endswith("ValueError: Script capability file must be a regular file.")
     assert token_path.is_dir()
+
+
+@pytest.mark.parametrize("cleanup_operation", ["lstat", "unlink"])
+def test_script_shim_cleanup_permission_error_preserves_source_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cleanup_operation: str,
+) -> None:
+    """Best-effort token cleanup must not replace the source validation failure."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_SCRIPT_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("MINDROOM_SCRIPT_SOURCE_DIGEST", hashlib.sha256(source_path.read_bytes()).hexdigest())
+    monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
+
+    def reject_source(_source_path: Path) -> None:
+        if cleanup_operation == "lstat":
+
+            def deny_lstat(_path: Path) -> os.stat_result:
+                message = "cleanup denied"
+                raise PermissionError(message)
+
+            monkeypatch.setattr(Path, "lstat", deny_lstat)
+        else:
+
+            def deny_unlink(_path: Path, *, missing_ok: bool = False) -> None:
+                del missing_ok
+                message = "cleanup denied"
+                raise PermissionError(message)
+
+            monkeypatch.setattr(Path, "unlink", deny_unlink)
+        msg = "Script source digest does not match the launch receipt."
+        raise ValueError(msg)
+
+    monkeypatch.setattr(script_run_shim, "_validate_source_digest", reject_source)
+
+    with pytest.raises(ValueError, match="Script source digest does not match the launch receipt"):
+        script_run_shim._main(["shim", str(source_path), str(token_path)])
+
+    assert token_path.read_text(encoding="utf-8") == "raw-secret"
 
 
 @pytest.mark.asyncio

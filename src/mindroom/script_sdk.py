@@ -256,13 +256,13 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             separators=(",", ":"),
         )
         wire_arguments = json.loads(encoded)
-    except (RecursionError, TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError):
         raise MindRoomToolCallError(
             _INVALID_ARGUMENTS_ERROR,
             kind="invalid_arguments",
             retryable=False,
             call_id=call_id,
-        ) from exc
+        ) from None
     return cast("dict[str, object]", wire_arguments)
 
 

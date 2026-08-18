@@ -66,21 +66,18 @@ def _trusted_token_entry(raw_path: str, *, workspace_root: Path) -> Path | None:
 def _remove_token_entry(token_entry: Path | None, *, workspace_root: Path) -> None:
     if token_entry is None:
         return
-    relative_parent = token_entry.parent.relative_to(workspace_root)
-    current_parent = workspace_root
-    for part in relative_parent.parts:
-        current_parent /= part
-        if current_parent.is_symlink():
-            return
     try:
+        relative_parent = token_entry.parent.relative_to(workspace_root)
+        current_parent = workspace_root
+        for part in relative_parent.parts:
+            current_parent /= part
+            if current_parent.is_symlink():
+                return
         metadata = token_entry.lstat()
-    except (FileNotFoundError, NotADirectoryError):
-        return
-    if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
-        return
-    try:
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+            return
         token_entry.unlink()
-    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+    except OSError:
         return
 
 
