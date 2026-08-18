@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
@@ -12,7 +12,7 @@ from agno.models.response import ToolExecution
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -26,8 +26,8 @@ _TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
 _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
-_TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d+(?=\](?: ⏳)?\s*$)")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 
@@ -41,6 +41,9 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
+    # Internal continuation identity; public Matrix metadata omits this field.
+    tool_call_id: str | None = field(default=None, compare=False)
+    scope_key: str | None = field(default=None, compare=False)
 
 
 @dataclass(slots=True)
@@ -49,6 +52,7 @@ class StructuredStreamChunk:
 
     content: str
     tool_trace: list[ToolTraceEntry] | None = None
+    presentation_state: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,11 @@ class StreamingToolTracker:
         tool_index: int | None = None,
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker."""
+        call_id = _streaming_tool_call_id(tool)
+        if call_id is not None and any(
+            pending.scope_key == scope_key and pending.tool_call_id == call_id for pending in self.pending_tools
+        ):
+            return "", None
         visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
         if trace_entry is not None:
             self.pending_tools.append(
@@ -83,7 +92,7 @@ class StreamingToolTracker:
                     scope_key=scope_key,
                     tool_name=trace_entry.tool_name,
                     trace_entry=trace_entry,
-                    tool_call_id=_streaming_tool_call_id(tool),
+                    tool_call_id=call_id,
                     visible_tool_index=tool_index,
                     visible_text=visible_text,
                 ),
@@ -126,6 +135,34 @@ class StreamingToolTracker:
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
         return True
 
+    def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Restore only exact pending slots from a durable presentation snapshot."""
+        for tool_index, trace_entry in enumerate(tool_trace, start=1):
+            if trace_entry.type == "tool_call_completed":
+                self.completed_tools.append(trace_entry)
+                continue
+            self.pending_tools.append(
+                _PendingStreamingTool(
+                    scope_key=trace_entry.scope_key or "",
+                    tool_name=trace_entry.tool_name,
+                    trace_entry=trace_entry,
+                    tool_call_id=trace_entry.tool_call_id,
+                    visible_tool_index=tool_index,
+                ),
+            )
+
+    def sync_visible_indices(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
+        """Synchronize pending completion targets after visible trace reordering."""
+        visible_indices = {id(trace_entry): tool_index for tool_index, trace_entry in enumerate(tool_trace, start=1)}
+        synchronized: list[_PendingStreamingTool] = []
+        for pending_tool in self.pending_tools:
+            tool_index = visible_indices.get(id(pending_tool.trace_entry))
+            if tool_index is None:
+                msg = "Pending tool is missing from its visible trace"
+                raise RuntimeError(msg)
+            synchronized.append(replace(pending_tool, visible_tool_index=tool_index))
+        self.pending_tools = synchronized
+
     def _find_pending_tool_index(
         self,
         *,
@@ -151,6 +188,73 @@ class StreamingToolTracker:
             ):
                 return pos
         return None
+
+
+@dataclass(slots=True)
+class CollectedStreamPresentation:
+    """Ordered stream presentation collected without incremental delivery."""
+
+    show_tool_calls: bool
+    response_text: str = ""
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    track_hidden_tools: bool = False
+    canonical_final_body_candidate: str | None = None
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+    separate_next_text: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Restore pending tool identity from the durable trace."""
+        self.tool_tracker.restore_pending(self.tool_trace)
+        self.separate_next_text = bool(self.response_text and self.tool_tracker.pending_tools)
+
+    def append_text(self, content: object | None) -> None:
+        """Append one provider content delta when it is non-empty."""
+        self.response_text = append_stream_text(
+            self.response_text,
+            content,
+            separate=self.separate_next_text,
+        )
+        if content:
+            self.separate_next_text = False
+
+    def start_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
+        """Record one tool start and append its marker when visible."""
+        if not self.show_tool_calls and not self.track_hidden_tools:
+            return
+        tool_index = len(self.tool_trace) + 1
+        text, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        if trace_entry is None:
+            return
+        trace_entry.scope_key = scope_key or None
+        self.tool_trace.append(trace_entry)
+        if self.show_tool_calls:
+            self.response_text += text
+        elif self.response_text:
+            self.separate_next_text = True
+
+    def complete_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
+        """Complete the exact pending slot represented by a provider event."""
+        if not self.show_tool_calls and not self.track_hidden_tools:
+            return
+        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
+        if completion is None:
+            return
+        tool_name, result, pending_tool, completed_trace = completion
+        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+            return
+        completed_trace.scope_key = scope_key or pending_tool.scope_key or None
+        if self.show_tool_calls:
+            self.response_text, _ = complete_pending_tool_block(
+                self.response_text,
+                tool_name,
+                result,
+                tool_index=pending_tool.visible_tool_index,
+            )
+        self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def final_text(self) -> str:
+        """Return collected deltas, falling back to the provider's canonical final body."""
+        return self.response_text or self.canonical_final_body_candidate or ""
 
 
 def _streaming_tool_call_id(tool: ToolExecution | None) -> str | None:
@@ -412,7 +516,7 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
     return f"{_TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
 
 
-def _is_visible_tool_marker_line(line: str) -> bool:
+def is_visible_tool_marker_line(line: str) -> bool:
     """Return whether one plain-text line is a Matrix-visible tool marker."""
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
 
@@ -435,7 +539,7 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     for index, line in enumerate(lines):
         spaced_lines.append(line)
         line_text = line.rstrip("\r\n")
-        if not _is_visible_tool_marker_line(line_text):
+        if not is_visible_tool_marker_line(line_text):
             continue
         next_line = lines[index + 1] if index + 1 < len(lines) else None
         if next_line is not None and next_line.strip():
@@ -443,20 +547,55 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     return "".join(spaced_lines)
 
 
+def remap_visible_tool_marker_indices(text: str, index_map: Mapping[int, int]) -> str:
+    """Remap standalone visible marker indices while preserving all other text."""
+    remapped_lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        line_text = line.rstrip("\r\n")
+        if not is_visible_tool_marker_line(line_text):
+            remapped_lines.append(line)
+            continue
+
+        match = _VISIBLE_TOOL_MARKER_INDEX_PATTERN.search(line_text)
+        if match is None:
+            remapped_lines.append(line)
+            continue
+        old_index = int(match.group())
+        new_index = index_map.get(old_index, old_index)
+        remapped_lines.append(f"{line[: match.start()]}{new_index}{line[match.end() :]}")
+    return "".join(remapped_lines)
+
+
+def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
+    """Append one delta while preserving explicit and visible-tool boundaries."""
+    if not content:
+        return existing_text
+    delta = str(content)
+    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
+    needs_separator = separate or is_visible_tool_marker_line(last_line)
+    separator = ""
+    if existing_text and not delta.startswith(("\n", "\r")) and needs_separator:
+        if existing_text.endswith(("\n\n", "\r\n\r\n")):
+            separator = ""
+        elif existing_text.endswith(("\n", "\r")):
+            separator = "\n"
+        else:
+            separator = "\n\n"
+    return f"{existing_text}{separator}{delta}"
+
+
+def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
+    """Return whether visible marker lines exactly match the ordered trace slots."""
+    visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
+    expected_markers = tuple(
+        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
+        for index, entry in enumerate(tool_trace, start=1)
+    )
+    return visible_markers == expected_markers
+
+
 def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
-
-
-def format_tool_trace_markers(tool_trace: Sequence[ToolTraceEntry]) -> str:
-    """Render indexed visible anchors for structured tool-trace entries."""
-    return "\n\n".join(
-        _tool_marker_line(
-            trace_entry.tool_name,
-            tool_index,
-            pending=trace_entry.type == "tool_call_started",
-        )
-        for tool_index, trace_entry in enumerate(tool_trace, start=1)
-    )
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -576,6 +715,7 @@ def format_tool_started_event(
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
     text, trace = _format_tool_started(tool_name, tool_args, tool_index=tool_index)
+    trace.tool_call_id = _streaming_tool_call_id(tool)
     return text, trace
 
 
@@ -589,6 +729,7 @@ def format_tool_completed_event(
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
     text, trace = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
+    trace.tool_call_id = _streaming_tool_call_id(tool)
     return text, trace
 
 
@@ -605,16 +746,14 @@ def extract_tool_completed_info(tool: ToolExecution | None) -> tuple[str, object
     return tool_name, tool.result
 
 
-def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:
-    """Build message content payload for tool trace metadata."""
-    if not tool_trace:
-        return None
-
-    trace_list = list(tool_trace)
-
-    events: list[dict[str, object]] = []
-    has_truncated_content = False
-    for entry in trace_list:
+def serialize_tool_trace(
+    tool_trace: Sequence[ToolTraceEntry],
+    *,
+    include_internal: bool = False,
+) -> tuple[dict[str, object], ...]:
+    """Serialize trace entries, optionally retaining restart-only identity."""
+    serialized: list[dict[str, object]] = []
+    for entry in tool_trace:
         event: dict[str, object] = {
             "type": entry.type,
             "tool_name": entry.tool_name,
@@ -625,8 +764,61 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
             event["result_preview"] = redact_sensitive_text(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
-            has_truncated_content = True
-        events.append(event)
+        if include_internal:
+            if entry.tool_call_id is not None:
+                event["tool_call_id"] = entry.tool_call_id
+            if entry.scope_key is not None:
+                event["scope_key"] = entry.scope_key
+        serialized.append(event)
+    return tuple(serialized)
+
+
+def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
+    """Restore a trace snapshot while rejecting malformed event records."""
+    restored: list[ToolTraceEntry] = []
+    for event in stored:
+        event_type = event.get("type")
+        tool_name = event.get("tool_name")
+        args_preview = event.get("args_preview")
+        result_preview = event.get("result_preview")
+        tool_call_id = event.get("tool_call_id")
+        scope_key = event.get("scope_key")
+        truncated = event.get("truncated")
+        if (
+            event_type not in {"tool_call_started", "tool_call_completed"}
+            or not isinstance(tool_name, str)
+            or not tool_name
+            or (args_preview is not None and not isinstance(args_preview, str))
+            or (result_preview is not None and not isinstance(result_preview, str))
+            or (tool_call_id is not None and (not isinstance(tool_call_id, str) or not tool_call_id))
+            or (scope_key is not None and (not isinstance(scope_key, str) or not scope_key))
+            or (truncated is not None and not isinstance(truncated, bool))
+        ):
+            msg = "Durable tool trace contains a malformed event"
+            raise RuntimeError(msg)
+        restored.append(
+            ToolTraceEntry(
+                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
+                tool_name=tool_name,
+                args_preview=args_preview,
+                result_preview=result_preview,
+                truncated=truncated is True,
+                tool_call_id=cast("str | None", tool_call_id),
+                scope_key=cast("str | None", scope_key),
+            ),
+        )
+    return restored
+
+
+def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:
+    """Build message content payload for tool trace metadata."""
+    if not tool_trace:
+        return None
+
+    trace_list = list(tool_trace)
+
+    events = list(serialize_tool_trace(trace_list))
+    has_truncated_content = any(entry.truncated for entry in trace_list)
 
     payload: dict[str, object] = {
         "version": _TOOL_TRACE_VERSION,

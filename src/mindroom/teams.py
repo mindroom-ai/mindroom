@@ -29,6 +29,7 @@ from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.session.team import TeamSession
 from agno.team import Team
+from agno.utils.string import url_safe_string
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime, model_loading
@@ -112,8 +113,11 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
+    append_stream_text,
     complete_pending_tool_block,
     format_tool_completed_event,
+    is_visible_tool_marker_line,
+    remap_visible_tool_marker_indices,
 )
 
 if TYPE_CHECKING:
@@ -252,7 +256,9 @@ def _format_member_contribution(agent_name: str, content: str, indent: int = 0) 
 
     """
     indent_str = "  " * indent
-    return f"{indent_str}**{agent_name}**: {content}"
+    first_line = content.lstrip().splitlines()[0] if content.strip() else ""
+    separator = "\n\n" if is_visible_tool_marker_line(first_line) else " "
+    return f"{indent_str}**{agent_name}**:{separator}{content}"
 
 
 def _format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
@@ -286,6 +292,487 @@ def _format_no_consensus_note(indent: int = 0) -> str:
     """
     indent_str = "  " * indent
     return f"\n{indent_str}*No team consensus - showing individual responses only*"
+
+
+def _render_team_member_slots(
+    member_ids: Sequence[str],
+    *,
+    display_names_by_id: Mapping[str, str],
+    per_member: Mapping[str, str],
+    consensus: str,
+) -> list[str]:
+    """Render stable identity slots using labels only as presentation attributes."""
+    parts = [
+        _format_member_contribution(display_names_by_id[member_id], per_member[member_id].strip())
+        for member_id in member_ids
+        if per_member[member_id].strip()
+    ]
+    if consensus.strip():
+        parts.extend(_format_team_consensus(consensus.strip()))
+    elif parts:
+        parts.append(_format_no_consensus_note())
+    return parts
+
+
+def _restore_hidden_team_separators(
+    state: Mapping[str, object],
+    *,
+    valid_tool_scopes: set[str],
+    show_tool_calls: bool,
+    per_member: Mapping[str, str],
+    consensus: str,
+) -> set[str]:
+    """Restore validated hidden-tool boundaries from a durable team snapshot."""
+    stored = state.get("separate_next_scopes", [])
+    if (
+        not isinstance(stored, list)
+        or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in stored)
+        or len(stored) != len(set(stored))
+        or (show_tool_calls and stored)
+    ):
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)
+    scopes = cast("list[str]", stored)
+    if any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes):
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)
+    return set(scopes)
+
+
+@dataclass
+class _TeamStreamPresentation:
+    """Structured team document that survives an approval continuation."""
+
+    member_ids: list[str]
+    config_names_by_id: dict[str, str]
+    display_names_by_id: dict[str, str]
+    show_tool_calls: bool
+    per_member: dict[str, str]
+    consensus: str = ""
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+    separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Restore pending tool identity from the durable trace."""
+        self.tool_tracker.restore_pending(self.tool_trace)
+        self.separate_next_scopes = {
+            pending.scope_key
+            for pending in self.tool_tracker.pending_tools
+            if pending.scope_key is not None and self._slot_text(pending.scope_key)
+        }
+
+    @property
+    def display_names(self) -> list[str]:
+        """Return immutable rendering labels in frozen member order."""
+        return [self.display_names_by_id[member_id] for member_id in self.member_ids]
+
+    @classmethod
+    def new(
+        cls,
+        config_names: Sequence[str],
+        display_names: Sequence[str],
+        *,
+        show_tool_calls: bool,
+    ) -> _TeamStreamPresentation:
+        """Create an empty presentation for a new team run."""
+        frozen_config_names = list(config_names)
+        ids = [url_safe_string(config_name) for config_name in frozen_config_names]
+        names = list(display_names)
+        if (
+            len(ids) != len(names)
+            or len(ids) != len(frozen_config_names)
+            or len(ids) != len(set(ids))
+            or any(not member_id for member_id in ids)
+        ):
+            msg = "Team presentation member identities are invalid"
+            raise RuntimeError(msg)
+        return cls(
+            member_ids=ids,
+            config_names_by_id=dict(zip(ids, frozen_config_names, strict=True)),
+            display_names_by_id=dict(zip(ids, names, strict=True)),
+            show_tool_calls=show_tool_calls,
+            per_member=dict.fromkeys(ids, ""),
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        config_names: Sequence[str],
+        show_tool_calls: bool,
+        state: Mapping[str, object] | None,
+        tool_trace: Sequence[ToolTraceEntry],
+        prior_response_text: str,
+    ) -> _TeamStreamPresentation:
+        """Restore a durable structured snapshot without interpreting its rendered Markdown."""
+        if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+        stored_members = state.get("members")
+        if not isinstance(stored_members, list):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)  # noqa: TRY004
+        restored_ids: list[str] = []
+        config_names_by_id: dict[str, str] = {}
+        display_names_by_id: dict[str, str] = {}
+        per_member: dict[str, str] = {}
+        for member in stored_members:
+            if not isinstance(member, dict):
+                msg = "Team continuation presentation snapshot is invalid"
+                raise RuntimeError(msg)  # noqa: TRY004
+            stored_member = cast("dict[str, object]", member)
+            member_id = stored_member.get("id")
+            config_name = stored_member.get("config_name")
+            display_name = stored_member.get("display_name")
+            content = stored_member.get("content")
+            if (
+                not isinstance(member_id, str)
+                or not member_id
+                or member_id in per_member
+                or not isinstance(config_name, str)
+                or not config_name
+                or not isinstance(display_name, str)
+                or not isinstance(content, str)
+            ):
+                msg = "Team continuation presentation snapshot is invalid"
+                raise RuntimeError(msg)
+            restored_ids.append(member_id)
+            config_names_by_id[member_id] = config_name
+            display_names_by_id[member_id] = display_name
+            per_member[member_id] = content
+        expected_config_names = list(config_names)
+        expected_ids = [url_safe_string(config_name) for config_name in expected_config_names]
+        if (
+            restored_ids != expected_ids
+            or len(expected_ids) != len(set(expected_ids))
+            or [config_names_by_id[member_id] for member_id in restored_ids] != expected_config_names
+        ):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+        valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
+        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
+            msg = "Team continuation durable tool scope is not a frozen presentation slot"
+            raise RuntimeError(msg)
+        consensus = state.get("consensus")
+        if not isinstance(consensus, str):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)  # noqa: TRY004
+        restored_separators = _restore_hidden_team_separators(
+            state,
+            valid_tool_scopes=valid_tool_scopes,
+            show_tool_calls=show_tool_calls,
+            per_member=per_member,
+            consensus=consensus,
+        )
+        restored = cls(
+            member_ids=restored_ids,
+            config_names_by_id=config_names_by_id,
+            display_names_by_id=display_names_by_id,
+            show_tool_calls=show_tool_calls,
+            per_member=per_member,
+            consensus=consensus,
+            tool_trace=list(deepcopy(tool_trace)),
+        )
+        restored.separate_next_scopes.update(restored_separators)
+        if restored.render_body() != prior_response_text:
+            msg = "Team continuation presentation snapshot does not match its response text"
+            raise RuntimeError(msg)
+        return restored
+
+    def to_state(self) -> dict[str, object]:
+        """Serialize only the structure needed to reproduce the current body."""
+        state: dict[str, object] = {
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {
+                    "id": member_id,
+                    "config_name": self.config_names_by_id[member_id],
+                    "display_name": self.display_names_by_id[member_id],
+                    "content": self.per_member[member_id],
+                }
+                for member_id in self.member_ids
+            ],
+            "consensus": self.consensus,
+        }
+        if not self.show_tool_calls and self.separate_next_scopes:
+            document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
+            state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
+        return state
+
+    def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
+        """Resolve an event only through its stable member identity."""
+        if isinstance(agent_id, str) and agent_id in self.per_member:
+            return agent_id
+        if isinstance(agent_id, str):
+            for member_id, config_name in self.config_names_by_id.items():
+                if agent_id == config_name:
+                    return member_id
+        msg = f"Team event has no frozen member slot for {reported_name or agent_id!r}"
+        raise RuntimeError(msg)
+
+    def append_member(self, member_id: str, content: object | None) -> None:
+        """Append a member content delta to its stable document slot."""
+        if member_id not in self.per_member:
+            msg = f"Team event has no frozen member slot for {member_id!r}"
+            raise RuntimeError(msg)
+        scope_key = f"agent:{member_id}"
+        self.per_member[member_id] = append_stream_text(
+            self.per_member[member_id],
+            content,
+            separate=scope_key in self.separate_next_scopes,
+        )
+        if content:
+            self.separate_next_scopes.discard(scope_key)
+
+    def append_consensus(self, content: object | None) -> None:
+        """Append a coordinator content delta to the consensus slot."""
+        self.consensus = append_stream_text(
+            self.consensus,
+            content,
+            separate="team" in self.separate_next_scopes,
+        )
+        if content:
+            self.separate_next_scopes.discard("team")
+
+    def _append_tool_marker(self, scope_key: str, marker: str) -> None:
+        if scope_key == "team":
+            self.consensus += marker
+            return
+        member_id = scope_key.removeprefix("agent:")
+        self.per_member[member_id] += marker
+
+    def _slot_text(self, scope_key: str) -> str:
+        if scope_key == "team":
+            return self.consensus
+        return self.per_member.get(scope_key.removeprefix("agent:"), "")
+
+    def _set_slot_text(self, scope_key: str, text: str) -> None:
+        if scope_key == "team":
+            self.consensus = text
+            return
+        self.per_member[scope_key.removeprefix("agent:")] = text
+
+    def _align_tool_trace_with_document(self) -> None:
+        """Keep trace slots and visible indices in rendered document order."""
+        scope_order = {
+            **{f"agent:{member_id}": index for index, member_id in enumerate(self.member_ids)},
+            "team": len(self.member_ids),
+        }
+        old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
+        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
+        index_map = {
+            old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
+        }
+        if self.show_tool_calls:
+            self.per_member = {
+                member_id: remap_visible_tool_marker_indices(member_text, index_map)
+                for member_id, member_text in self.per_member.items()
+            }
+            self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
+        self.tool_tracker.sync_visible_indices(self.tool_trace)
+
+    def start_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+        """Record a tool start in its exact member or coordinator slot."""
+        tool_index = len(self.tool_trace) + 1
+        marker, trace_entry = self.tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+        if trace_entry is None:
+            return
+        trace_entry.scope_key = scope_key
+        self.tool_trace.append(trace_entry)
+        if self.show_tool_calls:
+            self._append_tool_marker(scope_key, marker)
+        elif self._slot_text(scope_key):
+            self.separate_next_scopes.add(scope_key)
+        self._align_tool_trace_with_document()
+
+    def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
+        """Complete only the pending slot identified by this tool event."""
+        completion = self.tool_tracker.complete(tool, scope_key=scope_key)
+        if completion is None:
+            return
+        tool_name, result, pending_tool, completed_trace = completion
+        if pending_tool is None or pending_tool.visible_tool_index is None or completed_trace is None:
+            return
+        completed_trace.scope_key = pending_tool.scope_key or scope_key
+        if self.show_tool_calls:
+            updated_text, _ = complete_pending_tool_block(
+                self._slot_text(pending_tool.scope_key),
+                tool_name,
+                result,
+                tool_index=pending_tool.visible_tool_index,
+            )
+            self._set_slot_text(pending_tool.scope_key, updated_text)
+        self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+        """Record a member tool start."""
+        if member_id not in self.per_member:
+            msg = f"Team event has no frozen member slot for {member_id!r}"
+            raise RuntimeError(msg)
+        self.start_tool(f"agent:{member_id}", tool)
+
+    def complete_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
+        """Record a member tool completion."""
+        if member_id not in self.per_member:
+            msg = f"Team event has no frozen member slot for {member_id!r}"
+            raise RuntimeError(msg)
+        self.complete_tool(f"agent:{member_id}", tool)
+
+    def render_body(self) -> str:
+        """Render the current structured document."""
+        parts = _render_team_member_slots(
+            self.member_ids,
+            display_names_by_id=self.display_names_by_id,
+            per_member=self.per_member,
+            consensus=self.consensus,
+        )
+        return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+
+
+def _blocking_team_member_scope(
+    presentation: _TeamStreamPresentation,
+    *,
+    member_id: str | None,
+    member_name: str | None,
+) -> str:
+    """Resolve aggregate member identity to one frozen presentation slot."""
+    return f"agent:{presentation.resolve_member_id(member_id, member_name)}"
+
+
+def _merge_blocking_team_tool(
+    scoped_tools: dict[tuple[str, str], ToolExecution],
+    tool: ToolExecution,
+    scope: str,
+) -> None:
+    """Merge an aggregate tool snapshot, preferring its member-owned copy."""
+    call_id = tool_execution_call_id(tool)
+    if call_id is None:
+        msg = "Blocking team output has a tool without stable identity"
+        raise RuntimeError(msg)
+    key = (scope, call_id)
+    existing = scoped_tools.get(key)
+    if existing is not None and existing != tool:
+        msg = "Blocking team output has conflicting tool identity"
+        raise RuntimeError(msg)
+    if scope != "team" and scoped_tools.get(("team", call_id)) == tool:
+        scoped_tools.pop(("team", call_id))
+    scoped_tools[key] = tool
+
+
+def _append_team_output_text(
+    presentation: _TeamStreamPresentation,
+    output: TeamRunOutput | RunOutput,
+    *,
+    top_level: bool,
+    skip_scopes: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Append terminal aggregate text only for slots without streamed deltas."""
+    if isinstance(output, RunOutput):
+        scope = _blocking_team_member_scope(
+            presentation,
+            member_id=output.agent_id,
+            member_name=output.agent_name,
+        )
+        if scope not in skip_scopes:
+            presentation.append_member(scope.removeprefix("agent:"), _get_response_content(output))
+    elif top_level and "team" not in skip_scopes:
+        presentation.append_consensus(_get_response_content(output))
+    if isinstance(output, TeamRunOutput):
+        for member_response in output.member_responses:
+            _append_team_output_text(
+                presentation,
+                member_response,
+                top_level=False,
+                skip_scopes=skip_scopes,
+            )
+
+
+def _collect_blocking_team_tools(
+    presentation: _TeamStreamPresentation,
+    output: TeamRunOutput | RunOutput,
+    scoped_tools: dict[tuple[str, str], ToolExecution],
+) -> None:
+    """Collect aggregate tools into their structural owner scopes."""
+    if isinstance(output, RunOutput):
+        scope = _blocking_team_member_scope(
+            presentation,
+            member_id=output.agent_id,
+            member_name=output.agent_name,
+        )
+    else:
+        scope = "team"
+    for tool in output.tools or ():
+        _merge_blocking_team_tool(scoped_tools, tool, scope)
+    if isinstance(output, TeamRunOutput):
+        for member_response in output.member_responses:
+            _collect_blocking_team_tools(presentation, member_response, scoped_tools)
+
+
+def _merge_pending_team_tools(
+    presentation: _TeamStreamPresentation,
+    paused: PausedAttempt,
+    scoped_tools: dict[tuple[str, str], ToolExecution],
+) -> set[tuple[str, str]]:
+    """Merge exact pending calls and return their scoped stable identities."""
+    requirements_by_id = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in paused.requirements
+        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+    }
+    pending_ids: set[str] = set()
+    pending_keys: set[tuple[str, str]] = set()
+    for tool in paused.tools:
+        call_id = tool_execution_call_id(tool)
+        if call_id is None or call_id in pending_ids:
+            msg = "Paused team approval tool is missing its exact identity"
+            raise RuntimeError(msg)
+        pending_ids.add(call_id)
+        requirement = requirements_by_id.get(call_id)
+        scope = (
+            _blocking_team_member_scope(
+                presentation,
+                member_id=requirement.member_agent_id,
+                member_name=requirement.member_agent_name,
+            )
+            if requirement is not None and (requirement.member_agent_id or requirement.member_agent_name)
+            else "team"
+        )
+        key = (scope, call_id)
+        if scope != "team" and scoped_tools.get(("team", call_id)) == tool:
+            scoped_tools.pop(("team", call_id))
+        scoped_tools[key] = tool
+        pending_keys.add(key)
+    return pending_keys
+
+
+def _attach_team_pause_presentation(
+    paused: PausedAttempt,
+    *,
+    response: TeamRunOutput | RunOutput,
+    config_names: Sequence[str],
+    display_names: Sequence[str],
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Render a blocking team pause into the same document used by continuation."""
+    presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
+    scoped_tools: dict[tuple[str, str], ToolExecution] = {}
+    _append_team_output_text(presentation, response, top_level=True)
+    _collect_blocking_team_tools(presentation, response, scoped_tools)
+    pending_keys = _merge_pending_team_tools(presentation, paused, scoped_tools)
+
+    for key, tool in scoped_tools.items():
+        scope, _call_id = key
+        presentation.start_tool(scope, tool)
+        if key not in pending_keys:
+            presentation.complete_tool(scope, tool)
+    return replace(
+        paused,
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
 
 
 def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
@@ -1906,6 +2393,94 @@ def build_materialized_team_instance(
     )
 
 
+def _apply_team_continuation_event(event: object, presentation: _TeamStreamPresentation) -> None:
+    """Apply one Agno team event to the shared ordered presentation."""
+    if isinstance(event, AgentRunContentEvent):
+        member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+        presentation.append_member(member_id, event.content)
+    elif isinstance(event, AgentToolCallStartedEvent):
+        member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+        presentation.start_member_tool(member_id, event.tool)
+    elif isinstance(event, AgentToolCallCompletedEvent):
+        member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+        presentation.complete_member_tool(member_id, event.tool)
+    elif isinstance(event, TeamRunContentEvent):
+        presentation.append_consensus(event.content)
+    elif isinstance(event, TeamToolCallStartedEvent):
+        presentation.start_tool("team", event.tool)
+    elif isinstance(event, TeamToolCallCompletedEvent):
+        presentation.complete_tool("team", event.tool)
+
+
+async def _collect_team_continuation(
+    events: AsyncIterator[object],
+    presentation: _TeamStreamPresentation,
+) -> TeamRunOutput:
+    """Collect one team continuation stream and return its terminal run output."""
+    response: TeamRunOutput | None = None
+    content_delta_scopes: set[str] = set()
+    async for event in events:
+        if isinstance(event, TeamRunOutput):
+            response = event
+        else:
+            if isinstance(event, AgentRunContentEvent) and event.content:
+                member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+                content_delta_scopes.add(f"agent:{member_id}")
+            elif isinstance(event, TeamRunContentEvent) and event.content:
+                content_delta_scopes.add("team")
+            _apply_team_continuation_event(event, presentation)
+    if response is None:
+        msg = "Team continuation returned an unexpected result"
+        raise TypeError(msg)
+    _append_team_output_text(
+        presentation,
+        response,
+        top_level=True,
+        skip_scopes=content_delta_scopes,
+    )
+    _complete_terminal_team_tools(presentation, response)
+    return response
+
+
+def _complete_terminal_team_tools(
+    presentation: _TeamStreamPresentation,
+    output: TeamRunOutput | RunOutput,
+) -> None:
+    """Complete terminal-only tools in the structural slot that owns them."""
+    scope = (
+        _blocking_team_member_scope(
+            presentation,
+            member_id=output.agent_id,
+            member_name=output.agent_name,
+        )
+        if isinstance(output, RunOutput)
+        else "team"
+    )
+    for tool in output.tools or ():
+        if not tool.is_paused:
+            presentation.complete_tool(scope, tool)
+    if isinstance(output, TeamRunOutput):
+        for member_response in output.member_responses:
+            _complete_terminal_team_tools(presentation, member_response)
+
+
+def _continued_team_pause(
+    presentation: _TeamStreamPresentation,
+    paused: PausedAttempt,
+) -> PausedAttempt:
+    """Reconcile terminal-only pending calls and freeze the next team pause."""
+    scoped_pending: dict[tuple[str, str], ToolExecution] = {}
+    _merge_pending_team_tools(presentation, paused, scoped_pending)
+    for (scope, _call_id), tool in scoped_pending.items():
+        presentation.start_tool(scope, tool)
+    return replace(
+        paused,
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
+
+
 async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
@@ -1923,6 +2498,10 @@ async def continue_paused_team_run(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None = None,
     history_scope: HistoryScope | None = None,
+    prior_response_text: str = "",
+    prior_tool_trace: Sequence[ToolTraceEntry] = (),
+    prior_presentation_state: Mapping[str, object] | None = None,
+    show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
@@ -1982,33 +2561,43 @@ async def continue_paused_team_run(
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
-        continued = await cast(
-            "Any",
-            team.acontinue_run(
-                run_response=persisted,
-                requirements=requirements,
-                session_id=session_id,
-                user_id=user_id,
-                metadata=deepcopy(persisted.metadata),
-                stream=False,
-            ),
+        presentation = _TeamStreamPresentation.restore(
+            config_names=member_names,
+            show_tool_calls=show_tool_calls,
+            state=prior_presentation_state,
+            tool_trace=prior_tool_trace,
+            prior_response_text=prior_response_text,
         )
-        if not isinstance(continued, TeamRunOutput):
-            msg = "Team continuation returned an unexpected result"
-            raise TypeError(msg)
+        continuation_stream = team.acontinue_run(
+            run_response=persisted,
+            requirements=requirements,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+        continued = await _collect_team_continuation(
+            cast("AsyncIterator[object]", continuation_stream),
+            presentation,
+        )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
             fallback_run_id=run_id,
         )
         if paused is not None:
-            return paused
+            return _continued_team_pause(presentation, paused)
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
-        if tool_trace_collector is not None:
-            tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))
+        if tool_trace_collector is not None and show_tool_calls:
+            tool_trace_collector.extend(presentation.tool_trace)
+        response_text = presentation.render_body()
+        if not response_text:
+            response_text = _format_terminal_team_response(continued, team_display_names=members.display_names)
         return CompletedApprovalRun(
-            response_text=_format_terminal_team_response(continued, team_display_names=members.display_names),
+            response_text=response_text,
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,
@@ -2126,6 +2715,7 @@ async def team_response(  # noqa: C901, PLR0915
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
+    show_tool_calls: bool = True,
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     current_timestamp_ms: float | None = None,
@@ -2414,7 +3004,13 @@ async def team_response(  # noqa: C901, PLR0915
             )
             if paused_attempt is not None:
                 return replace(
-                    paused_attempt,
+                    _attach_team_pause_presentation(
+                        paused_attempt,
+                        response=response,
+                        config_names=attempt_members.requested_agent_names,
+                        display_names=attempt_members.display_names,
+                        show_tool_calls=show_tool_calls,
+                    ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
                 )
@@ -2788,53 +3384,25 @@ async def team_response_stream(  # noqa: C901, PLR0915
         attempt_run_id = continuation_state.active_run_id
         holder.attempt_run_id = attempt_run_id
 
-        canonical_per_member: dict[str, str] = {}
+        attempt_config_names = attempt_members.requested_agent_names
+        attempt_display_names = attempt_members.display_names
+        presentation = _TeamStreamPresentation.new(
+            attempt_config_names,
+            attempt_display_names,
+            show_tool_calls=show_tool_calls,
+        )
+        attempt_member_ids = presentation.member_ids
+        attempt_display_names_by_id = presentation.display_names_by_id
+        canonical_per_member: dict[str, str] = dict.fromkeys(attempt_member_ids, "")
         canonical_consensus = ""
-        tool_tracker = StreamingToolTracker()
-        completed_tools = tool_tracker.completed_tools
-        pending_tools = tool_tracker.pending_tools
-        visible_per_member: dict[str, str] = {}
-        visible_consensus: str = ""
-        tool_trace: list[ToolTraceEntry] = []
-        next_tool_index = 1
-
-        def _scope_key_for_agent(agent_name: str) -> str:
-            return f"agent:{agent_name}"
-
-        def _get_visible_consensus() -> str:
-            return visible_consensus
-
-        def _append_to_visible_consensus(text: str) -> None:
-            nonlocal visible_consensus
-            visible_consensus += text
-
-        def _set_visible_consensus(value: str) -> None:
-            nonlocal visible_consensus
-            visible_consensus = value
-
-        def _render_team_parts(
-            *,
-            per_member: dict[str, str],
-            consensus: str,
-        ) -> list[str]:
-            parts: list[str] = []
-            for display in display_names:
-                body = per_member.get(display, "").strip()
-                if body:
-                    parts.append(_format_member_contribution(display, body))
-            for display, body in per_member.items():
-                if display not in display_names and body.strip():
-                    parts.append(_format_member_contribution(display, body.strip()))
-
-            if consensus.strip():
-                parts.extend(_format_team_consensus(consensus.strip()))
-            elif parts:
-                parts.append(_format_no_consensus_note())
-            return parts
+        completed_tools = presentation.tool_tracker.completed_tools
+        pending_tools = presentation.tool_tracker.pending_tools
 
         def _current_canonical_partial_text() -> str:
             return "\n\n".join(
-                _render_team_parts(
+                _render_team_member_slots(
+                    attempt_member_ids,
+                    display_names_by_id=attempt_display_names_by_id,
                     per_member=canonical_per_member,
                     consensus=canonical_consensus,
                 ),
@@ -2868,92 +3436,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 _record_interrupted_team_turn()
                 raise
 
-        def _start_tool(
-            *,
-            scope_key: str,
-            apply_visible_text: Callable[[str], None],
-            tool: ToolExecution | None,
-        ) -> None:
-            nonlocal next_tool_index
-            tool_index = next_tool_index if show_tool_calls else None
-            tool_msg, trace_entry = tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
-            if not show_tool_calls or tool_index is None:
-                return
-            if tool_msg:
-                apply_visible_text(tool_msg)
-            if trace_entry is not None:
-                tool_trace.append(trace_entry)
-            next_tool_index += 1
-
-        def _complete_tool(
-            *,
-            scope_key: str,
-            get_visible_text: Callable[[], str],
-            set_visible_text: Callable[[str], None],
-            tool: ToolExecution | None,
-        ) -> None:
-            completion = tool_tracker.complete(tool, scope_key=scope_key)
-            if completion is None:
-                return
-            tool_name, result, pending_tool, completed_trace = completion
-
-            if not show_tool_calls:
-                return
-
-            if pending_tool is None or pending_tool.visible_tool_index is None:
-                logger.warning(
-                    "Missing pending tool start in team stream; skipping completion marker",
-                    tool_name=tool_name,
-                    scope=scope_key,
-                )
-                return
-
-            updated_text, _ = complete_pending_tool_block(
-                get_visible_text(),
-                tool_name,
-                result,
-                tool_index=pending_tool.visible_tool_index,
-            )
-            set_visible_text(updated_text)
-
-            if not tool_tracker.update_visible_trace_entry(tool_trace, pending_tool, completed_trace):
-                logger.warning(
-                    "Missing tool trace slot in team stream for completion",
-                    tool_name=tool_name,
-                    tool_index=pending_tool.visible_tool_index,
-                    trace_len=len(tool_trace),
-                )
-
-        def _start_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-            if agent_name not in visible_per_member:
-                visible_per_member[agent_name] = ""
-
-            def _apply_visible_text(text: str) -> None:
-                visible_per_member[agent_name] += text
-
-            _start_tool(
-                scope_key=_scope_key_for_agent(agent_name),
-                apply_visible_text=_apply_visible_text,
-                tool=tool,
-            )
-
-        def _complete_tool_for_member(agent_name: str, tool: ToolExecution | None) -> None:
-            if agent_name not in visible_per_member:
-                visible_per_member[agent_name] = ""
-
-            def _get_visible_text() -> str:
-                return visible_per_member[agent_name]
-
-            def _set_visible_text(value: str) -> None:
-                visible_per_member[agent_name] = value
-
-            _complete_tool(
-                scope_key=_scope_key_for_agent(agent_name),
-                get_visible_text=_get_visible_text,
-                set_visible_text=_set_visible_text,
-                tool=tool,
-            )
-
         def _emit_tool_timing(
             *,
             phase: str,
@@ -2975,16 +3457,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
         holder.attempt_started = True
         pending_retry_decision: MediaRetryDecision | None = None
         for retried_after_media_fallback in (False, True):
-            canonical_per_member = dict.fromkeys(display_names, "")
-            visible_per_member = dict.fromkeys(display_names, "")
+            canonical_per_member = dict.fromkeys(attempt_member_ids, "")
             canonical_consensus = ""
-            visible_consensus = ""
-            tool_trace = []
-            tool_tracker = StreamingToolTracker()
-            completed_tools = tool_tracker.completed_tools
-            next_tool_index = 1
-            pending_tools = tool_tracker.pending_tools
-            holder.tool_tracker = tool_tracker
+            presentation = _TeamStreamPresentation.new(
+                attempt_config_names,
+                attempt_display_names,
+                show_tool_calls=show_tool_calls,
+            )
+            completed_tools = presentation.tool_tracker.completed_tools
+            pending_tools = presentation.tool_tracker.pending_tools
+            holder.tool_tracker = presentation.tool_tracker
             completed_tool_executions: list[ToolExecution] = []
             emitted_output = False
             media_fallback_retry_requested = False
@@ -3245,6 +3727,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         fallback_run_id=attempt_run_id,
                     )
                     if paused_attempt is not None:
+                        paused_attempt = _continued_team_pause(presentation, paused_attempt)
+                        if paused_attempt.response_text:
+                            yield StructuredStreamChunk(
+                                content=paused_attempt.response_text,
+                                tool_trace=list(paused_attempt.tool_trace),
+                                presentation_state=paused_attempt.response_presentation_state,
+                            )
                         yield AttemptResolved(
                             replace(
                                 paused_attempt,
@@ -3267,41 +3756,37 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     return
 
                 if isinstance(event, AgentRunContentEvent):
-                    member_name = event.agent_name
-                    if member_name:
-                        if member_name not in canonical_per_member:
-                            canonical_per_member[member_name] = ""
-                            visible_per_member[member_name] = ""
-                        content = str(event.content or "")
-                        canonical_per_member[member_name] += content
-                        visible_per_member[member_name] += content
+                    member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+                    content = str(event.content or "")
+                    canonical_per_member[member_id] += content
+                    presentation.append_member(member_id, content)
                 elif isinstance(event, AgentToolCallStartedEvent):
                     member_name = event.agent_name
-                    if member_name:
-                        _emit_tool_timing(
-                            phase="agno_tool_call_started",
-                            tool_scope="member",
-                            agent_name=member_name,
-                            tool=event.tool,
-                        )
-                        _start_tool_for_member(member_name, event.tool)
+                    member_id = presentation.resolve_member_id(event.agent_id, member_name)
+                    _emit_tool_timing(
+                        phase="agno_tool_call_started",
+                        tool_scope="member",
+                        agent_name=member_name,
+                        tool=event.tool,
+                    )
+                    presentation.start_member_tool(member_id, event.tool)
                 elif isinstance(event, AgentToolCallCompletedEvent):
                     member_name = event.agent_name
-                    if member_name:
-                        _emit_tool_timing(
-                            phase="agno_tool_call_completed",
-                            tool_scope="member",
-                            agent_name=member_name,
-                            tool=event.tool,
-                        )
-                        if event.tool is not None:
-                            completed_tool_executions.append(event.tool)
-                        _complete_tool_for_member(member_name, event.tool)
+                    member_id = presentation.resolve_member_id(event.agent_id, member_name)
+                    _emit_tool_timing(
+                        phase="agno_tool_call_completed",
+                        tool_scope="member",
+                        agent_name=member_name,
+                        tool=event.tool,
+                    )
+                    if event.tool is not None:
+                        completed_tool_executions.append(event.tool)
+                    presentation.complete_member_tool(member_id, event.tool)
                 elif isinstance(event, TeamRunContentEvent):
                     if event.content:
                         content = str(event.content)
                         canonical_consensus += content
-                        visible_consensus += content
+                        presentation.append_consensus(content)
                     else:
                         logger.debug("Empty team consensus event received")
                 elif isinstance(event, TeamToolCallStartedEvent):
@@ -3311,11 +3796,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         agent_name=None,
                         tool=event.tool,
                     )
-                    _start_tool(
-                        scope_key="team",
-                        apply_visible_text=_append_to_visible_consensus,
-                        tool=event.tool,
-                    )
+                    presentation.start_tool("team", event.tool)
                 elif isinstance(event, TeamToolCallCompletedEvent):
                     _emit_tool_timing(
                         phase="agno_tool_call_completed",
@@ -3325,12 +3806,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     )
                     if event.tool is not None:
                         completed_tool_executions.append(event.tool)
-                    _complete_tool(
-                        scope_key="team",
-                        get_visible_text=_get_visible_consensus,
-                        set_visible_text=_set_visible_consensus,
-                        tool=event.tool,
-                    )
+                    presentation.complete_tool("team", event.tool)
                 elif isinstance(event, TeamRunCompletedEvent):
                     # Real Agno team streams never yield a terminal run output;
                     # this event is the stream's usage/identity source instead.
@@ -3346,16 +3822,14 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     continue
 
                 _sync_live_turn_recorder()
-                parts = _render_team_parts(
-                    per_member=visible_per_member,
-                    consensus=visible_consensus,
-                )
-                if parts:
+                rendered_body = presentation.render_body()
+                if rendered_body:
                     emitted_output = True
-                    header = _format_team_header(team_members.display_names)
-                    full_text = "\n\n".join(parts)
-                    chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
-                    yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
+                    yield StructuredStreamChunk(
+                        content=rendered_body,
+                        tool_trace=presentation.tool_trace.copy(),
+                        presentation_state=presentation.to_state(),
+                    )
 
             if media_fallback_retry_requested:
                 continue

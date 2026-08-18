@@ -991,6 +991,7 @@ class PrincipalStore:
         approval_id: str,
         *,
         runtime_generation: str,
+        legacy_show_tool_calls: bool | None = None,
     ) -> ApprovalContinuation | None:
         """Claim one ready paused run for exactly one response lifecycle."""
         return await self._backend.write(
@@ -999,6 +1000,7 @@ class PrincipalStore:
                 self._principal_id,
                 approval_id=approval_id,
                 runtime_generation=runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
             ),
         )
 
@@ -1010,6 +1012,9 @@ class PrincipalStore:
         run_id: str,
         session_id: str,
         calls: tuple[ApprovalCall, ...],
+        response_text: str | None = None,
+        response_tool_trace: tuple[dict[str, object], ...] | None = None,
+        response_presentation_state: dict[str, object] | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
         return await self._backend.write(
@@ -1021,6 +1026,9 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+                response_text=response_text,
+                response_tool_trace=response_tool_trace,
+                response_presentation_state=response_presentation_state,
             ),
         )
 

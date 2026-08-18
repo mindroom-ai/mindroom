@@ -18,6 +18,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from pydantic import ValidationError
 
+from mindroom import interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -44,6 +45,7 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -65,6 +67,7 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.bot_helpers import make_test_agent_bot
@@ -3278,6 +3281,144 @@ class TestStreamingBehavior:
 
         assert isinstance(exc_info.value.error, TimeoutError)
         assert shutdown_attempts == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flush_succeeds", [False, True], ids=["failure", "success"])
+    async def test_suspension_flush_controls_approval_handoff(self, flush_succeeds: bool) -> None:
+        """Only an acknowledged latest ordered presentation may escape to approval."""
+        mock_client = _make_matrix_client_mock()
+        tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+        marker, trace_entry = format_tool_started_event(tool, tool_index=1)
+        assert trace_entry is not None
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id="session-1",
+                run_id="run-1",
+                tools=(tool,),
+                response_text=f"Before approval.{marker}",
+                tool_trace=(trace_entry,),
+            ),
+        )
+        recorded_force_flags: list[bool] = []
+
+        class RecordingStreamingResponse(StreamingResponse):
+            async def _send_or_edit_message(
+                self,
+                client: nio.AsyncClient,
+                is_final: bool = False,
+                **kwargs: object,
+            ) -> bool:
+                recorded_force_flags.append(bool(kwargs.get("force_nonterminal_delivery")))
+                return await super()._send_or_edit_message(client, is_final, **kwargs)
+
+        async def pause_after_buffering_tool(
+            _response_stream: AsyncIterator[object],
+            streaming: StreamingResponse,
+            _progress_task: asyncio.Task[None] | None,
+            _delivery_task: asyncio.Task[None] | None,
+            _delivery_queue: asyncio.Queue[object | None],
+        ) -> None:
+            streaming.accumulated_text = "Before approval."
+            await streaming._send_or_edit_message(mock_client)
+            recorded_force_flags.clear()
+            streaming.accumulated_text += marker
+            streaming.tool_trace.append(trace_entry)
+            raise pause
+
+        edit = AsyncMock(
+            side_effect=[
+                DeliveredMatrixEvent(event_id="$stream", content_sent={}),
+                DeliveredMatrixEvent(event_id="$stream-edit", content_sent={}) if flush_succeeds else None,
+            ],
+        )
+
+        async def run_stream() -> None:
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=_aiter(),
+                existing_event_id="$stream",
+                adopt_existing_placeholder=True,
+                streaming_cls=RecordingStreamingResponse,
+            )
+
+        with (
+            patch(
+                "mindroom.streaming._consume_stream_with_progress_supervision",
+                new=pause_after_buffering_tool,
+            ),
+            patch("mindroom.streaming.edit_message_result", new=edit),
+        ):
+            if flush_succeeds:
+                with pytest.raises(ResponsePausedForApproval) as raised_pause:
+                    await run_stream()
+                assert raised_pause.value is pause
+                assert pause.presentation is not None
+                assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
+                assert pause.presentation.tool_trace == (trace_entry,)
+            else:
+                with pytest.raises(StreamingDeliveryError) as raised_delivery:
+                    await run_stream()
+                assert "suspension" in str(raised_delivery.value.error).lower()
+                assert pause.presentation is None
+
+        assert recorded_force_flags == [True]
+        assert edit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_approval_pause_captures_canonical_and_rendered_interactive_bodies(self) -> None:
+        """The continuation source and acknowledged suspension body must remain distinct."""
+        mock_client = _make_matrix_client_mock()
+        raw_interactive = (
+            '```interactive\n{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
+        )
+        rendered_interactive = interactive.parse_and_format_interactive(
+            raw_interactive,
+            extract_mapping=True,
+        ).formatted_text
+        tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+        marker, trace_entry = format_tool_started_event(tool, tool_index=1)
+        assert trace_entry is not None
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id="session-1",
+                run_id="run-1",
+                tools=(tool,),
+                response_text=f"{raw_interactive}{marker}".rstrip(),
+                tool_trace=(trace_entry,),
+            ),
+        )
+
+        async def paused_stream() -> AsyncIterator[object]:
+            yield StructuredStreamChunk(
+                content=f"{raw_interactive}{marker}",
+                tool_trace=[trace_entry],
+            )
+            raise pause
+
+        edit = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$stream-edit", content_sent={}))
+        with (
+            patch("mindroom.streaming.edit_message_result", new=edit),
+            pytest.raises(ResponsePausedForApproval) as raised_pause,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=paused_stream(),
+                existing_event_id="$stream",
+                adopt_existing_placeholder=True,
+                show_tool_calls=True,
+            )
+
+        assert raised_pause.value is pause
+        assert pause.presentation is not None
+        assert pause.presentation.response_text == f"{raw_interactive}{marker}".rstrip()
+        assert pause.presentation.rendered_response_text == f"{rendered_interactive}{marker}".rstrip()
+        assert pause.presentation.tool_trace == (trace_entry,)
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

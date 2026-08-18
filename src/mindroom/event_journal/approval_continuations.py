@@ -143,6 +143,11 @@ class ApprovalContinuation:
     source_event_ids: tuple[str, ...]
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
+    response_text: str = ""
+    response_tool_trace: tuple[dict[str, object], ...] = ()
+    response_presentation_state: dict[str, object] = field(default_factory=dict)
+    show_tool_calls: bool = True
+    show_tool_calls_is_frozen: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
@@ -177,6 +182,10 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
+        "response_text": continuation.response_text,
+        "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
+        "response_presentation_state": continuation.response_presentation_state,
+        "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
@@ -282,6 +291,16 @@ def _from_rows(
         source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
+        response_text=cast("str", stored.get("response_text", "")),
+        response_tool_trace=tuple(
+            dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
+        ),
+        response_presentation_state=cast(
+            "dict[str, object]",
+            stored.get("response_presentation_state", {}),
+        ),
+        show_tool_calls=stored.get("show_tool_calls", True) is not False,
+        show_tool_calls_is_frozen="show_tool_calls" in stored,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -529,16 +548,37 @@ def claim(
     *,
     approval_id: str,
     runtime_generation: str,
+    legacy_show_tool_calls: bool | None = None,
 ) -> ApprovalContinuation | None:
     """Move one ready paused run into its single execution attempt."""
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None or current.state != "ready":
+        return None
+    if not current.show_tool_calls_is_frozen and legacy_show_tool_calls is None:
+        msg = "Legacy approval continuation visibility must be resolved before claim"
+        raise RuntimeError(msg)
+    claimed_continuation = replace(
+        current,
+        state="claimed",
+        runtime_generation=runtime_generation,
+        show_tool_calls=(
+            current.show_tool_calls if current.show_tool_calls_is_frozen else bool(legacy_show_tool_calls)
+        ),
+        show_tool_calls_is_frozen=True,
+    )
     claimed = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = 'claimed', runtime_generation = ?
+        SET state = 'claimed', runtime_generation = ?, context_json = ?
         WHERE principal_id = ? AND approval_id = ? AND state = 'ready'
         RETURNING approval_id
         """,
-        (runtime_generation, principal_id, approval_id),
+        (
+            runtime_generation,
+            _json(_context(claimed_continuation)),
+            principal_id,
+            approval_id,
+        ),
     )
     return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
 
@@ -552,19 +592,30 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
+    response_text: str | None = None,
+    response_tool_trace: tuple[dict[str, object], ...] | None = None,
+    response_presentation_state: dict[str, object] | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
     if current is None:
         return None
     next_generation = claimant_generation + 1
-    state: ApprovalContinuationState = "ready" if all(call.decision is not None for call in calls) else "waiting"
-    publication_owner = None if state == "ready" else current.runtime_generation
+    # Every chained generation stays fenced until its ordered Matrix edit and
+    # any cards are published. Even an automatically decided generation must
+    # not become executable in the persist-before-ack crash window.
+    state: ApprovalContinuationState = "waiting"
+    publication_owner = current.runtime_generation
     advanced = replace(
         current,
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        response_text=current.response_text if response_text is None else response_text,
+        response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
+        response_presentation_state=(
+            current.response_presentation_state if response_presentation_state is None else response_presentation_state
+        ),
         state=state,
         runtime_generation=publication_owner,
         failure_reason=None,

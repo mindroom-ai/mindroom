@@ -43,6 +43,7 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
 )
 from mindroom.approval_receipt import approval_receipt_context
+from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -70,7 +71,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -79,9 +80,12 @@ from mindroom.team_exact_members import (
 )
 from mindroom.teams import (
     TeamMode,
+    _attach_team_pause_presentation,
+    _collect_team_continuation,
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
+    _TeamStreamPresentation,
     build_materialized_team_instance,
     continue_paused_team_run,
     materialize_exact_team_members,
@@ -107,6 +111,474 @@ if TYPE_CHECKING:
 _TEST_MODEL = "openai:gpt-5.4"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slots() -> None:
+    """Stable member IDs keep equal rendering labels from sharing content or tools."""
+    presentation = _TeamStreamPresentation.new(
+        config_names=["member-a", "member-b"],
+        display_names=["Same", "Same"],
+        show_tool_calls=True,
+    )
+
+    presentation.append_member("member-a", "First answer.")
+    presentation.append_member("member-b", "Second answer.")
+    presentation.start_member_tool(
+        "member-b",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+
+    assert presentation.per_member == {
+        "member-a": "First answer.",
+        "member-b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
+    }
+    assert presentation.tool_trace[0].scope_key == "agent:member-b"
+    assert presentation.render_body().count("**Same**:") == 2
+
+
+def test_team_pause_reindexes_interleaved_member_tools_to_document_order() -> None:
+    """Trace slots and completion indices must follow rendered member-slot order."""
+    presentation = _TeamStreamPresentation.new(
+        config_names=["first", "second"],
+        display_names=["First", "Second"],
+        show_tool_calls=True,
+    )
+    first = ToolExecution(
+        tool_call_id="call-first",
+        tool_name="inspect_first",
+        requires_confirmation=True,
+    )
+    second = ToolExecution(
+        tool_call_id="call-second",
+        tool_name="inspect_second",
+        requires_confirmation=True,
+    )
+    presentation.start_member_tool("second", second)
+    presentation.start_member_tool("first", first)
+    first_requirement = RunRequirement(first)
+    first_requirement.member_agent_id = "first"
+    second_requirement = RunRequirement(second)
+    second_requirement.member_agent_id = "second"
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(first, second),
+        requirements=(first_requirement, second_requirement),
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+    assert [entry.tool_call_id for entry in presentation.tool_trace] == ["call-first", "call-second"]
+    assert "🔧 `inspect_first` [1] ⏳" in presentation.per_member["first"]
+    assert "🔧 `inspect_second` [2] ⏳" in presentation.per_member["second"]
+    presentation.complete_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done"),
+    )
+    assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
+    assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
+
+
+def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -> None:
+    """Frozen hidden rendering keeps restart identity without adding markers to the body."""
+    presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
+    presentation.append_member("general", "Before.")
+    presentation.start_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}),
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["general"],
+        show_tool_calls=False,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+        prior_response_text=presentation.render_body(),
+    )
+    restored.complete_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"),
+    )
+    restored.append_member("general", " After.")
+
+    assert "🔧" not in restored.render_body()
+    assert restored.tool_trace[0].tool_call_id == "call-1"
+    assert restored.tool_trace[0].type == "tool_call_completed"
+
+
+def test_team_stream_presentation_scopes_reused_call_ids_to_members() -> None:
+    """Two member model runs can reuse a provider call ID without suppressing either tool."""
+    presentation = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=True,
+    )
+    presentation.start_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}),
+    )
+    presentation.start_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}),
+    )
+    presentation.complete_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done"),
+    )
+
+    assert [(entry.scope_key, entry.type) for entry in presentation.tool_trace] == [
+        ("agent:first", "tool_call_completed"),
+        ("agent:second", "tool_call_started"),
+    ]
+    assert "🔧 `inspect` [1]" in presentation.per_member["first"]
+    assert "🔧 `inspect` [2] ⏳" in presentation.per_member["second"]
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_appends_terminal_only_consensus() -> None:
+    """Terminal team content remains visible when the provider emitted no content deltas."""
+    presentation = _TeamStreamPresentation.new([], [], show_tool_calls=True)
+    presentation.append_consensus("Before approval. ")
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    response = await _collect_team_continuation(events(), presentation)
+
+    assert response is terminal
+    assert "Before approval. After approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_hidden_team_continuation_separates_text_across_the_tool_boundary() -> None:
+    """Hidden team approval tools must not concatenate prose across continuation."""
+    prior = _TeamStreamPresentation.new([], [], show_tool_calls=False)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    presentation = _TeamStreamPresentation.restore(
+        config_names=[],
+        show_tool_calls=False,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before approval.\n\nAfter approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_hidden_team_continuation_separates_text_across_a_new_tool_boundary() -> None:
+    """A hidden team tool started after restoration must separate later prose."""
+    presentation = _TeamStreamPresentation.new([], [], show_tool_calls=False)
+    presentation.append_consensus("Before tool.")
+    tool = ToolExecution(tool_call_id="call-2", tool_name="inspect", result="done")
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After tool.",
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield TeamToolCallStartedEvent(
+            tool=ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}),
+        )
+        yield TeamToolCallCompletedEvent(tool=tool)
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before tool.\n\nAfter tool." in presentation.render_body()
+
+
+def test_hidden_team_separator_state_survives_a_chained_pause_in_another_scope() -> None:
+    """A chained pause must preserve hidden boundaries for every member slot."""
+    prior = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=False,
+    )
+    prior.append_member("first", "Before tool.")
+    prior.start_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    prior.complete_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"),
+    )
+    prior.append_member("second", "Waiting.")
+    prior.start_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}),
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=False,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    restored.append_member("first", "After tool.")
+
+    assert "Before tool.\n\nAfter tool." in restored.render_body()
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_reuses_an_existing_visible_tool_separator() -> None:
+    """A restored team marker suffix must not become two blank paragraphs."""
+    prior = _TeamStreamPresentation.new([], [], show_tool_calls=True)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    presentation = _TeamStreamPresentation.restore(
+        config_names=[],
+        show_tool_calls=True,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+        tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_falls_back_per_unstreamed_slot() -> None:
+    """A streamed member delta must not suppress terminal-only team consensus."""
+    presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Consensus delta.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member delta.")
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    body = presentation.render_body()
+    assert "**GeneralAgent**: Member delta." in body
+    assert "**Team Consensus**:\n\nConsensus delta." in body
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_completes_terminal_only_member_tool_in_its_slot() -> None:
+    """A terminal member result must complete the pending marker owned by that member."""
+    presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
+    presentation.start_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        member_responses=[
+            RunOutput(
+                agent_id="general",
+                agent_name="GeneralAgent",
+                tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")],
+            ),
+        ],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert presentation.tool_trace[0].type == "tool_call_completed"
+    assert presentation.tool_trace[0].scope_key == "agent:general"
+    assert "🔧 `inspect` [1] ⏳" not in presentation.per_member["general"]
+    assert "🔧 `inspect` [1]" in presentation.per_member["general"]
+
+
+def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
+    """A blocking pause must reach approval with its pending marker already anchored."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "general"
+    requirement.member_agent_name = "GeneralAgent"
+    response = TeamRunOutput(
+        content="Consensus before approval.",
+        tools=[tool],
+        member_responses=[RunOutput(agent_id="general", agent_name="GeneralAgent", content="Member answer.")],
+        status=RunStatus.paused,
+    )
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+        ),
+        response=response,
+        config_names=["general"],
+        display_names=["GeneralAgent"],
+        show_tool_calls=True,
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["general"],
+        show_tool_calls=True,
+        state=paused.response_presentation_state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    assert "Member answer." in restored.per_member["general"]
+    assert "🔧 `inspect` [1] ⏳" in restored.per_member["general"]
+    assert restored.consensus == "Consensus before approval."
+    assert restored.tool_trace[0].tool_call_id == "call-1"
+
+
+def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line() -> None:
+    """A member label must not consume the standalone marker line used for ordering."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "general"
+    requirement.member_agent_name = "GeneralAgent"
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+        ),
+        response=TeamRunOutput(tools=[tool], status=RunStatus.paused),
+        config_names=["general"],
+        display_names=["GeneralAgent"],
+        show_tool_calls=True,
+    )
+
+    assert "**GeneralAgent**:\n\n🔧 `inspect` [1] ⏳" in paused.response_text
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
+def test_blocking_team_pause_maps_provider_member_id_to_raw_config_name() -> None:
+    """Agno's URL-safe requirement identity must retain the authored approval owner."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "code-review"
+    requirement.member_agent_name = "Code Review"
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+        ),
+        response=TeamRunOutput(
+            tools=[tool],
+            member_responses=[RunOutput(agent_id="Code_Review", agent_name="Code Review")],
+            status=RunStatus.paused,
+        ),
+        config_names=["Code_Review"],
+        display_names=["Code Review"],
+        show_tool_calls=True,
+    )
+
+    assert paused.tool_trace[0].scope_key == "agent:code-review"
+    assert paused.response_presentation_state["members"] == [
+        {
+            "id": "code-review",
+            "config_name": "Code_Review",
+            "display_name": "Code Review",
+            "content": "\n\n🔧 `inspect` [1] ⏳\n\n",
+        },
+    ]
+
+
+def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> None:
+    """A completed member tool must not collide with another member's pending call ID."""
+    completed = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")
+    pending = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool_execution=pending)
+    requirement.member_agent_id = "second"
+    requirement.member_agent_name = "SecondAgent"
+    response = TeamRunOutput(
+        tools=[pending],
+        member_responses=[
+            RunOutput(agent_id="first", agent_name="FirstAgent", tools=[completed]),
+            RunOutput(agent_id="second", agent_name="SecondAgent", content="Waiting."),
+        ],
+        status=RunStatus.paused,
+    )
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(pending,),
+            requirements=(requirement,),
+        ),
+        response=response,
+        config_names=["first", "second"],
+        display_names=["FirstAgent", "SecondAgent"],
+        show_tool_calls=True,
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=True,
+        state=paused.response_presentation_state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    assert [(entry.scope_key, entry.type) for entry in restored.tool_trace] == [
+        ("agent:first", "tool_call_completed"),
+        ("agent:second", "tool_call_started"),
+    ]
+    assert "🔧 `inspect` [1]" in restored.per_member["first"]
+    assert "🔧 `inspect` [2] ⏳" in restored.per_member["second"]
 
 
 def _make_test_agent(name: str) -> AgnoAgent:
@@ -426,6 +898,17 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
+    prior = _TeamStreamPresentation.new([], [], show_tool_calls=True)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(
+            tool_call_id=tool_call_id,
+            tool_name=requirement.tool_execution.tool_name,
+            tool_args=requirement.tool_execution.tool_args,
+        ),
+    )
+    collected_trace = []
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     members = ResolvedExactTeamMembers(
@@ -475,6 +958,11 @@ async def test_team_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
+            prior_response_text=prior.render_body(),
+            prior_tool_trace=prior.tool_trace,
+            prior_presentation_state=prior.to_state(),
+            show_tool_calls=True,
+            tool_trace_collector=collected_trace,
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -484,10 +972,16 @@ async def test_team_continuation_executes_real_agno_confirmation(
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
     assert continue_run.call_args.kwargs["metadata"] == original_metadata
     assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
+    assert continue_run.call_args.kwargs["stream"] is True
+    assert continue_run.call_args.kwargs["stream_events"] is True
+    assert continue_run.call_args.kwargs["yield_run_output"] is True
     assert continued_requirement.tool_execution is not None
     assert continued_requirement.tool_execution.confirmed is approved
     assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
     assert open_scope.call_args.kwargs["scope"] == persisted_scope
+    assert result.response_text.index("Before approval.") < result.response_text.index("🔧 `run_shell_command` [1]")
+    assert collected_trace[0].tool_call_id == tool_call_id
+    assert collected_trace[0].type == "tool_call_completed"
     register_notice.assert_called_once_with(
         storage_factory=storage_factory,
         session_id="session-1",
@@ -2774,6 +3268,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Before approval.")
         yield TeamRunPausedEvent(
             run_id="run-paused",
             session_id="session-team",
@@ -2813,6 +3308,10 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert raised.value.paused.run_id == "run-paused"
     assert raised.value.paused.tools == (tool,)
     assert raised.value.paused.team_member_model_names == (("general", "large"),)
+    assert "Before approval." in raised.value.paused.response_text
+    assert "🔧 `dangerous` [1] ⏳" in raised.value.paused.response_text
+    assert raised.value.paused.tool_trace[0].tool_call_id == "call-team-stream-approval"
+    assert raised.value.paused.response_presentation_state["kind"] == "team_stream"
 
 
 @pytest.mark.asyncio
@@ -2836,12 +3335,14 @@ async def test_team_response_stream_records_hidden_interrupted_tool_state() -> N
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Half done")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Half done")
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
         )
         yield AgentToolCallCompletedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(
                 tool_name="run_shell_command",
@@ -2921,6 +3422,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(
                 tool_name="run_shell_command",
@@ -2929,6 +3431,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
             ),
         )
         yield AgentToolCallCompletedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(
                 tool_name="run_shell_command",
@@ -3083,7 +3586,7 @@ async def test_team_response_stream_records_interrupted_snapshot_after_external_
     recorder = TurnRecorder(user_message="Analyze this.")
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Half done")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Half done")
         await asyncio.sleep(60)
 
     async def consume_stream() -> None:
@@ -3167,17 +3670,20 @@ async def test_team_response_stream_preserves_pending_tool_scope_for_same_named_
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="General started")
-        yield AgentRunContentEvent(agent_name="ResearchAgent", content="Research started")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="General started")
+        yield AgentRunContentEvent(agent_id="research", agent_name="ResearchAgent", content="Research started")
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
         )
         yield AgentToolCallStartedEvent(
+            agent_id="research",
             agent_name="ResearchAgent",
             tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "ls"}),
         )
         yield AgentToolCallCompletedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(
                 tool_name="run_shell_command",
@@ -3258,16 +3764,19 @@ async def test_team_response_stream_preserves_pending_tool_identity_within_membe
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="General started")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="General started")
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_call_id="call-1", tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
         )
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_call_id="call-2", tool_name="run_shell_command", tool_args={"cmd": "ls"}),
         )
         yield AgentToolCallCompletedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(
                 tool_call_id="call-1",
@@ -3355,6 +3864,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
         nonlocal attempts
         attempts += 1
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
         )
@@ -3423,6 +3933,7 @@ async def test_team_response_stream_does_not_retry_after_hidden_tool_progress_on
         nonlocal attempts
         attempts += 1
         yield AgentToolCallStartedEvent(
+            agent_id="general",
             agent_name="GeneralAgent",
             tool=ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}),
         )
@@ -3545,7 +4056,7 @@ async def test_team_response_stream_marks_successful_event_stream_completed() ->
     )
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer.")
         yield TeamRunContentEvent(content="Consensus answer.")
 
     team_agent_ids = [
@@ -3588,6 +4099,83 @@ async def test_team_response_stream_marks_successful_event_stream_completed() ->
     assert "Consensus answer." in recorder.assistant_text
     assert recorder.completed_tools == []
     assert any("Consensus answer." in chunk for chunk in rendered_chunks)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_keys_canonical_text_by_provider_member_id() -> None:
+    """A raw config name must not diverge from Agno's URL-safe stream identity."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"Code_Review": MagicMock(running=True)}
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["Code_Review"],
+        agents=[],
+        display_names=["Code Review"],
+        materialized_agent_names={"Code_Review"},
+        failed_agent_names=[],
+    )
+    tool = ToolExecution(
+        tool_call_id="call-normalized",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool)
+    requirement.member_agent_id = "code-review"
+    requirement.member_agent_name = "Code Review"
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_id="code-review", agent_name="Code Review", content="Member answer.")
+        yield TeamRunPausedEvent(
+            run_id="run-normalized",
+            session_id="session-team-stream",
+            tools=[tool],
+            requirements=[requirement],
+        )
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    recorder = TurnRecorder(user_message="Review this.")
+
+    with (
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(return_value=_prepared_team_execution_context(final_prompt="Review this.")),
+        ),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Review this.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-team-stream", run_id="run-normalized"),
+            mode=TeamMode.COORDINATE,
+            show_tool_calls=False,
+        ):
+            pass
+
+    assert "**Code Review**: Member answer." in raised.value.paused.response_text
+    assert raised.value.paused.response_presentation_state["members"] == [
+        {
+            "id": "code-review",
+            "config_name": "Code_Review",
+            "display_name": "Code Review",
+            "content": "Member answer.",
+        },
+    ]
 
 
 @pytest.mark.asyncio

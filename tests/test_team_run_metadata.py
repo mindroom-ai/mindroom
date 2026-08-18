@@ -183,7 +183,7 @@ async def test_team_response_stream_collects_run_metadata_from_completed_event()
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamRunCompletedEvent(
             run_id="team-run-1",
             session_id="session-1",
@@ -227,7 +227,7 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamModelRequestCompletedEvent(
             model="test-model",
             model_provider="openai",

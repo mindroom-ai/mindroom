@@ -22,6 +22,7 @@ from mindroom.approval_response import (
     ApprovalResponseCoordinator,
     continuation_target,
     identify_approval_tools,
+    require_ordered_pause_presentation,
 )
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
@@ -99,7 +100,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import format_tool_trace_markers
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
@@ -176,6 +177,37 @@ def _merge_response_extra_content(
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
     return merged_extra_content if extra_content is not None or attachment_ids else None
+
+
+def _paused_with_committed_presentation(
+    error: ResponsePausedForApproval,
+    *,
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Attach only the response state acknowledged before the stream suspended."""
+    if error.presentation is None:
+        return error.paused
+    if show_tool_calls:
+        tool_trace = error.presentation.tool_trace
+        presentation_state = error.presentation.state or {}
+    else:
+        tool_trace = error.paused.tool_trace
+        presentation_state = error.paused.response_presentation_state
+    return replace(
+        error.paused,
+        response_text=error.presentation.response_text,
+        acknowledged_response_text=error.presentation.rendered_response_text,
+        tool_trace=tool_trace,
+        response_presentation_state=presentation_state,
+    )
+
+
+def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
+    """Return one turn's policy snapshot or reject an unfrozen approval handoff."""
+    if show_tool_calls is None:
+        msg = "Approval suspension requires turn-frozen tool visibility"
+        raise RuntimeError(msg)
+    return show_tool_calls
 
 
 def _split_delivery_tool_trace(
@@ -526,6 +558,7 @@ class _PreparedResponseRuntime:
     session_id: str
     model_prompt: str
     active_model_name: str
+    show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
 
 
@@ -794,6 +827,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity,
         entity_kind: Literal["agent", "team"],
         history_scope: HistoryScope,
+        show_tool_calls: bool,
         team_member_names: tuple[str, ...] = (),
         team_mode: str | None = None,
     ) -> FinalDeliveryOutcome:
@@ -802,6 +836,7 @@ class ResponseRunner:
         if requester_id is None:
             msg = "Approval continuation requires the original requester identity"
             raise RuntimeError(msg)
+        require_ordered_pause_presentation(paused, show_tool_calls=show_tool_calls)
         identified_tools = identify_approval_tools(
             paused,
             default_agent_name=self.deps.agent_name,
@@ -828,7 +863,13 @@ class ResponseRunner:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
-            visible_text = plan.waiting_text or PROGRESS_PLACEHOLDER
+            visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
+            snapshot_text = paused.response_text
+            visible_text = (
+                paused.acknowledged_response_text
+                if paused.acknowledged_response_text is not None
+                else snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
+            )
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery_kind: Literal["sent", "edited"] | None = None
             final_visible_body: str | None = None
@@ -838,22 +879,24 @@ class ResponseRunner:
                         target=target,
                         response_text=visible_text,
                         extra_content={STREAM_STATUS_KEY: stream_status},
+                        tool_trace=list(visible_tool_trace) or None,
                         delivery_turn_id=request.response_envelope.source_event_id,
                         delivery_stage=DeliveryStage.INITIAL,
                     ),
                 )
                 delivery_kind = "sent"
                 final_visible_body = visible_text
-            elif approval_pending and not await self.deps.delivery_gateway.edit_text(
+            elif (approval_pending or bool(snapshot_text)) and not await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
                     target=target,
                     event_id=response_event_id,
                     new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
                 ),
             ):
                 response_event_id = None
-            elif approval_pending:
+            elif approval_pending or bool(snapshot_text):
                 delivery_kind = "edited"
                 final_visible_body = visible_text
             if response_event_id is None:
@@ -877,6 +920,10 @@ class ResponseRunner:
                     source_event_ids=source_event_ids,
                     calls=plan.calls,
                     state=continuation_state,
+                    response_text=snapshot_text,
+                    response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+                    response_presentation_state=paused.response_presentation_state,
+                    show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
@@ -929,6 +976,7 @@ class ResponseRunner:
                 is_visible_response=True,
                 final_visible_body=final_visible_body,
                 delivery_kind=delivery_kind,
+                tool_trace=visible_tool_trace,
                 extra_content={STREAM_STATUS_KEY: stream_status},
             )
         except (asyncio.CancelledError, Exception) as error:
@@ -957,21 +1005,15 @@ class ResponseRunner:
         )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
-            show_tool_calls = self._show_tool_calls()
+            show_tool_calls = claimed.show_tool_calls
             visible_tool_trace = tool_trace if show_tool_calls else []
-            tool_markers = format_tool_trace_markers(visible_tool_trace)
-            response_text = (
-                f"{tool_markers}\n\n{result.response_text}"
-                if tool_markers and result.response_text
-                else tool_markers or result.response_text
-            )
             return (
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
                         target=target,
                         existing_event_id=claimed.response_event_id,
                         existing_event_is_placeholder=False,
-                        response_text=response_text,
+                        response_text=result.response_text,
                         identity=self._response_identity(
                             request,
                             response_kind="team" if claimed.entity_kind == "team" else "ai",
@@ -986,11 +1028,10 @@ class ResponseRunner:
                 ),
                 current,
             )
-        waiting_text = await self._approval_responses.advance_pause(
+        presentation = await self._approval_responses.advance_pause(
             claimed,
             result,
             target=target,
-            tool_trace=tool_trace if self._show_tool_calls() else [],
             pending_text=PROGRESS_PLACEHOLDER,
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
@@ -999,12 +1040,12 @@ class ResponseRunner:
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
                 is_visible_response=True,
-                final_visible_body=waiting_text or PROGRESS_PLACEHOLDER,
+                final_visible_body=presentation.response_text,
                 delivery_kind="edited",
-                tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
+                tool_trace=presentation.tool_trace,
                 extra_content={
                     STREAM_STATUS_KEY: (
-                        STREAM_STATUS_APPROVAL_PENDING if waiting_text is not None else STREAM_STATUS_PENDING
+                        STREAM_STATUS_APPROVAL_PENDING if presentation.approval_pending else STREAM_STATUS_PENDING
                     ),
                 },
             ),
@@ -1437,6 +1478,10 @@ class ResponseRunner:
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
+                        prior_response_text=continuation.response_text,
+                        prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+                        prior_presentation_state=continuation.response_presentation_state or None,
+                        show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,
                     )
 
@@ -1956,6 +2001,7 @@ class ResponseRunner:
         claimed = await self.deps.approval_store.claim_approval_continuation(
             owned.approval_id,
             runtime_generation=self.deps.approval_runtime_generation,
+            legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
         )
         if claimed is None:
             return None
@@ -2742,6 +2788,7 @@ class ResponseRunner:
         ]
         | None = None,
         approval_suspension_handler: Callable[[PausedAttempt], Awaitable[FinalDeliveryOutcome]] | None = None,
+        show_tool_calls: bool | None = None,
     ) -> str | None:
         """Run generation and settle its terminal lifecycle exactly once."""
         deferred_error: BaseException | None = None
@@ -2759,8 +2806,16 @@ class ResponseRunner:
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:
                 raise
+            frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
             try:
-                progress.settle(await approval_suspension_handler(error.paused))
+                progress.settle(
+                    await approval_suspension_handler(
+                        _paused_with_committed_presentation(
+                            error,
+                            show_tool_calls=frozen_show_tool_calls,
+                        ),
+                    ),
+                )
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                 progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
@@ -3305,6 +3360,7 @@ class ResponseRunner:
                                     model_name=model_name,
                                     member_model_names=member_model_names,
                                     media=resolved_request.media,
+                                    show_tool_calls=show_tool_calls,
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
                                     current_timestamp_ms=request.current_timestamp_ms,
@@ -3476,9 +3532,11 @@ class ResponseRunner:
                 execution_identity=tool_dispatch.execution_identity,
                 entity_kind="team",
                 history_scope=session_scope,
+                show_tool_calls=show_tool_calls,
                 team_member_names=tuple(agent_names),
                 team_mode=mode.value,
             ),
+            show_tool_calls=show_tool_calls,
         )
 
     async def _run_cancellable_response(
@@ -3547,6 +3605,7 @@ class ResponseRunner:
             session_id=session_id,
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
+            show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
         )
 
@@ -3575,7 +3634,7 @@ class ResponseRunner:
             turn_recorder.set_run_id(current_run_id)
             attempt_run_id_collector.append(current_run_id)
 
-        show_tool_calls = self._show_tool_calls()
+        show_tool_calls = runtime.show_tool_calls
 
         async def build_response_text() -> str:
             knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
@@ -3699,7 +3758,7 @@ class ResponseRunner:
             knowledge=knowledge_resolution.knowledge,
             run_id_callback=note_attempt_run_id,
             media=runtime.media_inputs,
-            show_tool_calls=self._show_tool_calls(),
+            show_tool_calls=runtime.show_tool_calls,
             run_metadata_collector=run_metadata_content,
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_lifecycle=compaction_lifecycle,
@@ -3727,7 +3786,7 @@ class ResponseRunner:
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
                         and request.existing_event_is_placeholder,
-                        show_tool_calls=self._show_tool_calls(),
+                        show_tool_calls=runtime.show_tool_calls,
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
                         streaming_cls=StreamingResponse,
@@ -3866,7 +3925,7 @@ class ResponseRunner:
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     response_text=generation.response_text,
                     identity=response_identity,
-                    tool_trace=generation.tool_trace if self._show_tool_calls() else None,
+                    tool_trace=generation.tool_trace if runtime.show_tool_calls else None,
                     extra_content=response_extra_content or None,
                 ),
             )
@@ -4001,7 +4060,7 @@ class ResponseRunner:
                         stream_transport_outcome=stream_transport_outcome,
                         initial_delivery_kind="edited" if request.existing_event_id else "sent",
                         identity=response_identity,
-                        tool_trace=error.tool_trace if self._show_tool_calls() else None,
+                        tool_trace=error.tool_trace if runtime.show_tool_calls else None,
                         extra_content=response_extra_content,
                         existing_event_id=request.existing_event_id,
                         existing_event_is_placeholder=request.existing_event_is_placeholder,
@@ -4039,7 +4098,7 @@ class ResponseRunner:
                         ),
                         initial_delivery_kind="edited" if request.existing_event_id else "sent",
                         identity=response_identity,
-                        tool_trace=list(tool_trace) if self._show_tool_calls() else None,
+                        tool_trace=list(tool_trace) if runtime.show_tool_calls else None,
                         extra_content=_merge_response_extra_content(
                             run_metadata_content,
                             request.attachment_ids,
@@ -4062,7 +4121,7 @@ class ResponseRunner:
             transport_outcome=transport_outcome,
             delivery_kind="edited" if request.existing_event_id else "sent",
             response_identity=response_identity,
-            tool_trace=tool_trace if self._show_tool_calls() else None,
+            tool_trace=tool_trace if runtime.show_tool_calls else None,
             extra_content=response_extra_content,
         )
         return build_outcome(delivery)
@@ -4258,5 +4317,7 @@ class ResponseRunner:
                 execution_identity=execution_identity,
                 entity_kind="agent",
                 history_scope=history_scope,
+                show_tool_calls=runtime.show_tool_calls,
             ),
+            show_tool_calls=runtime.show_tool_calls,
         )

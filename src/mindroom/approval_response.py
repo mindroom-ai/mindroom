@@ -6,7 +6,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.constants import (
@@ -25,8 +25,17 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
+from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
+
+
+def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
+    """Raise outside the publication try block's I/O expression when an edit fails."""
+    if not succeeded:
+        raise RuntimeError(failure_reason)
+
+
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
@@ -51,17 +60,47 @@ class _ApprovalPausePlan:
     waiting_text: str | None
 
 
+@dataclass(frozen=True)
+class _ApprovalPausePresentation:
+    """Visible response state published for one chained approval generation."""
+
+    response_text: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+    approval_pending: bool
+
+
+def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str]:
+    """Read the frozen provider-to-config identity map from a team presentation."""
+    stored_members = state.get("members") if state.get("kind") == "team_stream" else None
+    if not isinstance(stored_members, list):
+        return {}
+    config_names_by_provider_id: dict[str, str] = {}
+    for member in stored_members:
+        if not isinstance(member, dict):
+            continue
+        stored_member = cast("dict[str, object]", member)
+        provider_id = stored_member.get("id")
+        config_name = stored_member.get("config_name")
+        if isinstance(provider_id, str) and provider_id and isinstance(config_name, str) and config_name:
+            config_names_by_provider_id[provider_id] = config_name
+    return config_names_by_provider_id
+
+
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
     default_agent_name: str,
 ) -> tuple[tuple[ToolExecution, str, str, str], ...]:
     """Resolve exact paused call IDs, names, and invoking member ownership."""
+    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: requirement.member_agent_name
+        requirement.tool_execution.tool_call_id: config_names_by_provider_id.get(requirement.member_agent_id)
         for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.member_agent_name
+        if requirement.tool_execution is not None and requirement.member_agent_id
     }
+    if any(owner is None for owner in owners.values()):
+        msg = "Paused approval tool has no frozen member config identity"
+        raise RuntimeError(msg)
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
         if not tool.tool_call_id or not tool.tool_name:
@@ -72,10 +111,42 @@ def identify_approval_tools(
                 tool,
                 tool.tool_call_id,
                 tool.tool_name,
-                owners.get(tool.tool_call_id, default_agent_name),
+                owners.get(tool.tool_call_id) or default_agent_name,
             ),
         )
     return tuple(identified)
+
+
+def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
+    """Reject a visible approval handoff whose pending tools have no ordered anchors."""
+    if not show_tool_calls:
+        return
+    if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
+        msg = "Approval suspension requires an ordered presentation for every pending tool"
+        raise RuntimeError(msg)
+    requirements_by_call_id = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in paused.requirements
+        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+    }
+    is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
+    for tool in paused.tools:
+        call_id = tool.tool_call_id
+        matches = [
+            (index, entry)
+            for index, entry in enumerate(paused.tool_trace, start=1)
+            if entry.type == "tool_call_started" and entry.tool_call_id == call_id
+        ]
+        if call_id is None or len(matches) != 1:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        _, entry = matches[0]
+        requirement = requirements_by_call_id.get(call_id)
+        member_id = requirement.member_agent_id if requirement is not None else None
+        expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
+        if entry.scope_key != expected_scope:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
 
 
 def continuation_target(
@@ -252,49 +323,55 @@ class ApprovalResponseCoordinator:
         paused: PausedAttempt,
         *,
         target: MessageTarget,
-        tool_trace: list[ToolTraceEntry],
         pending_text: str,
-    ) -> str | None:
+    ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
+        require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
-        visible_text = plan.waiting_text or pending_text
-        stream_status = STREAM_STATUS_APPROVAL_PENDING if plan.waiting_text is not None else STREAM_STATUS_PENDING
-        if not await self.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=current.response_event_id,
-                new_text=visible_text,
-                extra_content={STREAM_STATUS_KEY: stream_status},
-                tool_trace=tool_trace or None,
-            ),
-        ):
-            msg = "Could not publish the chained approval response"
-            raise RuntimeError(msg)
+        approval_pending = plan.waiting_text is not None
+        visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
+        visible_text = paused.response_text or plan.waiting_text or pending_text
+        stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         publishing = await self.store.advance_approval_continuation(
             current.approval_id,
             claimant_generation=current.generation,
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            response_text=paused.response_text,
+            response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+            response_presentation_state=paused.response_presentation_state,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
+        failure_reason = "Chained approval publication failed"
         try:
+            edit_succeeded = await self.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=current.response_event_id,
+                    new_text=visible_text,
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
+                ),
+            )
+            _require_successful_edit(edit_succeeded, failure_reason)
             await self.publish_generation(
                 publishing,
                 plan,
                 target=target,
-                failure_reason="Chained approval card creation failed",
+                failure_reason=failure_reason,
             )
         except (asyncio.CancelledError, Exception):
-            await self.request_failure(
-                publishing,
-                "Chained approval card creation failed",
-            )
+            await self.request_failure(publishing, failure_reason)
             raise
-        return plan.waiting_text
+        return _ApprovalPausePresentation(
+            response_text=visible_text,
+            tool_trace=visible_tool_trace,
+            approval_pending=approval_pending,
+        )
 
     async def request_failure(
         self,

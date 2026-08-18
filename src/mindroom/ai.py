@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import aclosing
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -81,6 +82,7 @@ from mindroom.response_turn import (
     DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
+    ResponsePausedForApproval,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
@@ -92,7 +94,12 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
-from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
+from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
+    StreamingToolTracker,
+    complete_pending_tool_block,
+    format_tool_combined,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
@@ -111,7 +118,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import EmptyRunDiscard, StandaloneReplaySnapshot, TurnRunState
+    from mindroom.response_turn import EmptyRunDiscard, PausedAttempt, StandaloneReplaySnapshot, TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -494,101 +501,41 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
-@dataclass
-class _CollectedStreamResponseState:
-    """State for collecting stream-shaped output into one final body."""
-
-    full_response: str = ""
-    canonical_final_body_candidate: str | None = None
-    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
-    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
-
-
-def _collect_stream_content_chunk(
-    state: _CollectedStreamResponseState,
-    chunk: str | RunContentEvent | RunCompletedEvent,
-) -> None:
-    """Append regular stream content or remember the final canonical body."""
-    if isinstance(chunk, str):
-        state.full_response += chunk
-    elif isinstance(chunk, RunContentEvent):
-        if chunk.content:
-            state.full_response += str(chunk.content)
-    elif chunk.content is not None:
-        state.canonical_final_body_candidate = str(chunk.content)
-
-
-def _collect_stream_tool_started(
-    state: _CollectedStreamResponseState,
-    event: ToolCallStartedEvent,
-    *,
-    show_tool_calls: bool,
-) -> None:
-    """Track a tool start while collecting a silent stream."""
-    if not show_tool_calls or event.tool is None:
-        return
-
-    tool_index = len(state.tool_trace) + 1
-    text_chunk, trace_entry = state.tool_tracker.start(event.tool, tool_index=tool_index)
-    if trace_entry is not None:
-        state.tool_trace.append(trace_entry)
-    state.full_response += text_chunk
-
-
-def _collect_stream_tool_completed(
-    state: _CollectedStreamResponseState,
-    event: ToolCallCompletedEvent,
-    *,
-    show_tool_calls: bool,
-) -> None:
-    """Track a tool completion while collecting a silent stream."""
-    if not show_tool_calls:
-        return
-
-    completion = state.tool_tracker.complete(event.tool)
-    if completion is None:
-        return
-
-    tool_name, result, pending_tool, completed_trace = completion
-    if pending_tool is None or pending_tool.visible_tool_index is None:
-        logger.warning(
-            "Missing pending tool start in collected streaming response; skipping completion marker",
-            tool_name=tool_name,
-        )
-        return
-
-    state.full_response, _ = complete_pending_tool_block(
-        state.full_response,
-        tool_name,
-        result,
-        tool_index=pending_tool.visible_tool_index,
-    )
-    if not state.tool_tracker.update_visible_trace_entry(state.tool_trace, pending_tool, completed_trace):
-        logger.warning(
-            "Missing tool trace slot in collected streaming response for completion",
-            tool_name=tool_name,
-            tool_index=pending_tool.visible_tool_index,
-            trace_len=len(state.tool_trace),
-        )
-
-
 async def _collect_streamed_response_content(
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     show_tool_calls: bool,
+    initial_response_text: str = "",
+    initial_tool_trace: Sequence[ToolTraceEntry] = (),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a streaming response into one final body without Matrix edits."""
-    state = _CollectedStreamResponseState()
+    state = CollectedStreamPresentation(
+        show_tool_calls=show_tool_calls,
+        response_text=initial_response_text,
+        tool_trace=deepcopy(list(initial_tool_trace)),
+    )
 
-    async for chunk in response_stream:
-        if isinstance(chunk, str | RunContentEvent | RunCompletedEvent):
-            _collect_stream_content_chunk(state, chunk)
-        elif isinstance(chunk, ToolCallStartedEvent):
-            _collect_stream_tool_started(state, chunk, show_tool_calls=show_tool_calls)
-        elif isinstance(chunk, ToolCallCompletedEvent):
-            _collect_stream_tool_completed(state, chunk, show_tool_calls=show_tool_calls)
+    try:
+        async for chunk in response_stream:
+            if isinstance(chunk, str):
+                state.append_text(chunk)
+            elif isinstance(chunk, RunContentEvent):
+                state.append_text(chunk.content)
+            elif isinstance(chunk, RunCompletedEvent):
+                if chunk.content is not None:
+                    state.canonical_final_body_candidate = str(chunk.content)
+            elif isinstance(chunk, ToolCallStartedEvent):
+                state.start_tool(chunk.tool)
+            elif isinstance(chunk, ToolCallCompletedEvent):
+                state.complete_tool(chunk.tool)
+    except ResponsePausedForApproval as error:
+        error.capture_collected_presentation(
+            response_text=state.final_text().rstrip(),
+            tool_trace=state.tool_trace,
+        )
+        raise
 
-    return state.full_response or state.canonical_final_body_candidate or "", state.tool_trace
+    return state.final_text(), state.tool_trace
 
 
 async def _collect_response_body_with_trace(
@@ -680,6 +627,46 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
     return trace
 
 
+def _attach_blocking_pause_presentation(
+    paused: PausedAttempt,
+    response: RunOutput,
+    *,
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Render a blocking pause once, before it crosses the approval boundary."""
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=show_tool_calls,
+        track_hidden_tools=True,
+    )
+    presentation.append_text(_extract_replayable_response_text(response))
+    pending_by_id: dict[str, ToolExecution] = {}
+    for tool in paused.tools:
+        call_id = tool_execution_call_id(tool)
+        if call_id is None or call_id in pending_by_id:
+            msg = "Paused approval tool is missing its exact identity"
+            raise RuntimeError(msg)
+        pending_by_id[call_id] = tool
+
+    seen_ids: set[str] = set()
+    for tool in (*tuple(response.tools or ()), *paused.tools):
+        call_id = tool_execution_call_id(tool)
+        if call_id is None:
+            msg = "Blocking approval output has a tool without stable identity"
+            raise RuntimeError(msg)
+        if call_id in seen_ids:
+            continue
+        seen_ids.add(call_id)
+        presentation.start_tool(tool)
+        if call_id not in pending_by_id:
+            presentation.complete_tool(tool)
+
+    return replace(
+        paused,
+        response_text=presentation.final_text(),
+        tool_trace=tuple(presentation.tool_trace),
+    )
+
+
 def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
     """Extract completed and unfinished tool traces from an interrupted RunOutput."""
     return split_interrupted_tool_trace(response.tools)
@@ -767,17 +754,35 @@ def _track_stream_tool_started(
     event: ToolCallStartedEvent,
     *,
     show_tool_calls: bool,
-) -> None:
+) -> bool:
     """Track started tool-call metadata for streaming output."""
-    state.observed_tool_calls += 1
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, _ = state.tool_tracker.start(event.tool, tool_index=display_tool_index)
+    tool_msg, trace_entry = state.tool_tracker.start(event.tool, tool_index=display_tool_index)
+    if trace_entry is None:
+        return False
+    state.observed_tool_calls += 1
     if not show_tool_calls or display_tool_index is None:
-        return
+        return True
 
     state.tool_count = display_tool_index
     if tool_msg:
         state.full_response += tool_msg
+    return True
+
+
+def _materialize_paused_agent_tool_events(
+    state: _StreamingAttemptState,
+    tools: Sequence[ToolExecution],
+    *,
+    show_tool_calls: bool,
+) -> tuple[ToolCallStartedEvent, ...]:
+    """Return exact missing tool-start events for one native approval pause."""
+    materialized: list[ToolCallStartedEvent] = []
+    for tool in tools:
+        event = ToolCallStartedEvent(tool=tool)
+        if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls):
+            materialized.append(event)
+    return tuple(materialized)
 
 
 def _track_stream_tool_completed(
@@ -1602,7 +1607,14 @@ async def ai_response(  # noqa: C901
                 fallback_run_id=attempt.attempt_run_id,
             )
             if paused_attempt is not None:
-                return replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name)
+                return replace(
+                    _attach_blocking_pause_presentation(
+                        paused_attempt,
+                        response,
+                        show_tool_calls=show_tool_calls,
+                    ),
+                    runtime_model_name=prepared_run.runtime_model_name,
+                )
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,
@@ -2154,8 +2166,23 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     fallback_run_id=attempt.attempt_run_id,
                 )
                 if paused_attempt is not None:
+                    for tool_event in _materialize_paused_agent_tool_events(
+                        state,
+                        paused_attempt.tools,
+                        show_tool_calls=show_tool_calls,
+                    ):
+                        _sync_live_turn_recorder()
+                        yield tool_event
                     yield AttemptResolved(
-                        replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name),
+                        replace(
+                            paused_attempt,
+                            runtime_model_name=prepared_run.runtime_model_name,
+                            tool_trace=(
+                                paused_attempt.tool_trace
+                                if show_tool_calls
+                                else tuple(pending.trace_entry for pending in state.pending_tools)
+                            ),
+                        ),
                     )
                     return
                 paused_metadata = _build_interrupted_metadata(

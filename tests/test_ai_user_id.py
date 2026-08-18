@@ -34,6 +34,7 @@ from agno.tools.function import Function
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
+    _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _run_error_event_text,
@@ -75,10 +76,12 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
+    _paused_with_committed_presentation,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     get_tool_runtime_context,
@@ -1215,12 +1218,18 @@ class TestUserIdPassthrough:
             tool_args={"value": 1},
             requires_confirmation=True,
         )
+        completed_tool = ToolExecution(
+            tool_call_id="call-0",
+            tool_name="inspect",
+            tool_args={"path": "report.txt"},
+            result="ready",
+        )
         paused_run = RunOutput(
             run_id="run-paused",
             agent_id="general",
             session_id="session1",
             content="Approval required",
-            tools=[paused_tool],
+            tools=[completed_tool, paused_tool],
             status=RunStatus.paused,
         )
 
@@ -1242,6 +1251,15 @@ class TestUserIdPassthrough:
                 )
 
         assert raised.value.paused.tools == (paused_tool,)
+        assert raised.value.paused.response_text.index("Approval required") < raised.value.paused.response_text.index(
+            "🔧 `inspect` [1]",
+        )
+        assert "🔧 `inspect` [1] ⏳" not in raised.value.paused.response_text
+        assert "🔧 `dangerous` [2] ⏳" in raised.value.paused.response_text
+        assert [(entry.tool_call_id, entry.type) for entry in raised.value.paused.tool_trace] == [
+            ("call-0", "tool_call_completed"),
+            ("call-1", "tool_call_started"),
+        ]
         assert storage.session is None
 
     @pytest.mark.asyncio
@@ -3668,16 +3686,80 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                async for _chunk in stream_agent_response(
-                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
-                    prompt="Run the action",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
-                ):
-                    pass
+                await _collect_streamed_response_content(
+                    stream_agent_response(
+                        make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                        prompt="Run the action",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                    ),
+                    show_tool_calls=True,
+                )
 
         assert raised.value.paused.run_id == "run-paused"
         assert raised.value.paused.tools == (tool,)
+        assert raised.value.presentation is not None
+        assert raised.value.presentation.response_text.strip() == "🔧 `dangerous` [1] ⏳"
+        assert raised.value.presentation.tool_trace[0].tool_call_id == "call-stream-approval"
+
+    @pytest.mark.asyncio
+    async def test_hidden_streamed_confirmation_pause_preserves_internal_tool_boundary(self, tmp_path: Path) -> None:
+        """A hidden pause must retain enough internal trace state to separate its continuation."""
+        storage = _SessionStorage()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+        tool = ToolExecution(
+            tool_call_id="call-stream-approval",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Before approval.")
+            yield RunPausedEvent(
+                run_id="run-paused",
+                session_id="session1",
+                tools=[tool],
+                requirements=[RunRequirement(tool)],
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_: _open_agent_scope_context(storage),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                await _collect_streamed_response_content(
+                    stream_agent_response(
+                        make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                        prompt="Run the action",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        show_tool_calls=False,
+                    ),
+                    show_tool_calls=False,
+                )
+
+        paused = _paused_with_committed_presentation(raised.value, show_tool_calls=False)
+        restored = CollectedStreamPresentation(
+            show_tool_calls=False,
+            response_text=paused.response_text,
+            tool_trace=list(paused.tool_trace),
+            track_hidden_tools=True,
+        )
+        restored.append_text("After approval.")
+
+        assert [entry.tool_call_id for entry in paused.tool_trace] == ["call-stream-approval"]
+        assert restored.final_text() == "Before approval.\n\nAfter approval."
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_real_agno_confirmation_run_paused(self, tmp_path: Path) -> None:
@@ -3743,6 +3825,37 @@ class TestUserIdPassthrough:
         assert persisted is not None
         assert persisted.status == RunStatus.paused
         assert len(persisted.requirements or []) == 1
+
+    @pytest.mark.asyncio
+    async def test_collected_agent_pause_carries_its_ordered_presentation(self) -> None:
+        """A non-Matrix stream collector must hand its body and trace to approval."""
+        tool = ToolExecution(
+            tool_call_id="call-1",
+            tool_name="inspect",
+            tool_args={"item": "report"},
+            requires_confirmation=True,
+        )
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id="session-1",
+                run_id="run-paused",
+                tools=(tool,),
+            ),
+        )
+
+        async def paused_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Before approval.")
+            yield ToolCallStartedEvent(tool=tool)
+            raise pause
+
+        with pytest.raises(ResponsePausedForApproval) as raised:
+            await _collect_streamed_response_content(paused_stream(), show_tool_calls=True)
+
+        assert raised.value is pause
+        assert pause.presentation is not None
+        assert pause.presentation.response_text == "Before approval.\n\n🔧 `inspect` [1] ⏳"
+        assert len(pause.presentation.tool_trace) == 1
+        assert pause.presentation.tool_trace[0].tool_call_id == "call-1"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_persists_hidden_interrupted_tool_state(self, tmp_path: Path) -> None:

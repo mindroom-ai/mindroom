@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    RunOutput,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
@@ -24,14 +30,16 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_system.events import format_tool_completed_event
+from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
 
     import nio
+    from agno.agent import Agent
+    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -41,6 +49,80 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _append_terminal_agent_content(
+    presentation: CollectedStreamPresentation,
+    terminal_content: str | None,
+    *,
+    saw_content_delta: bool,
+) -> None:
+    """Append terminal content only when the provider emitted no continuation delta."""
+    if not saw_content_delta and terminal_content:
+        presentation.append_text(terminal_content)
+
+
+async def _collect_agent_continuation(
+    events: AsyncIterator[object],
+    presentation: CollectedStreamPresentation,
+) -> RunOutput:
+    """Collect one ordered continuation stream and return its terminal run."""
+    response: RunOutput | None = None
+    terminal_content: str | None = None
+    saw_content_delta = False
+    async for event in events:
+        if isinstance(event, RunOutput):
+            response = event
+        elif isinstance(event, RunContentEvent):
+            presentation.append_text(event.content)
+            saw_content_delta = saw_content_delta or bool(event.content)
+        elif isinstance(event, RunCompletedEvent) and event.content is not None:
+            terminal_content = str(event.content)
+        elif isinstance(event, ToolCallStartedEvent):
+            presentation.start_tool(event.tool)
+        elif isinstance(event, ToolCallCompletedEvent):
+            presentation.complete_tool(event.tool)
+    if response is None:
+        msg = "Agent continuation did not yield its final run"
+        raise RuntimeError(msg)
+    _append_terminal_agent_content(
+        presentation,
+        terminal_content,
+        saw_content_delta=saw_content_delta,
+    )
+    for tool in response.tools or ():
+        if tool.is_paused:
+            presentation.start_tool(tool)
+        else:
+            presentation.complete_tool(tool)
+    return response
+
+
+async def _continue_persisted_agent(
+    agent: Agent,
+    continuation: ApprovalContinuation,
+    persisted: RunOutput,
+    requirements: list[RunRequirement],
+) -> tuple[RunOutput, CollectedStreamPresentation]:
+    """Resume a persisted agent with event streaming so presentation order is retained."""
+    events = agent.acontinue_run(
+        run_id=continuation.run_id,
+        requirements=requirements,
+        session_id=continuation.session_id,
+        user_id=continuation.requester_id,
+        metadata=deepcopy(persisted.metadata),
+        stream=True,
+        stream_events=True,
+        yield_run_output=True,
+    )
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=continuation.show_tool_calls,
+        response_text=continuation.response_text,
+        tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+        track_hidden_tools=True,
+    )
+    response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
+    return response, presentation
 
 
 @dataclass(frozen=True)
@@ -119,23 +201,17 @@ class AgentApprovalExecution:
                 denial_reasons=denial_reasons,
             )
 
-            async def continue_run() -> RunOutput:
-                result = agent.acontinue_run(
-                    run_id=continuation.run_id,
-                    requirements=requirements,
-                    session_id=continuation.session_id,
-                    user_id=continuation.requester_id,
-                    metadata=deepcopy(persisted.metadata),
-                    stream=False,
-                )
-                return await cast("Awaitable[RunOutput]", result)
-
             async with typing_indicator(self.client(), continuation.room_id):
-                response = await self.tool_runtime.run_in_context(
+                response, presentation = await self.tool_runtime.run_in_context(
                     tool_context=runtime_context_from_dispatch_context(tool_dispatch),
                     operation=lambda: run_with_tool_execution_identity(
                         tool_dispatch.execution_identity,
-                        operation=continue_run,
+                        operation=lambda: _continue_persisted_agent(
+                            agent,
+                            continuation,
+                            persisted,
+                            requirements,
+                        ),
                     ),
                 )
         finally:
@@ -162,16 +238,18 @@ class AgentApprovalExecution:
             fallback_run_id=continuation.run_id,
         )
         if paused is not None:
-            return paused
+            return replace(
+                paused,
+                response_text=presentation.final_text(),
+                tool_trace=tuple(presentation.tool_trace),
+            )
         if response.status != RunStatus.completed:
             raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-        for tool in response.tools or ():
-            _, trace_entry = format_tool_completed_event(tool)
-            if trace_entry is not None:
-                tool_trace_collector.append(trace_entry)
+        if continuation.show_tool_calls:
+            tool_trace_collector.extend(presentation.tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(
-            response_text=str(response.content or "Tool approval continuation completed"),
+            response_text=presentation.final_text() or str(response.content or "Tool approval continuation completed"),
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

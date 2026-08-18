@@ -669,6 +669,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.message_target",
     "mindroom.tool_approval",
+    "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -4782,17 +4783,23 @@ from = ["mindroom.history.turn_recorder"]
 
 [[interfaces]]
 expose = [
+    "CollectedStreamPresentation",
     "StreamingToolTracker",
     "StructuredStreamChunk",
     "ToolTraceEntry",
+    "append_stream_text",
     "build_tool_trace_content",
     "complete_pending_tool_block",
+    "deserialize_tool_trace",
     "extract_tool_completed_info",
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
-    "format_tool_trace_markers",
+    "is_visible_tool_marker_line",
+    "remap_visible_tool_marker_indices",
     "render_tool_trace_for_context",
+    "serialize_tool_trace",
+    "tool_markers_match_trace",
 ]
 from = ["mindroom.tool_system.events"]
 
