@@ -70,12 +70,20 @@ class PostgresBackend:
     # repr reaches logs and tracebacks without anyone choosing to print it.
     database_url: str = field(repr=False)
     _writer: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
+    _recovery_reader: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
     _writer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
+    _recovery_offload: ThreadOffload = field(
+        default_factory=lambda: ThreadOffload.serial(
+            thread_name_prefix="mindroom-event-journal-recovery",
+        ),
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def open(cls, database_url: str) -> PostgresBackend:
@@ -88,6 +96,7 @@ class PostgresBackend:
         backend._writer = backend._connect()
         backend._create_schema()
         backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
+        backend._recovery_reader = backend._connect()
         return backend
 
     def _readers_queue(self) -> asyncio.Queue[psycopg.Connection[tuple[Any, ...]]]:
@@ -177,6 +186,22 @@ class PostgresBackend:
         finally:
             self._readers_queue().put_nowait(connection)
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run a committed-state handoff proof on its reserved reader."""
+        if self._closed:
+            msg = "The event-journal store is closed"
+            raise RuntimeError(msg)
+
+        def apply() -> T:
+            try:
+                with self._recovery_reader.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    return operation(_PostgresTransaction(cursor))
+            finally:
+                self._recovery_reader.rollback()
+
+        return await self._recovery_offload.run(apply)
+
     @staticmethod
     def _apply_read[T](
         connection: psycopg.Connection[tuple[Any, ...]],
@@ -209,9 +234,14 @@ class PostgresBackend:
     async def _finish_close(self) -> None:
         """Finish the teardown every close waiter shares."""
         try:
-            await self._offload.drain()
+            await asyncio.gather(
+                self._offload.drain(),
+                self._recovery_offload.drain(),
+            )
             for connection in (self._writer, *self._pool):
                 await self._offload.run(connection.close)
+            await self._recovery_offload.run(self._recovery_reader.close)
             self._pool.clear()
         finally:
             self._offload.shutdown()
+            self._recovery_offload.shutdown()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ from mindroom.delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
@@ -60,6 +62,7 @@ if TYPE_CHECKING:
         PrincipalStore,
         TerminalTurnWrite,
     )
+    from mindroom.event_journal.backend import Transaction
     from mindroom.final_delivery import FinalDeliveryOutcome
 
 
@@ -1522,6 +1525,66 @@ class TestARacedAcknowledgementSpeaksForTheRow:
 
         assert winning_publishes == [("turn-1", "$deduplicated")]
         assert losing_publishes == [], "a caller that bound nothing published a record anyway"
+
+
+async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_reads(
+    journal_store: EventJournalStore,
+    alice: PrincipalStore,
+) -> None:
+    """A saturated ordinary read lane cannot starve an exact shutdown handoff proof."""
+    source_event_id = "$shutdown-owned:localhost"
+    turn = TurnRecord.create([source_event_id])
+    await alice.admit(
+        InboundEvent(
+            event_id=source_event_id,
+            room_id=_ROOM_ID,
+            thread_id=source_event_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1_000,
+            source={
+                "event_id": source_event_id,
+                "content": {"msgtype": "m.text", "body": "question"},
+            },
+        ),
+    )
+    bot = object.__new__(AgentBot)
+    bot._journal_store = journal_store
+    bot._journal_principal_id = "agent@alice"
+    bot._turn_store = SimpleNamespace(has_live_turn_claim=lambda _event_id: False)
+
+    backend = journal_store.backend
+    ordinary_capacity = (
+        backend._offload._executor._max_workers if isinstance(backend, SqliteBackend) else len(backend._pool)
+    )
+    ordinary_started = threading.Event()
+    release_ordinary = threading.Event()
+    started_count = 0
+    started_lock = threading.Lock()
+
+    def block_ordinary_read(transaction: Transaction) -> None:
+        nonlocal started_count
+        transaction.fetchone("SELECT 1 AS one")
+        with started_lock:
+            started_count += 1
+            if started_count == ordinary_capacity:
+                ordinary_started.set()
+        release_ordinary.wait()
+
+    ordinary_reads = tuple(asyncio.create_task(backend.read(block_ordinary_read)) for _ in range(ordinary_capacity))
+    proof: asyncio.Task[bool] | None = None
+    try:
+        assert await asyncio.to_thread(ordinary_started.wait, 10), "ordinary journal reads did not saturate"
+        proof = asyncio.create_task(bot._response_recovery_ready(turn))
+        ready = await asyncio.wait_for(asyncio.shield(proof), timeout=1)
+    finally:
+        release_ordinary.set()
+        await asyncio.gather(*ordinary_reads)
+        if proof is not None and not proof.done():
+            await proof
+
+    assert ready is True
 
 
 class TestTurnDeliverySerialization:

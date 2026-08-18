@@ -21,7 +21,7 @@ import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,6 +64,16 @@ class ThreadOffload:
         default_factory=lambda: ThreadPoolExecutor(thread_name_prefix="mindroom-event-journal"),
     )
     _running: set[asyncio.Future[Any]] = field(default_factory=set)
+
+    @classmethod
+    def serial(cls, *, thread_name_prefix: str) -> Self:
+        """Own one worker reserved for work that must bypass ordinary backlog."""
+        return cls(
+            _executor=ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=thread_name_prefix,
+            ),
+        )
 
     def submit[T](self, call: Callable[[], T]) -> asyncio.Future[T]:
         """Hand ``call`` to a worker thread, remembering it until it stops.

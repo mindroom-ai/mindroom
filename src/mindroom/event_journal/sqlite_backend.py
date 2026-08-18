@@ -142,6 +142,13 @@ class SqliteBackend:
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
+    _recovery_offload: ThreadOffload = field(
+        default_factory=lambda: ThreadOffload.serial(
+            thread_name_prefix="mindroom-event-journal-recovery",
+        ),
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def open(cls, database_path: Path) -> SqliteBackend:
@@ -289,6 +296,21 @@ class SqliteBackend:
 
         return await self._offload.run(apply)
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run a committed-state handoff proof on its reserved WAL reader."""
+        if self._closed:
+            raise RuntimeError(_CLOSED_MESSAGE)
+
+        def apply() -> T:
+            connection = self._reader()
+            connection.execute("BEGIN")
+            try:
+                return operation(_SqliteTransaction(connection))
+            finally:
+                connection.execute("ROLLBACK")
+
+        return await self._recovery_offload.run(apply)
+
     def _apply_read[T](self, operation: Operation[T]) -> T:
         return operation(_SqliteTransaction(self._reader()))
 
@@ -337,7 +359,10 @@ class SqliteBackend:
                 queued.future.set_exception(RuntimeError(_CLOSED_MESSAGE))
             queue.task_done()
         try:
-            await self._offload.drain()
+            await asyncio.gather(
+                self._offload.drain(),
+                self._recovery_offload.drain(),
+            )
             await self._offload.run(self._writer.close)
             with self._reader_lock:
                 readers = tuple(self._open_readers)
@@ -346,6 +371,7 @@ class SqliteBackend:
                 await self._offload.run(reader.close)
         finally:
             self._offload.shutdown()
+            self._recovery_offload.shutdown()
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:

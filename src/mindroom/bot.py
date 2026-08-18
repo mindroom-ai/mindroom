@@ -100,7 +100,6 @@ from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     ApprovalView,
-    DeliveryStage,
     EventJournalStore,
     MembershipFence,
     PrincipalStore,
@@ -1563,20 +1562,17 @@ class AgentBot:
         if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
-        pending_sources = await asyncio.gather(
-            *(principal.is_pending(event_id) for event_id in turn_record.source_event_ids),
+        turn_id = turn_record.anchor_event_id
+        pending_sources, final_delivery = await principal.response_recovery_state(
+            source_event_ids=turn_record.source_event_ids,
+            turn_id=turn_id,
         )
         if all(pending_sources):
             return True
         if any(pending_sources):
             return False
-        turn_id = turn_record.anchor_event_id
         if turn_id is None:
             return False
-        final_delivery = await principal.load_delivery(
-            turn_id=turn_id,
-            stage=DeliveryStage.FINAL,
-        )
         if final_delivery is None:
             return False
         completed_response_event_ids = {

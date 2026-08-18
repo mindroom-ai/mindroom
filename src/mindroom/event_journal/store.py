@@ -23,7 +23,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     RecordedApprovalDecision,
     StoredApprovalCard,
 )
-from .models import DeliveryAcknowledgement, IngestionConsumer, IngestionConsumerBindingError
+from .models import DeliveryAcknowledgement, DeliveryStage, IngestionConsumer, IngestionConsumerBindingError
 from .projection import drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
@@ -36,7 +36,6 @@ if TYPE_CHECKING:
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
-        DeliveryStage,
         DepartureOutcome,
         DepartureSource,
         EventKind,
@@ -147,6 +146,32 @@ class PrincipalStore:
         return await self._backend.read(
             lambda transaction: journal.is_pending(transaction, self._principal_id, event_id),
         )
+
+    async def response_recovery_state(
+        self,
+        *,
+        source_event_ids: tuple[str, ...],
+        turn_id: str | None,
+    ) -> tuple[tuple[bool, ...], OutboxDelivery | None]:
+        """Read one response's durable handoff through the reserved recovery lane."""
+
+        def load(transaction: Transaction) -> tuple[tuple[bool, ...], OutboxDelivery | None]:
+            pending = tuple(
+                journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
+            )
+            delivery = (
+                None
+                if any(pending) or turn_id is None
+                else outbox.load(
+                    transaction,
+                    self._principal_id,
+                    turn_id=turn_id,
+                    stage=DeliveryStage.FINAL,
+                )
+            )
+            return pending, delivery
+
+        return await self._backend.recovery_read(load)
 
     async def settle(self, event_id: str) -> None:
         """Mark one event's semantic work terminal."""

@@ -3546,6 +3546,70 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         assert not closed_early, "close() returned while a read was still executing on the connection"
         assert await reading == "read"
 
+    async def test_closing_the_store_waits_for_a_recovery_read_already_on_a_worker_thread(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Close cannot release a connection still proving a shutdown handoff."""
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "recovery read"
+
+        reading = asyncio.create_task(journal_store.backend.recovery_read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(journal_store.close())
+        closed_early = await _finished_within_grace(closing)
+        release.set()
+        await closing
+
+        assert not closed_early, "close() returned while a recovery read still owned a connection"
+        assert await reading == "recovery read"
+
+    async def test_recovery_read_keeps_one_snapshot_across_a_concurrent_commit(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """One handoff proof cannot combine source and outbox facts from different commits."""
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute(
+                _INSERT_MEMBERSHIP,
+                ("agent@alice", ROOM, 1),
+            ),
+        )
+        first_read = threading.Event()
+        writer_committed = threading.Event()
+
+        def read_epoch(transaction: Transaction) -> int:
+            row = transaction.fetchone(
+                "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
+                ("agent@alice", ROOM),
+            )
+            assert row is not None
+            return int(row["membership_epoch"])
+
+        def interleaved_snapshot(transaction: Transaction) -> tuple[int, int]:
+            before = read_epoch(transaction)
+            first_read.set()
+            assert writer_committed.wait(_WORKER_WAIT_SECONDS), "concurrent journal write did not commit"
+            return before, read_epoch(transaction)
+
+        recovery = asyncio.create_task(journal_store.backend.recovery_read(interleaved_snapshot))
+        try:
+            assert await asyncio.to_thread(first_read.wait, _WORKER_WAIT_SECONDS), "recovery read did not start"
+            await journal_store.backend.write(
+                lambda transaction: transaction.execute(
+                    "UPDATE room_membership SET membership_epoch = ? WHERE principal_id = ? AND room_id = ?",
+                    (2, "agent@alice", ROOM),
+                ),
+            )
+        finally:
+            writer_committed.set()
+
+        assert await recovery == (1, 1)
+
     async def test_sqlite_close_does_not_borrow_the_saturated_default_executor(
         self,
         tmp_path: Path,
