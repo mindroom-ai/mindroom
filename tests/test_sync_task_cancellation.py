@@ -1884,6 +1884,63 @@ async def test_stop_does_not_close_runtime_resources_under_live_response_owner()
     client.close.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_orderly_stop_defers_saturated_response_timeouts_without_tracebacks() -> None:
+    """Expected response handoffs must not synchronously format one traceback per bot."""
+    bots: list[AgentBot] = []
+    failures: list[ResponseShutdownTimeoutError] = []
+    for index in range(16):
+        failure = ResponseShutdownTimeoutError(
+            "response tasks did not stop within bounded cleanup",
+        )
+        bot = object.__new__(AgentBot)
+        bot.agent_user = AgentMatrixUser(
+            agent_name=f"saturated_{index:02d}",
+            user_id=f"@mindroom_saturated_{index:02d}:localhost",
+            display_name=f"Saturated {index:02d}",
+            password=TEST_PASSWORD,
+        )
+        bot._runtime_view = MagicMock(client=AsyncMock())
+        bot.running = True
+        bot.last_sync_time = None
+        bot._last_sync_monotonic = None
+        bot._first_sync_done = True
+        bot._orchestrator_ready_handled = True
+        bot._sync_shutting_down = False
+        bot._emit_agent_lifecycle_event = AsyncMock()
+        bot._call_manager = None
+        bot._response_runner = MagicMock(pending_inbox_response_count=index % 3 + 1)
+        bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
+        bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+        bot._ingestion_session = MagicMock(close=AsyncMock())
+        bot._own_journal = MagicMock(close=AsyncMock())
+        bot.logger = MagicMock()
+        bot.logger.exception.side_effect = AssertionError(
+            "expected response timeout formatted a synchronous traceback",
+        )
+        bots.append(bot)
+        failures.append(failure)
+
+    results = await asyncio.gather(
+        *(bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in bots),
+        return_exceptions=True,
+    )
+
+    assert results == failures
+    for bot in bots:
+        assert bot.deferred_stop_required
+        bot.logger.exception.assert_not_called()
+        bot.logger.warning.assert_called_once_with(
+            "Deferred resource release after bounded response shutdown",
+            error_type="ResponseShutdownTimeoutError",
+            resource="sync shutdown preparation",
+        )
+        bot._journal_dispatcher.stop.assert_not_awaited()
+        bot._ingestion_session.close.assert_not_awaited()
+        bot._own_journal.close.assert_not_awaited()
+        bot._runtime_view.client.close.assert_not_awaited()
+
+
 def test_matrix_sync_change_restarts_existing_entities() -> None:
     """Changing matrix_sync must restart running bots so sync loops pick up the new transport."""
     plan = build_config_update_plan(

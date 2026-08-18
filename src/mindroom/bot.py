@@ -1681,6 +1681,7 @@ class AgentBot:
             "sync shutdown preparation",
             self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent),
             failures,
+            defer_expected_response_timeout=shutdown_intent.stop_reason == "shutdown",
         )
         pending_response_count = self._response_runner.pending_inbox_response_count
         if pending_response_count > 0:
@@ -1754,12 +1755,32 @@ class AgentBot:
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)
 
-    async def _release(self, what: str, closing: Awaitable[None], failures: list[BaseException]) -> None:
+    async def _release(
+        self,
+        what: str,
+        closing: Awaitable[None],
+        failures: list[BaseException],
+        *,
+        defer_expected_response_timeout: bool = False,
+    ) -> None:
         """Await one shutdown step, recording failure so the later steps still run."""
         try:
             await closing
         except BaseException as error:
-            self.logger.exception("Failed to release resource during stop", resource=what)
+            if defer_expected_response_timeout and isinstance(
+                error,
+                ResponseShutdownTimeoutError,
+            ):
+                self.logger.warning(
+                    "Deferred resource release after bounded response shutdown",
+                    error_type=error.__class__.__name__,
+                    resource=what,
+                )
+            else:
+                self.logger.exception(
+                    "Failed to release resource during stop",
+                    resource=what,
+                )
             failures.append(error)
 
     async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
