@@ -753,13 +753,10 @@ def merge_tool_executions_for_presentation(
     *additional_groups: Sequence[ToolExecution],
 ) -> list[ToolExecution]:
     """Merge overlapping execution snapshots without losing stable call identity."""
-    tools = list(primary_tools)
+    tools: list[ToolExecution] = []
     indexes_by_id: dict[str, int] = {}
-    for index, tool in enumerate(tools):
-        if tool.tool_call_id is not None:
-            indexes_by_id.setdefault(tool.tool_call_id, index)
 
-    for group in additional_groups:
+    for group in (primary_tools, *additional_groups):
         for tool in group:
             if tool.tool_call_id is not None and (existing_index := indexes_by_id.get(tool.tool_call_id)) is not None:
                 tools[existing_index] = _merge_presentation_tool_metadata(tools[existing_index], tool)
@@ -788,6 +785,56 @@ def _exact_tool_trace_matches(
     return matches
 
 
+def _tool_trace_has_matching_legacy_evidence(tool: ToolExecution, entry: ToolTraceEntry) -> bool:
+    """Return whether preview metadata links an ID-less trace slot to one execution."""
+    if (tool.tool_name or "tool") != entry.tool_name:
+        return False
+    if tool.tool_call_id is not None and entry.tool_call_id is not None:
+        return False
+    _, candidate = format_tool_completed_event(tool)
+    assert candidate is not None
+    compared = False
+    for attribute in ("args_preview", "result_preview"):
+        stored_value = getattr(entry, attribute)
+        if stored_value is None:
+            continue
+        compared = True
+        if stored_value != getattr(candidate, attribute):
+            return False
+    return compared
+
+
+def _reserve_unambiguous_legacy_evidence_matches(
+    tools: Sequence[ToolExecution],
+    trace: Sequence[ToolTraceEntry],
+    matches: list[int | None],
+    used_trace_indexes: set[int],
+) -> None:
+    """Reserve one-to-one preview matches before falling back to occurrence order."""
+    while True:
+        candidates_by_tool: dict[int, list[int]] = {}
+        candidates_by_trace: dict[int, list[int]] = {}
+        for tool_index, tool in enumerate(tools):
+            if matches[tool_index] is not None:
+                continue
+            for trace_index, entry in enumerate(trace):
+                if trace_index in used_trace_indexes or not _tool_trace_has_matching_legacy_evidence(tool, entry):
+                    continue
+                candidates_by_tool.setdefault(tool_index, []).append(trace_index)
+                candidates_by_trace.setdefault(trace_index, []).append(tool_index)
+
+        unambiguous_pairs = [
+            (tool_index, trace_indexes[0])
+            for tool_index, trace_indexes in candidates_by_tool.items()
+            if len(trace_indexes) == 1 and len(candidates_by_trace[trace_indexes[0]]) == 1
+        ]
+        if not unambiguous_pairs:
+            return
+        for tool_index, trace_index in unambiguous_pairs:
+            matches[tool_index] = trace_index
+            used_trace_indexes.add(trace_index)
+
+
 def _tool_trace_matches(
     tools: Sequence[ToolExecution],
     trace: Sequence[ToolTraceEntry],
@@ -797,6 +844,7 @@ def _tool_trace_matches(
     """Match exact IDs first, then remaining legacy entries by name and occurrence."""
     matches = _exact_tool_trace_matches(tools, trace)
     used_trace_indexes = {match for match in matches if match is not None}
+    _reserve_unambiguous_legacy_evidence_matches(tools, trace, matches, used_trace_indexes)
 
     tool_indexes = range(len(tools) - 1, -1, -1) if prefer_latest_tools else range(len(tools))
     trace_indexes = range(len(trace) - 1, -1, -1) if prefer_latest_tools else range(len(trace))

@@ -403,6 +403,27 @@ def test_presentation_merge_does_not_guess_identity_from_name_alone() -> None:
     assert merged == [provider_tool, requirement_tool]
 
 
+def test_presentation_merge_collapses_duplicate_primary_stable_ids() -> None:
+    """Stable identity collapses provider duplicates while preserving their metadata."""
+    first = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+    )
+    duplicate = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        result="details",
+    )
+
+    merged = tool_events.merge_tool_executions_for_presentation([first, duplicate])
+
+    assert len(merged) == 1
+    assert merged[0].tool_call_id == "call-1"
+    assert merged[0].tool_args == {"path": "report.txt"}
+    assert merged[0].result == "details"
+
+
 def test_tool_trace_snapshot_round_trips_for_durable_continuations() -> None:
     """Approval persistence must restore the same structured trace the frontend consumes."""
     original = [
@@ -605,6 +626,30 @@ def test_reconcile_tool_presentation_preserves_sparse_idless_suffix_order() -> N
     current_trace = [
         ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="second result"),
         ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="third result"),
+    ]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="🔧 `inspect` [1]\n\n🔧 `inspect` [2]",
+        current_tool_trace=current_trace,
+        tools=tools,
+    )
+
+    assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]\n\n🔧 `inspect` [3]"
+    assert [entry.result_preview for entry in trace] == ["first result", "second result", "third result"]
+
+
+def test_reconcile_tool_presentation_preserves_sparse_idless_prefix_order() -> None:
+    """Legacy preview evidence identifies prefix anchors before ordinal fallback."""
+    tools = [
+        ToolExecution(tool_name="inspect", result="first result"),
+        ToolExecution(tool_name="inspect", result="second result"),
+        ToolExecution(tool_name="inspect", result="third result"),
+    ]
+    current_trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="first result"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="second result"),
     ]
 
     body, trace = tool_events.reconcile_tool_presentation(

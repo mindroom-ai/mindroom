@@ -34,6 +34,7 @@ from agno.tools.function import Function
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
+    _blocking_approval_attempt,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _run_error_event_text,
@@ -77,7 +78,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
@@ -1201,6 +1202,46 @@ class TestUserIdPassthrough:
         assert persisted_run.metadata["mindroom_original_status"] == "paused"
         assert persisted_run.messages is not None
         assert "turn paused before completion" in str(persisted_run.messages[-1].content)
+
+    def test_blocking_approval_attempt_merges_idless_execution_with_stable_pause(self) -> None:
+        """Initial pauses use assistant-owned identity without duplicating one call."""
+        provider_tool = ToolExecution(tool_name="dangerous", tool_args={"value": 1})
+        paused_tool = ToolExecution(
+            tool_call_id="call-1",
+            tool_name="dangerous",
+            tool_args={"value": 1},
+            requires_confirmation=True,
+        )
+        response = RunOutput(
+            run_id="run-paused",
+            session_id="session1",
+            status=RunStatus.paused,
+            messages=[
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "dangerous", "arguments": '{"value":1}'},
+                        },
+                    ],
+                ),
+            ],
+            tools=[provider_tool],
+        )
+        paused = PausedAttempt(session_id="session1", run_id="run-paused", tools=(paused_tool,))
+
+        presented = _blocking_approval_attempt(
+            response,
+            paused,
+            runtime_model_name="default",
+            show_tool_calls=True,
+        )
+
+        assert presented.response_text == "🔧 `dangerous` [1] ⏳"
+        assert len(presented.tool_trace) == 1
+        assert presented.tool_trace[0].tool_call_id == "call-1"
 
     @pytest.mark.parametrize("show_tool_calls", [True, False])
     @pytest.mark.asyncio

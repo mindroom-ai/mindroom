@@ -96,8 +96,10 @@ from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, ti
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     complete_pending_tool_block,
+    enrich_tool_executions_from_assistant_calls,
     format_assistant_tool_transcript,
     format_tool_combined,
+    merge_tool_executions_for_presentation,
     reconcile_tool_presentation,
 )
 
@@ -695,9 +697,10 @@ def _blocking_approval_attempt(
     show_tool_calls: bool,
 ) -> PausedAttempt:
     """Attach the canonical presentation to a non-streaming approval pause."""
-    presentation_tools = list(response.tools or ())
-    known_tool_call_ids = {tool.tool_call_id for tool in presentation_tools if tool.tool_call_id}
-    presentation_tools.extend(tool for tool in paused.tools if tool.tool_call_id not in known_tool_call_ids)
+    presentation_tools = merge_tool_executions_for_presentation(
+        enrich_tool_executions_from_assistant_calls(response.messages or (), response.tools or ()),
+        paused.tools,
+    )
     pending_tool_call_ids = {tool.tool_call_id for tool in paused.tools if tool.tool_call_id}
     response_text, response_tool_trace = format_assistant_tool_transcript(
         response.messages or (),
