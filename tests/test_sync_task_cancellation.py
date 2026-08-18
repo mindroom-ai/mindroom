@@ -727,6 +727,72 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_preparation_does_not_wait_for_transport_close() -> None:
+    """Transport teardown cannot consume the bounded response-drain window."""
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    coalescing_drained = asyncio.Event()
+
+    class BlockingSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "fenced shutdown reached the HTTP session"
+            raise AssertionError(message)
+
+        async def close(self) -> None:
+            close_started.set()
+            await release_close.wait()
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_busy:example.org")
+    client.client_session = BlockingSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        with pytest.raises(
+            RuntimeError,
+            match="transport is fenced for process shutdown",
+        ):
+            await client.send("GET", "/_matrix/client/v3/account/whoami")
+        coalescing_drained.set()
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    try:
+        with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+            await asyncio.wait_for(
+                bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
+                timeout=0.2,
+            )
+        assert coalescing_drained.is_set()
+        assert not close_started.is_set()
+    finally:
+        release_close.set()
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_cancellation_during_replacement_leaves_no_sync_or_response_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

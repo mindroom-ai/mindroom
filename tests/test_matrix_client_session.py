@@ -222,7 +222,8 @@ async def test_process_shutdown_transport_fence_stops_retry_before_session_recre
     await asyncio.wait_for(request_started.wait(), timeout=1.0)
 
     try:
-        await client.close_for_process_shutdown()
+        client.begin_process_shutdown_transport_fence()
+        await client.close()
         with pytest.raises(RuntimeError, match="transport is fenced for process shutdown"):
             await asyncio.wait_for(request, timeout=1.0)
     finally:
@@ -278,7 +279,8 @@ async def test_process_shutdown_transport_fence_stops_send_after_header_preparat
     )
     await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
 
-    await client.close_for_process_shutdown()
+    client.begin_process_shutdown_transport_fence()
+    await client.close()
     release_prepare.set()
 
     with pytest.raises(RuntimeError, match="transport is fenced for process shutdown"):

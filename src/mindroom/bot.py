@@ -173,8 +173,8 @@ if TYPE_CHECKING:
 class _ProcessShutdownMatrixClient(Protocol):
     """Owned Matrix transport boundary used only during process shutdown."""
 
-    async def close_for_process_shutdown(self) -> None:
-        """Permanently fence and close the owned Matrix transport."""
+    def begin_process_shutdown_transport_fence(self) -> None:
+        """Permanently refuse new Matrix transport attempts."""
 
 
 type _MatrixEventId = str
@@ -1938,10 +1938,10 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
         if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
-            await cast(
+            cast(
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
                 self.client,
-            ).close_for_process_shutdown()
+            ).begin_process_shutdown_transport_fence()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)

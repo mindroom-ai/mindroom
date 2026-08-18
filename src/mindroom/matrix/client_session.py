@@ -112,10 +112,9 @@ class MindRoomAsyncClient(nio.AsyncClient):
             raise _MatrixTransportShutdownError
         return await super().send(*args, **kwargs)
 
-    async def close_for_process_shutdown(self) -> None:
-        """Permanently fence retries before closing the active HTTP session."""
+    def begin_process_shutdown_transport_fence(self) -> None:
+        """Permanently refuse new requests before owned work is drained."""
         self._process_shutdown_transport_fenced = True
-        await super().close()
 
     def encrypt(
         self,
