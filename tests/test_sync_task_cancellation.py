@@ -9,6 +9,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import UUID
 
@@ -78,6 +79,9 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     shutdown_intent_for_entity,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -3380,6 +3384,99 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
     release_proof.set()
     await asyncio.wait_for(finalizing, timeout=0.1)
 
+    bot._release_stopped_resources.assert_awaited_once_with([])
+    assert not bot.deferred_stop_required
+    assert runner.pending_inbox_response_count == 0
+    await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None:
+    """A proof cancelled by phase one must settle before phase two replaces it."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    first_proof_started = asyncio.Event()
+    first_proof_cancelled = asyncio.Event()
+    release_first_proof = asyncio.Event()
+    proof_calls = 0
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def retryable_proof() -> bool:
+        nonlocal proof_calls
+        proof_calls += 1
+        if proof_calls > 1:
+            return True
+        first_proof_started.set()
+        try:
+            await release_first_proof.wait()
+        except asyncio.CancelledError:
+            first_proof_cancelled.set()
+            await release_first_proof.wait()
+            raise
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_cancelling_proof",
+        recovery_proof_ready=retryable_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+    await first_proof_started.wait()
+    await first_proof_cancelled.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+    deferred_ensure_called = asyncio.Event()
+    original_ensure = ResponseRunner._ensure_recovery_proof_task
+
+    def observe_deferred_ensure(
+        runner_self: ResponseRunner,
+        response_task: asyncio.Task[None],
+        recovery_check: Callable[[], bool | Awaitable[bool]],
+        *,
+        retry_until_ready: bool,
+    ) -> asyncio.Task[bool]:
+        deferred_ensure_called.set()
+        return original_ensure(
+            runner_self,
+            response_task,
+            recovery_check,
+            retry_until_ready=retry_until_ready,
+        )
+
+    with patch.object(
+        ResponseRunner,
+        "_ensure_recovery_proof_task",
+        new=observe_deferred_ensure,
+    ):
+        finalizing = asyncio.create_task(
+            AgentBot.finish_deferred_stop(
+                bot,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+                timeout_seconds=0.1,
+            ),
+        )
+        await deferred_ensure_called.wait()
+
+        assert not finalizing.done()
+        assert proof_calls == 1
+        bot._release_stopped_resources.assert_not_awaited()
+
+        release_first_proof.set()
+        await asyncio.wait_for(finalizing, timeout=0.1)
+
+    assert proof_calls == 2
     bot._release_stopped_resources.assert_awaited_once_with([])
     assert not bot.deferred_stop_required
     assert runner.pending_inbox_response_count == 0

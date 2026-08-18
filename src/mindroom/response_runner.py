@@ -694,27 +694,33 @@ class ResponseRunner:
         if not proof_targets:
             return True
 
-        proof_tasks: set[asyncio.Task[bool]] = set()
-        for response_task in proof_targets:
-            proof_task = self._ensure_recovery_proof_task(
-                response_task,
-                recovery_checks[response_task],
-                retry_until_ready=retry_until_ready,
-            )
-            proof_tasks.add(proof_task)
-        try:
-            if deadline is None:
-                return all(await asyncio.gather(*proof_tasks))
-            remaining_seconds = max(0.0, deadline - asyncio.get_running_loop().time())
-            _done, pending = await asyncio.wait(proof_tasks, timeout=remaining_seconds)
-            if pending:
-                msg = "response recovery proof exceeded bounded cleanup"
-                raise ResponseShutdownTimeoutError(msg)
-            return all(task.result() for task in proof_tasks)
-        finally:
-            pending = {task for task in proof_tasks if not task.done()}
-            for task in pending:
-                task.cancel()
+        while True:
+            proof_tasks = {
+                self._ensure_recovery_proof_task(
+                    response_task,
+                    recovery_checks[response_task],
+                    retry_until_ready=retry_until_ready,
+                )
+                for response_task in proof_targets
+            }
+            try:
+                remaining_seconds = None if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+                _done, pending = await asyncio.wait(proof_tasks, timeout=remaining_seconds)
+                if pending:
+                    msg = "response recovery proof exceeded bounded cleanup"
+                    raise ResponseShutdownTimeoutError(msg)
+                # The preceding bounded phase may have cancelled a proof while
+                # its journal read was already committed to an offload worker.
+                # Reusing that still-running task is required for ownership,
+                # but its eventual CancelledError is not a new proof result.
+                # Only after it is terminal may this phase launch a replacement.
+                if any(task.cancelled() for task in proof_tasks):
+                    continue
+                return all(task.result() for task in proof_tasks)
+            finally:
+                pending = {task for task in proof_tasks if not task.done()}
+                for task in pending:
+                    task.cancel()
 
     def _finish_recovery_proof_task(
         self,
