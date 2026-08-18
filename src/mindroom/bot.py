@@ -1915,6 +1915,12 @@ class AgentBot:
             shutdown_budget=shutdown_budget,
             shutdown_intent=shutdown_intent,
         )
+        if drain_result.admission_deferred_count:
+            self.logger.info(
+                "coalescing_admission_deferred_for_durable_recovery",
+                agent_name=self.agent_name,
+                admission_deferred_count=drain_result.admission_deferred_count,
+            )
         responses_drained = await self._response_runner.drain_inbox_responses(
             cancel_after_seconds=shutdown_budget.per_window_seconds(windows=2),
             shutdown_intent=shutdown_intent,

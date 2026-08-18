@@ -627,6 +627,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         dropped_ready_count=0,
         dispatch_failure_count=0,
         dispatch_cancelled_count=0,
+        admission_deferred_count=1,
     )
 
     async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
@@ -653,6 +654,14 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
 
     assert cancellation_seen_at_coalescing == [True]
     assert response_task.cancelled()
+    assert (
+        call(
+            "coalescing_admission_deferred_for_durable_recovery",
+            agent_name="busy",
+            admission_deferred_count=1,
+        )
+        in bot.logger.info.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -681,6 +690,7 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
         dropped_ready_count=0,
         dispatch_failure_count=0,
         dispatch_cancelled_count=0,
+        admission_deferred_count=0,
     )
 
     async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
@@ -1776,6 +1786,7 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
         dropped_ready_count=0,
         dispatch_failure_count=0,
         dispatch_cancelled_count=0,
+        admission_deferred_count=0,
     )
 
     async def drain_coalescing(

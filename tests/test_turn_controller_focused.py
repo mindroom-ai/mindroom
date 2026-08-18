@@ -76,6 +76,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
@@ -468,6 +469,13 @@ def _build_harness(
     def _retry_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         retried_dispatch_sources.append(source_event_ids)
 
+    def _retry_failed_coalesced_dispatch(
+        pending_events: tuple[PendingEvent, ...],
+    ) -> None:
+        retried_dispatch_sources.append(
+            tuple(pending_event.event.event_id for pending_event in pending_events),
+        )
+
     async def _recover_config_confirmation_setup(_room_id: str, _preview_event_id: str) -> bool:
         return False
 
@@ -503,6 +511,7 @@ def _build_harness(
         dispatch_batch=_dispatch_batch,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
+        on_dispatch_failure=_retry_failed_coalesced_dispatch,
     )
     ingress_validator = IngressValidator(
         IngressValidatorDeps(
@@ -2346,8 +2355,61 @@ async def test_process_shutdown_refuses_text_before_pending_turn_persistence(
 
     assert drain_result.completed is False
     assert drain_result.dispatch_failure_count == 1
+    assert drain_result.admission_deferred_count == 0
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
     assert harness.turn_store.get_turn_record(event.event_id) is None
     assert harness.runner.inbox_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_orderly_shutdown_defers_fenced_coalescing_source_without_failed_drain(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """An exact process-fence refusal is a durable handoff, not a failed drain."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.process_shutdown_started = True
+    room = _room_with_members(config, "general")
+    event = _text_event("retry me after orderly process restart")
+
+    await harness.controller.handle_text_event(room, event)
+    drain_result = await harness.gate.drain_all(
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+
+    assert drain_result.completed is True
+    assert drain_result.dispatch_failure_count == 0
+    assert drain_result.admission_deferred_count == 1
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    assert harness.runner.inbox_tasks == []
+    assert harness.gateway.sent == []
+
+
+@pytest.mark.asyncio
+async def test_orderly_shutdown_keeps_admission_refusal_subclass_as_failed_drain(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Only the exact pre-owner process-fence refusal is a durable handoff."""
+
+    class RelatedAdmissionError(ResponseAdmissionRefusedError):
+        pass
+
+    harness = _build_harness(config, tmp_path)
+    harness.runner.pre_lock_error = RelatedAdmissionError()
+    room = _room_with_members(config, "general")
+    event = _text_event("do not reinterpret related admission failures")
+
+    await harness.controller.handle_text_event(room, event)
+    drain_result = await harness.gate.drain_all(
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    await asyncio.gather(*harness.runner.inbox_tasks, return_exceptions=True)
+
+    assert drain_result.completed is False
+    assert drain_result.dispatch_failure_count == 1
+    assert drain_result.admission_deferred_count == 0
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,13 @@ from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
-from .runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent, ShutdownBudget
+from .response_admission import ResponseAdmissionRefusedError
+from .runtime_shutdown import (
+    GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    RuntimeShutdownIntent,
+    ShutdownBudget,
+)
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
@@ -100,6 +106,7 @@ class CoalescingDrainResult:
     dropped_ready_count: int = 0
     dispatch_failure_count: int = 0
     dispatch_cancelled_count: int = 0
+    admission_deferred_count: int = 0
 
 
 @dataclass
@@ -110,6 +117,7 @@ class _MutableDrainResult:
     dropped_ready_count: int = 0
     dispatch_failure_count: int = 0
     dispatch_cancelled_count: int = 0
+    admission_deferred_count: int = 0
 
     def freeze(self) -> CoalescingDrainResult:
         completed = not any(
@@ -130,6 +138,7 @@ class _MutableDrainResult:
             dropped_ready_count=self.dropped_ready_count,
             dispatch_failure_count=self.dispatch_failure_count,
             dispatch_cancelled_count=self.dispatch_cancelled_count,
+            admission_deferred_count=self.admission_deferred_count,
         )
 
 
@@ -910,9 +919,17 @@ class CoalescingGate:
             raise
         except Exception as error:
             segment_owner.close_metadata_once()
-            if (drain_context := self._current_drain_context(gate)) is not None:
-                drain_context.result.dispatch_failure_count += 1
-            self._log_dispatch_failure(key, gate, error)
+            drain_context = self._current_drain_context(gate)
+            if (
+                drain_context is not None
+                and drain_context.shutdown_intent == ORDERLY_SHUTDOWN
+                and type(error) is ResponseAdmissionRefusedError
+            ):
+                drain_context.result.admission_deferred_count += 1
+            else:
+                if drain_context is not None:
+                    drain_context.result.dispatch_failure_count += 1
+                self._log_dispatch_failure(key, gate, error)
             return False
         else:
             return True
