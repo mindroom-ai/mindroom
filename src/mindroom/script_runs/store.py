@@ -9,7 +9,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 from mindroom.script_runs.models import (
@@ -98,6 +98,10 @@ class ScriptCallConflictError(ScriptRunStoreError):
     """Raised when a stable call ID is reused with different immutable inputs."""
 
 
+class ScriptCallRateLimitError(ScriptRunStoreError):
+    """Raised when a new logical call would exceed its run's durable rate limit."""
+
+
 class ScriptCapabilityError(ScriptRunStoreError):
     """Raised when a run capability is invalid or cannot accept calls."""
 
@@ -127,6 +131,9 @@ class ScriptRunStore:
         if run.entity_kind is not ScriptRunEntityKind.AGENT:
             msg = "Background script runs must be agent-owned."
             raise ScriptRunStoreError(msg)
+        if run.max_tool_calls_per_minute <= 0 or run.max_runtime_seconds <= 0:
+            msg = "Background script limits must be positive."
+            raise ScriptRunStoreError(msg)
         with self._write_transaction() as connection:
             try:
                 connection.execute(
@@ -134,10 +141,11 @@ class ScriptRunStore:
                     INSERT INTO script_runs (
                         run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash,
-                        worker_id, supervisor_handle, local_unsafe, state, created_at,
+                        worker_key, worker_id, supervisor_handle, name, local_unsafe,
+                        max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
                         cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -193,6 +201,16 @@ class ScriptRunStore:
             raise ScriptCapabilityError(_REVOKED_CAPABILITY)
         return run
 
+    def require_call_dispatch_allowed(self, run_id: str) -> ScriptRunRecord:
+        """Recheck durable run authority immediately before an accepted call dispatches."""
+        run = self.get_run(run_id)
+        if run.cancel_requested_at is not None or run.state not in {
+            ScriptRunState.STARTING,
+            ScriptRunState.RUNNING,
+        }:
+            raise ScriptCapabilityError(_REVOKED_CAPABILITY)
+        return run
+
     def claim_call(  # noqa: Vulture
         self,
         *,
@@ -215,7 +233,10 @@ class ScriptRunStore:
                 return ScriptCallClaim(call=existing_call, created=False)
 
             run_row = connection.execute(
-                "SELECT state, cancel_requested_at, grants_json FROM script_runs WHERE run_id = ?",
+                """
+                SELECT state, cancel_requested_at, grants_json, max_tool_calls_per_minute
+                FROM script_runs WHERE run_id = ?
+                """,
                 (run_id,),
             ).fetchone()
             if run_row is None:
@@ -228,6 +249,16 @@ class ScriptRunStore:
             if grant not in _grants_from_json(str(run_row["grants_json"])):
                 raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
             now = _utc_now()
+            window_start = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+            recent_call_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM script_calls WHERE run_id = ? AND created_at >= ?",
+                    (run_id, window_start),
+                ).fetchone()[0],
+            )
+            if recent_call_count >= int(run_row["max_tool_calls_per_minute"]):
+                msg = "Background script tool-call rate limit exceeded."
+                raise ScriptCallRateLimitError(msg)
             connection.execute(
                 """
                 INSERT INTO script_calls (
@@ -433,9 +464,13 @@ _SCHEMA_STATEMENTS = (
                     source_digest TEXT NOT NULL,
                     grants_json TEXT NOT NULL,
                     token_hash TEXT NOT NULL,
+                    worker_key TEXT,
                     worker_id TEXT,
                     supervisor_handle TEXT,
+                    name TEXT,
                     local_unsafe INTEGER NOT NULL,
+                    max_tool_calls_per_minute INTEGER NOT NULL,
+                    max_runtime_seconds INTEGER NOT NULL,
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     started_at TEXT,
@@ -497,9 +532,13 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
             separators=(",", ":"),
         ),
         run.token_hash,
+        run.worker_key,
         run.worker_id,
         run.supervisor_handle,
+        run.name,
         int(run.local_unsafe),
+        run.max_tool_calls_per_minute,
+        run.max_runtime_seconds,
         run.state.value,
         run.created_at,
         run.started_at,
@@ -525,9 +564,13 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         entity_kind=ScriptRunEntityKind(str(row["entity_kind"])),
         thread_root_event_id=_nullable_string(row["thread_root_event_id"]),
         execution_identity=cast("dict[str, object]", execution_identity),
+        worker_key=_nullable_string(row["worker_key"]),
         worker_id=_nullable_string(row["worker_id"]),
         supervisor_handle=_nullable_string(row["supervisor_handle"]),
+        name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),
+        max_tool_calls_per_minute=int(row["max_tool_calls_per_minute"]),
+        max_runtime_seconds=int(row["max_runtime_seconds"]),
         state=ScriptRunState(str(row["state"])),
         created_at=str(row["created_at"]),
         started_at=_nullable_string(row["started_at"]),

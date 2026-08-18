@@ -69,7 +69,7 @@ class ScriptWorkerClient:
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     transport: httpx.AsyncBaseTransport | None = None
 
-    async def launch(  # noqa: Vulture -- Task 5 manager consumes this transport boundary.
+    async def launch(
         self,
         worker: WorkerHandle,
         *,

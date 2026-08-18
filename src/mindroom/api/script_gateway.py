@@ -16,7 +16,12 @@ from mindroom.script_runs.broker import (
     ScriptToolCallRequest,
 )
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from mindroom.script_runs.store import ScriptCallConflictError, ScriptCallNotFoundError, ScriptCapabilityError
+from mindroom.script_runs.store import (
+    ScriptCallConflictError,
+    ScriptCallNotFoundError,
+    ScriptCallRateLimitError,
+    ScriptCapabilityError,
+)
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _INITIAL_WAIT_SECONDS = 1.0
@@ -151,7 +156,12 @@ def _consume_submission_result(task: asyncio.Task[ScriptCallReceipt]) -> None:
         task.result()
     except asyncio.CancelledError:
         return
-    except (ScriptBrokerAuthenticationError, ScriptCapabilityError, ScriptCallConflictError):
+    except (
+        ScriptBrokerAuthenticationError,
+        ScriptCapabilityError,
+        ScriptCallConflictError,
+        ScriptCallRateLimitError,
+    ):
         return
     except Exception:
         logger.exception(
@@ -186,6 +196,8 @@ async def submit_script_call(
         raise _unavailable() from exc
     except ScriptCallConflictError as exc:
         raise HTTPException(status_code=409, detail="Stable call ID conflicts with its accepted request.") from exc
+    except ScriptCallRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     if receipt.state is ScriptCallState.PENDING:
         response.status_code = 202
     return ScriptCallReceiptResponse.from_domain(receipt)

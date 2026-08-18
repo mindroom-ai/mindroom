@@ -340,6 +340,7 @@ resend = [
   "resend",
 ]
 scheduler = []
+script = []
 scrapegraph = [
   "scrapegraph-py>=2.1",
 ]

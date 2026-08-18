@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ import pytest
 
 from mindroom.constants import RuntimePaths
 from mindroom.script_runs.models import (
+    ScriptCallClaim,
     ScriptCallState,
     ScriptRunEntityKind,
     ScriptRunRecord,
@@ -17,6 +19,7 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.store import (
     ScriptCallConflictError,
+    ScriptCallRateLimitError,
     ScriptCapabilityError,
     ScriptRunStore,
     ScriptRunStoreError,
@@ -76,6 +79,41 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     authenticated = store.require_active_capability(run.run_id, token)
     assert authenticated.run_id == run.run_id
     assert authenticated.call_count == 1
+
+
+def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_paths: RuntimePaths) -> None:
+    """Concurrent new claims share one durable quota while an identical retry remains free."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(replace(_new_run(), max_tool_calls_per_minute=1))
+
+    def claim(call_id: str) -> ScriptCallClaim | ScriptCallRateLimitError:
+        try:
+            return store.claim_call(
+                run_id=run.run_id,
+                call_id=call_id,
+                grant=ScriptToolGrant("website", "read_url"),
+                arguments_digest=f"digest-{call_id}",
+            )
+        except ScriptCallRateLimitError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(claim, ("call-a", "call-b")))
+
+    accepted = [outcome for outcome in outcomes if not isinstance(outcome, ScriptCallRateLimitError)]
+    rejected = [outcome for outcome in outcomes if isinstance(outcome, ScriptCallRateLimitError)]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    accepted_claim = accepted[0]
+    assert isinstance(accepted_claim, ScriptCallClaim)
+    duplicate = store.claim_call(
+        run_id=run.run_id,
+        call_id=accepted_claim.call.call_id,
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest=accepted_claim.call.arguments_digest,
+    )
+    assert duplicate.created is False
+    assert store.get_run(run.run_id).call_count == 1
 
 
 def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths: RuntimePaths) -> None:

@@ -240,6 +240,7 @@ class ScriptToolBroker:
     runtime_resolver: ScriptRuntimeResolver
     _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallReceipt]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
+    _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     def _prepare_call(self, request: ScriptToolCallRequest) -> _PreparedScriptCall:
@@ -323,6 +324,7 @@ class ScriptToolBroker:
             self._preparing[key] = remaining
         else:
             self._preparing.pop(key, None)
+        self._preparation_changed.set()
 
     def _call_is_owned(
         self,
@@ -373,6 +375,28 @@ class ScriptToolBroker:
             raise ScriptBrokerAuthenticationError(msg)
         return token
 
+    async def cancel_run(self, run_id: str) -> None:
+        """Cancel this broker's work for a run whose capability is already revoked."""
+        while any(key[0] == run_id for key in self._preparing):
+            self._preparation_changed.clear()
+            if any(key[0] == run_id for key in self._preparing):
+                await self._preparation_changed.wait()
+        active = [(key, task) for key, task in self._tasks.items() if key[0] == run_id and not task.done()]
+        for _key, task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*(task for _key, task in active), return_exceptions=True)
+        for (_claimed_run_id, call_id), _task in active:
+            record = await asyncio.to_thread(self.store.get_call, run_id, call_id)
+            if record.state is ScriptCallState.PENDING:
+                await asyncio.to_thread(
+                    self.store.publish_call_result,
+                    run_id=run_id,
+                    call_id=call_id,
+                    state=ScriptCallState.INDETERMINATE,
+                    error=_INDETERMINATE_ERROR,
+                )
+
     async def accept_authenticated(
         self,
         request: ScriptToolCallRequest,
@@ -400,7 +424,15 @@ class ScriptToolBroker:
     ) -> ScriptCallReceipt:
         run_lock = self._run_locks.setdefault(run.run_id, asyncio.Lock())
         async with run_lock:
-            return await self._execute_claimed_call_serialized(run, call, arguments)
+            try:
+                durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, run.run_id)
+            except ScriptCapabilityError:
+                return await self._publish_async(
+                    call,
+                    state=ScriptCallState.FAILED,
+                    error=_REVOKED_GRANT_ERROR,
+                )
+            return await self._execute_claimed_call_serialized(durable_run, call, arguments)
 
     async def _execute_claimed_call_serialized(
         self,
@@ -615,12 +647,14 @@ def _validate_resolved_authority(
         execution_identity=durable_identity,
         runtime_paths=context.runtime_paths,
     )
+    expected_durable_worker_key = None if run.local_unsafe else expected_worker_target.worker_key
     if (
         durable_identity != live_identity
         or durable_identity.agent_name != run.agent_name
         or durable_identity.requester_id != run.owner_user_id
         or durable_identity.room_id != run.room_id
         or durable_identity.resolved_thread_id != run.thread_root_event_id
+        or run.worker_key != expected_durable_worker_key
         or worker_authority.worker_id != run.worker_id
         or worker_authority.local_unsafe != run.local_unsafe
         or worker_authority.worker_target != expected_worker_target

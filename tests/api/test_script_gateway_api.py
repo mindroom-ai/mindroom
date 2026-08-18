@@ -29,7 +29,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
 )
-from mindroom.script_runs.store import ScriptCallConflictError, ScriptCapabilityError
+from mindroom.script_runs.store import ScriptCallConflictError, ScriptCallRateLimitError, ScriptCapabilityError
 
 if TYPE_CHECKING:
     from mindroom.script_runs.broker import ScriptToolCallRequest
@@ -80,6 +80,35 @@ def _app(broker: object) -> FastAPI:
     app.include_router(router)
     bind_script_tool_broker(app, broker)
     return app
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_reports_durable_rate_limit() -> None:
+    """A new call rejected by the atomic claim quota receives a stable non-retry response."""
+
+    class RateLimitedBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallReceipt:
+            del request, authorization
+            message = "Background script tool-call rate limit exceeded."
+            raise ScriptCallRateLimitError(message)
+
+    broker = RateLimitedBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json=_payload(),
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Background script tool-call rate limit exceeded."}
 
 
 def test_script_gateway_binds_through_public_app_state_attributes() -> None:

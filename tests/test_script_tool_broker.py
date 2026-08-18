@@ -38,7 +38,7 @@ from mindroom.script_runs.broker import (
     ScriptToolBroker,
     ScriptToolCallRequest,
 )
-from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptToolGrant
+from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.tool_approval import ToolApprovalDecision
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -202,6 +202,7 @@ def _broker(
     execution_identity: dict[str, object] | None = None,
     thread_root_event_id: str | None = "$thread:example.test",
     durable_worker_id: str | None = None,
+    durable_worker_key: str | None = None,
     live_worker_id: str | None = None,
     live_private_agent_names: frozenset[str] | None = None,
     preapprove_script_tool: bool = False,
@@ -232,6 +233,7 @@ def _broker(
             source_digest="source-digest",
             grants=(ScriptToolGrant("calculator", "add"),),
             token_hash=token_hash,
+            worker_key=durable_worker_key,
             worker_id=durable_worker_id,
             local_unsafe=durable_local_unsafe,
         ),
@@ -740,6 +742,108 @@ async def test_script_broker_forgets_retained_execution_after_submitter_cancella
 
 
 @pytest.mark.asyncio
+async def test_script_broker_cancel_run_closes_accepted_receipt_as_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revocation cancellation cannot leave an accepted side-effecting call pending forever."""
+    entered = asyncio.Event()
+
+    class BlockingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        async def add(self, a: int, b: int) -> int:
+            del a, b
+            entered.set()
+            await asyncio.Event().wait()
+            return 0
+
+    _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(token, call_id="cancelled-run-call")
+    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    await entered.wait()
+    broker.store.request_cancel(request.run_id)
+
+    await broker.cancel_run(request.run_id)
+
+    receipt = broker.get_call(request.run_id, request.call_id)
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    assert broker._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued accepted call never enters its tool after the run is revoked."""
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    executed_values: list[int] = []
+
+    class SerialToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        async def add(self, a: int, b: int) -> int:
+            del a
+            executed_values.append(b)
+            if b == 2:
+                first_entered.set()
+                await release_first.wait()
+            return b
+
+    _replace_calculator_toolkit(monkeypatch, SerialToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    first_request = _request(token, call_id="first", b=2)
+    second_request = _request(token, call_id="queued", b=3)
+    await broker.accept_authenticated(replace(first_request, token=""), f"Bearer {token}")
+    await first_entered.wait()
+    await broker.accept_authenticated(replace(second_request, token=""), f"Bearer {token}")
+    broker.store.request_cancel(first_request.run_id)
+    release_first.set()
+
+    [first_task, second_task] = list(broker._tasks.values())
+    await first_task
+    second_receipt = await second_task
+
+    assert executed_values == [2]
+    assert second_receipt.state is ScriptCallState.FAILED
+    assert second_receipt.error == {
+        "kind": "capability_revoked",
+        "message": "The requested tool is no longer available to this script run.",
+        "retryable": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_queued_starting_call_dispatches_with_fresh_durable_worker_identity(tmp_path: Path) -> None:
+    """A call accepted during launch uses worker identity persisted before its eventual dispatch."""
+    broker, token = _broker(tmp_path, events=[], live_worker_id="worker-after-launch")
+    run_lock = broker._run_locks.setdefault("run-1", asyncio.Lock())
+    await run_lock.acquire()
+    request = _request(token, call_id="accepted-while-starting")
+
+    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    broker.store.transition_run(
+        request.run_id,
+        state=ScriptRunState.RUNNING,
+        worker_id="worker-after-launch",
+        supervisor_handle="shell:1234abcd",
+    )
+    run_lock.release()
+    [execution] = broker._tasks.values()
+
+    receipt = await execution
+
+    assert receipt.state is ScriptCallState.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path: Path) -> None:
     """A pending claim left by an unknown executor must never be resubmitted after ambiguity."""
     broker, token = _broker(tmp_path, events=[])
@@ -912,6 +1016,22 @@ async def test_script_broker_rejects_durable_live_worker_mismatch_before_dispatc
     )
 
     receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-worker"))
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_script_broker_rejects_durable_worker_key_mismatch_before_dispatch(tmp_path: Path) -> None:
+    """A run cannot substitute another requester-scoped worker key at dispatch."""
+    events: list[str] = []
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        durable_worker_key="v1:default:user_agent:mallory:watcher",
+    )
+
+    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-worker-key"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
