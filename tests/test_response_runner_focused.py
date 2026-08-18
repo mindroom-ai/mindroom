@@ -2913,7 +2913,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 
 @pytest.mark.asyncio
 async def test_chained_pause_keeps_transient_status_out_of_durable_snapshot(tmp_path: Path) -> None:
-    """A later waiting label must not become model-authored continuation content."""
+    """A hidden marker and later waiting label must not become durable assistant content."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -2930,6 +2930,8 @@ async def test_chained_pause_keeps_transient_status_out_of_durable_snapshot(tmp_
         source_event_ids=("$source",),
         calls=(),
         state="ready",
+        response_text="🔧 `inspect` [1] ⏳",
+        response_tool_trace=({"type": "tool_call_started", "tool_name": "inspect"},),
     )
     assert await store.create_approval_continuation(continuation) == continuation
     current = await store.claim_approval_continuation(
@@ -2961,6 +2963,7 @@ async def test_chained_pause_keeps_transient_status_out_of_durable_snapshot(tmp_
 
     waiting_text = "Waiting for approval: `dangerous`"
     assert edit_text.await_args.args[0].new_text == waiting_text
+    assert "🔧" not in presentation.response_text
     persisted = await store.approval_continuation(continuation.approval_id)
     assert persisted is not None
     assert persisted.response_text == ""

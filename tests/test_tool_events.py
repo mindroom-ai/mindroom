@@ -90,16 +90,35 @@ def test_format_assistant_tool_transcript_preserves_message_order() -> None:
     ]
 
 
-def test_format_assistant_tool_transcript_matches_idless_tools_by_occurrence() -> None:
+@pytest.mark.parametrize(
+    "call_ids",
+    [(None, None), ("call-1", "call-2")],
+    ids=["idless-messages", "identified-messages"],
+)
+def test_format_assistant_tool_transcript_matches_idless_tools_by_occurrence(
+    call_ids: tuple[str | None, str | None],
+) -> None:
     """Legacy id-less calls retain each execution's metadata in message order."""
     messages = [
         Message(
             role="assistant",
-            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                    **({"id": call_ids[0]} if call_ids[0] is not None else {}),
+                },
+            ],
         ),
         Message(
             role="assistant",
-            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                    **({"id": call_ids[1]} if call_ids[1] is not None else {}),
+                },
+            ],
         ),
     ]
     tools = [
@@ -114,6 +133,7 @@ def test_format_assistant_tool_transcript_matches_idless_tools_by_occurrence() -
         ("path=first.txt", "first result"),
         ("path=second.txt", "second result"),
     ]
+    assert [entry.tool_call_id for entry in trace] == list(call_ids)
 
 
 def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snapshot() -> None:
@@ -271,7 +291,15 @@ def test_reconcile_tool_presentation_completes_durable_pending_marker_in_place()
     ]
 
 
-def test_reconcile_tool_presentation_preserves_durable_completed_metadata() -> None:
+@pytest.mark.parametrize(
+    ("replayed_call_id", "replayed_name"),
+    [("call-1", None), (None, "inspect")],
+    ids=["missing-name", "missing-id"],
+)
+def test_reconcile_tool_presentation_preserves_durable_completed_metadata(
+    replayed_call_id: str | None,
+    replayed_name: str | None,
+) -> None:
     """An incomplete provider replay must not erase persisted completed metadata."""
     prior_trace = [
         ToolTraceEntry(
@@ -283,8 +311,8 @@ def test_reconcile_tool_presentation_preserves_durable_completed_metadata() -> N
         ),
     ]
     replayed = ToolExecution(
-        tool_call_id="call-1",
-        tool_name=None,
+        tool_call_id=replayed_call_id,
+        tool_name=replayed_name,
         tool_args={"path": "report.txt"},
         result=None,
     )
@@ -298,7 +326,12 @@ def test_reconcile_tool_presentation_preserves_durable_completed_metadata() -> N
         fallback_text="After approval.",
     )
 
-    assert (trace[0].tool_name, trace[0].result_preview) == ("inspect", "details")
+    assert len(trace) == 1
+    assert (trace[0].tool_call_id, trace[0].tool_name, trace[0].result_preview) == (
+        "call-1",
+        "inspect",
+        "details",
+    )
 
 
 def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text() -> None:
@@ -342,6 +375,33 @@ def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text(
             tool_call_id="call-2",
         ),
     ]
+
+
+def test_reconcile_tool_presentation_consumes_idless_trace_matches() -> None:
+    """One legacy same-name trace cannot represent multiple executions."""
+    tools = [
+        ToolExecution(tool_name="inspect", result="first result"),
+        ToolExecution(tool_name="inspect", result="second result"),
+    ]
+    current_trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            result_preview="second result",
+        ),
+    ]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="🔧 `inspect` [1]",
+        current_tool_trace=current_trace,
+        tools=tools,
+        fallback_text="",
+    )
+
+    assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]"
+    assert [entry.result_preview for entry in trace] == ["first result", "second result"]
 
 
 def test_reconcile_tool_presentation_reindexes_repeated_markers_without_collisions() -> None:

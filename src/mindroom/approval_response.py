@@ -269,7 +269,7 @@ class ApprovalResponseCoordinator:
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
         approval_pending = plan.waiting_text is not None
-        snapshot_text = paused.response_text or current.response_text
+        snapshot_text = paused.response_text
         snapshot_tool_trace = response_tool_trace if snapshot_text else ()
         visible_text = snapshot_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING

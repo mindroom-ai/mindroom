@@ -486,7 +486,7 @@ def _tool_execution_for_call(
     raw_tool_name = function.get("name") or call.get("name")
     tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
     tool = tools_by_id.get(call_id) if call_id is not None else None
-    if call_id is None and (matching_tools := idless_tools_by_name.get(tool_name)):
+    if tool is None and (matching_tools := idless_tools_by_name.get(tool_name)):
         tool = matching_tools.pop(0)
     return call_id, tool or ToolExecution(tool_call_id=call_id, tool_name=tool_name)
 
@@ -535,6 +535,7 @@ def format_assistant_tool_transcript(
                 marker, trace_entry = format_tool_completed_event(tool, tool_index=tool_index)
             transcript_parts.append(marker.strip())
             if trace_entry is not None:
+                trace_entry.tool_call_id = call_id or trace_entry.tool_call_id
                 tool_trace.append(trace_entry)
 
     return "\n\n".join(transcript_parts), tool_trace
@@ -633,32 +634,25 @@ def _append_presentation_part(body: str, part: str) -> str:
     return f"{body}\n\n{part}" if body and part else body or part
 
 
-def _matching_prior_trace_index(
+def _matching_trace_index(
     trace: Sequence[ToolTraceEntry],
     tool: ToolExecution,
     used_indexes: set[int],
 ) -> int | None:
-    """Match executions to durable entries by call ID, with legacy name fallback."""
+    """Match one execution to one trace entry by ID, then legacy name and occurrence."""
     if tool.tool_call_id is not None:
         for index, entry in enumerate(trace):
             if index not in used_indexes and entry.tool_call_id == tool.tool_call_id:
                 return index
     tool_name = tool.tool_name or "tool"
     for index, entry in enumerate(trace):
-        if index not in used_indexes and entry.tool_call_id is None and entry.tool_name == tool_name:
+        if (
+            index not in used_indexes
+            and entry.tool_name == tool_name
+            and (tool.tool_call_id is None or entry.tool_call_id is None)
+        ):
             return index
     return None
-
-
-def _trace_represents_tool(trace: Sequence[ToolTraceEntry], tool: ToolExecution) -> bool:
-    """Match a continued execution to its ordered message trace."""
-    if tool.tool_call_id is not None:
-        if any(entry.tool_call_id == tool.tool_call_id for entry in trace):
-            return True
-        if any(entry.tool_call_id is not None for entry in trace):
-            return False
-    tool_name = tool.tool_name or "tool"
-    return any(entry.tool_call_id is None and entry.tool_name == tool_name for entry in trace)
 
 
 def _reindex_tool_markers(
@@ -701,17 +695,17 @@ def reconcile_tool_presentation(
     body = prior_text
     trace = [replace(entry) for entry in prior_tool_trace]
     used_prior_indexes: set[int] = set()
-    missing_tools: list[ToolExecution] = []
+    tools_without_prior: list[ToolExecution] = []
 
     for tool in tools:
-        prior_index = _matching_prior_trace_index(trace, tool, used_prior_indexes)
+        prior_index = _matching_trace_index(trace, tool, used_prior_indexes)
         if prior_index is None:
-            if not _trace_represents_tool(current_tool_trace, tool):
-                missing_tools.append(tool)
+            tools_without_prior.append(tool)
             continue
 
         used_prior_indexes.add(prior_index)
-        if tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids:
+        matched_call_id = tool.tool_call_id or trace[prior_index].tool_call_id
+        if matched_call_id is not None and matched_call_id in pending_tool_call_ids:
             continue
         marker_index = prior_index + 1
         tool_name = tool.tool_name or trace[prior_index].tool_name
@@ -721,11 +715,22 @@ def reconcile_tool_presentation(
         previous_entry = trace[prior_index]
         trace[prior_index] = replace(
             completed_entry,
+            tool_call_id=completed_entry.tool_call_id or previous_entry.tool_call_id,
             tool_name=tool.tool_name or previous_entry.tool_name,
             args_preview=completed_entry.args_preview or previous_entry.args_preview,
             result_preview=completed_entry.result_preview or previous_entry.result_preview,
             truncated=completed_entry.truncated or previous_entry.truncated,
         )
+
+    used_current_indexes: set[int] = set()
+    missing_tools: list[ToolExecution] = []
+    for tool in reversed(tools_without_prior):
+        current_index = _matching_trace_index(current_tool_trace, tool, used_current_indexes)
+        if current_index is None:
+            missing_tools.append(tool)
+        else:
+            used_current_indexes.add(current_index)
+    missing_tools.reverse()
 
     missing_completed = [
         tool for tool in missing_tools if tool.tool_call_id is None or tool.tool_call_id not in pending_tool_call_ids
