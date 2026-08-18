@@ -815,7 +815,7 @@ class StreamingResponse:
                 event_id=self.event_id,
                 room_id=self.room_id,
                 stream_status=final_stream_status,
-                exc_info=True,
+                exc_info=not current_task_is_process_shutdown(),
             )
             (
                 committed_rendered_body,

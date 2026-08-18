@@ -13,6 +13,7 @@ import pytest
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
+from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -290,6 +291,7 @@ async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_b
     streaming.event_id = "$placeholder"
     streaming.accumulated_text = "partial answer"
     sleep_mock = AsyncMock()
+    warning = MagicMock()
 
     with (
         patch(
@@ -297,12 +299,51 @@ async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_b
             new=AsyncMock(side_effect=asyncio.CancelledError("user-stop")),
         ),
         patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
+        patch("mindroom.streaming.logger.warning", new=warning),
     ):
         outcome = await streaming.finalize(_client(), cancelled=True)
 
     sleep_mock.assert_not_awaited()
     assert outcome.terminal_status == "cancelled"
     assert outcome.failure_reason == "cancelled_by_user"
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["exc_info"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_stream_cancellations_do_not_format_tracebacks(
+    tmp_path: Path,
+) -> None:
+    """A saturated orderly stop must not synchronously render one traceback per stream."""
+    streams = [_streaming_response(_config(tmp_path)) for _ in range(16)]
+    started = asyncio.Event()
+    entered = 0
+
+    async def blocked_edit(*_args: object, **_kwargs: object) -> None:
+        nonlocal entered
+        entered += 1
+        if entered == len(streams):
+            started.set()
+        await asyncio.Future()
+
+    for index, stream in enumerate(streams):
+        stream.event_id = f"$placeholder-{index}"
+        stream.accumulated_text = "partial answer"
+
+    warning = MagicMock()
+    with (
+        patch("mindroom.streaming.edit_message_result", new=blocked_edit),
+        patch("mindroom.streaming.logger.warning", new=warning),
+    ):
+        tasks = [asyncio.create_task(stream.finalize(_client())) for stream in streams]
+        await started.wait()
+        for task in tasks:
+            request_task_cancel(task, process_shutdown=True)
+        outcomes = await asyncio.gather(*tasks)
+
+    assert all(outcome.terminal_status == "cancelled" for outcome in outcomes)
+    assert warning.call_count == len(streams)
+    assert all(call.kwargs["exc_info"] is False for call in warning.call_args_list)
 
 
 @pytest.mark.asyncio
