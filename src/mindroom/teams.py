@@ -99,6 +99,7 @@ from mindroom.response_turn import (
     build_matrix_run_metadata,
     paused_attempt_from_event,
     paused_attempt_from_response,
+    reconciled_tool_count,
     resolve_approval_response_content,
     response_content_text,
     run_blocking_response_turn,
@@ -1566,6 +1567,35 @@ def _merge_approval_presentation_tools(
     return merge_tool_executions_for_presentation(primary_tools, *additional_groups)
 
 
+def _is_team_section_heading(line: str) -> bool:
+    """Return whether one line is a standalone member, nested-team, or consensus heading."""
+    stripped = line.strip()
+    return stripped.startswith("**") and stripped.endswith(("**:", "** (Team):"))
+
+
+def _without_tool_only_team_sections(text: str) -> str:
+    """Remove team section headings whose body consisted only of visible tool markers."""
+    lines = text.splitlines()
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _is_team_section_heading(lines[index]):
+            filtered_lines.append(lines[index])
+            index += 1
+            continue
+
+        next_heading = index + 1
+        while next_heading < len(lines) and not _is_team_section_heading(lines[next_heading]):
+            next_heading += 1
+        section_body = lines[index + 1 : next_heading]
+        has_tool_marker = any(line.strip() and not visible_text_without_tool_markers(line) for line in section_body)
+        has_visible_body = bool(visible_text_without_tool_markers("\n".join(section_body)).strip())
+        if not has_tool_marker or has_visible_body:
+            filtered_lines.extend(lines[index:next_heading])
+        index = next_heading
+    return "\n".join(filtered_lines)
+
+
 def _continued_team_approval_presentation(
     continued: TeamRunOutput | RunOutput,
     *,
@@ -1594,8 +1624,11 @@ def _continued_team_approval_presentation(
     if prior_response_text:
         current_text = current_text.removeprefix(_format_team_header(team_display_names))
     presentation_tools = _merge_approval_presentation_tools(continued, requirement_tools, paused_tools)
+    reconciled_prior_text = (
+        prior_response_text if show_tool_calls else _without_tool_only_team_sections(prior_response_text)
+    )
     response_text, response_tool_trace = reconcile_tool_presentation(
-        prior_text=prior_response_text,
+        prior_text=reconciled_prior_text,
         prior_tool_trace=prior_tool_trace,
         current_text=current_text,
         current_tool_trace=current_tool_trace,
@@ -2403,7 +2436,7 @@ async def continue_paused_team_run(
                 model=continued.model,
                 model_provider=continued.model_provider,
                 metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
-                tool_count=len(presentation_tools),
+                tool_count=reconciled_tool_count(presentation_tools, response_tool_trace),
             ),
         )
     finally:

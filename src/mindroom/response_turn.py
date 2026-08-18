@@ -86,6 +86,7 @@ __all__ = [
     "build_matrix_run_metadata",
     "paused_attempt_from_event",
     "paused_attempt_from_response",
+    "reconciled_tool_count",
     "resolve_approval_response_content",
     "response_content_text",
     "run_blocking_response_turn",
@@ -136,6 +137,14 @@ def stable_assistant_message_ids(messages: Sequence[Message]) -> set[str]:
         for message in messages
         if message.role == "assistant" and isinstance(message.id, str) and bool(message.id)
     }
+
+
+def reconciled_tool_count(
+    tools: Sequence[ToolExecution],
+    trace: Sequence[ToolTraceEntry],
+) -> int:
+    """Count the canonical calls retained by either execution or durable presentation state."""
+    return max(len(tools), len(trace))
 
 
 def resolve_approval_response_content(

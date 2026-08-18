@@ -473,6 +473,7 @@ class _AssistantToolCall:
     call_id: str | None
     tool_name: str
     tool_args: dict[str, object]
+    has_tool_args_evidence: bool
 
 
 def _assistant_tool_call(raw_call: object) -> _AssistantToolCall | None:
@@ -488,15 +489,25 @@ def _assistant_tool_call(raw_call: object) -> _AssistantToolCall | None:
     function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
     raw_tool_name = function.get("name") or call.get("name")
     tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
-    raw_args = function.get("arguments") or call.get("arguments")
+    raw_args = function.get("arguments") if "arguments" in function else call.get("arguments")
     parsed_args: object = raw_args
     if isinstance(raw_args, str):
         try:
             parsed_args = json.loads(raw_args)
         except json.JSONDecodeError:
-            parsed_args = {}
-    tool_args = {str(key): value for key, value in parsed_args.items()} if isinstance(parsed_args, Mapping) else {}
-    return _AssistantToolCall(call_id=call_id, tool_name=tool_name, tool_args=tool_args)
+            parsed_args = None
+    if isinstance(parsed_args, Mapping):
+        tool_args = {str(key): value for key, value in parsed_args.items()}
+        has_tool_args_evidence = True
+    else:
+        tool_args = {}
+        has_tool_args_evidence = False
+    return _AssistantToolCall(
+        call_id=call_id,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        has_tool_args_evidence=has_tool_args_evidence,
+    )
 
 
 def _execution_with_call_metadata(tool: ToolExecution, call: _AssistantToolCall) -> ToolExecution:
@@ -545,6 +556,71 @@ def _reserve_exact_tool_matches(
     return matched_indexes, used_tool_indexes
 
 
+def _normalized_execution_args(tool: ToolExecution) -> dict[str, object] | None:
+    """Return comparable execution arguments only when the provider supplied them."""
+    if not isinstance(tool.tool_args, Mapping):
+        return None
+    return {str(key): value for key, value in tool.tool_args.items()}
+
+
+def _assistant_tool_call_is_compatible(call: _AssistantToolCall, tool: ToolExecution) -> bool:
+    """Reject execution candidates that contradict an assistant call's explicit evidence."""
+    if (tool.tool_name or "tool") != call.tool_name:
+        return False
+    if call.call_id is not None and tool.tool_call_id is not None:
+        return False
+    execution_args = _normalized_execution_args(tool)
+    return not (
+        call.has_tool_args_evidence
+        and execution_args is not None
+        and call.tool_args
+        and execution_args
+        and call.tool_args != execution_args
+    )
+
+
+def _assistant_tool_call_has_matching_args(call: _AssistantToolCall, tool: ToolExecution) -> bool:
+    """Return whether both records carry the same explicit argument payload."""
+    execution_args = _normalized_execution_args(tool)
+    return (
+        _assistant_tool_call_is_compatible(call, tool)
+        and call.has_tool_args_evidence
+        and execution_args is not None
+        and call.tool_args == execution_args
+    )
+
+
+def _reserve_unambiguous_assistant_argument_matches(
+    calls: Sequence[tuple[tuple[int, int], _AssistantToolCall]],
+    tools: Sequence[ToolExecution],
+    matched_indexes: dict[tuple[int, int], int],
+    used_tool_indexes: set[int],
+) -> None:
+    """Reserve one-to-one argument matches before occurrence fallback."""
+    while True:
+        candidates_by_call: dict[tuple[int, int], list[int]] = {}
+        candidates_by_tool: dict[int, list[tuple[int, int]]] = {}
+        for key, call in calls:
+            if key in matched_indexes:
+                continue
+            for tool_index, tool in enumerate(tools):
+                if tool_index in used_tool_indexes or not _assistant_tool_call_has_matching_args(call, tool):
+                    continue
+                candidates_by_call.setdefault(key, []).append(tool_index)
+                candidates_by_tool.setdefault(tool_index, []).append(key)
+
+        unambiguous_pairs = [
+            (key, tool_indexes[0])
+            for key, tool_indexes in candidates_by_call.items()
+            if len(tool_indexes) == 1 and len(candidates_by_tool[tool_indexes[0]]) == 1
+        ]
+        if not unambiguous_pairs:
+            return
+        for key, tool_index in unambiguous_pairs:
+            matched_indexes[key] = tool_index
+            used_tool_indexes.add(tool_index)
+
+
 def _assistant_tool_match_indexes(
     messages: Sequence[Message],
     tools: Sequence[ToolExecution],
@@ -552,14 +628,13 @@ def _assistant_tool_match_indexes(
     """Match exact IDs first, then assign remaining current calls by occurrence."""
     calls = _assistant_tool_calls(messages)
     matched_indexes, used_tool_indexes = _reserve_exact_tool_matches(calls, tools)
+    _reserve_unambiguous_assistant_argument_matches(calls, tools, matched_indexes, used_tool_indexes)
 
     for key, call in calls:
         if key in matched_indexes:
             continue
         for tool_index, tool in enumerate(tools):
-            if tool_index in used_tool_indexes or (tool.tool_name or "tool") != call.tool_name:
-                continue
-            if call.call_id is not None and tool.tool_call_id is not None:
+            if tool_index in used_tool_indexes or not _assistant_tool_call_is_compatible(call, tool):
                 continue
             matched_indexes[key] = tool_index
             used_tool_indexes.add(tool_index)
@@ -593,10 +668,40 @@ def enrich_tool_executions_from_assistant_calls(
     calls_by_tool_index = {
         tool_index: call for key, call in calls if (tool_index := matched_indexes.get(key)) is not None
     }
-    return [
+    enriched_tools = [
         _execution_with_call_metadata(tool, calls_by_tool_index[index]) if index in calls_by_tool_index else tool
         for index, tool in enumerate(tools)
     ]
+    unmatched_tool_indexes = set(range(len(tools))) - set(matched_indexes.values())
+    duplicate_candidates_by_owner: dict[int, list[int]] = {}
+    owners_by_duplicate_candidate: dict[int, list[int]] = {}
+    for key, call in calls:
+        owner_index = matched_indexes.get(key)
+        if owner_index is None or call.call_id is None:
+            continue
+        owner = enriched_tools[owner_index]
+        if owner.tool_call_id != call.call_id:
+            continue
+        for candidate_index in unmatched_tool_indexes:
+            candidate = tools[candidate_index]
+            if candidate.tool_call_id is not None or not _assistant_tool_call_has_matching_args(call, candidate):
+                continue
+            duplicate_candidates_by_owner.setdefault(owner_index, []).append(candidate_index)
+            owners_by_duplicate_candidate.setdefault(candidate_index, []).append(owner_index)
+
+    collapsed_indexes: set[int] = set()
+    for owner_index, candidate_indexes in duplicate_candidates_by_owner.items():
+        if len(candidate_indexes) != 1:
+            continue
+        candidate_index = candidate_indexes[0]
+        if len(owners_by_duplicate_candidate[candidate_index]) != 1:
+            continue
+        enriched_tools[owner_index] = _merge_presentation_tool_metadata(
+            enriched_tools[owner_index],
+            enriched_tools[candidate_index],
+        )
+        collapsed_indexes.add(candidate_index)
+    return [tool for index, tool in enumerate(enriched_tools) if index not in collapsed_indexes]
 
 
 def format_assistant_tool_transcript(
@@ -785,23 +890,39 @@ def _exact_tool_trace_matches(
     return matches
 
 
-def _tool_trace_has_matching_legacy_evidence(tool: ToolExecution, entry: ToolTraceEntry) -> bool:
-    """Return whether preview metadata links an ID-less trace slot to one execution."""
+def _tool_trace_legacy_evidence_is_compatible(
+    tool: ToolExecution,
+    entry: ToolTraceEntry,
+    *,
+    allow_result_update: bool = False,
+) -> bool:
+    """Return whether an occurrence match would preserve all explicit preview evidence."""
     if (tool.tool_name or "tool") != entry.tool_name:
         return False
     if tool.tool_call_id is not None and entry.tool_call_id is not None:
         return False
     _, candidate = format_tool_completed_event(tool)
     assert candidate is not None
-    compared = False
     for attribute in ("args_preview", "result_preview"):
         stored_value = getattr(entry, attribute)
-        if stored_value is None:
+        candidate_value = getattr(candidate, attribute)
+        if stored_value is None or candidate_value is None:
             continue
-        compared = True
-        if stored_value != getattr(candidate, attribute):
+        if stored_value != candidate_value and not (allow_result_update and attribute == "result_preview"):
             return False
-    return compared
+    return True
+
+
+def _tool_trace_has_matching_legacy_evidence(tool: ToolExecution, entry: ToolTraceEntry) -> bool:
+    """Return whether preview metadata positively links a trace slot to one execution."""
+    if not _tool_trace_legacy_evidence_is_compatible(tool, entry):
+        return False
+    _, candidate = format_tool_completed_event(tool)
+    assert candidate is not None
+    return any(
+        getattr(entry, attribute) is not None and getattr(entry, attribute) == getattr(candidate, attribute)
+        for attribute in ("args_preview", "result_preview")
+    )
 
 
 def _reserve_unambiguous_legacy_evidence_matches(
@@ -840,6 +961,7 @@ def _tool_trace_matches(
     trace: Sequence[ToolTraceEntry],
     *,
     prefer_latest_tools: bool = False,
+    allow_result_updates: bool = False,
 ) -> list[int | None]:
     """Match exact IDs first, then remaining legacy entries by name and occurrence."""
     matches = _exact_tool_trace_matches(tools, trace)
@@ -857,7 +979,11 @@ def _tool_trace_matches(
             entry = trace[index]
             if index in used_trace_indexes or entry.tool_name != tool_name:
                 continue
-            if tool.tool_call_id is not None and entry.tool_call_id is not None:
+            if not _tool_trace_legacy_evidence_is_compatible(
+                tool,
+                entry,
+                allow_result_update=allow_result_updates,
+            ):
                 continue
             matches[tool_index] = index
             used_trace_indexes.add(index)
@@ -1031,7 +1157,11 @@ def reconcile_tool_presentation(
         if current_match is not None and exact_prior_matches[tool_index] is None
     }
     prior_candidate_indexes = [index for index in range(len(tools)) if index not in current_owned_tool_indexes]
-    prior_candidate_matches = _tool_trace_matches([tools[index] for index in prior_candidate_indexes], trace)
+    prior_candidate_matches = _tool_trace_matches(
+        [tools[index] for index in prior_candidate_indexes],
+        trace,
+        allow_result_updates=True,
+    )
     prior_matches: list[int | None] = [None] * len(tools)
     for tool_index, prior_match in zip(prior_candidate_indexes, prior_candidate_matches, strict=True):
         prior_matches[tool_index] = prior_match

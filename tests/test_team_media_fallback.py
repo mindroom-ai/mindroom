@@ -916,6 +916,7 @@ def test_team_continuation_starts_marker_only_member_content_on_new_line() -> No
     )
 
     assert "🔧" not in hidden_text
+    assert "**GeneralAgent**:" not in hidden_text
     assert "Done." in hidden_text
     assert hidden_trace == []
 

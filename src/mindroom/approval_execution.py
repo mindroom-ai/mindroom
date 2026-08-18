@@ -24,6 +24,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     apply_exact_approval_decisions,
     paused_attempt_from_response,
+    reconciled_tool_count,
     resolve_approval_response_content,
     response_content_text,
     stable_assistant_message_ids,
@@ -250,6 +251,6 @@ class AgentApprovalExecution:
                 model=response.model,
                 model_provider=response.model_provider,
                 metrics=response.metrics,
-                tool_count=len(presentation_tools),
+                tool_count=reconciled_tool_count(presentation_tools, response_tool_trace),
             ),
         )

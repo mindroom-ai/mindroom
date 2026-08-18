@@ -290,6 +290,48 @@ def test_format_assistant_tool_transcript_consumes_skipped_idless_calls() -> Non
     assert [entry.result_preview for entry in trace] == ["after result"]
 
 
+def test_format_assistant_tool_transcript_matches_arguments_before_occurrence() -> None:
+    """A skipped older call cannot consume a current execution with different arguments."""
+    messages = [
+        Message(
+            id="before-pause",
+            role="assistant",
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"before.txt"}'},
+                },
+            ],
+        ),
+        Message(
+            id="after-pause",
+            role="assistant",
+            content="After reasoning.",
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"after.txt"}'},
+                },
+            ],
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_name="inspect", tool_args={"path": "after.txt"}, result="after result"),
+        ToolExecution(tool_name="inspect", tool_args={"path": "before.txt"}, result="before result"),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(
+        messages,
+        tools,
+        skip_message_ids={"before-pause"},
+    )
+
+    assert body == "After reasoning.\n\n🔧 `inspect` [1]"
+    assert [(entry.args_preview, entry.result_preview) for entry in trace] == [
+        ("path=after.txt", "after result"),
+    ]
+
+
 def test_format_assistant_tool_transcript_ignores_history_without_current_executions() -> None:
     """Historical calls cannot consume executions owned by the continued run."""
     messages = [
@@ -422,6 +464,32 @@ def test_presentation_merge_collapses_duplicate_primary_stable_ids() -> None:
     assert merged[0].tool_call_id == "call-1"
     assert merged[0].tool_args == {"path": "report.txt"}
     assert merged[0].result == "details"
+
+
+def test_assistant_call_enrichment_collapses_richer_idless_duplicate() -> None:
+    """One stable assistant call owns both incomplete and completed provider copies."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
+                },
+            ],
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"path": "report.txt"}),
+        ToolExecution(tool_name="inspect", tool_args={"path": "report.txt"}, result="details"),
+    ]
+
+    enriched = tool_events.enrich_tool_executions_from_assistant_calls(messages, tools)
+
+    assert len(enriched) == 1
+    assert enriched[0].tool_call_id == "call-1"
+    assert enriched[0].result == "details"
 
 
 def test_tool_trace_snapshot_round_trips_for_durable_continuations() -> None:
@@ -662,6 +730,27 @@ def test_reconcile_tool_presentation_preserves_sparse_idless_prefix_order() -> N
 
     assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]\n\n🔧 `inspect` [3]"
     assert [entry.result_preview for entry in trace] == ["first result", "second result", "third result"]
+
+
+def test_tool_trace_matching_rejects_contradictory_preview_fallback() -> None:
+    """Occurrence fallback cannot override explicit result evidence."""
+    tools = [
+        ToolExecution(tool_name="inspect", tool_args={"path": "same.txt"}, result="result-a"),
+        ToolExecution(tool_name="inspect", tool_args={"path": "same.txt"}, result="result-b"),
+    ]
+    trace = [
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", args_preview="path=same.txt"),
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=same.txt",
+            result_preview="result-a",
+        ),
+    ]
+
+    matches = tool_events._tool_trace_matches(tools, trace, prefer_latest_tools=True)
+
+    assert matches == [1, 0]
 
 
 def test_reconcile_tool_presentation_prefers_new_idless_anchor_over_prior_snapshot() -> None:

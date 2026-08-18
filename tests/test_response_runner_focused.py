@@ -90,6 +90,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
+    reconciled_tool_count,
     stable_assistant_message_ids,
 )
 from mindroom.room_model_overrides import set_room_model_override
@@ -2775,6 +2776,18 @@ def test_stable_assistant_message_ids_excludes_missing_identity() -> None:
     ]
 
     assert stable_assistant_message_ids(messages) == {"stable-message"}
+
+
+def test_reconciled_tool_count_includes_durable_trace_entries() -> None:
+    """Metadata counts calls retained only by the durable presentation snapshot."""
+    tools = [ToolExecution(tool_call_id="call-2", tool_name="save")]
+    trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", tool_call_id="call-1"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="save", tool_call_id="call-2"),
+    ]
+
+    assert reconciled_tool_count(tools, trace) == 2
+    assert reconciled_tool_count(tools, []) == 1
 
 
 @pytest.mark.parametrize("show_tool_calls", [True, False])
