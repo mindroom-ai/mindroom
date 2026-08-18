@@ -117,7 +117,7 @@ from mindroom.tool_system.events import (
     format_assistant_tool_transcript,
     format_tool_completed_event,
     reconcile_tool_presentation,
-    visible_text_without_tool_markers,
+    tools_not_represented_in_trace,
 )
 
 if TYPE_CHECKING:
@@ -355,23 +355,12 @@ def _format_terminal_team_response(
 def _approval_response_content(
     response: TeamRunOutput | RunOutput,
     rendered_content: str,
-    skip_message_ids: set[str] | frozenset[str],
 ) -> str:
-    """Use raw content only when it is not control state or an already-rendered snapshot."""
-    if rendered_content and not visible_text_without_tool_markers(rendered_content):
-        fallback_content = resolve_approval_response_content(
-            response,
-            "",
-            skip_message_ids,
-            fallback_content=_get_response_content(response),
-        )
-        if fallback_content:
-            return f"{rendered_content}\n\n{fallback_content}"
+    """Include raw terminal content only when messages do not already represent it."""
     return resolve_approval_response_content(
         response,
         rendered_content,
-        skip_message_ids,
-        fallback_content=_get_response_content(response),
+        terminal_content=_get_response_content(response),
     )
 
 
@@ -380,6 +369,68 @@ def _with_nested_team_header(team_name: str, nested_parts: list[str], indent: st
     if not nested_parts:
         return []
     return [f"{indent}**{team_name}** (Team):", *nested_parts]
+
+
+def _local_approval_recovery_tools(
+    response: TeamRunOutput | RunOutput,
+    recovery_tools: Sequence[ToolExecution],
+) -> list[ToolExecution]:
+    """Select globally unmatched executions owned by one response segment."""
+    return [tool for tool in response.tools or () if any(tool is candidate for candidate in recovery_tools)]
+
+
+def _format_approval_response_segment(
+    response: TeamRunOutput | RunOutput,
+    *,
+    pending_tool_call_ids: set[str],
+    show_tool_calls: bool,
+    start_index: int,
+    skip_message_ids: set[str] | frozenset[str],
+    recovery_tools: Sequence[ToolExecution],
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Render one response and keep unanchored tools beside its own prose."""
+    content, trace = format_assistant_tool_transcript(
+        response.messages or (),
+        response.tools or (),
+        pending_tool_call_ids=pending_tool_call_ids,
+        start_index=start_index,
+        show_tool_calls=show_tool_calls,
+        skip_message_ids=skip_message_ids,
+    )
+    content = _approval_response_content(response, content)
+    return reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=(),
+        current_text=content,
+        current_tool_trace=trace,
+        tools=_local_approval_recovery_tools(response, recovery_tools),
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+        current_start_index=start_index,
+    )
+
+
+def _format_nested_team_recovery_tools(
+    response: TeamRunOutput,
+    *,
+    pending_tool_call_ids: set[str],
+    show_tool_calls: bool,
+    start_index: int,
+    indent: str,
+    recovery_tools: Sequence[ToolExecution],
+) -> tuple[list[str], list[ToolTraceEntry]]:
+    """Place a nested leader's unanchored tools after its member transcript."""
+    tool_text, tool_trace = reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=(),
+        current_text="",
+        current_tool_trace=(),
+        tools=_local_approval_recovery_tools(response, recovery_tools),
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+        current_start_index=start_index,
+    )
+    return ([f"{indent}{tool_text}"] if tool_text else []), tool_trace
 
 
 def _format_approval_contributions_recursive(
@@ -391,6 +442,7 @@ def _format_approval_contributions_recursive(
     indent: int,
     include_consensus: bool,
     skip_message_ids: set[str] | frozenset[str],
+    recovery_tools: Sequence[ToolExecution],
 ) -> tuple[list[str], list[ToolTraceEntry]]:
     """Render one continued team's contributions with globally indexed tool anchors."""
     parts: list[str] = []
@@ -409,19 +461,19 @@ def _format_approval_contributions_recursive(
                     indent=indent + 1,
                     include_consensus=False,
                     skip_message_ids=skip_message_ids,
+                    recovery_tools=recovery_tools,
                 )
                 parts.extend(_with_nested_team_header(team_name, nested_parts, indent_str))
                 trace.extend(nested_trace)
             elif isinstance(member_response, RunOutput):
-                content, member_trace = format_assistant_tool_transcript(
-                    member_response.messages or (),
-                    member_response.tools or (),
+                content, member_trace = _format_approval_response_segment(
+                    member_response,
                     pending_tool_call_ids=pending_tool_call_ids,
                     start_index=start_index + len(trace),
                     show_tool_calls=show_tool_calls,
                     skip_message_ids=skip_message_ids,
+                    recovery_tools=recovery_tools,
                 )
-                content = _approval_response_content(member_response, content, skip_message_ids)
                 if content.strip():
                     parts.append(
                         _format_member_contribution(
@@ -433,30 +485,39 @@ def _format_approval_contributions_recursive(
                 trace.extend(member_trace)
 
         if include_consensus:
-            consensus, consensus_trace = format_assistant_tool_transcript(
-                response.messages or (),
-                response.tools or (),
+            consensus, consensus_trace = _format_approval_response_segment(
+                response,
                 pending_tool_call_ids=pending_tool_call_ids,
                 start_index=start_index + len(trace),
                 show_tool_calls=show_tool_calls,
                 skip_message_ids=skip_message_ids,
+                recovery_tools=recovery_tools,
             )
-            consensus = _approval_response_content(response, consensus, skip_message_ids)
             if consensus.strip():
                 parts.extend(_format_team_consensus(consensus, indent))
             elif parts:
                 parts.append(_format_no_consensus_note(indent))
             trace.extend(consensus_trace)
+        else:
+            tool_parts, tool_trace = _format_nested_team_recovery_tools(
+                response,
+                pending_tool_call_ids=pending_tool_call_ids,
+                show_tool_calls=show_tool_calls,
+                start_index=start_index + len(trace),
+                indent=indent_str,
+                recovery_tools=recovery_tools,
+            )
+            parts.extend(tool_parts)
+            trace.extend(tool_trace)
     else:
-        content, response_trace = format_assistant_tool_transcript(
-            response.messages or (),
-            response.tools or (),
+        content, response_trace = _format_approval_response_segment(
+            response,
             pending_tool_call_ids=pending_tool_call_ids,
             start_index=start_index,
             show_tool_calls=show_tool_calls,
             skip_message_ids=skip_message_ids,
+            recovery_tools=recovery_tools,
         )
-        content = _approval_response_content(response, content, skip_message_ids)
         if content.strip():
             parts.append(_format_member_contribution(response.agent_name or "Agent", content, indent))
         trace.extend(response_trace)
@@ -472,6 +533,7 @@ def _format_approval_team_response(
     show_tool_calls: bool,
     start_index: int = 1,
     skip_message_ids: set[str] | frozenset[str] = frozenset(),
+    recovery_tools: Sequence[ToolExecution] = (),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Render a continued team run and its trace from persisted message order."""
     parts, trace = _format_approval_contributions_recursive(
@@ -482,8 +544,9 @@ def _format_approval_team_response(
         indent=0,
         include_consensus=True,
         skip_message_ids=skip_message_ids,
+        recovery_tools=recovery_tools,
     )
-    body = "\n\n".join(parts) if parts else _approval_response_content(response, "", skip_message_ids)
+    body = "\n\n".join(parts) if parts else _approval_response_content(response, "")
     return (_format_team_header(team_display_names) + body if body else ""), trace
 
 
@@ -1381,11 +1444,12 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
     The rerun is bounded by the continuation budget and prior attempts stay
     in session history for the rerun to reuse.
     """
-    tools: list[ToolExecution] = list(response.tools or [])
+    tools: list[ToolExecution] = []
     if isinstance(response, TeamRunOutput):
         for member_response in response.member_responses:
             if isinstance(member_response, TeamRunOutput | RunOutput):
                 tools.extend(_collect_team_tool_executions(member_response))
+    tools.extend(response.tools or [])
     return tools
 
 
@@ -1495,6 +1559,8 @@ def _continued_team_approval_presentation(
     """Reconcile one continued team result with its transport-committed snapshot."""
     paused_tools = paused.tools if paused is not None else ()
     pending_tool_call_ids = {tool.tool_call_id for tool in paused_tools if tool.tool_call_id}
+    response_tools = _collect_team_tool_executions(continued)
+    recovery_tools = tools_not_represented_in_trace(response_tools, prior_tool_trace)
     current_text, current_tool_trace = _format_approval_team_response(
         continued,
         team_display_names=team_display_names,
@@ -1502,6 +1568,7 @@ def _continued_team_approval_presentation(
         start_index=len(prior_tool_trace) + 1,
         show_tool_calls=show_tool_calls,
         skip_message_ids=prior_message_ids if prior_response_text else frozenset(),
+        recovery_tools=recovery_tools,
     )
     if prior_response_text:
         current_text = current_text.removeprefix(_format_team_header(team_display_names))
@@ -1512,11 +1579,6 @@ def _continued_team_approval_presentation(
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text=_approval_response_content(
-            continued,
-            "",
-            prior_message_ids if prior_response_text else frozenset(),
-        ).lstrip("\n"),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )

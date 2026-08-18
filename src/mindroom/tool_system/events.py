@@ -470,8 +470,8 @@ def _assistant_message_content(message: Message) -> str:
 
 def _tool_execution_for_call(
     raw_call: object,
-    tools_by_id: Mapping[str, ToolExecution],
-    idless_tools_by_name: dict[str, list[ToolExecution]],
+    tools: Sequence[ToolExecution],
+    used_tool_indexes: set[int],
 ) -> tuple[str | None, ToolExecution] | None:
     """Resolve one persisted assistant tool call to its execution payload."""
     if not isinstance(raw_call, Mapping):
@@ -485,19 +485,23 @@ def _tool_execution_for_call(
     function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
     raw_tool_name = function.get("name") or call.get("name")
     tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
-    tool = tools_by_id.get(call_id) if call_id is not None else None
-    if tool is None and (matching_tools := idless_tools_by_name.get(tool_name)):
-        tool = matching_tools.pop(0)
+    tool: ToolExecution | None = None
+    if call_id is not None:
+        for index, candidate in enumerate(tools):
+            if candidate.tool_call_id == call_id:
+                tool = candidate
+                used_tool_indexes.add(index)
+                break
+    if tool is None:
+        for index, candidate in enumerate(tools):
+            if index in used_tool_indexes or (candidate.tool_name or "tool") != tool_name:
+                continue
+            if call_id is not None and candidate.tool_call_id is not None:
+                continue
+            tool = candidate
+            used_tool_indexes.add(index)
+            break
     return call_id, tool or ToolExecution(tool_call_id=call_id, tool_name=tool_name)
-
-
-def _idless_tools_by_name(tools: Sequence[ToolExecution]) -> dict[str, list[ToolExecution]]:
-    """Index legacy executions without call IDs while retaining occurrence order."""
-    tools_by_name: dict[str, list[ToolExecution]] = {}
-    for tool in tools:
-        if tool.tool_call_id is None and tool.tool_name:
-            tools_by_name.setdefault(tool.tool_name, []).append(tool)
-    return tools_by_name
 
 
 def format_assistant_tool_transcript(
@@ -510,22 +514,23 @@ def format_assistant_tool_transcript(
     skip_message_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Rebuild one run's visible assistant transcript from its persisted message order."""
-    tools_by_id = {tool.tool_call_id: tool for tool in tools if tool.tool_call_id}
-    idless_tools_by_name = _idless_tools_by_name(tools)
+    used_tool_indexes: set[int] = set()
     transcript_parts: list[str] = []
     tool_trace: list[ToolTraceEntry] = []
 
     for message in messages:
-        if message.role != "assistant" or message.from_history or message.id in skip_message_ids:
+        if message.role != "assistant":
             continue
-        content_text = _assistant_message_content(message)
-        if content_text.strip():
-            transcript_parts.append(content_text)
+        render_message = not message.from_history and message.id not in skip_message_ids
+        if render_message:
+            content_text = _assistant_message_content(message)
+            if content_text.strip():
+                transcript_parts.append(content_text)
         if not show_tool_calls:
             continue
         for raw_call in message.tool_calls or ():
-            resolved_call = _tool_execution_for_call(raw_call, tools_by_id, idless_tools_by_name)
-            if resolved_call is None:
+            resolved_call = _tool_execution_for_call(raw_call, tools, used_tool_indexes)
+            if resolved_call is None or not render_message:
                 continue
             call_id, tool = resolved_call
             tool_index = start_index + len(tool_trace)
@@ -655,6 +660,22 @@ def _matching_trace_index(
     return None
 
 
+def tools_not_represented_in_trace(
+    tools: Sequence[ToolExecution],
+    trace: Sequence[ToolTraceEntry],
+) -> list[ToolExecution]:
+    """Return executions without a one-to-one stable or legacy trace match."""
+    used_indexes: set[int] = set()
+    missing: list[ToolExecution] = []
+    for tool in tools:
+        trace_index = _matching_trace_index(trace, tool, used_indexes)
+        if trace_index is None:
+            missing.append(tool)
+        else:
+            used_indexes.add(trace_index)
+    return missing
+
+
 def _reindex_tool_markers(
     text: str,
     trace: Sequence[ToolTraceEntry],
@@ -682,18 +703,22 @@ def reconcile_tool_presentation(
     current_text: str,
     current_tool_trace: Sequence[ToolTraceEntry],
     tools: Sequence[ToolExecution],
-    fallback_text: str,
     pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
     show_tool_calls: bool = True,
+    current_start_index: int | None = None,
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Reconcile a continued run against the last transport-committed presentation."""
     if not show_tool_calls:
         body = visible_text_without_tool_markers(prior_text)
-        continuation_text = current_text if current_text.strip() else fallback_text
-        return _append_presentation_part(body, continuation_text), []
+        return _append_presentation_part(body, current_text), []
 
     body = prior_text
     trace = [replace(entry) for entry in prior_tool_trace]
+    current_start_index = current_start_index or len(prior_tool_trace) + 1
+    marker_index_offset = current_start_index - len(prior_tool_trace) - 1
+    if marker_index_offset < 0:
+        msg = "Current tool marker index overlaps the prior trace"
+        raise ValueError(msg)
     used_prior_indexes: set[int] = set()
     tools_without_prior: list[ToolExecution] = []
 
@@ -742,7 +767,7 @@ def reconcile_tool_presentation(
         marker, trace_entry = _trace_entry_for_tool(
             tool,
             pending_tool_call_ids=pending_tool_call_ids,
-            tool_index=len(trace) + 1,
+            tool_index=len(trace) + marker_index_offset + 1,
         )
         body = _append_presentation_part(body, marker)
         trace.append(trace_entry)
@@ -750,19 +775,17 @@ def reconcile_tool_presentation(
     current_text = _reindex_tool_markers(
         current_text,
         current_tool_trace,
-        old_start_index=len(prior_tool_trace) + 1,
-        new_start_index=len(trace) + 1,
+        old_start_index=current_start_index,
+        new_start_index=len(trace) + marker_index_offset + 1,
     )
     body = _append_presentation_part(body, current_text)
     trace.extend(replace(entry) for entry in current_tool_trace)
-    if not visible_text_without_tool_markers(current_text):
-        body = _append_presentation_part(body, fallback_text)
 
     for tool in missing_pending:
         marker, trace_entry = _trace_entry_for_tool(
             tool,
             pending_tool_call_ids=pending_tool_call_ids,
-            tool_index=len(trace) + 1,
+            tool_index=len(trace) + marker_index_offset + 1,
         )
         body = _append_presentation_part(body, marker)
         trace.append(trace_entry)

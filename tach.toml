@@ -4796,6 +4796,7 @@ expose = [
     "reconcile_tool_presentation",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "tools_not_represented_in_trace",
     "visible_text_without_tool_markers",
 ]
 from = ["mindroom.tool_system.events"]

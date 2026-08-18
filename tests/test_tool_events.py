@@ -136,6 +136,40 @@ def test_format_assistant_tool_transcript_matches_idless_tools_by_occurrence(
     assert [entry.tool_call_id for entry in trace] == list(call_ids)
 
 
+def test_format_assistant_tool_transcript_matches_idless_call_to_identified_tool() -> None:
+    """An id-less assistant call still inherits its execution's stable metadata."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+            ],
+        ),
+    ]
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+        result="details",
+    )
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, [tool])
+
+    assert body == "🔧 `inspect` [1]"
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
+
+
 def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snapshot() -> None:
     """Continuation rendering must append only assistant messages added after the pause."""
     messages = [
@@ -171,6 +205,35 @@ def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snap
             tool_call_id="call-2",
         ),
     ]
+
+
+def test_format_assistant_tool_transcript_consumes_skipped_idless_calls() -> None:
+    """A skipped legacy call cannot steal metadata from the next visible occurrence."""
+    messages = [
+        Message(
+            id="before-pause",
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+        Message(
+            id="after-pause",
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_name="inspect", result="before result"),
+        ToolExecution(tool_name="inspect", result="after result"),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(
+        messages,
+        tools,
+        skip_message_ids={"before-pause"},
+    )
+
+    assert body == "🔧 `inspect` [1]"
+    assert [entry.result_preview for entry in trace] == ["after result"]
 
 
 def test_format_assistant_tool_transcript_hides_tools_without_concatenating_messages() -> None:
@@ -276,7 +339,6 @@ def test_reconcile_tool_presentation_completes_durable_pending_marker_in_place()
         current_text="After approval.",
         current_tool_trace=[],
         tools=[completed],
-        fallback_text="After approval.",
     )
 
     assert body == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
@@ -323,7 +385,6 @@ def test_reconcile_tool_presentation_preserves_durable_completed_metadata(
         current_text="After approval.",
         current_tool_trace=[],
         tools=[replayed],
-        fallback_text="After approval.",
     )
 
     assert len(trace) == 1
@@ -361,7 +422,6 @@ def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text(
         current_text="Need one more step.",
         current_tool_trace=[],
         tools=tools,
-        fallback_text="Need one more step.",
         pending_tool_call_ids={"call-2"},
     )
 
@@ -397,7 +457,6 @@ def test_reconcile_tool_presentation_consumes_idless_trace_matches() -> None:
         current_text="🔧 `inspect` [1]",
         current_tool_trace=current_trace,
         tools=tools,
-        fallback_text="",
     )
 
     assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]"
@@ -428,7 +487,6 @@ def test_reconcile_tool_presentation_reindexes_repeated_markers_without_collisio
         current_text="🔧 `inspect` [1] ⏳\n\n🔧 `inspect` [2] ⏳",
         current_tool_trace=current_trace,
         tools=[bootstrap, first_inspect, second_inspect],
-        fallback_text="",
         pending_tool_call_ids={"call-2", "call-3"},
     )
 
@@ -446,7 +504,6 @@ def test_reconcile_tool_presentation_preserves_prose_when_only_recovery_tools_ar
         current_text="After approval.",
         current_tool_trace=[],
         tools=[completed],
-        fallback_text="After approval.",
     )
 
     assert body == "🔧 `inspect` [1]\n\nAfter approval."
@@ -461,7 +518,6 @@ def test_reconcile_tool_presentation_keeps_repeated_new_prose() -> None:
         current_text="Done.",
         current_tool_trace=[],
         tools=[],
-        fallback_text="Done.",
     )
 
     assert body == "Done.\n\nDone."

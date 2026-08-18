@@ -81,18 +81,17 @@ def _approval_response_presentation(
         show_tool_calls=show_tool_calls,
         skip_message_ids=skipped_message_ids,
     )
+    current_text = resolve_approval_response_content(
+        response,
+        current_text,
+        terminal_content=str(response.content or ""),
+    )
     return reconcile_tool_presentation(
         prior_text=continuation.response_text,
         prior_tool_trace=prior_tool_trace,
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text=resolve_approval_response_content(
-            response,
-            "",
-            skipped_message_ids,
-            fallback_content=str(response.content or ""),
-        ),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )

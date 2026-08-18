@@ -711,7 +711,6 @@ def _blocking_approval_attempt(
         current_text=response_text,
         current_tool_trace=response_tool_trace,
         tools=presentation_tools,
-        fallback_text="",
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )

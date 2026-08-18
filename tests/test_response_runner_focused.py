@@ -2577,14 +2577,14 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
 
 
 @pytest.mark.parametrize(
-    ("fallback_content", "expected_body"),
+    ("terminal_content", "expected_body"),
     [
         pytest.param("Before approval.", "Before approval.", id="replayed"),
         pytest.param("After approval.", "Before approval.\n\nAfter approval.", id="fresh"),
     ],
 )
-def test_agent_approval_presentation_reconciles_skipped_content_fallback(
-    fallback_content: str,
+def test_agent_approval_presentation_reconciles_skipped_terminal_content(
+    terminal_content: str,
     expected_body: str,
 ) -> None:
     """Terminal fallback is appended only when it differs from persisted assistant prose."""
@@ -2607,7 +2607,7 @@ def test_agent_approval_presentation_reconciles_skipped_content_fallback(
         run_id="run-1",
         session_id="session-1",
         status=RunStatus.completed,
-        content=fallback_content,
+        content=terminal_content,
         messages=[
             Message(
                 id="before-pause",
@@ -2627,6 +2627,43 @@ def test_agent_approval_presentation_reconciles_skipped_content_fallback(
     )
 
     assert body == expected_body
+    assert trace == []
+
+
+def test_agent_approval_presentation_keeps_distinct_terminal_content_after_new_message() -> None:
+    """A provider-only terminal answer follows fresh persisted assistant prose."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-terminal-content",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        response_text="Before approval.",
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Fresh terminal answer.",
+        messages=[Message(id="after-pause", role="assistant", content="Intermediate update.")],
+        tools=[],
+    )
+
+    body, trace = approval_execution._approval_response_presentation(
+        response,
+        None,
+        continuation=continuation,
+        show_tool_calls=True,
+    )
+
+    assert body == "Before approval.\n\nIntermediate update.\n\nFresh terminal answer."
     assert trace == []
 
 

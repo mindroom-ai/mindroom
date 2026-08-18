@@ -98,26 +98,25 @@ class CompletedApprovalRun:
 def resolve_approval_response_content(
     response: TeamRunOutput | RunOutput,
     rendered_content: str,
-    skip_message_ids: set[str] | frozenset[str],
     *,
-    fallback_content: str,
+    terminal_content: str,
 ) -> str:
-    """Use fallback content only when it is neither control state nor a persisted snapshot."""
-    if rendered_content:
+    """Append terminal content only when assistant messages do not already represent it."""
+    if response.status == RunStatus.paused:
         return rendered_content
     assistant_messages = [
         message for message in response.messages or () if message.role == "assistant" and not message.from_history
     ]
-    if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
-        skipped_content = [
-            message.content.strip()
-            for message in assistant_messages
-            if isinstance(message.content, str) and message.content.strip()
-        ]
-        normalized_fallback = fallback_content.strip()
-        if normalized_fallback in {*skipped_content, "\n\n".join(skipped_content)}:
-            return ""
-    return "" if response.status == RunStatus.paused else fallback_content
+    message_content = [
+        message.content.strip()
+        for message in assistant_messages
+        if isinstance(message.content, str) and message.content.strip()
+    ]
+    normalized_terminal = terminal_content.strip()
+    represented_content = {*message_content, "\n\n".join(message_content)}
+    if not normalized_terminal or normalized_terminal in represented_content:
+        return rendered_content
+    return f"{rendered_content}\n\n{terminal_content}" if rendered_content else terminal_content
 
 
 def _has_unsupported_approval_requirement(requirement: RunRequirement) -> bool:

@@ -634,6 +634,50 @@ def test_team_continuation_omits_empty_replayed_nested_team_shell() -> None:
     assert presentation_tools == []
 
 
+def test_team_continuation_keeps_nested_team_tools_inside_nested_section() -> None:
+    """A nested leader's recovery marker follows its nested member contributions."""
+    member_tool = ToolExecution(tool_call_id="member-call", tool_name="member_tool", result="member result")
+    nested_tool = ToolExecution(tool_call_id="nested-call", tool_name="nested_tool", result="nested result")
+    nested = TeamRunOutput(
+        run_id="nested-run",
+        team_name="NestedTeam",
+        status=RunStatus.completed,
+        tools=[nested_tool],
+        member_responses=[
+            RunOutput(
+                run_id="nested-member-run",
+                agent_name="NestedMember",
+                status=RunStatus.completed,
+                content="Nested answer.",
+                messages=[Message(role="assistant", content="Nested answer.")],
+                tools=[member_tool],
+            ),
+        ],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        member_responses=[nested],
+    )
+
+    response_text, response_trace, _ = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["NestedMember"],
+        requirement_tools=[],
+        paused=None,
+        prior_response_text="",
+        prior_tool_trace=[],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    ordered_parts = ["**NestedTeam** (Team):", "🔧 `member_tool` [1]", "Nested answer.", "🔧 `nested_tool` [2]"]
+    positions = [response_text.index(part) for part in ordered_parts]
+    assert positions == sorted(positions)
+    assert [entry.tool_call_id for entry in response_trace] == ["member-call", "nested-call"]
+
+
 def test_team_continuation_recovers_member_content_after_marker_only_messages() -> None:
     """A member's terminal content follows tool markers when its messages contain no prose."""
     completed_tool = ToolExecution(
@@ -682,6 +726,58 @@ def test_team_continuation_recovers_member_content_after_marker_only_messages() 
     assert "Final member answer." in response_text
     assert response_text.index("🔧 `inspect` [1]") < response_text.index("Final member answer.")
     assert response_trace[0].result_preview == "details"
+
+
+def test_team_continuation_recovers_unanchored_tools_in_contribution_order() -> None:
+    """Recovery-only tool markers stay with their member and consensus prose."""
+    approved_tool = ToolExecution(tool_call_id="approved-call", tool_name="approved_tool", result="approved")
+    member_tool = ToolExecution(tool_call_id="member-call", tool_name="member_tool", result="member result")
+    leader_tool = ToolExecution(tool_call_id="leader-call", tool_name="leader_tool", result="leader result")
+    member = RunOutput(
+        run_id="member-run",
+        agent_name="GeneralAgent",
+        status=RunStatus.completed,
+        content="Member answer.",
+        messages=[Message(role="assistant", content="Member answer.")],
+        tools=[member_tool],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Leader consensus.",
+        messages=[Message(role="assistant", content="Leader consensus.")],
+        tools=[leader_tool],
+        member_responses=[member],
+    )
+
+    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[approved_tool],
+        paused=None,
+        prior_response_text="Before approval.\n\n🔧 `approved_tool` [1] ⏳",
+        prior_tool_trace=[
+            ToolTraceEntry(type="tool_call_started", tool_name="approved_tool", tool_call_id="approved-call"),
+        ],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    ordered_parts = [
+        "Before approval.",
+        "🔧 `approved_tool` [1]",
+        "**GeneralAgent**:",
+        "🔧 `member_tool` [2]",
+        "Member answer.",
+        "**Team Consensus**:",
+        "🔧 `leader_tool` [3]",
+        "Leader consensus.",
+    ]
+    positions = [response_text.index(part) for part in ordered_parts]
+    assert positions == sorted(positions)
+    assert [entry.tool_call_id for entry in response_trace] == ["approved-call", "member-call", "leader-call"]
+    assert [tool.tool_call_id for tool in presentation_tools] == ["member-call", "leader-call", "approved-call"]
 
 
 @pytest.mark.asyncio
