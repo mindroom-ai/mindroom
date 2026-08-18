@@ -81,6 +81,7 @@ __all__ = [
     "build_matrix_run_metadata",
     "paused_attempt_from_event",
     "paused_attempt_from_response",
+    "resolve_approval_response_content",
     "run_blocking_response_turn",
     "stream_response_turn",
 ]
@@ -92,6 +93,24 @@ class CompletedApprovalRun:
 
     response_text: str
     metadata_content: dict[str, Any]
+
+
+def resolve_approval_response_content(
+    response: TeamRunOutput | RunOutput,
+    rendered_content: str,
+    skip_message_ids: set[str] | frozenset[str],
+    *,
+    fallback_content: str,
+) -> str:
+    """Use fallback content only when it is neither control state nor a persisted snapshot."""
+    if rendered_content:
+        return rendered_content
+    assistant_messages = [
+        message for message in response.messages or () if message.role == "assistant" and not message.from_history
+    ]
+    if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
+        return ""
+    return "" if response.status == RunStatus.paused else fallback_content
 
 
 def _has_unsupported_approval_requirement(requirement: RunRequirement) -> bool:

@@ -2576,6 +2576,50 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
     ]
 
 
+def test_agent_approval_presentation_does_not_repeat_skipped_content_fallback() -> None:
+    """A persisted pre-pause message must not be replayed from terminal response content."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-persisted-message",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        response_text="Before approval.",
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Before approval.",
+        messages=[
+            Message(
+                id="before-pause",
+                role="assistant",
+                content="Before approval.",
+            ),
+        ],
+        tools=[],
+    )
+
+    body, trace = approval_execution._approval_response_presentation(
+        response,
+        None,
+        continuation=continuation,
+        prior_message_ids={"before-pause"},
+        show_tool_calls=True,
+    )
+
+    assert body == "Before approval."
+    assert trace == []
+
+
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 def test_agent_approval_presentation_excludes_framework_pause_status(
     *,

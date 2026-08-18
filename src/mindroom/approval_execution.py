@@ -23,6 +23,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     apply_exact_approval_decisions,
     paused_attempt_from_response,
+    resolve_approval_response_content,
 )
 from mindroom.tool_system.events import (
     deserialize_tool_trace,
@@ -71,13 +72,14 @@ def _approval_response_presentation(
         {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
     )
     prior_tool_trace = deserialize_tool_trace(continuation.response_tool_trace)
+    skipped_message_ids = prior_message_ids if continuation.response_text else frozenset()
     current_text, current_tool_trace = format_assistant_tool_transcript(
         response.messages or (),
         presentation_tools,
         pending_tool_call_ids=pending_tool_call_ids,
         start_index=len(prior_tool_trace) + 1,
         show_tool_calls=show_tool_calls,
-        skip_message_ids=prior_message_ids if continuation.response_text else frozenset(),
+        skip_message_ids=skipped_message_ids,
     )
     return reconcile_tool_presentation(
         prior_text=continuation.response_text,
@@ -85,7 +87,12 @@ def _approval_response_presentation(
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text="" if paused is not None else str(response.content or ""),
+        fallback_text=resolve_approval_response_content(
+            response,
+            "",
+            skipped_message_ids,
+            fallback_content=str(response.content or ""),
+        ),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )

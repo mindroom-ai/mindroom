@@ -98,6 +98,7 @@ from mindroom.response_turn import (
     build_matrix_run_metadata,
     paused_attempt_from_event,
     paused_attempt_from_response,
+    resolve_approval_response_content,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -356,14 +357,12 @@ def _approval_response_content(
     skip_message_ids: set[str] | frozenset[str],
 ) -> str:
     """Use raw content only when it is not control state or an already-rendered snapshot."""
-    if rendered_content:
-        return rendered_content
-    assistant_messages = [
-        message for message in response.messages or () if message.role == "assistant" and not message.from_history
-    ]
-    if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
-        return ""
-    return "" if response.status == RunStatus.paused else _get_response_content(response)
+    return resolve_approval_response_content(
+        response,
+        rendered_content,
+        skip_message_ids,
+        fallback_content=_get_response_content(response),
+    )
 
 
 def _format_approval_contributions_recursive(
