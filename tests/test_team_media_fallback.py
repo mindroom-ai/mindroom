@@ -304,6 +304,54 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
     assert restored.tool_trace[0].tool_call_id == "call-1"
 
 
+def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> None:
+    """A completed member tool must not collide with another member's pending call ID."""
+    completed = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")
+    pending = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool_execution=pending)
+    requirement.member_agent_id = "second"
+    requirement.member_agent_name = "SecondAgent"
+    response = TeamRunOutput(
+        tools=[pending],
+        member_responses=[
+            RunOutput(agent_id="first", agent_name="FirstAgent", tools=[completed]),
+            RunOutput(agent_id="second", agent_name="SecondAgent", content="Waiting."),
+        ],
+        status=RunStatus.paused,
+    )
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(pending,),
+            requirements=(requirement,),
+        ),
+        response=response,
+        member_ids=["first", "second"],
+        display_names=["FirstAgent", "SecondAgent"],
+        show_tool_calls=True,
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        member_ids=["first", "second"],
+        show_tool_calls=True,
+        state=paused.response_presentation_state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    assert [(entry.scope_key, entry.type) for entry in restored.tool_trace] == [
+        ("agent:first", "tool_call_completed"),
+        ("agent:second", "tool_call_started"),
+    ]
+    assert "🔧 `inspect` [1]" in restored.per_member["first"]
+    assert "🔧 `inspect` [2] ⏳" in restored.per_member["second"]
+
+
 def _make_test_agent(name: str) -> AgnoAgent:
     agent_id = name.removesuffix("Agent").replace(" ", "_").lower() or name.lower()
     return AgnoAgent(name=name, id=agent_id, model=_TEST_MODEL)

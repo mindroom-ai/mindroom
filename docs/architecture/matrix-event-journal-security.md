@@ -58,6 +58,7 @@ It is deleted when the current question revision is cleared, and its foreign key
 `approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
 It also retains the acknowledged `response_text`, structured team `response_presentation_state`, and `response_tool_trace` needed to preserve transcript order after continuation.
 The durable tool trace contains redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
+A team continuation without the versioned structured presentation is rejected instead of reconstructed from rendered Markdown, because reconstruction could bind a tool to the wrong member or transcript position; the requester must start a new turn.
 `finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.

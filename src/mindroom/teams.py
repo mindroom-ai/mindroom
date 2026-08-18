@@ -538,7 +538,7 @@ def _blocking_team_member_scope(
 
 
 def _merge_blocking_team_tool(
-    scoped_tools: dict[str, tuple[ToolExecution, str]],
+    scoped_tools: dict[tuple[str, str], ToolExecution],
     tool: ToolExecution,
     scope: str,
 ) -> None:
@@ -547,12 +547,14 @@ def _merge_blocking_team_tool(
     if call_id is None:
         msg = "Blocking team output has a tool without stable identity"
         raise RuntimeError(msg)
-    existing = scoped_tools.get(call_id)
-    if existing is None or (existing[1] == "team" and scope != "team"):
-        scoped_tools[call_id] = (tool, scope)
-    elif existing[0].tool_name != tool.tool_name or scope not in {"team", existing[1]}:
+    key = (scope, call_id)
+    existing = scoped_tools.get(key)
+    if existing is not None and existing != tool:
         msg = "Blocking team output has conflicting tool identity"
         raise RuntimeError(msg)
+    if scope != "team" and scoped_tools.get(("team", call_id)) == tool:
+        scoped_tools.pop(("team", call_id))
+    scoped_tools[key] = tool
 
 
 def _append_team_output_text(
@@ -586,7 +588,7 @@ def _append_team_output_text(
 def _collect_blocking_team_tools(
     presentation: _TeamStreamPresentation,
     output: TeamRunOutput | RunOutput,
-    scoped_tools: dict[str, tuple[ToolExecution, str]],
+    scoped_tools: dict[tuple[str, str], ToolExecution],
 ) -> None:
     """Collect aggregate tools into their structural owner scopes."""
     if isinstance(output, RunOutput):
@@ -607,15 +609,16 @@ def _collect_blocking_team_tools(
 def _merge_pending_team_tools(
     presentation: _TeamStreamPresentation,
     paused: PausedAttempt,
-    scoped_tools: dict[str, tuple[ToolExecution, str]],
-) -> set[str]:
-    """Merge exact pending calls and return their stable call IDs."""
+    scoped_tools: dict[tuple[str, str], ToolExecution],
+) -> set[tuple[str, str]]:
+    """Merge exact pending calls and return their scoped stable identities."""
     requirements_by_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
     }
     pending_ids: set[str] = set()
+    pending_keys: set[tuple[str, str]] = set()
     for tool in paused.tools:
         call_id = tool_execution_call_id(tool)
         if call_id is None or call_id in pending_ids:
@@ -632,8 +635,12 @@ def _merge_pending_team_tools(
             if requirement is not None and (requirement.member_agent_id or requirement.member_agent_name)
             else "team"
         )
-        scoped_tools[call_id] = (tool, scope)
-    return pending_ids
+        key = (scope, call_id)
+        if scope != "team" and scoped_tools.get(("team", call_id)) == tool:
+            scoped_tools.pop(("team", call_id))
+        scoped_tools[key] = tool
+        pending_keys.add(key)
+    return pending_keys
 
 
 def _attach_team_pause_presentation(
@@ -646,14 +653,15 @@ def _attach_team_pause_presentation(
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
     presentation = _TeamStreamPresentation.new(member_ids, display_names, show_tool_calls=show_tool_calls)
-    scoped_tools: dict[str, tuple[ToolExecution, str]] = {}
+    scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
     _collect_blocking_team_tools(presentation, response, scoped_tools)
-    pending_ids = _merge_pending_team_tools(presentation, paused, scoped_tools)
+    pending_keys = _merge_pending_team_tools(presentation, paused, scoped_tools)
 
-    for call_id, (tool, scope) in scoped_tools.items():
+    for key, tool in scoped_tools.items():
+        scope, _call_id = key
         presentation.start_tool(scope, tool)
-        if call_id not in pending_ids:
+        if key not in pending_keys:
             presentation.complete_tool(scope, tool)
     return replace(
         paused,
@@ -2357,9 +2365,9 @@ def _continued_team_pause(
     paused: PausedAttempt,
 ) -> PausedAttempt:
     """Reconcile terminal-only pending calls and freeze the next team pause."""
-    scoped_pending: dict[str, tuple[ToolExecution, str]] = {}
+    scoped_pending: dict[tuple[str, str], ToolExecution] = {}
     _merge_pending_team_tools(presentation, paused, scoped_pending)
-    for tool, scope in scoped_pending.values():
+    for (scope, _call_id), tool in scoped_pending.items():
         presentation.start_tool(scope, tool)
     return replace(
         paused,
