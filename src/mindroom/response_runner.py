@@ -179,15 +179,25 @@ def _merge_response_extra_content(
 
 
 def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> PausedAttempt:
-    """Attach only the response state acknowledged before the stream suspended."""
+    """Reconcile transport-committed output with the pause's private renderer state."""
     if error.presentation is None:
         return error.paused
+    tool_trace = error.presentation.tool_trace
+    presentation_state = error.presentation.state or {}
+    if error.paused.response_text == error.presentation.response_text:
+        # Hidden tool events can advance continuation identity without changing
+        # the rendered body.  That private state is safe to retain only while
+        # it still reproduces the exact raw body acknowledged by the transport.
+        if error.paused.tool_trace:
+            tool_trace = error.paused.tool_trace
+        if error.paused.response_presentation_state:
+            presentation_state = error.paused.response_presentation_state
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
         visible_response_text=error.presentation.visible_response_text,
-        tool_trace=error.presentation.tool_trace,
-        response_presentation_state=error.presentation.state or {},
+        tool_trace=tool_trace,
+        response_presentation_state=presentation_state,
     )
 
 

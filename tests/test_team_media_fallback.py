@@ -71,12 +71,14 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_runner import _paused_with_committed_presentation
 from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAttempt,
     ResponsePausedForApproval,
     paused_attempt_from_response,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -3155,6 +3157,99 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert "🔧 `dangerous` [1] ⏳" in raised.value.paused.response_text
     assert raised.value.paused.tool_trace[0].tool_call_id == "call-team-stream-approval"
     assert raised.value.paused.response_presentation_state["kind"] == "team_stream"
+
+
+@pytest.mark.asyncio
+async def test_hidden_team_tool_can_continue_when_pause_precedes_visible_output() -> None:
+    """A state-only team pause retains its exact tool identity through transport handoff."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+        model_names={"general": "large"},
+    )
+    tool = ToolExecution(
+        tool_call_id="call-hidden-team-approval",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool)
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield TeamToolCallStartedEvent(tool=tool)
+        yield TeamRunPausedEvent(
+            run_id="run-paused",
+            session_id="session-team",
+            content="Approval required",
+            tools=[tool],
+            requirements=[requirement],
+        )
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    with (
+        patch(
+            "mindroom.teams.resolve_agent_knowledge_access",
+            new=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
+        ),
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Analyze this.",
+            turn_recorder=TurnRecorder(user_message="Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(run_id="run-paused", session_id="session-team"),
+            mode=TeamMode.COORDINATE,
+            show_tool_calls=False,
+        ):
+            pass
+
+    raised.value.capture_presentation(
+        StreamingPresentation(response_text="", visible_response_text="Thinking..."),
+    )
+    paused = _paused_with_committed_presentation(raised.value)
+    presentation = _TeamStreamPresentation.restore(
+        member_ids=["general"],
+        show_tool_calls=False,
+        state=paused.response_presentation_state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    tool.confirmed = True
+    tool.result = "done"
+
+    async def continuation_events() -> AsyncIterator[object]:
+        yield TeamToolCallCompletedEvent(tool=tool)
+        yield TeamRunOutput(status=RunStatus.completed)
+
+    continued = await _collect_team_continuation(continuation_events(), presentation)
+    _reconcile_decided_team_tools(presentation, [requirement])
+
+    assert continued.status is RunStatus.completed
+    assert presentation.render_body() == ""
+    assert [(entry.tool_call_id, entry.type) for entry in presentation.tool_trace] == [
+        ("call-hidden-team-approval", "tool_call_completed"),
+    ]
 
 
 @pytest.mark.asyncio

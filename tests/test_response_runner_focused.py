@@ -2532,11 +2532,19 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
 
 def test_streaming_pause_handoff_uses_only_transport_committed_presentation() -> None:
     """The lifecycle persists the body/trace acknowledged by Matrix, not buffered stream state."""
+    buffered_trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="buffered",
+        tool_call_id="call-buffered",
+    )
     error = ResponsePausedForApproval(
         PausedAttempt(
             session_id="session-1",
             run_id="run-1",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="inspect"),),
+            response_text="Unacknowledged buffered body.",
+            tool_trace=(buffered_trace,),
+            response_presentation_state={"kind": "team", "consensus": "Unacknowledged."},
         ),
     )
     trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
@@ -2555,6 +2563,45 @@ def test_streaming_pause_handoff_uses_only_transport_committed_presentation() ->
     assert paused.visible_response_text == "Visible committed body."
     assert paused.tool_trace == (trace,)
     assert paused.response_presentation_state == {"kind": "team", "consensus": "Committed."}
+
+
+def test_streaming_pause_handoff_preserves_state_only_private_presentation() -> None:
+    """A private snapshot may advance when it still renders the acknowledged raw body."""
+    trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="inspect",
+        tool_call_id="call-hidden",
+        scope_key="team",
+    )
+    state = {
+        "kind": "team_stream",
+        "version": 2,
+        "members": [],
+        "consensus": "",
+    }
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(ToolExecution(tool_call_id="call-hidden", tool_name="inspect"),),
+            response_text="",
+            tool_trace=(trace,),
+            response_presentation_state=state,
+        ),
+    )
+    error.capture_presentation(
+        StreamingPresentation(
+            response_text="",
+            visible_response_text="Thinking...",
+        ),
+    )
+
+    paused = response_runner._paused_with_committed_presentation(error)
+
+    assert paused.response_text == ""
+    assert paused.visible_response_text == "Thinking..."
+    assert paused.tool_trace == (trace,)
+    assert paused.response_presentation_state == state
 
 
 @pytest.mark.asyncio
