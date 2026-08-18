@@ -8,14 +8,18 @@ the writer lock goes to the next caller, the pooled reader is handed back, or
 for that last one with a segmentation fault; PostgreSQL pays for the first two
 by running the next transaction inside a stranger's open one.
 
-The fix is the same in both backends and belongs in neither of them: an
-offloaded statement is awaited to completion even when the await itself is
-cancelled, so ownership is released only once the thread has genuinely stopped.
+The fix is the same in both backends and belongs in neither of them: journal
+work runs on an owned pool and an offloaded statement is awaited to completion
+even when the await itself is cancelled. Ownership is released only once the
+thread has genuinely stopped, and unrelated application work cannot starve the
+final connection close.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -54,8 +58,11 @@ async def settled[T](work: asyncio.Future[T]) -> T:
 
 @dataclass(slots=True)
 class ThreadOffload:
-    """Every statement this hands to a worker thread, it can also wait for."""
+    """Own the workers for one backend and every statement handed to them."""
 
+    _executor: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(thread_name_prefix="mindroom-event-journal"),
+    )
     _running: set[asyncio.Future[Any]] = field(default_factory=set)
 
     def submit[T](self, call: Callable[[], T]) -> asyncio.Future[T]:
@@ -64,7 +71,8 @@ class ThreadOffload:
         Registration is synchronous, so a ``close()`` that starts after this
         returns already knows the statement exists.
         """
-        work = asyncio.ensure_future(asyncio.to_thread(call))
+        context = contextvars.copy_context()
+        work = asyncio.get_running_loop().run_in_executor(self._executor, context.run, call)
         self._running.add(work)
         work.add_done_callback(self._running.discard)
         return work
@@ -77,3 +85,7 @@ class ThreadOffload:
         """Wait until no statement of this backend is still on a worker thread."""
         while running := {work for work in self._running if not work.done()}:
             await asyncio.wait(running)
+
+    def shutdown(self) -> None:
+        """Release the owned pool after its submitted work and connections stop."""
+        self._executor.shutdown(wait=False)

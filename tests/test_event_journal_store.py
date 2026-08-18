@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -49,7 +50,7 @@ from mindroom.event_journal import (
     TerminalTurnWrite,
     delivery_transaction_id,
 )
-from mindroom.event_journal.offloading import settled
+from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -3463,11 +3464,11 @@ class TestConcurrency:
 class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
     """A cancelled await cannot stop a worker thread, so it must not hand on what that thread is using.
 
-    Every backend statement runs on an ``asyncio.to_thread`` worker no
-    cancellation can reach. What each rule below pins is one thing the await
-    was holding while the thread ran -- the writer lock, a pooled connection,
-    a connection about to be closed -- and that none of them may change hands
-    until the statement has actually stopped.
+    Every backend statement runs on an owned worker thread no cancellation can
+    reach. What each rule below pins is one thing the await was holding while
+    the thread ran -- the writer lock, a pooled connection, a connection about
+    to be closed -- and that none of them may change hands until the statement
+    has actually stopped.
 
     Nothing here substitutes anything for ``to_thread``: the crash these guard
     against is a real connection being taken away from a real statement, and a
@@ -3544,6 +3545,106 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
 
         assert not closed_early, "close() returned while a read was still executing on the connection"
         assert await reading == "read"
+
+    async def test_sqlite_close_does_not_borrow_the_saturated_default_executor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shared application workers cannot keep a journal connection open at shutdown."""
+        backend = SqliteBackend.open(tmp_path / "dedicated-offload.db")
+        await backend.write(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
+        await backend.read(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        release_workers = threading.Event()
+        workers_started = (asyncio.Event(), asyncio.Event())
+
+        def occupy_worker(index: int) -> None:
+            loop.call_soon_threadsafe(workers_started[index].set)
+            release_workers.wait()
+
+        blockers = tuple(loop.run_in_executor(None, occupy_worker, index) for index in range(2))
+        await asyncio.gather(*(started.wait() for started in workers_started))
+        closing = asyncio.create_task(backend.close())
+        try:
+            finished, _ = await asyncio.wait({closing}, timeout=_MUST_NOT_FINISH_SECONDS)
+        finally:
+            release_workers.set()
+            await asyncio.gather(*blockers)
+            await closing
+
+        assert finished == {closing}, "SQLite close waited for an unrelated default-executor worker"
+
+    async def test_cancelled_sqlite_close_still_finishes_owned_teardown(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelling one waiter cannot abandon the backend's connection close."""
+        backend = SqliteBackend.open(tmp_path / "cancelled-close.db")
+        running = threading.Event()
+        release = threading.Event()
+        close_started = asyncio.Event()
+        real_drain = ThreadOffload.drain
+
+        async def observe_drain(offload: ThreadOffload) -> None:
+            if offload is backend._offload:
+                close_started.set()
+            await real_drain(offload)
+
+        monkeypatch.setattr(ThreadOffload, "drain", observe_drain)
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "read"
+
+        reading = asyncio.create_task(backend.read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(backend.close())
+        await close_started.wait()
+        closing.cancel()
+        returned_early = await _finished_within_grace(closing)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert await reading == "read"
+        await backend.close()
+
+        try:
+            backend._writer.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            writer_closed = True
+        else:
+            writer_closed = False
+            backend._writer.close()
+
+        assert not returned_early, "the cancelled close waiter returned before owned teardown finished"
+        assert writer_closed, "a cancelled close left the SQLite writer connection open"
+
+    async def test_concurrent_sqlite_close_waits_for_owned_teardown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Every close caller waits for the one teardown already in progress."""
+        backend = SqliteBackend.open(tmp_path / "concurrent-close.db")
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "read"
+
+        reading = asyncio.create_task(backend.read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        first_close = asyncio.create_task(backend.close())
+        second_close = asyncio.create_task(backend.close())
+        second_returned_early = await _finished_within_grace(second_close)
+        release.set()
+        await asyncio.gather(first_close, second_close)
+
+        assert await reading == "read"
+        assert not second_returned_early, "a concurrent close returned before the owned teardown finished"
 
     async def test_a_cancelled_write_does_not_return_while_its_statement_runs(
         self,

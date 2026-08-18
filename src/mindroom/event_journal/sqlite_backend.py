@@ -138,6 +138,7 @@ class SqliteBackend:
     _queue: asyncio.Queue[_QueuedWrite] | None = field(default=None, init=False, repr=False)
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
@@ -172,9 +173,9 @@ class SqliteBackend:
         return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
-        # The writer runs on whichever pool thread `asyncio.to_thread` picks, so
-        # the connection has to outlive its creating thread. Only ever one write
-        # is in flight, because a single task drains the queue.
+        # The writer runs on whichever owned-pool thread is free, so the
+        # connection has to outlive its creating thread. Only ever one write is
+        # in flight, because a single task drains the queue.
         connection = sqlite3.connect(
             self.database_path,
             isolation_level=None,
@@ -292,7 +293,7 @@ class SqliteBackend:
         return operation(_SqliteTransaction(self._reader()))
 
     async def close(self) -> None:
-        """Stop the writer task and close every connection.
+        """Close admission once and await the one owned connection teardown.
 
         Cancelling the writer task is safe only because ``_settle`` refuses to
         return while its worker thread is still executing: the cancellation
@@ -309,9 +310,18 @@ class SqliteBackend:
         ever be admitted is already in the queue by the time this reaches it,
         and every write after is refused where it starts.
         """
-        if self._closed:
-            return
-        self._closed = True
+        close_task = self._close_task
+        if close_task is None:
+            self._closed = True
+            close_task = asyncio.create_task(
+                self._finish_close(),
+                name="event_journal_sqlite_close",
+            )
+            self._close_task = close_task
+        await settled(close_task)
+
+    async def _finish_close(self) -> None:
+        """Finish the teardown every close waiter shares."""
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
@@ -326,13 +336,16 @@ class SqliteBackend:
             if not queued.future.done():
                 queued.future.set_exception(RuntimeError(_CLOSED_MESSAGE))
             queue.task_done()
-        await self._offload.drain()
-        await asyncio.to_thread(self._writer.close)
-        with self._reader_lock:
-            readers = tuple(self._open_readers)
-            self._open_readers.clear()
-        for reader in readers:
-            await asyncio.to_thread(reader.close)
+        try:
+            await self._offload.drain()
+            await self._offload.run(self._writer.close)
+            with self._reader_lock:
+                readers = tuple(self._open_readers)
+                self._open_readers.clear()
+            for reader in readers:
+                await self._offload.run(reader.close)
+        finally:
+            self._offload.shutdown()
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:

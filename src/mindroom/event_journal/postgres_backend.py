@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .offloading import ThreadOffload
+from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
@@ -74,6 +74,7 @@ class PostgresBackend:
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
 
     @classmethod
@@ -188,17 +189,29 @@ class PostgresBackend:
             connection.rollback()
 
     async def close(self) -> None:
-        """Close every connection this backend owns, once nothing is using one.
+        """Close admission once and await the one owned connection teardown.
 
         Setting the closed flag first stops any further statement from
         starting; draining then waits for the ones already on worker threads,
         because closing a connection under a running statement is how psycopg
         reports someone else's cancellation as this caller's broken connection.
         """
-        if self._closed:
-            return
-        self._closed = True
-        await self._offload.drain()
-        for connection in (self._writer, *self._pool):
-            await asyncio.to_thread(connection.close)
-        self._pool.clear()
+        close_task = self._close_task
+        if close_task is None:
+            self._closed = True
+            close_task = asyncio.create_task(
+                self._finish_close(),
+                name="event_journal_postgres_close",
+            )
+            self._close_task = close_task
+        await settled(close_task)
+
+    async def _finish_close(self) -> None:
+        """Finish the teardown every close waiter shares."""
+        try:
+            await self._offload.drain()
+            for connection in (self._writer, *self._pool):
+                await self._offload.run(connection.close)
+            self._pool.clear()
+        finally:
+            self._offload.shutdown()
