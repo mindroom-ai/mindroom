@@ -135,6 +135,7 @@ class _RecordingResponseRunner:
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
     failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    process_shutdown_started: bool = False
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -159,6 +160,9 @@ class _RecordingResponseRunner:
         recovery_proof_ready: Callable[[], Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
+        if self.process_shutdown_started:
+            response.close()
+            raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)
         task = asyncio.get_running_loop().create_task(response, name=name)
@@ -2310,6 +2314,58 @@ async def test_pre_lock_replacement_refusal_poisons_coalescing_drain(config: Con
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.completed is False
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_refuses_text_before_pending_turn_persistence(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A process-fenced response stays journal-pending without creating a turn owner."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.process_shutdown_started = True
+    room = _room_with_members(config, "general")
+    event = _text_event("retry me after process restart")
+
+    await harness.controller.handle_text_event(room, event)
+    drain_result = await harness.gate.drain_all()
+
+    assert drain_result.completed is False
+    assert drain_result.dispatch_failure_count == 1
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    assert harness.runner.inbox_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_race_refuses_owner_without_leaking_response_coroutine(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """Shutdown during the pending write must not leak the unstarted response."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("fence me while my pending turn commits")
+    record_pending_turn = harness.turn_store.record_pending_turn
+
+    async def record_then_fence(turn: TurnRecord) -> TurnRecord | None:
+        pending_turn = await record_pending_turn(turn)
+        harness.runner.process_shutdown_started = True
+        return pending_turn
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_fence)
+
+    await harness.controller.handle_text_event(room, event)
+    drain_result = await harness.gate.drain_all()
+
+    assert drain_result.completed is False
+    assert drain_result.dispatch_failure_count == 1
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is False
+    assert harness.runner.inbox_tasks == []
+    assert not [warning for warning in recwarn if issubclass(warning.category, RuntimeWarning)]
 
 
 @pytest.mark.asyncio

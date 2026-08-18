@@ -415,6 +415,12 @@ def _attachment_parts(
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
+def _ensure_response_admission_open(controller: TurnController) -> None:
+    """Refuse response planning after orderly shutdown closes task ownership."""
+    if controller.deps.response_runner.process_shutdown_started:
+        raise ResponseAdmissionRefusedError
+
+
 async def _apply_turn_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -443,16 +449,18 @@ async def _apply_turn_plan(
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)
         return
 
-    assert plan.response_action is not None
+    response_action = plan.response_action
+    assert response_action is not None
+    _ensure_response_admission_open(controller)
     reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
         prepared.handled_turn.source_event_ids,
     )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
-            plan.response_action,
+            response_action,
             requester_user_id=prepared.dispatch.requester_user_id,
         )
-        if plan.response_action.kind in {"individual", "team"}
+        if response_action.kind in {"individual", "team"}
         else None
     )
 
@@ -492,14 +500,14 @@ async def _apply_turn_plan(
         return await controller.deps.response_recovery_ready(handled_turn)
 
     response_task = controller.deps.response_runner.track_inbox_response(
-        _run_claimed_response(
+        _run_lazily_claimed_response(
             controller,
             turn_claim,
-            controller._execute_response_action(
+            lambda: controller._execute_response_action(
                 room,
                 prepared.event,
                 prepared.dispatch,
-                plan.response_action,
+                response_action,
                 payload_inputs,
                 processing_log="Processing",
                 dispatch_started_at=prepared.dispatch_started_at,
@@ -546,6 +554,15 @@ async def _run_claimed_response(
         await response
     finally:
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+
+async def _run_lazily_claimed_response(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    response_factory: Callable[[], Awaitable[None]],
+) -> None:
+    """Create a claimed response only after its runner task starts."""
+    await _run_claimed_response(controller, turn_claim, response_factory())
 
 
 async def _run_admitted_router_relay(

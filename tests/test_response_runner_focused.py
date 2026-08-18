@@ -35,6 +35,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_payload_preparation import (
@@ -125,6 +126,39 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         final_visible_body=body,
         delivery_kind="sent",
     )
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_refuses_new_response_owners_until_admissions_resume() -> None:
+    """Orderly shutdown must close the owner set before concurrent producers run."""
+    runner = ResponseRunner(deps=MagicMock())
+    runner.begin_process_shutdown()
+    refused_response = asyncio.sleep(0)
+    accidentally_owned: asyncio.Task[None] | None = None
+
+    try:
+        with pytest.raises(ResponseAdmissionRefusedError):
+            accidentally_owned = runner.track_inbox_response(
+                refused_response,
+                name="test_late_process_shutdown_response",
+                recovery_proof_ready=lambda: True,
+            )
+    finally:
+        if accidentally_owned is not None:
+            accidentally_owned.cancel()
+            await asyncio.gather(accidentally_owned, return_exceptions=True)
+
+    assert refused_response.cr_frame is None
+    assert runner.pending_inbox_response_count == 0
+
+    runner.resume_pending_admissions()
+    resumed_response = runner.track_inbox_response(
+        asyncio.sleep(0),
+        name="test_resumed_response",
+        recovery_proof_ready=lambda: True,
+    )
+    await resumed_response
+    assert runner.pending_inbox_response_count == 0
 
 
 @pytest.mark.asyncio

@@ -545,6 +545,7 @@ class ResponseRunner:
         repr=False,
     )
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
+    _process_shutdown_started: bool = field(default=False, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
 
@@ -557,6 +558,9 @@ class ResponseRunner:
         on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
+        if self._process_shutdown_started:
+            response.close()
+            raise ResponseAdmissionRefusedError
         task = asyncio.create_task(response, name=name)
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
@@ -584,6 +588,11 @@ class ResponseRunner:
         """Return whether every timed-out response has finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
 
+    @property
+    def process_shutdown_started(self) -> bool:
+        """Return whether orderly process shutdown has closed response admission."""
+        return self._process_shutdown_started
+
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
         ownership = self._inbox_response_tasks.pop(task, None)
         if task.cancelled():
@@ -605,6 +614,7 @@ class ResponseRunner:
 
     def begin_process_shutdown(self) -> None:
         """Signal owned responses before other orderly-shutdown drains spend the budget."""
+        self._process_shutdown_started = True
         for task, ownership in tuple(self._inbox_response_tasks.items()):
             if task.done():
                 continue
@@ -873,6 +883,7 @@ class ResponseRunner:
 
     def resume_pending_admissions(self) -> None:
         """Let a fresh sync-loop generation wait for config apply completion."""
+        self._process_shutdown_started = False
         self._admission_shutdown_requested.clear()
 
     def refuse_pending_admissions(self) -> None:
