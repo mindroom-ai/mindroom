@@ -99,6 +99,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.events import format_tool_trace_markers
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
@@ -956,18 +957,26 @@ class ResponseRunner:
         )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
+            show_tool_calls = self._show_tool_calls()
+            visible_tool_trace = tool_trace if show_tool_calls else []
+            tool_markers = format_tool_trace_markers(visible_tool_trace)
+            response_text = (
+                f"{tool_markers}\n\n{result.response_text}"
+                if tool_markers and result.response_text
+                else tool_markers or result.response_text
+            )
             return (
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
                         target=target,
                         existing_event_id=claimed.response_event_id,
                         existing_event_is_placeholder=False,
-                        response_text=result.response_text,
+                        response_text=response_text,
                         identity=self._response_identity(
                             request,
                             response_kind="team" if claimed.entity_kind == "team" else "ai",
                         ),
-                        tool_trace=tool_trace if self._show_tool_calls() else None,
+                        tool_trace=visible_tool_trace if show_tool_calls else None,
                         extra_content=_merge_response_extra_content(
                             {**result.metadata_content, STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
                             claimed.attachment_ids,

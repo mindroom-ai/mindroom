@@ -447,6 +447,18 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
+def format_tool_trace_markers(tool_trace: Sequence[ToolTraceEntry]) -> str:
+    """Render indexed visible anchors for structured tool-trace entries."""
+    return "\n\n".join(
+        _tool_marker_line(
+            trace_entry.tool_name,
+            tool_index,
+            pending=trace_entry.type == "tool_call_started",
+        )
+        for tool_index, trace_entry in enumerate(tool_trace, start=1)
+    )
+
+
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False

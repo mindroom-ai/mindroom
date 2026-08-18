@@ -5686,15 +5686,25 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_runtime_path", [False, True], ids=["launcher-fallback", "runtime-override"])
 async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    explicit_runtime_path: bool,
 ) -> None:
-    """The subprocess helper sends the scheduled config snapshot via stdin."""
+    """The subprocess gets its config snapshot and the correct executable path."""
+    launcher_bin = tmp_path / "nix-profile" / "bin"
+    runtime_bin = tmp_path / "runtime-bin"
+    monkeypatch.setenv("PATH", str(launcher_bin))
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
+    path_overrides = ({}, {"PATH": str(runtime_bin)})[explicit_runtime_path]
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, **path_overrides},
+    )
     captured_request: dict[str, object] = {}
     captured_args: tuple[object, ...] = ()
     captured_env: dict[str, str] = {}
@@ -5752,6 +5762,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
     assert captured_request["base_id"] == "docs"

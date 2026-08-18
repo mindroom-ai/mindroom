@@ -98,6 +98,7 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
@@ -2323,6 +2324,63 @@ async def test_automatic_pause_without_visible_event_sends_neutral_placeholder(t
     assert outcome.final_visible_body == "Thinking..."
     assert outcome.delivery_kind == "sent"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+
+
+@pytest.mark.asyncio
+async def test_completed_approval_continuation_materializes_tool_markers_in_final_body(tmp_path: Path) -> None:
+    """A resumed final answer must retain visible anchors for its structured tool trace."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    request = _plain_request(target, source_event_id="$source")
+    continuation = ApprovalContinuation(
+        approval_id="approval-visible-tools",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$thinking",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+    trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="fetch_report"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="save_report"),
+    ]
+
+    async def continue_call(
+        *_args: object,
+        tool_trace_collector: list[ToolTraceEntry],
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        tool_trace_collector.extend(trace)
+        return CompletedApprovalRun(response_text="Final answer.", metadata_content={})
+
+    deliver_final = AsyncMock(
+        return_value=FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$thinking",
+            is_visible_response=True,
+            final_visible_body="Final answer.",
+            delivery_kind="edited",
+        ),
+    )
+    with (
+        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+    ):
+        await runner._execute_claimed_approval(
+            continuation,
+            request=request,
+            target=target,
+        )
+
+    final_request = deliver_final.await_args.args[0]
+    assert final_request.response_text == ("🔧 `fetch_report` [1]\n\n🔧 `save_report` [2]\n\nFinal answer.")
+    assert final_request.tool_trace == trace
 
 
 @pytest.mark.asyncio

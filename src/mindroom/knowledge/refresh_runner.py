@@ -161,6 +161,7 @@ async def refresh_knowledge_binding_in_subprocess(
         force_reindex=force_reindex,
     )
     env = dict(runtime_env_values(runtime_paths))
+    env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
     env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     # Resolved before the spawn so a malformed window rejects the refresh
