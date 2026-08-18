@@ -743,6 +743,83 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     assert "Inline media unavailable for this model" in second_prompt[-1].content
 
 
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.asyncio
+async def test_team_response_captures_blocking_approval_presentation(*, show_tool_calls: bool) -> None:
+    """A blocking team pause must carry its ordered transcript into suspension."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+    paused_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        tool_args={"value": 1},
+        requires_confirmation=True,
+    )
+    paused_run = TeamRunOutput(
+        run_id="run-paused",
+        session_id="session-team",
+        status=RunStatus.paused,
+        content="Approval required",
+        messages=[
+            Message(
+                id="team-before-approval",
+                role="assistant",
+                content="Approval required",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "dangerous", "arguments": '{"value":1}'},
+                    },
+                ],
+            ),
+        ],
+        tools=[paused_tool],
+        requirements=[RunRequirement(paused_tool)],
+    )
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(return_value=paused_run)
+    fake_agent = _make_test_agent("GeneralAgent")
+
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-team"),
+            show_tool_calls=show_tool_calls,
+        )
+
+    marker = "🔧 `dangerous` [1] ⏳"
+    assert "Approval required" in raised.value.paused.response_text
+    assert (marker in raised.value.paused.response_text) is show_tool_calls
+    if show_tool_calls:
+        assert raised.value.paused.response_text.index("Approval required") < raised.value.paused.response_text.index(
+            marker,
+        )
+        assert raised.value.paused.tool_trace == (
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                args_preview="value=1",
+            ),
+        )
+    else:
+        assert raised.value.paused.tool_trace == ()
+
+
 @pytest.mark.asyncio
 async def test_team_response_media_retry_keeps_route_filtered_kinds_removed() -> None:
     """A retry must not restore media already excluded by the route cache."""

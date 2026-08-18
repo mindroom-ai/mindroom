@@ -269,7 +269,9 @@ class ApprovalResponseCoordinator:
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
         approval_pending = plan.waiting_text is not None
-        visible_text = paused.response_text or current.response_text or plan.waiting_text or pending_text
+        snapshot_text = paused.response_text or current.response_text
+        snapshot_tool_trace = response_tool_trace if snapshot_text else ()
+        visible_text = snapshot_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         if not await self.delivery_gateway.edit_text(
             EditTextRequest(
@@ -288,8 +290,8 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            response_text=visible_text,
-            response_tool_trace=response_tool_trace,
+            response_text=snapshot_text,
+            response_tool_trace=snapshot_tool_trace,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"

@@ -81,6 +81,7 @@ from mindroom.response_turn import (
     DynamicContinuationRunState,
     ExcludedAttempt,
     HandledAttempt,
+    PausedAttempt,
     ResponseTurnContext,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
@@ -92,7 +93,13 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
-from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
+from mindroom.tool_system.events import (
+    StreamingToolTracker,
+    complete_pending_tool_block,
+    format_assistant_tool_transcript,
+    format_tool_combined,
+    reconcile_tool_presentation,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
@@ -678,6 +685,42 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _blocking_approval_attempt(
+    response: RunOutput,
+    paused: PausedAttempt,
+    *,
+    runtime_model_name: str,
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Attach the canonical presentation to a non-streaming approval pause."""
+    presentation_tools = list(response.tools or ())
+    known_tool_call_ids = {tool.tool_call_id for tool in presentation_tools if tool.tool_call_id}
+    presentation_tools.extend(tool for tool in paused.tools if tool.tool_call_id not in known_tool_call_ids)
+    pending_tool_call_ids = {tool.tool_call_id for tool in paused.tools if tool.tool_call_id}
+    response_text, response_tool_trace = format_assistant_tool_transcript(
+        response.messages or (),
+        presentation_tools,
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+    )
+    response_text, response_tool_trace = reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=(),
+        current_text=response_text,
+        current_tool_trace=response_tool_trace,
+        tools=presentation_tools,
+        fallback_text=str(response.content or ""),
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+    )
+    return replace(
+        paused,
+        runtime_model_name=runtime_model_name,
+        response_text=response_text,
+        tool_trace=tuple(response_tool_trace),
+    )
 
 
 def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -1602,7 +1645,12 @@ async def ai_response(  # noqa: C901
                 fallback_run_id=attempt.attempt_run_id,
             )
             if paused_attempt is not None:
-                return replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name)
+                return _blocking_approval_attempt(
+                    response,
+                    paused_attempt,
+                    runtime_model_name=prepared_run.runtime_model_name,
+                    show_tool_calls=show_tool_calls,
+                )
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,

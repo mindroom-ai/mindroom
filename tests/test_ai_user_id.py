@@ -79,6 +79,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     get_tool_runtime_context,
@@ -1220,7 +1221,22 @@ class TestUserIdPassthrough:
             agent_id="general",
             session_id="session1",
             content="Approval required",
-            tools=[paused_tool],
+            messages=[
+                Message(
+                    id="assistant-before-approval",
+                    role="assistant",
+                    content="Approval required",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "dangerous", "arguments": '{"value":1}'},
+                        },
+                    ],
+                ),
+            ],
+            tools=[],
+            requirements=[RunRequirement(paused_tool)],
             status=RunStatus.paused,
         )
 
@@ -1242,6 +1258,15 @@ class TestUserIdPassthrough:
                 )
 
         assert raised.value.paused.tools == (paused_tool,)
+        marker = "🔧 `dangerous` [1] ⏳"
+        assert raised.value.paused.response_text == f"Approval required\n\n{marker}"
+        assert raised.value.paused.tool_trace == (
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                args_preview="value=1",
+            ),
+        )
         assert storage.session is None
 
     @pytest.mark.asyncio

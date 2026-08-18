@@ -1384,7 +1384,7 @@ def _assistant_message_ids(response: TeamRunOutput | RunOutput) -> set[str]:
 
 
 def _merge_approval_presentation_tools(
-    response: TeamRunOutput,
+    response: TeamRunOutput | RunOutput,
     *additional_groups: Sequence[ToolExecution],
 ) -> list[ToolExecution]:
     """Merge persisted and continued executions by stable call identity."""
@@ -1401,7 +1401,7 @@ def _merge_approval_presentation_tools(
 
 
 def _continued_team_approval_presentation(
-    continued: TeamRunOutput,
+    continued: TeamRunOutput | RunOutput,
     *,
     team_display_names: list[str],
     requirement_tools: Sequence[ToolExecution],
@@ -2346,6 +2346,7 @@ async def team_response(  # noqa: C901, PLR0915
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
+    show_tool_calls: bool = True,
     reason_prefix: str = "Team request",
     member_model_names: Mapping[str, str] | None = None,
 ) -> str:
@@ -2622,10 +2623,22 @@ async def team_response(  # noqa: C901, PLR0915
                 fallback_run_id=attempt_run_id,
             )
             if paused_attempt is not None:
+                response_text, paused_tool_trace, _ = _continued_team_approval_presentation(
+                    response,
+                    team_display_names=attempt_members.display_names,
+                    requirement_tools=(),
+                    paused=paused_attempt,
+                    prior_response_text="",
+                    prior_tool_trace=(),
+                    prior_message_ids=frozenset(),
+                    show_tool_calls=show_tool_calls,
+                )
                 return replace(
                     paused_attempt,
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                    response_text=response_text,
+                    tool_trace=tuple(paused_tool_trace),
                 )
             original_status = response.status if isinstance(response.status, RunStatus) else RunStatus.error
             partial_text = _extract_interrupted_team_partial_text(response)

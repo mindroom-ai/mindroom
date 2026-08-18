@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -1760,6 +1760,57 @@ async def test_approval_suspension_preserves_committed_transcript_and_trace(tmp_
     assert outcome.tool_trace == trace
 
 
+@pytest.mark.parametrize("entity_kind", ["agent", "team"])
+@pytest.mark.asyncio
+async def test_approval_suspension_keeps_transient_status_out_of_durable_snapshot(
+    tmp_path: Path,
+    entity_kind: Literal["agent", "team"],
+) -> None:
+    """A waiting label must not replace uncaptured agent or team transcript content."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    await _admit_approval_source(runner.deps.approval_store)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-paused",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    send_text = AsyncMock(return_value="$waiting")
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=send_text),
+        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex=f"approval-{entity_kind}-status")),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        outcome = await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind=entity_kind,
+            history_scope=runner.deps.state_writer.history_scope(),
+            team_member_names=("general",) if entity_kind == "team" else (),
+            team_mode="coordinate" if entity_kind == "team" else None,
+        )
+
+    waiting_text = "Waiting for approval: `dangerous`"
+    assert send_text.await_args.args[0].response_text == waiting_text
+    continuation = await runner.deps.approval_store.approval_continuation(
+        f"approval-{entity_kind}-status",
+    )
+    assert continuation is not None
+    assert continuation.response_text == ""
+    assert continuation.response_tool_trace == ()
+    assert outcome.final_visible_body == waiting_text
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -2715,6 +2766,63 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         )
     else:
         retry_sources.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chained_pause_keeps_transient_status_out_of_durable_snapshot(tmp_path: Path) -> None:
+    """A later waiting label must not become model-authored continuation content."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain-status",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    current = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert current is not None
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(ToolExecution(tool_call_id="call-2", tool_name="dangerous", requires_confirmation=True),),
+    )
+    edit_text = AsyncMock(return_value=True)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        presentation = await runner._approval_responses.advance_pause(
+            current,
+            paused,
+            target=_target(thread_id="$thread"),
+            pending_text="Thinking...",
+            tool_trace=(),
+            response_tool_trace=(),
+        )
+
+    waiting_text = "Waiting for approval: `dangerous`"
+    assert edit_text.await_args.args[0].new_text == waiting_text
+    persisted = await store.approval_continuation(continuation.approval_id)
+    assert persisted is not None
+    assert persisted.response_text == ""
+    assert persisted.response_tool_trace == ()
+    assert presentation.response_text == waiting_text
 
 
 @pytest.mark.asyncio

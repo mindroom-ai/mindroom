@@ -841,7 +841,9 @@ class ResponseRunner:
             approval_pending = plan.waiting_text is not None
             show_tool_calls = self._show_tool_calls()
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
-            visible_text = paused.response_text or plan.waiting_text or PROGRESS_PLACEHOLDER
+            snapshot_text = paused.response_text
+            snapshot_tool_trace = visible_tool_trace if snapshot_text else ()
+            visible_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery_kind: Literal["sent", "edited"] | None = None
             final_visible_body: str | None = None
@@ -892,8 +894,8 @@ class ResponseRunner:
                     source_event_ids=source_event_ids,
                     calls=plan.calls,
                     state=continuation_state,
-                    response_text=visible_text,
-                    response_tool_trace=serialize_tool_trace(visible_tool_trace, include_tool_call_ids=True),
+                    response_text=snapshot_text,
+                    response_tool_trace=serialize_tool_trace(snapshot_tool_trace, include_tool_call_ids=True),
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
@@ -3342,6 +3344,7 @@ class ResponseRunner:
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
+                                    show_tool_calls=show_tool_calls,
                                 )
 
                             try:
