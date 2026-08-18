@@ -492,6 +492,97 @@ async def test_script_broker_keeps_toolkit_connected_while_materializing_generat
     assert lifecycle == ["connect", "body", "close"]
 
 
+def test_append_bounded_result_tracks_exact_incremental_json_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stream accounting includes UTF-8 bytes, brackets, and separators exactly once."""
+    monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", 10)
+    items: list[object] = []
+
+    encoded_bytes = broker_module._append_bounded_result(items, "é", 2)
+    encoded_bytes = broker_module._append_bounded_result(items, "x", encoded_bytes)
+
+    assert encoded_bytes == 10
+    assert items == ["é", "x"]
+    with pytest.raises(ValueError, match="bounded result byte limit"):
+        broker_module._append_bounded_result(items, "z", encoded_bytes)
+
+
+@pytest.mark.asyncio
+async def test_materialize_result_enforces_exact_stream_item_limit() -> None:
+    """Exactly 1,000 stream items fit while item 1,001 is rejected."""
+    expected = list(range(1_000))
+
+    assert await broker_module._materialize_result(iter(expected)) == expected
+    with pytest.raises(ValueError, match="bounded result item limit"):
+        await broker_module._materialize_result(iter(range(1_001)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("maximum_bytes", "expected_state", "expected_error_kind"),
+    [
+        (10, ScriptCallState.COMPLETED, None),
+        (9, ScriptCallState.FAILED, "call_rejected"),
+    ],
+)
+async def test_script_broker_enforces_exact_stream_json_byte_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    maximum_bytes: int,
+    expected_state: ScriptCallState,
+    expected_error_kind: str | None,
+) -> None:
+    """The stream byte limit is exact for UTF-8 data and JSON list punctuation."""
+
+    class BoundedToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> object:
+            del a, b
+            yield "é"
+            yield "x"
+
+    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BoundedToolkit())
+    monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", maximum_bytes)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await broker.submit_call(_request(token, call_id=f"stream-bytes-{maximum_bytes}"))
+
+    assert receipt.state is expected_state
+    if expected_error_kind is None:
+        assert receipt.result == ["é", "x"]
+    else:
+        assert isinstance(receipt.error, dict)
+        assert receipt.error["kind"] == expected_error_kind
+
+
+@pytest.mark.asyncio
+async def test_script_broker_rejects_nonfinite_stream_item(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incremental stream encoding must retain strict non-finite rejection."""
+
+    class NonFiniteStreamToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> object:
+            del a, b
+            yield float("nan")
+
+    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: NonFiniteStreamToolkit())
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await broker.submit_call(_request(token, call_id="nonfinite-stream"))
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert isinstance(receipt.error, dict)
+    assert receipt.error["kind"] == "call_rejected"
+
+
 @pytest.mark.asyncio
 async def test_script_broker_offloads_blocking_sync_toolkit_connect(
     tmp_path: Path,

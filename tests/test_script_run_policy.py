@@ -95,7 +95,7 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
                 ),
             },
             defaults=DefaultsConfig(tools=["calculator"]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
     )
     context = replace(
@@ -130,12 +130,13 @@ def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=tools)},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
     )
 
     grants = resolve_script_launch_grants(context)
 
+    assert ScriptToolGrant("coding", "read_file") in grants
     assert all(grant.toolkit_name != "shell" for grant in grants)
 
 
@@ -146,14 +147,14 @@ def test_current_grants_use_live_config_and_agent_removal_revokes_surface(tmp_pa
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
     )
     removed = bind_runtime_paths(
         Config(
             agents={},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )

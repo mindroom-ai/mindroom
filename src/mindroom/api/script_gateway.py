@@ -8,6 +8,7 @@ from typing import Annotated, Protocol, cast
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
@@ -19,8 +20,8 @@ from mindroom.script_runs.store import ScriptCallConflictError, ScriptCallNotFou
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _INITIAL_WAIT_SECONDS = 1.0
-_BROKER_STATE_KEY = "script_tool_broker"
 _SUBMISSION_TASKS: set[asyncio.Task[ScriptCallReceipt]] = set()
+logger = get_logger(__name__)
 
 
 class _ScriptGatewayBroker(Protocol):
@@ -104,12 +105,15 @@ def bind_script_tool_broker(
     broker: _ScriptGatewayBroker,
 ) -> None:
     """Bind the lifecycle-owned broker to one primary API app."""
-    app.state._state[_BROKER_STATE_KEY] = broker
+    app.state.script_tool_broker = broker
 
 
 def _app_script_tool_broker(app: FastAPI) -> _ScriptGatewayBroker:
     """Return the app-bound broker or fail closed while runtime wiring is unavailable."""
-    broker = app.state._state.get(_BROKER_STATE_KEY)
+    try:
+        broker = app.state.script_tool_broker
+    except AttributeError:
+        raise HTTPException(status_code=503, detail="Background script gateway is unavailable.") from None
     if broker is None:
         raise HTTPException(status_code=503, detail="Background script gateway is unavailable.")
     return cast("_ScriptGatewayBroker", broker)
@@ -143,8 +147,17 @@ def _unavailable() -> HTTPException:
 def _consume_submission_result(task: asyncio.Task[ScriptCallReceipt]) -> None:
     """Retain accepted work while ensuring detached failures are observed."""
     _SUBMISSION_TASKS.discard(task)
-    if not task.cancelled():
-        task.exception()
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except (ScriptBrokerAuthenticationError, ScriptCapabilityError, ScriptCallConflictError):
+        return
+    except Exception:
+        logger.exception(
+            "Background script call acceptance failed",
+            task_name=task.get_name(),
+        )
 
 
 @router.post("/calls", response_model=ScriptCallReceiptResponse)

@@ -839,13 +839,15 @@ async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
 async def _materialize_result(result: object) -> object:
     if inspect.isasyncgen(result) or isinstance(result, AsyncIterator):
         items: list[object] = []
+        encoded_bytes = 2
         async for item in result:
-            _append_bounded_result(items, item)
+            encoded_bytes = _append_bounded_result(items, item, encoded_bytes)
         return items
     if inspect.isgenerator(result) or isinstance(result, Iterator):
         items = []
+        encoded_bytes = 2
         for item in result:
-            _append_bounded_result(items, item)
+            encoded_bytes = _append_bounded_result(items, item, encoded_bytes)
         return items
     return result
 
@@ -867,12 +869,17 @@ def _strict_json_result(result: object) -> object:
     return normalized
 
 
-def _append_bounded_result(items: list[object], item: object) -> None:
+def _append_bounded_result(items: list[object], item: object, encoded_bytes: int) -> int:
     if len(items) >= _MAX_MATERIALIZED_RESULT_ITEMS:
         msg = "Tool stream exceeded the bounded result item limit."
         raise ValueError(msg)
-    items.append(to_json_compatible(item))
-    encoded = json.dumps(items, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode()
-    if len(encoded) > _MAX_MATERIALIZED_RESULT_BYTES:
+    normalized = to_json_compatible(item)
+    item_bytes = len(
+        json.dumps(normalized, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode(),
+    )
+    next_encoded_bytes = encoded_bytes + item_bytes + int(bool(items))
+    if next_encoded_bytes > _MAX_MATERIALIZED_RESULT_BYTES:
         msg = "Tool stream exceeded the bounded result byte limit."
         raise ValueError(msg)
+    items.append(normalized)
+    return next_encoded_bytes

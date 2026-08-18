@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from structlog.testing import capture_logs
 
 from mindroom.api import script_gateway
 from mindroom.api.script_gateway import bind_script_tool_broker, router
@@ -79,6 +80,55 @@ def _app(broker: object) -> FastAPI:
     app.include_router(router)
     bind_script_tool_broker(app, broker)
     return app
+
+
+def test_script_gateway_binds_through_public_app_state_attributes() -> None:
+    """Broker binding must use Starlette's public state attribute contract."""
+    broker = _GatewayBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    app = FastAPI()
+    app.state = SimpleNamespace()
+
+    bind_script_tool_broker(app, broker)
+
+    assert app.state.script_tool_broker is broker
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_fails_closed_when_broker_is_unbound() -> None:
+    """An app without lifecycle broker wiring must not accept script calls."""
+    app = FastAPI()
+    app.include_router(router)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json=_payload(),
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Background script gateway is unavailable."}
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_fails_closed_when_public_broker_state_is_empty() -> None:
+    """An explicitly empty lifecycle binding must remain unavailable."""
+    app = FastAPI()
+    app.state.script_tool_broker = None
+    app.include_router(router)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json=_payload(),
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Background script gateway is unavailable."}
 
 
 def _payload() -> dict[str, object]:
@@ -211,6 +261,93 @@ async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_reso
 
     assert old_response.status_code == 200
     assert old_response.json()["arguments_digest"] == old_arguments_digest
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_logs_unexpected_detached_acceptance_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected acceptance failure after timeout must remain observable."""
+
+    class FailingBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallReceipt:
+            del request, authorization
+            await asyncio.sleep(0.02)
+            message = "unexpected detached acceptance failure"
+            raise RuntimeError(message)
+
+    broker = FailingBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.001)
+
+    with capture_logs() as logs:
+        async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+            response = await client.post(
+                "/api/script-gateway/calls",
+                json=_payload(),
+                headers={"Authorization": "Bearer secret-token"},
+            )
+        await asyncio.sleep(0.03)
+
+    assert response.status_code == 503
+    assert logs == [
+        {
+            "event": "Background script call acceptance failed",
+            "exc_info": True,
+            "log_level": "error",
+            "task_name": "script-gateway:run-1:call-1",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ScriptBrokerAuthenticationError("unknown capability"),
+        ScriptCapabilityError("revoked capability"),
+        ScriptCallConflictError("conflicting stable call"),
+    ],
+)
+async def test_script_gateway_does_not_log_expected_detached_acceptance_rejections(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    """Expected authentication, capability, and conflict outcomes stay quiet after timeout."""
+
+    class RejectingBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallReceipt:
+            del request, authorization
+            await asyncio.sleep(0.02)
+            raise failure
+
+    broker = RejectingBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.001)
+
+    with capture_logs() as logs:
+        async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+            response = await client.post(
+                "/api/script-gateway/calls",
+                json=_payload(),
+                headers={"Authorization": "Bearer secret-token"},
+            )
+        await asyncio.sleep(0.03)
+
+    assert response.status_code == 503
+    assert logs == []
 
 
 @pytest.mark.asyncio
