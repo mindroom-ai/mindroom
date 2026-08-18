@@ -216,6 +216,127 @@ async def test_script_shim_removes_capability_file_when_source_validation_fails(
 
 
 @pytest.mark.asyncio
+async def test_script_shim_rejects_missing_workspace_root(tmp_path: Path) -> None:
+    """A missing workspace root must not make the current directory the trust boundary."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert "MINDROOM_SCRIPT_WORKSPACE_ROOT must be set" in result.message
+    assert token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_removes_oversized_capability_file(tmp_path: Path) -> None:
+    """Token-size rejection must still remove the trusted raw launch entry."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("x" * 4097, encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_unlinks_rejected_token_symlink_without_deleting_target(tmp_path: Path) -> None:
+    """Cleanup must unlink the trusted entry rather than its resolved outside target."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    outside_token = tmp_path / "outside-capability"
+    outside_token.write_text("raw-secret", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.symlink_to(outside_token)
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
+    assert outside_token.read_text(encoding="utf-8") == "raw-secret"
+
+
+@pytest.mark.asyncio
+async def test_script_shim_does_not_treat_workspace_root_as_a_token_entry(tmp_path: Path) -> None:
+    """A rejected directory path must retain its validation error and the workspace itself."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(workspace),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(workspace)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
+    assert workspace.is_dir()
+
+
+@pytest.mark.asyncio
 async def test_handles_are_namespace_scoped() -> None:
     """Handles must not be visible to callers from another namespace."""
     registry: dict[str, ProcessRecord] = {}

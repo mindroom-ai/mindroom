@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom import shell_supervisor as shell_supervisor_module
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.api.sandbox_runner_scripts import _script_namespace
+from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -264,6 +266,7 @@ async def test_worker_script_endpoint_replays_valid_chunked_body_for_model_valid
 
 def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path: Path) -> None:
     """A worker-scoped auth endpoint must not control a sibling worker namespace."""
+    previous_context = getattr(sandbox_runner_app.state, "sandbox_runner_context", None)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -277,14 +280,16 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
             SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "worker-a"),
         },
     )
+    dedicated_worker_app = FastAPI()
+    dedicated_worker_app.include_router(sandbox_runner_scripts_router)
     sandbox_runner_module.initialize_sandbox_runner_app(
-        sandbox_runner_app,
+        dedicated_worker_app,
         runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         runner_token=_TOKEN,
     )
 
-    response = TestClient(sandbox_runner_app).post(
+    response = TestClient(dedicated_worker_app).post(
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
         json={
@@ -299,6 +304,7 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
 
     assert response.status_code == 400
     assert "dedicated worker" in response.json()["detail"].lower()
+    assert getattr(sandbox_runner_app.state, "sandbox_runner_context", None) is previous_context
 
 
 def test_worker_script_status_is_bound_to_run_namespace(

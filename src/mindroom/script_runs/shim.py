@@ -56,19 +56,43 @@ def _handle_sigterm(_signum: int, _frame: object) -> None:
     raise SystemExit(128 + signal.SIGTERM)
 
 
+def _trusted_token_entry(raw_path: str, *, workspace_root: Path) -> Path | None:
+    candidate = Path(os.path.abspath(raw_path))  # noqa: PTH100 - resolving would follow the token symlink.
+    if candidate == workspace_root or not candidate.is_relative_to(workspace_root):
+        return None
+    return candidate
+
+
+def _remove_token_entry(token_entry: Path | None, *, workspace_root: Path) -> None:
+    if token_entry is None:
+        return
+    relative_parent = token_entry.parent.relative_to(workspace_root)
+    current_parent = workspace_root
+    for part in relative_parent.parts:
+        current_parent /= part
+        if current_parent.is_symlink():
+            return
+    token_entry.unlink(missing_ok=True)
+
+
 def _main(argv: list[str]) -> int:
     if len(argv) != 3:
         print("Usage: python -m mindroom.script_runs.shim SOURCE_PATH TOKEN_PATH", file=sys.stderr)
         return 2
 
-    workspace_root = Path(os.environ.get(_WORKSPACE_ROOT_ENV, "")).resolve(strict=True)
-    token_path = _validated_file(
-        argv[2],
-        workspace_root=workspace_root,
-        label="Script capability file",
-        byte_limit=_MAX_TOKEN_BYTES,
-    )
+    raw_workspace_root = os.environ.get(_WORKSPACE_ROOT_ENV, "").strip()
+    if not raw_workspace_root:
+        msg = f"{_WORKSPACE_ROOT_ENV} must be set for a supervised script run."
+        raise ValueError(msg)
+    workspace_root = Path(raw_workspace_root).resolve(strict=True)
+    token_entry = _trusted_token_entry(argv[2], workspace_root=workspace_root)
     try:
+        token_path = _validated_file(
+            argv[2],
+            workspace_root=workspace_root,
+            label="Script capability file",
+            byte_limit=_MAX_TOKEN_BYTES,
+        )
         source_path = _validated_file(
             argv[1],
             workspace_root=workspace_root,
@@ -85,7 +109,7 @@ def _main(argv: list[str]) -> int:
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
-        token_path.unlink(missing_ok=True)
+        _remove_token_entry(token_entry, workspace_root=workspace_root)
     return 0
 
 

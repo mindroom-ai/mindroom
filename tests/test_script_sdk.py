@@ -94,6 +94,73 @@ def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
     assert all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
 
 
+def test_script_sdk_digests_the_json_wire_argument_representation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nested integer keys must retain the gateway's post-JSON argument identity."""
+    _configure(monkeypatch, tmp_path)
+    posted_arguments: dict[str, object] = {}
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        payload = json.loads(request.data or b"{}")
+        posted_arguments.update(payload["arguments"])
+        return io.BytesIO(
+            _receipt(
+                "completed",
+                result="accepted",
+                arguments=payload["arguments"],
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0).call(
+        "website",
+        "read_url",
+        payload={1: "one", 10: "ten", 2: "two"},
+    )
+
+    assert result == "accepted"
+    assert posted_arguments == {"payload": {"1": "one", "10": "ten", "2": "two"}}
+
+
+@pytest.mark.parametrize(
+    "invalid_arguments",
+    [
+        {"payload": {1: "integer", "2": "string"}},
+        {"payload": float("nan")},
+        {"payload": object()},
+    ],
+)
+def test_script_sdk_rejects_invalid_arguments_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid_arguments: dict[str, object],
+) -> None:
+    """Ambiguous or non-JSON arguments must fail locally without dispatching a call."""
+    _configure(monkeypatch, tmp_path)
+    requests: list[Request] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        requests.append(request)
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", **invalid_arguments)
+
+    assert exc_info.value.kind == "invalid_arguments"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.call_id == "stable-call"
+    assert requests == []
+
+
 def test_script_sdk_ambiguous_submit_polls_without_resubmitting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

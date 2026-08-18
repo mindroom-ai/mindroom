@@ -23,6 +23,7 @@ _MAX_TOKEN_BYTES = 4096
 _TRANSPORT_ERROR = "The background tool gateway transport failed after dispatch may have been accepted."
 _INVALID_RECEIPT_ERROR = "The background tool gateway returned an invalid receipt."
 _CONFLICTING_RECEIPT_ERROR = "The stable call ID belongs to a different tool request."
+_INVALID_ARGUMENTS_ERROR = "Background tool arguments must have an unambiguous JSON representation."
 _CAPABILITY_UNAVAILABLE_MESSAGE = "The MindRoom script capability token is unavailable."
 _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
@@ -92,13 +93,14 @@ class MindRoomTools:
     def call(self, toolkit_name: str, function_name: str, **arguments: object) -> object:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
-        arguments_digest = _digest_arguments(arguments)
+        wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
+        arguments_digest = _digest_arguments(wire_arguments)
         try:
             receipt = self._submit(
                 call_id,
                 toolkit_name,
                 function_name,
-                arguments,
+                wire_arguments,
                 arguments_digest=arguments_digest,
             )
         except MindRoomToolCallError as exc:
@@ -242,6 +244,37 @@ def _digest_arguments(arguments: dict[str, object]) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[str, object]:
+    try:
+        _reject_mixed_mapping_key_types(arguments)
+        encoded = json.dumps(
+            arguments,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        wire_arguments = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise MindRoomToolCallError(
+            _INVALID_ARGUMENTS_ERROR,
+            kind="invalid_arguments",
+            retryable=False,
+            call_id=call_id,
+        ) from exc
+    return cast("dict[str, object]", wire_arguments)
+
+
+def _reject_mixed_mapping_key_types(value: object) -> None:
+    if isinstance(value, dict):
+        if len({type(key) for key in value}) > 1:
+            raise TypeError(_INVALID_ARGUMENTS_ERROR)
+        for item in value.values():
+            _reject_mixed_mapping_key_types(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_mixed_mapping_key_types(item)
 
 
 def _parse_receipt(
