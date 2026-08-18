@@ -19,6 +19,7 @@ import uvicorn
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.plugin_imports as plugin_module
+import mindroom.workers.runtime as workers_runtime_module
 from mindroom.approval_manager import (
     _ApprovalStartupSweep,
     get_approval_store,
@@ -125,6 +126,16 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
 
 
 def _retry_tasks() -> list[asyncio.Task[Any]]:

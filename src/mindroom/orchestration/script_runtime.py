@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -92,6 +93,63 @@ class _WorkerManagerLease(Protocol):
     def generation_id(self) -> str: ...
 
     def release(self) -> None: ...
+
+
+@dataclass(slots=True)
+class _WorkerLeaseDelivery:
+    """Own a provider lease until the asyncio consumer acknowledges delivery."""
+
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
+    _abandoned: bool = field(default=False, init=False, repr=False)
+
+    def acquire(
+        self,
+        provider: Callable[[], _WorkerManagerLease | None],
+    ) -> _WorkerManagerLease | None:
+        """Acquire in the executor and release there if delivery was abandoned."""
+        lease = provider()
+        if lease is None:
+            return None
+        with self._lock:
+            release_lease = self._abandoned
+            if not release_lease:
+                self._lease = lease
+        if release_lease:
+            lease.release()
+            return None
+        return lease
+
+    def acknowledge(self, lease: _WorkerManagerLease) -> bool:
+        """Transfer one delivered lease from the handoff to the lifecycle."""
+        with self._lock:
+            if self._abandoned or self._lease is not lease:
+                return False
+            self._lease = None
+            return True
+
+    def abandon(self) -> _WorkerManagerLease | None:
+        """Close delivery and return any lease already waiting for acknowledgement."""
+        with self._lock:
+            self._abandoned = True
+            lease, self._lease = self._lease, None
+            return lease
+
+    def settle_task(self, task: asyncio.Task[_WorkerManagerLease | None]) -> None:
+        """Settle cancellation or a late provider failure after lifecycle abandonment."""
+        if task.cancelled():
+            lease = self.abandon()
+            if lease is not None:
+                _release_worker_lease_later(lease)
+            return
+        failure = task.exception()
+        with self._lock:
+            abandoned = self._abandoned
+        if failure is not None and abandoned:
+            logger.warning(
+                "script_worker_backend_pending_acquire_failed",
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
 
 
 @dataclass(slots=True)
@@ -266,6 +324,7 @@ class ScriptRuntimeLifecycle:
         init=False,
         repr=False,
     )
+    _pending_worker_lease_delivery: _WorkerLeaseDelivery | None = field(default=None, init=False, repr=False)
     _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
@@ -357,15 +416,7 @@ class ScriptRuntimeLifecycle:
 
     async def _acquire_current_worker_lease(self) -> _WorkerManagerLease | None:
         while True:
-            task = self._pending_worker_lease_task
-            if task is None:
-                self._pending_worker_lease_epoch = self._worker_config_epoch
-                task = asyncio.create_task(
-                    asyncio.to_thread(self.worker_lease_provider),
-                    name="script_worker_backend_acquire",
-                )
-                self._pending_worker_lease_task = task
-            task_epoch = self._pending_worker_lease_epoch
+            task, delivery, task_epoch = self._get_or_create_worker_lease_acquisition()
             try:
                 lease = await asyncio.shield(task)
             except asyncio.CancelledError:
@@ -373,15 +424,41 @@ class ScriptRuntimeLifecycle:
             except Exception:
                 if self._pending_worker_lease_task is task:
                     self._pending_worker_lease_task = None
+                    self._pending_worker_lease_delivery = None
                     self._pending_worker_lease_epoch = -1
                 raise
             if self._pending_worker_lease_task is task:
                 self._pending_worker_lease_task = None
+                self._pending_worker_lease_delivery = None
                 self._pending_worker_lease_epoch = -1
+            if lease is not None and not delivery.acknowledge(lease):
+                return None
             if task_epoch == self._worker_config_epoch:
                 return lease
             if lease is not None:
                 await asyncio.to_thread(lease.release)
+
+    def _get_or_create_worker_lease_acquisition(
+        self,
+    ) -> tuple[asyncio.Task[_WorkerManagerLease | None], _WorkerLeaseDelivery, int]:
+        task = self._pending_worker_lease_task
+        if task is not None:
+            delivery = self._pending_worker_lease_delivery
+            if delivery is None:
+                msg = "Pending worker lease acquisition has no delivery owner."
+                raise RuntimeError(msg)
+            return task, delivery, self._pending_worker_lease_epoch
+
+        delivery = _WorkerLeaseDelivery()
+        task = asyncio.create_task(
+            asyncio.to_thread(delivery.acquire, self.worker_lease_provider),
+            name="script_worker_backend_acquire",
+        )
+        task.add_done_callback(delivery.settle_task)
+        self._pending_worker_lease_task = task
+        self._pending_worker_lease_delivery = delivery
+        self._pending_worker_lease_epoch = self._worker_config_epoch
+        return task, delivery, self._pending_worker_lease_epoch
 
     async def install_committed_worker_generation(self) -> None:
         """Install the committed worker configuration for subsequent launches."""
@@ -683,18 +760,20 @@ class ScriptRuntimeLifecycle:
             self._activated_once = False
             leases = list(self._worker_leases)
             pending_lease_task = self._pending_worker_lease_task
-            if pending_lease_task is not None:
-                if pending_lease_task.done():
-                    try:
-                        pending_lease = pending_lease_task.result()
-                    except Exception:
-                        logger.warning("script_worker_backend_pending_acquire_failed", exc_info=True)
-                    else:
-                        if pending_lease is not None:
-                            leases.append(pending_lease)
-                else:
-                    pending_lease_task.add_done_callback(_release_pending_worker_lease)
+            pending_delivery = self._pending_worker_lease_delivery
+            if pending_delivery is not None:
+                pending_lease = pending_delivery.abandon()
+                if pending_lease is not None:
+                    leases.append(pending_lease)
+            if pending_lease_task is not None and pending_lease_task.done() and not pending_lease_task.cancelled():
+                pending_failure = pending_lease_task.exception()
+                if pending_failure is not None:
+                    logger.warning(
+                        "script_worker_backend_pending_acquire_failed",
+                        exc_info=(type(pending_failure), pending_failure, pending_failure.__traceback__),
+                    )
             self._pending_worker_lease_task = None
+            self._pending_worker_lease_delivery = None
             self._pending_worker_lease_epoch = -1
             self._worker_leases.clear()
             self._current_worker_lease = None
@@ -709,21 +788,13 @@ class ScriptRuntimeLifecycle:
                 logger.warning("script_worker_backend_release_timeout", timeout_seconds=timeout_seconds)
 
 
-def _release_pending_worker_lease(task: asyncio.Task[_WorkerManagerLease | None]) -> None:
-    """Release an acquisition that completed after lifecycle shutdown stopped waiting."""
-    try:
-        lease = task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.warning("script_worker_backend_pending_acquire_failed", exc_info=True)
-        return
-    if lease is not None:
-        create_logged_task(
-            asyncio.to_thread(lease.release),
-            name="script_worker_backend_late_release",
-            failure_message="Late background script worker lease release failed",
-        )
+def _release_worker_lease_later(lease: _WorkerManagerLease) -> None:
+    """Release an acknowledged-cancelled delivery without blocking the event loop."""
+    create_logged_task(
+        asyncio.to_thread(lease.release),
+        name="script_worker_backend_late_release",
+        failure_message="Late background script worker lease release failed",
+    )
 
 
 def build_script_runtime(

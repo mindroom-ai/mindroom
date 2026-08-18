@@ -108,6 +108,16 @@ _TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
 @pytest.mark.asyncio
 async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
     """Worker proxy calls must not queue behind unrelated default-pool work."""

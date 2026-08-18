@@ -829,6 +829,103 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_published_worker_lease_handoff_releases_after_final_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after publication cannot strand the executor-owned lease delivery."""
+    workers_runtime_module._reset_primary_worker_manager()
+    runtime_paths = _runtime_paths(tmp_path)
+    lease_published = threading.Event()
+    release_provider = threading.Event()
+    manager_shutdown = threading.Event()
+
+    class _PublishedManager:
+        shutdown_calls = 0
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            manager_shutdown.set()
+
+    published_manager = _PublishedManager()
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("published-generation",),
+    )
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_build_primary_worker_manager",
+        lambda *_args, **_kwargs: cast("WorkerBackend", published_manager),
+    )
+
+    def lease_provider() -> workers_runtime_module.PrimaryWorkerManagerLease:
+        lease = workers_runtime_module.lease_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=runtime_paths.storage_root,
+        )
+        lease_published.set()
+        assert release_provider.wait(timeout=5)
+        return lease
+
+    manager = SimpleNamespace(
+        gateway_url="",
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=AsyncMock(),
+        cleanup_snapshot=AsyncMock(return_value=True),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lease_provider,
+        pass_timeout_seconds=0.01,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+
+    try:
+        await runtime.start()
+        assert await asyncio.to_thread(lease_published.wait, 1)
+        acquisition_task = runtime._pending_worker_lease_task
+        assert acquisition_task is not None
+
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        with workers_runtime_module._PRIMARY_WORKER_MANAGER_CONDITION:
+            assert workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY is None
+            assert len(workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES) == 1
+            assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES[0].active_leases == 1
+
+        await runtime.shutdown(timeout_seconds=0.01)
+        acquisition_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await acquisition_task
+        release_provider.set()
+
+        assert await asyncio.to_thread(manager_shutdown.wait, 1)
+        assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
+        assert published_manager.shutdown_calls == 1
+
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        assert published_manager.shutdown_calls == 1
+    finally:
+        release_provider.set()
+        with workers_runtime_module._PRIMARY_WORKER_MANAGER_CONDITION:
+            active_entry = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
+            if active_entry is not None:
+                active_entry.active_leases = 0
+            for retired_entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
+                retired_entry.active_leases = 0
+        workers_runtime_module._reset_primary_worker_manager()
+
+
+@pytest.mark.asyncio
 async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_path: Path) -> None:
     """Retired backend disposal remains off-loop and inside the reconciliation deadline."""
     runtime_paths = _runtime_paths(tmp_path)
