@@ -92,6 +92,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
+    reset_primary_worker_manager,
     shutdown_primary_worker_manager,
 )
 
@@ -2613,7 +2614,7 @@ async def main(
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
-        shutdown_primary_worker_manager(timeout_seconds=0.0)
+        reset_primary_worker_manager()
 
         # Configure logging before any background tasks or account setup begin.
         setup_logging(level=log_level, runtime_paths=runtime_paths)

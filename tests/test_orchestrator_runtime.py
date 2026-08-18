@@ -255,6 +255,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
@@ -656,6 +657,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
@@ -988,6 +990,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
@@ -997,7 +1000,8 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1013,6 +1017,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator") as mock_orchestrator_cls,
             patch(
                 "mindroom.orchestrator.shutdown_primary_worker_manager",
@@ -1026,7 +1031,8 @@ class TestAgentBot(AgentBotTestBase):
                 api=False,
             )
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator_cls.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1046,6 +1052,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
@@ -1056,7 +1063,8 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator.stop.assert_awaited_once()
 
 

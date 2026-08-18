@@ -9,7 +9,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Never, cast
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
@@ -34,6 +34,7 @@ __all__ = [
     "primary_worker_backend_available",
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
+    "reset_primary_worker_manager",
     "serialized_kubernetes_worker_config_snapshot",
     "serialized_kubernetes_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
@@ -98,6 +99,8 @@ class PrimaryWorkerManagerLease:
 _PRIMARY_WORKER_MANAGER_ENTRY: _WorkerManagerEntry | None = None
 _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES: list[_WorkerManagerEntry] = []
 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
+_PRIMARY_WORKER_MANAGER_EPOCH = 0
+_PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS = True
 
 
 def _stable_json_digest(payload: object) -> str:
@@ -449,57 +452,52 @@ def _drain_retired_entries_locked() -> list[WorkerBackend]:
     return ready_managers
 
 
-def _resolve_primary_worker_manager_entry(
-    runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-    storage_root: Path | None,
-    acquire_lease: bool,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
-    kubernetes_config_snapshot: dict[str, object] | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
-) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None]:
-    global _PRIMARY_WORKER_MANAGER_ENTRY
+def _require_primary_worker_manager_epoch_locked(acquisition_epoch: int) -> None:
+    if acquisition_epoch != _PRIMARY_WORKER_MANAGER_EPOCH or not _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+        msg = "Primary worker manager runtime shut down during acquisition."
+        raise WorkerBackendError(msg)
 
-    config_signature = _primary_worker_backend_config_signature(
-        runtime_paths,
-        proxy_url=proxy_url,
-        proxy_token=proxy_token,
-        storage_root=storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
-    )
+
+def _capture_primary_worker_manager_epoch() -> int:
+    with _PRIMARY_WORKER_MANAGER_CONDITION:
+        if not _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+            msg = "Primary worker manager runtime has shut down."
+            raise WorkerBackendError(msg)
+        return _PRIMARY_WORKER_MANAGER_EPOCH
+
+
+def _reserve_primary_worker_manager_build(
+    config_signature: tuple[str, ...],
+    *,
+    acquisition_epoch: int,
+    acquire_lease: bool,
+) -> _WorkerManagerEntry | None:
     with _PRIMARY_WORKER_MANAGER_CONDITION:
         while True:
+            _require_primary_worker_manager_epoch_locked(acquisition_epoch)
             active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
             if active_entry is not None and active_entry.config_signature == config_signature:
                 if acquire_lease:
                     active_entry.active_leases += 1
-                return active_entry, [], None
+                return active_entry
             if config_signature not in _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES:
                 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.add(config_signature)
-                break
+                return None
             _PRIMARY_WORKER_MANAGER_CONDITION.wait()
 
-    try:
-        built_manager = _build_primary_worker_manager(
-            runtime_paths,
-            proxy_url=proxy_url,
-            proxy_token=proxy_token,
-            storage_root=storage_root,
-            kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-            kubernetes_config_snapshot=kubernetes_config_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
-        )
-    except Exception:
-        with _PRIMARY_WORKER_MANAGER_CONDITION:
-            _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
-            _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-        raise
+
+def _publish_primary_worker_manager_build(
+    built_manager: WorkerBackend,
+    config_signature: tuple[str, ...],
+    *,
+    acquisition_epoch: int,
+    acquire_lease: bool,
+) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None] | None:
+    global _PRIMARY_WORKER_MANAGER_ENTRY
 
     with _PRIMARY_WORKER_MANAGER_CONDITION:
+        if acquisition_epoch != _PRIMARY_WORKER_MANAGER_EPOCH or not _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+            return None
         _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
         active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         if active_entry is not None and active_entry.config_signature == config_signature:
@@ -519,6 +517,82 @@ def _resolve_primary_worker_manager_entry(
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
         return new_entry, managers_to_shutdown, None
+
+
+def _dispose_fenced_primary_worker_manager(
+    built_manager: WorkerBackend,
+    config_signature: tuple[str, ...],
+) -> Never:
+    try:
+        shutdown_failure = _shutdown_worker_manager_now(
+            built_manager,
+            suppress_errors=False,
+            log_message="Failed to shut down fenced primary worker manager",
+        )
+    finally:
+        with _PRIMARY_WORKER_MANAGER_CONDITION:
+            _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
+            _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
+    message = "Primary worker manager runtime shut down during construction."
+    if shutdown_failure is not None:
+        message = f"{message} Manager disposal failed: {shutdown_failure}"
+    raise WorkerBackendError(message)
+
+
+def _resolve_primary_worker_manager_entry(
+    runtime_paths: RuntimePaths,
+    *,
+    proxy_url: str | None,
+    proxy_token: str | None,
+    storage_root: Path | None,
+    acquire_lease: bool,
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    kubernetes_config_snapshot: dict[str, object] | None = None,
+    worker_grantable_credentials: frozenset[str] | None = None,
+) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None]:
+    acquisition_epoch = _capture_primary_worker_manager_epoch()
+    config_signature = _primary_worker_backend_config_signature(
+        runtime_paths,
+        proxy_url=proxy_url,
+        proxy_token=proxy_token,
+        storage_root=storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=kubernetes_config_snapshot,
+        worker_grantable_credentials=worker_grantable_credentials,
+    )
+    active_entry = _reserve_primary_worker_manager_build(
+        config_signature,
+        acquisition_epoch=acquisition_epoch,
+        acquire_lease=acquire_lease,
+    )
+    if active_entry is not None:
+        return active_entry, [], None
+
+    try:
+        built_manager = _build_primary_worker_manager(
+            runtime_paths,
+            proxy_url=proxy_url,
+            proxy_token=proxy_token,
+            storage_root=storage_root,
+            kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+            kubernetes_config_snapshot=kubernetes_config_snapshot,
+            worker_grantable_credentials=worker_grantable_credentials,
+        )
+    except Exception:
+        with _PRIMARY_WORKER_MANAGER_CONDITION:
+            _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
+            _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
+        raise
+
+    published = _publish_primary_worker_manager_build(
+        built_manager,
+        config_signature,
+        acquisition_epoch=acquisition_epoch,
+        acquire_lease=acquire_lease,
+    )
+    if published is not None:
+        return published
+    _dispose_fenced_primary_worker_manager(built_manager, config_signature)
 
 
 def _release_primary_worker_manager_entry(entry: _WorkerManagerEntry) -> None:
@@ -606,10 +680,17 @@ def shutdown_primary_worker_manager(
     timeout_seconds: float = _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS,
 ) -> None:
     """Drain and shut down the cached primary worker manager from a real shutdown path."""
+    global _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS
     global _PRIMARY_WORKER_MANAGER_ENTRY
+    global _PRIMARY_WORKER_MANAGER_EPOCH
 
     deadline = time.monotonic() + max(timeout_seconds, 0.0)
     failures: list[str] = []
+
+    with _PRIMARY_WORKER_MANAGER_CONDITION:
+        _PRIMARY_WORKER_MANAGER_EPOCH += 1
+        _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS = False
+        _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
 
     while True:
         with _PRIMARY_WORKER_MANAGER_CONDITION:
@@ -654,6 +735,18 @@ def shutdown_primary_worker_manager(
         raise WorkerBackendError(msg)
 
 
+def reset_primary_worker_manager() -> None:
+    """Drain stale managers and establish a fresh in-process startup epoch."""
+    global _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS
+    global _PRIMARY_WORKER_MANAGER_EPOCH
+
+    shutdown_primary_worker_manager(timeout_seconds=0.0)
+    with _PRIMARY_WORKER_MANAGER_CONDITION:
+        _PRIMARY_WORKER_MANAGER_EPOCH += 1
+        _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS = True
+        _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
+
+
 def _reset_primary_worker_manager() -> None:
     """Reset the cached primary worker manager. Intended for tests."""
-    shutdown_primary_worker_manager(timeout_seconds=0.0)
+    reset_primary_worker_manager()

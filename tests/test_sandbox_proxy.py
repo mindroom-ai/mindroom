@@ -3492,6 +3492,52 @@ def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
+def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Final shutdown rejects new builds until an explicit process reset establishes a new epoch."""
+    workers_runtime_module._reset_primary_worker_manager()
+
+    class _FakeWorkerManager:
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("reset-generation",),
+    )
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_build_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeWorkerManager(),
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    try:
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        with pytest.raises(WorkerBackendError, match="shut down"):
+            workers_runtime_module.get_primary_worker_manager(
+                runtime_paths,
+                proxy_url=None,
+                proxy_token=None,
+                storage_root=tmp_path,
+            )
+
+        workers_runtime_module._reset_primary_worker_manager()
+        manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=tmp_path,
+        )
+
+        assert isinstance(manager, _FakeWorkerManager)
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
 def test_docker_worker_manager_retains_obsolete_generation_until_final_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

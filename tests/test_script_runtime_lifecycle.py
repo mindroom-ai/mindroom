@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mindroom.workers.runtime as workers_runtime_module
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.workers.backend import WorkerBackend
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -736,6 +739,93 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
 
     assert calls == 1
     assert runtime._worker_backend_for(None) is lease.manager
+
+
+@pytest.mark.asyncio
+async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Final shutdown fences a provider thread even after its asyncio owner is cancelled."""
+    workers_runtime_module._reset_primary_worker_manager()
+    runtime_paths = _runtime_paths(tmp_path)
+    build_started = threading.Event()
+    release_build = threading.Event()
+    manager_shutdown = threading.Event()
+
+    class _LateManager:
+        shutdown_calls = 0
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            manager_shutdown.set()
+
+    late_manager = _LateManager()
+
+    def build_manager(*_args: object, **_kwargs: object) -> WorkerBackend:
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        return cast("WorkerBackend", late_manager)
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("late-generation",),
+    )
+    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+    manager = SimpleNamespace(
+        gateway_url="",
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=AsyncMock(),
+        cleanup_snapshot=AsyncMock(return_value=True),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: workers_runtime_module.lease_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=runtime_paths.storage_root,
+        ),
+        pass_timeout_seconds=0.01,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+
+    try:
+        await runtime.start()
+        assert await asyncio.to_thread(build_started.wait, 1)
+        acquisition_task = runtime._pending_worker_lease_task
+        assert acquisition_task is not None
+        await runtime.shutdown(timeout_seconds=0.01)
+        acquisition_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await acquisition_task
+
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        release_build.set()
+
+        assert await asyncio.to_thread(manager_shutdown.wait, 1)
+        assert workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY is None
+        assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
+        assert late_manager.shutdown_calls == 1
+
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        assert late_manager.shutdown_calls == 1
+    finally:
+        release_build.set()
+        with workers_runtime_module._PRIMARY_WORKER_MANAGER_CONDITION:
+            active_entry = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
+            if active_entry is not None:
+                active_entry.active_leases = 0
+            for retired_entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
+                retired_entry.active_leases = 0
+        workers_runtime_module._reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio
