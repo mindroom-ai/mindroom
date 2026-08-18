@@ -575,10 +575,11 @@ def app_runner_token(app: FastAPI) -> str | None:
     return runner_token
 
 
-async def _validate_runner_token(
+async def validate_runner_token(
     request: Request,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> None:
+    """Reject requests that do not carry the configured runner token."""
     proxy_token = app_runner_token(request.app)
     if proxy_token is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
@@ -589,7 +590,7 @@ async def _validate_runner_token(
 router = APIRouter(
     prefix="/api/sandbox-runner",
     tags=["sandbox-runner"],
-    dependencies=[Depends(_validate_runner_token)],
+    dependencies=[Depends(validate_runner_token)],
 )
 
 

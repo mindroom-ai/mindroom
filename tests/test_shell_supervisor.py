@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -147,6 +148,71 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
         assert "Force-killed" in kill_result
 
         assert "FINISHED" in await _wait_for_finished(socket_path, handle)
+
+
+@pytest.mark.asyncio
+async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
+    """The private shim must narrow the child environment and clean its raw token."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text(
+        "import os\nprint(os.environ.get('MINDROOM_CONTROL_STATE_PATH', 'absent'), flush=True)\n",
+        encoding="utf-8",
+    )
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_CONTROL_STATE_PATH": str(tmp_path / "primary-control"),
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+    registry: dict[str, ProcessRecord] = {}
+
+    result = await run_command(
+        registry,
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message == "absent"
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_removes_capability_file_when_source_validation_fails(tmp_path: Path) -> None:
+    """A rejected launch must not strand its raw capability token on disk."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": "0" * 64,
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
 
 
 @pytest.mark.asyncio

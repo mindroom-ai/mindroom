@@ -1182,7 +1182,20 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.sandbox_runner_app"
-depends_on = ["mindroom.api.sandbox_runner"]
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_runner_scripts",
+]
+
+[[modules]]
+path = "mindroom.api.sandbox_runner_scripts"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_worker_prep",
+    "mindroom.constants",
+    "mindroom.shell_supervisor",
+]
 
 [[modules]]
 path = "mindroom.api.sandbox_worker_prep"
@@ -1195,6 +1208,14 @@ depends_on = [
     "mindroom.workers.backends.local",
     "mindroom.workers.models",
 ]
+
+[[modules]]
+path = "mindroom.script_runs.shim"
+depends_on = []
+
+[[modules]]
+path = "mindroom.script_runs.worker_client"
+depends_on = ["mindroom.workers.models"]
 
 [[modules]]
 path = "mindroom.api.schedules"

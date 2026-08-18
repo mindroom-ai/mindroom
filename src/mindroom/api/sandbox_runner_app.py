@@ -15,6 +15,7 @@ from mindroom.api.sandbox_runner import (
     startup_runner_token_from_env,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
+from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.workers.compatibility import worker_health_payload
 
 
@@ -39,6 +40,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="MindRoom Sandbox Runner", lifespan=_lifespan)
 app.include_router(sandbox_runner_router)
+app.include_router(sandbox_runner_scripts_router)
 
 
 @app.get("/healthz")
