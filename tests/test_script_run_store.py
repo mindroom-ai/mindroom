@@ -280,6 +280,20 @@ def test_run_store_rejects_terminal_run_transition(runtime_paths: RuntimePaths) 
         store.transition_run("run-1", state=ScriptRunState.RUNNING)
 
 
+def test_run_store_rejects_running_transition_after_cancellation_intent(runtime_paths: RuntimePaths) -> None:
+    """The durable cancellation barrier cannot be overwritten by a racing launcher."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.request_cancel("run-1", reason="stop before publication")
+
+    with pytest.raises(ScriptRunStoreError, match="cancellation"):
+        store.transition_run("run-1", state=ScriptRunState.RUNNING)
+
+    run = store.get_run("run-1")
+    assert run.state is ScriptRunState.STARTING
+    assert run.cancel_requested_at is not None
+
+
 def test_run_store_publishes_one_bounded_terminal_receipt(runtime_paths: RuntimePaths) -> None:
     """A claimed call retains its one terminal result for duplicate polling."""
     store = ScriptRunStore(runtime_paths)

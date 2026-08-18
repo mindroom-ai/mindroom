@@ -137,6 +137,7 @@ async def run_command(
     tail: int,
     timeout: float,  # noqa: ASYNC109
     handle: str | None = None,
+    handle_reservations: set[str] | None = None,
 ) -> _RunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -150,9 +151,40 @@ async def run_command(
     if handle is not None:
         if _CALLER_HANDLE_RE.fullmatch(handle) is None:
             return _RunResult(message="Error: Invalid caller-supplied shell handle.")
-        if handle in registry:
+        if handle in registry or (handle_reservations is not None and handle in handle_reservations):
             return _RunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+        if handle_reservations is None:
+            return _RunResult(message="Error: Caller-supplied shell handle reservations are unavailable.")
+        handle_reservations.add(handle)
 
+    try:
+        return await _run_command_after_reservation(
+            registry,
+            namespace=namespace,
+            argv=argv,
+            env=env,
+            cwd=cwd,
+            tail=tail,
+            timeout=timeout,
+            handle=handle,
+        )
+    finally:
+        if handle is not None and handle_reservations is not None:
+            handle_reservations.discard(handle)
+
+
+async def _run_command_after_reservation(
+    registry: dict[str, ProcessRecord],
+    *,
+    namespace: str,
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    tail: int,
+    timeout: float,  # noqa: ASYNC109
+    handle: str | None,
+) -> _RunResult:
+    """Spawn one command after any caller-supplied handle is reserved."""
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,

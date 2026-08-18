@@ -47,7 +47,11 @@ _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
-    server = await asyncio.start_unix_server(partial(_handle_connection, registry), path=socket_path)
+    handle_reservations: set[str] = set()
+    server = await asyncio.start_unix_server(
+        partial(_handle_connection, registry, handle_reservations),
+        path=socket_path,
+    )
     try:
         yield socket_path
     finally:
@@ -450,6 +454,59 @@ async def test_caller_supplied_handle_is_registered_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_caller_handle_is_reserved_before_process_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent use of one durable handle starts exactly one real child process."""
+    registry: dict[str, ProcessRecord] = {}
+    requested_handle = f"shell:{'b' * 32}"
+    original_spawn = asyncio.create_subprocess_exec
+    first_spawned = asyncio.Event()
+    duplicate_spawned = asyncio.Event()
+    release_first_spawn = asyncio.Event()
+    spawn_count = 0
+
+    async def controlled_spawn(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal spawn_count
+        process = await original_spawn(*args, **kwargs)
+        spawn_count += 1
+        if spawn_count == 1:
+            first_spawned.set()
+            await release_first_spawn.wait()
+        else:
+            duplicate_spawned.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", controlled_spawn)
+    async with _running_server(registry) as socket_path:
+        first_task = asyncio.create_task(
+            _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle),
+        )
+        await first_spawned.wait()
+        second_task = asyncio.create_task(
+            _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle),
+        )
+        duplicate_waiter = asyncio.create_task(duplicate_spawned.wait())
+        done, _pending = await asyncio.wait(
+            {second_task, duplicate_waiter},
+            timeout=2,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert done
+        release_first_spawn.set()
+        first, second = await asyncio.gather(first_task, second_task)
+        duplicate_waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await duplicate_waiter
+        try:
+            assert spawn_count == 1
+            assert sum("Handle:" in result for result in (first, second)) == 1
+            assert sum("already registered" in result for result in (first, second)) == 1
+        finally:
+            await _kill(socket_path, requested_handle, force=True)
+
+
+@pytest.mark.asyncio
 async def test_caller_supplied_handle_requires_full_random_identifier() -> None:
     """Short or malformed caller handles are rejected before process registration."""
     registry: dict[str, ProcessRecord] = {}
@@ -543,7 +600,7 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         "timeout": 0,
     }
 
-    message = await shell_supervisor._handle_run(registry, payload, eof_reader)
+    message = await shell_supervisor._handle_run(registry, set(), payload, eof_reader)
 
     assert message is None
     assert registry == {}

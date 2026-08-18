@@ -76,6 +76,7 @@ class ShellSupervisorStartupError(RuntimeError):
 
 async def _handle_run(
     registry: dict[str, ProcessRecord],
+    handle_reservations: set[str],
     payload: dict[str, object],
     reader: asyncio.StreamReader,
 ) -> str | None:
@@ -99,6 +100,7 @@ async def _handle_run(
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
             timeout=float(payload["timeout"]),  # ty: ignore[invalid-argument-type]
             handle=handle_payload,
+            handle_reservations=handle_reservations,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -127,6 +129,7 @@ async def _handle_run(
 
 async def _handle_connection(
     registry: dict[str, ProcessRecord],
+    handle_reservations: set[str],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -137,7 +140,7 @@ async def _handle_connection(
         payload = json.loads(line)
         op = payload.get("op")
         if op == "run":
-            message = await _handle_run(registry, payload, reader)
+            message = await _handle_run(registry, handle_reservations, payload, reader)
             if message is None:
                 return
         elif op == "check":
@@ -167,12 +170,13 @@ async def _handle_connection(
 
 async def _serve(socket_path: str) -> int:
     registry: dict[str, ProcessRecord] = {}
+    handle_reservations: set[str] = set()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry),
+        partial(_handle_connection, registry, handle_reservations),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )

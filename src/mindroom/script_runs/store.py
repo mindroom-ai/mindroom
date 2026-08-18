@@ -378,6 +378,9 @@ class ScriptRunStore:
             if row is None:
                 raise ScriptRunNotFoundError(run_id)
             run = _run_from_row(row)
+            if state is ScriptRunState.RUNNING and run.cancel_requested_at is not None:
+                msg = f"Script run '{run_id}' cannot enter running after cancellation was requested."
+                raise ScriptRunStoreError(msg)
             if state is not run.state and state not in _RUN_TRANSITIONS[run.state]:
                 msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
                 raise ScriptRunStoreError(msg)
