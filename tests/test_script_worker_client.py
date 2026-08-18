@@ -121,6 +121,7 @@ async def test_script_worker_client_exposes_unknown_handle_as_status() -> None:
     ("response", "expected_kind"),
     [
         (httpx.Response(400, json={"detail": "invalid source"}), "tool"),
+        (httpx.Response(413, json={"detail": "request too large"}), "tool"),
         (httpx.Response(503, json={"detail": "supervisor unavailable"}), "worker"),
         (httpx.Response(200, json={"ok": False, "error": "launch failed", "failure_kind": "worker"}), "worker"),
     ],

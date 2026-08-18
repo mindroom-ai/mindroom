@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from mindroom import shell_supervisor as shell_supervisor_module
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -20,7 +23,7 @@ from mindroom.shell_supervisor import _ShellSupervisorManager
 from mindroom.workers.backends import local as local_workers_module
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
 
 _TOKEN = "worker-secret"  # noqa: S105
 _HEADERS = {"x-mindroom-sandbox-token": _TOKEN}
@@ -197,6 +200,68 @@ def test_worker_script_endpoint_rejects_oversized_request(
     assert response.status_code == 413
 
 
+@pytest.mark.asyncio
+async def test_worker_script_endpoint_stops_reading_chunked_body_over_limit(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """The body boundary must stop receiving chunks as soon as the limit is crossed."""
+    _client, _workspace = runner_client
+    consumed_chunks: list[int] = []
+
+    async def oversized_body() -> AsyncIterator[bytes]:
+        for index in range(3):
+            consumed_chunks.append(index)
+            yield b"x" * 9000
+
+    transport = httpx.ASGITransport(app=sandbox_runner_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        response = await async_client.post(
+            "/api/sandbox-runner/scripts/run",
+            headers=_HEADERS,
+            content=oversized_body(),
+        )
+
+    assert consumed_chunks == [0, 1]
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_worker_script_endpoint_replays_valid_chunked_body_for_model_validation(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A bounded streamed body must remain available to FastAPI's Pydantic parser."""
+    client, workspace = runner_client
+    run_id = "run-streamed"
+    raw_body = json.dumps(
+        _run_payload(
+            workspace,
+            run_id=run_id,
+            source="import time\ntime.sleep(60)\n",
+        ),
+    ).encode()
+
+    async def chunked_body() -> AsyncIterator[bytes]:
+        midpoint = len(raw_body) // 2
+        yield raw_body[:midpoint]
+        yield raw_body[midpoint:]
+
+    transport = httpx.ASGITransport(app=sandbox_runner_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        response = await async_client.post(
+            "/api/sandbox-runner/scripts/run",
+            headers={**_HEADERS, "content-type": "application/json"},
+            content=chunked_body(),
+        )
+
+    assert response.status_code == 200
+    handle = response.json()["supervisor_handle"]
+    client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/cancel",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY, "supervisor_handle": handle, "force": True},
+    )
+
+
 def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path: Path) -> None:
     """A worker-scoped auth endpoint must not control a sibling worker namespace."""
     config_path = tmp_path / "config.yaml"
@@ -266,6 +331,39 @@ def test_worker_script_status_is_bound_to_run_namespace(
             headers=_HEADERS,
             json={"worker_key": _WORKER_KEY, "supervisor_handle": handle, "force": True},
         )
+
+
+def test_script_namespace_distinguishes_delimiter_ambiguous_identities() -> None:
+    """Worker and run boundaries must not depend on ambiguous delimiter concatenation."""
+    assert _script_namespace("a:b", "c") != _script_namespace("a", "b:c")
+
+
+def test_worker_script_launch_rejects_path_like_run_id(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """The entire launch run ID must match the filesystem-safe identifier grammar."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id="run-safe", source="print('no')\n")
+    payload["run_id"] = "run-safe/child"
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 422
+
+
+def test_worker_script_cancel_rejects_handle_with_valid_prefix(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A supervisor handle prefix must not authorize a different full handle string."""
+    client, _workspace = runner_client
+
+    response = client.post(
+        "/api/sandbox-runner/scripts/run-safe/cancel",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY, "supervisor_handle": "shell:1234abcd-suffix"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_worker_script_endpoints_use_runner_authentication(

@@ -197,7 +197,7 @@ class ScriptWorkerClient:
             raise ScriptWorkerError(message, failure_kind="worker") from exc
         if response.status_code >= 400:
             detail = _response_error(response)
-            request_failure = response.status_code in {400, 422}
+            request_failure = response.status_code in {400, 413, 422}
             raise ScriptWorkerError(detail, failure_kind="tool" if request_failure else "worker")
         try:
             decoded = response.json()

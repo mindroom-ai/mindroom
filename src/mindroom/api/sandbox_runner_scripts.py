@@ -8,11 +8,12 @@ import re
 import secrets
 import stat
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from fastapi.routing import APIRoute
+from pydantic import AfterValidator, BaseModel, Field
 
 from mindroom.api import sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
@@ -24,6 +25,13 @@ from mindroom.shell_supervisor import (
     kill_command_via_supervisor,
     run_command_via_supervisor,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from typing import Any
+
+    from starlette.responses import Response
+    from starlette.types import Message
 
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_SOURCE_BYTES = 128 * 1024
@@ -48,7 +56,7 @@ __all__ = [
 ]
 
 
-async def _validate_script_request_size(request: Request) -> None:
+async def _bounded_replay_request(request: Request) -> Request:
     raw_length = request.headers.get("content-length")
     if raw_length is not None:
         try:
@@ -59,21 +67,70 @@ async def _validate_script_request_size(request: Request) -> None:
             raise HTTPException(status_code=400, detail="Invalid Content-Length header.")
         if content_length > _MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Script worker request is too large.")
-    if len(await request.body()) > _MAX_REQUEST_BYTES:
-        raise HTTPException(status_code=413, detail="Script worker request is too large.")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > _MAX_REQUEST_BYTES - len(body):
+            raise HTTPException(status_code=413, detail="Script worker request is too large.")
+        body.extend(chunk)
+
+    original_receive = request.receive
+    replayed = False
+
+    async def replay_receive() -> Message:
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+        return await original_receive()
+
+    return Request(request.scope, replay_receive)
+
+
+class _BoundedScriptRoute(APIRoute):
+    """Bound POST bodies before FastAPI performs its normal model parsing."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        route_handler = super().get_route_handler()
+
+        async def bounded_route_handler(request: Request) -> Response:
+            if request.method == "POST":
+                request = await _bounded_replay_request(request)
+            return await route_handler(request)
+
+        return bounded_route_handler
+
+
+def _validate_run_id(value: str) -> str:
+    if re.fullmatch(_RUN_ID_PATTERN, value) is None:
+        message = "Script run ID contains unsupported characters."
+        raise ValueError(message)
+    return value
+
+
+def _validate_supervisor_handle(value: str) -> str:
+    if _HANDLE_RE.fullmatch(value) is None:
+        message = "Invalid script supervisor handle."
+        raise ValueError(message)
+    return value
+
+
+_RunId = Annotated[str, AfterValidator(_validate_run_id)]
+_SupervisorHandle = Annotated[str, AfterValidator(_validate_supervisor_handle)]
 
 
 router = APIRouter(
     prefix="/api/sandbox-runner/scripts",
     tags=["sandbox-runner"],
-    dependencies=[Depends(validate_runner_token), Depends(_validate_script_request_size)],
+    dependencies=[Depends(validate_runner_token)],
+    route_class=_BoundedScriptRoute,
 )
 
 
 class SandboxScriptRunRequest(BaseModel):
     """Validated launch description for one already-snapshotted script."""
 
-    run_id: str = Field(min_length=1, max_length=128, pattern=_RUN_ID_PATTERN)
+    run_id: _RunId
     worker_key: str = Field(min_length=1, max_length=1024)
     source_path: str = Field(min_length=1, max_length=1024)
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
@@ -87,7 +144,7 @@ class SandboxScriptControlRequest(BaseModel):
     """Worker identity and supervisor handle for status-changing operations."""
 
     worker_key: str = Field(min_length=1, max_length=1024)
-    supervisor_handle: str = Field(pattern=_HANDLE_PATTERN)
+    supervisor_handle: _SupervisorHandle
     force: bool = False
 
 
@@ -123,7 +180,7 @@ class SandboxScriptCancelResponse(BaseModel):
 
 
 def _script_namespace(worker_key: str, run_id: str) -> str:
-    return f"script:{worker_key}:{run_id}"
+    return f"script:{len(worker_key)}:{worker_key}:{run_id}"
 
 
 def _normalized_worker_key(request: Request, worker_key: str) -> str:
@@ -299,13 +356,11 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
 @router.get("/{run_id}", response_model=SandboxScriptStatusResponse)
 async def status_script_in_worker(
     request: Request,
-    run_id: Annotated[str, Field(pattern=_RUN_ID_PATTERN)],
+    run_id: _RunId,
     worker_key: Annotated[str, Query(min_length=1, max_length=1024)],
-    supervisor_handle: Annotated[str, Query(pattern=_HANDLE_PATTERN)],
+    supervisor_handle: Annotated[_SupervisorHandle, Query()],
 ) -> SandboxScriptStatusResponse:
     """Poll one namespaced supervisor handle without owning lifecycle state."""
-    if _HANDLE_RE.fullmatch(supervisor_handle) is None:
-        raise HTTPException(status_code=400, detail="Invalid script supervisor handle.")
     normalized_worker_key = _normalized_worker_key(request, worker_key)
     socket_path = ensure_shell_supervisor()
     message = await asyncio.to_thread(
@@ -320,7 +375,7 @@ async def status_script_in_worker(
 @router.post("/{run_id}/cancel", response_model=SandboxScriptCancelResponse)
 async def cancel_script_in_worker(
     request: Request,
-    run_id: Annotated[str, Field(pattern=_RUN_ID_PATTERN)],
+    run_id: _RunId,
     payload: SandboxScriptControlRequest,
 ) -> SandboxScriptCancelResponse:
     """Signal one namespaced supervisor handle without changing durable desired state."""
