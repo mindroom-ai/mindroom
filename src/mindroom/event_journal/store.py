@@ -1010,6 +1010,7 @@ class PrincipalStore:
         run_id: str,
         session_id: str,
         calls: tuple[ApprovalCall, ...],
+        staged_presentation: dict[str, object],
     ) -> ApprovalContinuation | None:
         """Stage the next exact Agno pause behind its publication lease."""
         return await self._backend.write(
@@ -1021,6 +1022,7 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+                staged_presentation=staged_presentation,
             ),
         )
 
@@ -1029,10 +1031,7 @@ class PrincipalStore:
         approval_id: str,
         *,
         expected_generation: int,
-        response_text: str,
         visible_response_text: str,
-        response_tool_trace: tuple[dict[str, object], ...],
-        response_presentation_state: dict[str, object],
     ) -> ApprovalContinuation | None:
         """Commit the exact body and renderer state acknowledged for one generation."""
         return await self._backend.write(
@@ -1041,10 +1040,7 @@ class PrincipalStore:
                 self._principal_id,
                 approval_id=approval_id,
                 expected_generation=expected_generation,
-                response_text=response_text,
                 visible_response_text=visible_response_text,
-                response_tool_trace=response_tool_trace,
-                response_presentation_state=response_presentation_state,
             ),
         )
 

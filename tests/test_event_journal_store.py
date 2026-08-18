@@ -5930,6 +5930,23 @@ class TestApprovalContinuations:
                 expires_at_ns=time.time_ns() + 60_000_000_000,
             ),
         )
+        staged_presentation = {
+            "version": 1,
+            "delivery_id": "approval-presentation:approval-1:1",
+            "delivery_text": "Visible before write.",
+            "response_text": "Before.\n\n🔧 `write_file` [2] ⏳",
+            "response_tool_trace": [
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "write_file",
+                    "tool_call_id": "call-2",
+                },
+            ],
+            "response_presentation_state": {"kind": "team", "consensus": "Before."},
+            "visible_tool_trace": [],
+            "stream_status": "approval_pending",
+            "tools": [{"tool_call_id": "call-2", "tool_name": "write_file", "tool_args": {}}],
+        }
 
         stale = await alice.advance_approval_continuation(
             "approval-1",
@@ -5937,6 +5954,7 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            staged_presentation=staged_presentation,
         )
         advanced = await alice.advance_approval_continuation(
             "approval-1",
@@ -5944,6 +5962,7 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            staged_presentation=staged_presentation,
         )
 
         assert stale is None
@@ -5954,6 +5973,7 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
+        assert advanced.staged_presentation == staged_presentation
         assert advanced.response_text == ""
         assert (
             await alice.activate_approval_continuation(
@@ -5966,16 +5986,7 @@ class TestApprovalContinuations:
         committed = await alice.commit_approval_continuation_presentation(
             "approval-1",
             expected_generation=1,
-            response_text="Before.\n\n🔧 `write_file` [2] ⏳",
             visible_response_text="Visible before write.",
-            response_tool_trace=(
-                {
-                    "type": "tool_call_started",
-                    "tool_name": "write_file",
-                    "tool_call_id": "call-2",
-                },
-            ),
-            response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
         assert committed is not None
@@ -5984,6 +5995,14 @@ class TestApprovalContinuations:
         assert committed.visible_response_text == "Visible before write."
         assert committed.response_tool_trace[-1]["tool_call_id"] == "call-2"
         assert committed.response_presentation_state == {"kind": "team", "consensus": "Before."}
+        assert committed.staged_presentation == staged_presentation
+
+        activated = await alice.activate_approval_continuation(
+            "approval-1",
+            expected_generation=1,
+        )
+        assert activated is not None
+        assert activated.staged_presentation is None
 
     async def test_every_card_is_reserved_before_publication_activates(
         self,

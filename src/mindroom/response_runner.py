@@ -843,7 +843,6 @@ class ResponseRunner:
                 paused,
                 identified_tools,
                 entity_kind=entity_kind,
-                coordinator_name=self.deps.agent_name,
             )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
@@ -2102,7 +2101,7 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def _recover_nonready_approval(
+    async def _recover_nonready_approval(  # noqa: PLR0911
         self,
         owned: ApprovalContinuation,
         *,
@@ -2111,6 +2110,20 @@ class ResponseRunner:
         """Recover a non-ready owner, leaving ready execution to the caller."""
         if owned.state == "waiting":
             if owned.runtime_generation is not None:
+                if owned.staged_presentation is not None:
+                    try:
+                        recovered = await self._approval_responses.recover_staged_pause(
+                            owned,
+                            target=target,
+                        )
+                    except Exception:
+                        self.deps.logger.exception(
+                            "approval_staged_presentation_recovery_failed",
+                            approval_id=owned.approval_id,
+                            generation=owned.generation,
+                        )
+                        return True, None
+                    return True, recovered.response_event_id
                 reason = "Tool approval card publication was interrupted and denied safely."
                 failing = await self._approval_responses.request_failure(owned, reason)
                 if failing is not None:
@@ -3335,6 +3348,7 @@ class ResponseRunner:
                                     else None,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
+                                    show_tool_calls=show_tool_calls,
                                     turn_recorder=team_turn_recorder,
                                 )
 

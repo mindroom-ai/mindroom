@@ -733,10 +733,23 @@ def deserialize_tool_trace(
     """Restore a trace snapshot while rejecting malformed event records."""
     restored: list[ToolTraceEntry] = []
     seen_ids: set[str] = set()
+    allowed_keys = {
+        "type",
+        "tool_name",
+        "args_preview",
+        "result_preview",
+        "truncated",
+        "tool_call_id",
+        "scope_key",
+    }
     for event in stored:
         event_type = event.get("type")
         tool_name = event.get("tool_name")
-        if event_type not in {"tool_call_started", "tool_call_completed"} or not isinstance(tool_name, str):
+        if (
+            event_type not in {"tool_call_started", "tool_call_completed"}
+            or not isinstance(tool_name, str)
+            or (strict and not tool_name.strip())
+        ):
             if strict:
                 msg = "Continuation durable tool trace contains a malformed event"
                 raise RuntimeError(msg)
@@ -745,6 +758,15 @@ def deserialize_tool_trace(
         result_preview = event.get("result_preview")
         tool_call_id = event.get("tool_call_id")
         scope_key = event.get("scope_key")
+        if strict and (
+            not set(event).issubset(allowed_keys)
+            or ("args_preview" in event and not isinstance(args_preview, str))
+            or ("result_preview" in event and not isinstance(result_preview, str))
+            or ("truncated" in event and not isinstance(event.get("truncated"), bool))
+            or ("scope_key" in event and (not isinstance(scope_key, str) or not scope_key.strip()))
+        ):
+            msg = "Continuation durable tool trace contains a malformed event"
+            raise RuntimeError(msg)
         stable_id = tool_call_id.strip() if isinstance(tool_call_id, str) else ""
         if strict and (not stable_id or stable_id in seen_ids):
             msg = "Continuation durable tool trace has missing or duplicate stable identity"

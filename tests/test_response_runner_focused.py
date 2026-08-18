@@ -1772,13 +1772,37 @@ def test_initial_nonstreaming_pause_builds_private_durable_tool_identity() -> No
         paused,
         identified,
         entity_kind="agent",
-        coordinator_name="general",
     )
 
     assert [(entry.tool_call_id, entry.scope_key, entry.type) for entry in trace] == [
         ("call-1", None, "tool_call_started"),
     ]
     assert paused.tool_trace == ()
+
+
+def test_initial_team_pause_scopes_private_tool_identity_by_stable_member_id() -> None:
+    """A member's display label never becomes its durable tool ownership key."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "member-a"
+    requirement.member_agent_name = "Same"
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(requirement,),
+    )
+    identified = approval_response.identify_approval_tools(paused, default_agent_name="team")
+
+    trace = approval_response.durable_pause_tool_trace(
+        paused,
+        identified,
+        entity_kind="team",
+    )
+
+    assert [(entry.tool_call_id, entry.scope_key) for entry in trace] == [
+        ("call-1", "agent:member-a"),
+    ]
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
@@ -2835,6 +2859,95 @@ async def test_automatic_chained_pause_is_not_claimable_before_its_edit_commits(
     assert ready.runtime_generation is None
     assert ready.presentation_generation == 1
     assert ready.response_text == paused.response_text
+
+
+@pytest.mark.asyncio
+async def test_chained_pause_recovers_acknowledged_edit_after_crash_before_presentation_commit(
+    tmp_path: Path,
+) -> None:
+    """Restart reuses the frozen generation edit and promotes its exact acknowledged body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-chain-crash",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    current = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert current is not None
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-2",
+        tools=(ToolExecution(tool_call_id="call-1", tool_name="automatic", tool_args={}),),
+        response_text="Raw renderer body.",
+        response_presentation_state={"kind": "agent_stream", "version": 1, "response_text": "Raw renderer body."},
+    )
+    acknowledged_body = "Exact wire body after formatting."
+    first_edit = AsyncMock(
+        return_value=TextDeliveryOutcome(event_id="$waiting", visible_body=acknowledged_body),
+    )
+
+    with (
+        patch.object(DeliveryGateway, "edit_text_outcome", new=first_edit),
+        patch.object(
+            PrincipalStore,
+            "commit_approval_continuation_presentation",
+            new=AsyncMock(side_effect=SystemExit),
+        ),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
+        pytest.raises(SystemExit),
+    ):
+        await runner._approval_responses.advance_pause(
+            current,
+            paused,
+            target=_target(thread_id="$thread"),
+            pending_text="Thinking...",
+        )
+
+    staged = await store.approval_continuation(continuation.approval_id)
+    assert staged is not None
+    assert staged.presentation_generation == 0
+    assert staged.staged_presentation is not None
+    first_request = first_edit.await_args.args[0]
+    assert first_request.delivery_turn_id == "approval-presentation:approval-chain-crash:1"
+
+    restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    recover_edit = AsyncMock(
+        return_value=TextDeliveryOutcome(event_id="$waiting", visible_body=acknowledged_body),
+    )
+    with patch.object(DeliveryGateway, "edit_text_outcome", new=recover_edit):
+        recovered, event_id = await restarted._recover_nonready_approval(
+            staged,
+            target=_target(thread_id="$thread"),
+        )
+
+    assert recovered
+    assert event_id == "$waiting"
+    recovered_request = recover_edit.await_args.args[0]
+    assert recovered_request.delivery_turn_id == first_request.delivery_turn_id
+    assert recovered_request.new_text == first_request.new_text
+    ready = await store.approval_continuation(continuation.approval_id)
+    assert ready is not None
+    assert ready.state == "ready"
+    assert ready.presentation_generation == 1
+    assert ready.visible_response_text == acknowledged_body
+    assert ready.response_text == paused.response_text
+    assert ready.staged_presentation is None
 
 
 @pytest.mark.asyncio

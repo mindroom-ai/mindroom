@@ -653,6 +653,43 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
         pytest.param(({"type": "unknown", "tool_name": "inspect"},), id="malformed-event"),
         pytest.param(({"type": "tool_call_started", "tool_name": "inspect"},), id="missing-start-id"),
         pytest.param(
+            ({"type": "tool_call_started", "tool_name": "", "tool_call_id": "call-1"},),
+            id="empty-tool-name",
+        ),
+        pytest.param(
+            (
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "inspect",
+                    "tool_call_id": "call-1",
+                    "args_preview": 7,
+                },
+            ),
+            id="invalid-args-preview",
+        ),
+        pytest.param(
+            (
+                {
+                    "type": "tool_call_completed",
+                    "tool_name": "inspect",
+                    "tool_call_id": "call-1",
+                    "truncated": "yes",
+                },
+            ),
+            id="invalid-truncated",
+        ),
+        pytest.param(
+            (
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "inspect",
+                    "tool_call_id": "call-1",
+                    "scope_key": 3,
+                },
+            ),
+            id="invalid-scope",
+        ),
+        pytest.param(
             (
                 {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": "call-1"},
                 {"type": "tool_call_completed", "tool_name": "inspect", "tool_call_id": "call-1"},
