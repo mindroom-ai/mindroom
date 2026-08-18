@@ -11,7 +11,7 @@ from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 
 from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.approval_response import identify_approval_tools
+from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 
@@ -54,6 +54,39 @@ def test_identify_approval_tools_keeps_team_member_owner() -> None:
     )
 
     assert identified == ((tool, "call-1", "dangerous", "Researcher_A"),)
+
+
+def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
+    """A team-level approval requirement must be anchored in the coordinator slot."""
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="dangerous",
+        requires_confirmation=True,
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(RunRequirement(tool_execution=tool),),
+        response_text="🔧 `dangerous` [1] ⏳",
+        tool_trace=(
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                tool_call_id="call-1",
+                scope_key="agent:wrong-member",
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [],
+            "consensus": "🔧 `dangerous` [1] ⏳",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="ordered presentation"):
+        require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
 @pytest.mark.asyncio
@@ -134,3 +167,35 @@ async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> N
     await _collect_agent_continuation(events(), presentation)
 
     assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+
+
+@pytest.mark.asyncio
+async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary() -> None:
+    """Hidden approval tools must not concatenate pre- and post-approval prose."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=False,
+        response_text="Before approval.",
+        tool_trace=[
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="inspect",
+                tool_call_id="call-1",
+            ),
+        ],
+        track_hidden_tools=True,
+    )
+    terminal = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="After approval.")
+        yield terminal
+
+    await _collect_agent_continuation(events(), presentation)
+
+    assert presentation.final_text() == "Before approval.\n\nAfter approval."

@@ -2929,7 +2929,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             tool_call_id="call-write",
         ),
     )
-    committed_state = {"kind": "team_stream", "version": 1, "consensus": "Committed before pause."}
+    committed_state: dict[str, object] = {}
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-2",

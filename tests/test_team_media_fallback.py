@@ -213,6 +213,37 @@ async def test_team_continuation_appends_terminal_only_consensus() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hidden_team_continuation_separates_text_across_the_tool_boundary() -> None:
+    """Hidden team approval tools must not concatenate prose across continuation."""
+    prior = _TeamStreamPresentation.new([], [], show_tool_calls=False)
+    prior.append_consensus("Before approval.")
+    prior.start_tool(
+        "team",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    presentation = _TeamStreamPresentation.restore(
+        config_names=[],
+        show_tool_calls=False,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before approval.\n\nAfter approval." in presentation.render_body()
+
+
+@pytest.mark.asyncio
 async def test_team_continuation_falls_back_per_unstreamed_slot() -> None:
     """A streamed member delta must not suppress terminal-only team consensus."""
     presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
@@ -3929,6 +3960,65 @@ async def test_team_response_stream_marks_successful_event_stream_completed() ->
     assert "**Team Consensus**" in recorder.assistant_text
     assert "Consensus answer." in recorder.assistant_text
     assert recorder.completed_tools == []
+    assert any("Consensus answer." in chunk for chunk in rendered_chunks)
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_keys_canonical_text_by_provider_member_id() -> None:
+    """A raw config name must not diverge from Agno's URL-safe stream identity."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"Code_Review": MagicMock(running=True)}
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["Code_Review"],
+        agents=[],
+        display_names=["Code Review"],
+        materialized_agent_names={"Code_Review"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_id="code-review", agent_name="Code Review", content="Member answer.")
+        yield TeamRunContentEvent(content="Consensus answer.")
+
+    team_agent_ids = [
+        fixture_entity_matrix_id(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    recorder = TurnRecorder(user_message="Review this.")
+
+    with (
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(return_value=_prepared_team_execution_context(final_prompt="Review this.")),
+        ),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Review this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id="session-team-stream", run_id="run-normalized"),
+                mode=TeamMode.COORDINATE,
+                show_tool_calls=False,
+            )
+        ]
+
+    rendered_chunks = [chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks]
+    assert "**Code Review**: Member answer." in recorder.assistant_text
     assert any("Consensus answer." in chunk for chunk in rendered_chunks)
 
 

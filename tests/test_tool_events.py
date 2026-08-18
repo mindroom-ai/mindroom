@@ -674,6 +674,22 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].scope_key == "member:GeneralAgent"
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"type": "unknown", "tool_name": "inspect"},
+        {"type": "tool_call_started", "tool_name": 7},
+        {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": 7},
+        {"type": "tool_call_started", "tool_name": "inspect", "scope_key": []},
+        {"type": "tool_call_completed", "tool_name": "inspect", "truncated": "yes"},
+    ],
+)
+def test_durable_tool_trace_rejects_malformed_events(malformed: dict[str, object]) -> None:
+    """Corrupt continuation metadata must fail closed instead of dropping an ordered slot."""
+    with pytest.raises(RuntimeError, match="malformed event"):
+        deserialize_tool_trace([malformed])
+
+
 # --- markdown_to_html: v2 plain markers + unsupported tag escaping ---
 
 

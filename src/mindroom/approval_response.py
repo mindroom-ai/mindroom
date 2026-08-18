@@ -129,6 +129,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
     }
+    is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     for tool in paused.tools:
         call_id = tool.tool_call_id
         matches = [
@@ -142,7 +143,8 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         _, entry = matches[0]
         requirement = requirements_by_call_id.get(call_id)
         member_id = requirement.member_agent_id if requirement is not None else None
-        if member_id is not None and entry.scope_key != f"agent:{member_id}":
+        expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
+        if entry.scope_key != expected_scope:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
 

@@ -325,10 +325,16 @@ class _TeamStreamPresentation:
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+    separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
         self.tool_tracker.restore_pending(self.tool_trace)
+        self.separate_next_scopes = {
+            pending.scope_key
+            for pending in self.tool_tracker.pending_tools
+            if pending.scope_key is not None and self._slot_text(pending.scope_key)
+        }
 
     @property
     def display_names(self) -> list[str]:
@@ -473,11 +479,24 @@ class _TeamStreamPresentation:
         if member_id not in self.per_member:
             msg = f"Team event has no frozen member slot for {member_id!r}"
             raise RuntimeError(msg)
-        self.per_member[member_id] = append_stream_text(self.per_member[member_id], content)
+        scope_key = f"agent:{member_id}"
+        self.per_member[member_id] = append_stream_text(
+            self.per_member[member_id],
+            content,
+            separate=scope_key in self.separate_next_scopes,
+        )
+        if content:
+            self.separate_next_scopes.discard(scope_key)
 
     def append_consensus(self, content: object | None) -> None:
         """Append a coordinator content delta to the consensus slot."""
-        self.consensus = append_stream_text(self.consensus, content)
+        self.consensus = append_stream_text(
+            self.consensus,
+            content,
+            separate="team" in self.separate_next_scopes,
+        )
+        if content:
+            self.separate_next_scopes.discard("team")
 
     def _append_tool_marker(self, scope_key: str, marker: str) -> None:
         if scope_key == "team":
@@ -3305,16 +3324,17 @@ async def team_response_stream(  # noqa: C901, PLR0915
         attempt_run_id = continuation_state.active_run_id
         holder.attempt_run_id = attempt_run_id
 
-        attempt_member_ids = attempt_members.requested_agent_names
+        attempt_config_names = attempt_members.requested_agent_names
         attempt_display_names = attempt_members.display_names
-        attempt_display_names_by_id = dict(zip(attempt_member_ids, attempt_display_names, strict=True))
-        canonical_per_member: dict[str, str] = dict.fromkeys(attempt_member_ids, "")
-        canonical_consensus = ""
         presentation = _TeamStreamPresentation.new(
-            attempt_member_ids,
+            attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
         )
+        attempt_member_ids = presentation.member_ids
+        attempt_display_names_by_id = presentation.display_names_by_id
+        canonical_per_member: dict[str, str] = dict.fromkeys(attempt_member_ids, "")
+        canonical_consensus = ""
         completed_tools = presentation.tool_tracker.completed_tools
         pending_tools = presentation.tool_tracker.pending_tools
 

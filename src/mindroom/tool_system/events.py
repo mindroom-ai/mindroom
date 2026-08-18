@@ -187,14 +187,22 @@ class CollectedStreamPresentation:
     track_hidden_tools: bool = False
     canonical_final_body_candidate: str | None = None
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+    separate_next_text: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
         self.tool_tracker.restore_pending(self.tool_trace)
+        self.separate_next_text = bool(self.response_text and self.tool_tracker.pending_tools)
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
-        self.response_text = append_stream_text(self.response_text, content)
+        self.response_text = append_stream_text(
+            self.response_text,
+            content,
+            separate=self.separate_next_text,
+        )
+        if content:
+            self.separate_next_text = False
 
     def start_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
         """Record one tool start and append its marker when visible."""
@@ -524,13 +532,14 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     return "".join(spaced_lines)
 
 
-def append_stream_text(existing_text: str, content: object | None) -> str:
-    """Append one delta while keeping a trailing visible tool marker on its own line."""
+def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
+    """Append one delta while preserving explicit and visible-tool boundaries."""
     if not content:
         return existing_text
     delta = str(content)
     last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
-    separator = "\n\n" if not delta.startswith(("\n", "\r")) and is_visible_tool_marker_line(last_line) else ""
+    needs_separator = separate or is_visible_tool_marker_line(last_line)
+    separator = "\n\n" if existing_text and not delta.startswith(("\n", "\r")) and needs_separator else ""
     return f"{existing_text}{separator}{delta}"
 
 
@@ -729,21 +738,32 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
     for event in stored:
         event_type = event.get("type")
         tool_name = event.get("tool_name")
-        if event_type not in {"tool_call_started", "tool_call_completed"} or not isinstance(tool_name, str):
-            continue
         args_preview = event.get("args_preview")
         result_preview = event.get("result_preview")
         tool_call_id = event.get("tool_call_id")
         scope_key = event.get("scope_key")
+        truncated = event.get("truncated")
+        if (
+            event_type not in {"tool_call_started", "tool_call_completed"}
+            or not isinstance(tool_name, str)
+            or not tool_name
+            or (args_preview is not None and not isinstance(args_preview, str))
+            or (result_preview is not None and not isinstance(result_preview, str))
+            or (tool_call_id is not None and (not isinstance(tool_call_id, str) or not tool_call_id))
+            or (scope_key is not None and (not isinstance(scope_key, str) or not scope_key))
+            or (truncated is not None and not isinstance(truncated, bool))
+        ):
+            msg = "Durable tool trace contains a malformed event"
+            raise RuntimeError(msg)
         restored.append(
             ToolTraceEntry(
                 type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
                 tool_name=tool_name,
-                args_preview=args_preview if isinstance(args_preview, str) else None,
-                result_preview=result_preview if isinstance(result_preview, str) else None,
-                truncated=event.get("truncated") is True,
-                tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
-                scope_key=scope_key if isinstance(scope_key, str) else None,
+                args_preview=args_preview,
+                result_preview=result_preview,
+                truncated=truncated is True,
+                tool_call_id=cast("str | None", tool_call_id),
+                scope_key=cast("str | None", scope_key),
             ),
         )
     return restored
