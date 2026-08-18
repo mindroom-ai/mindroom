@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import uuid4
@@ -512,7 +513,7 @@ class _PreparedResponseRuntime:
 class _InboxResponseOwnership:
     """Recovery callbacks retained with one detached inbox response."""
 
-    recovery_proof_ready: Callable[[], bool]
+    recovery_proof_ready: Callable[[], bool | Awaitable[bool]]
     on_failure: Callable[[], None] | None
 
 
@@ -529,7 +530,10 @@ class ResponseRunner:
         init=False,
     )
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
-    _process_shutdown_recovery_checks: dict[asyncio.Task[None], Callable[[], bool]] = field(
+    _process_shutdown_recovery_checks: dict[
+        asyncio.Task[None],
+        Callable[[], bool | Awaitable[bool]],
+    ] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -543,7 +547,7 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_proof_ready: Callable[[], bool],
+        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
@@ -592,6 +596,22 @@ class ResponseRunner:
             self._process_shutdown_recovery_checks.setdefault(task, ownership.recovery_proof_ready)
             request_task_cancel(task, process_shutdown=True)
 
+    @staticmethod
+    async def _recovery_proofs_are_ready(
+        tasks: set[asyncio.Task[None]],
+        recovery_checks: dict[asyncio.Task[None], Callable[[], bool | Awaitable[bool]]],
+    ) -> bool:
+        """Prove every terminal task transferred its obligation durably."""
+        for task in tasks:
+            if not task.done():
+                return False
+            ready = recovery_checks[task]()
+            if inspect.isawaitable(ready):
+                ready = await ready
+            if not ready:
+                return False
+        return True
+
     async def drain_inbox_responses(
         self,
         *,
@@ -600,12 +620,15 @@ class ResponseRunner:
     ) -> bool:
         """Settle detached inbox responses: graceful drains await, bounded grace cancels.
 
-        Returns False when bounded grace had to cancel running work. The grace
-        period uses two ``cancel_after_seconds`` windows: one waiting for
-        completion and one letting cancelled tasks run cleanup. Orderly process
-        shutdown repeats its cancellation signal inside the same second window
-        so finite cancellation-resistant cleanup cannot strand ownership. A task
-        that remains live after that cleanup window fails the shutdown boundary;
+        Generic bounded cancellation returns False because the interrupted work
+        has no durable restart contract. Orderly process cancellation returns
+        True only when every task is terminal and its recovery callback proves
+        journal or outbox ownership. The grace period uses two
+        ``cancel_after_seconds`` windows: one waiting for completion and one
+        letting cancelled tasks run cleanup. Orderly process shutdown repeats
+        its cancellation signal inside the same second window so finite
+        cancellation-resistant cleanup cannot strand ownership. A task that
+        remains live after that cleanup window fails the shutdown boundary;
         callers must not release resources it can still use.
         """
         tasks = list(
@@ -630,35 +653,35 @@ class ResponseRunner:
             process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
             if not process_shutdown_tasks:
                 return True
-            recoverable = all(task.done() and recovery_checks[task]() for task in process_shutdown_tasks)
+            recoverable = await self._recovery_proofs_are_ready(process_shutdown_tasks, recovery_checks)
             self._incomplete_inbox_responses_recoverable &= recoverable
             for task in process_shutdown_tasks:
                 self._process_shutdown_recovery_checks.pop(task, None)
-            return False
+            return recoverable
         process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             if not process_shutdown_tasks:
                 return True
-            recoverable = all(task.done() and recovery_checks[task]() for task in process_shutdown_tasks)
+            recoverable = await self._recovery_proofs_are_ready(process_shutdown_tasks, recovery_checks)
             self._incomplete_inbox_responses_recoverable &= recoverable
             for task in process_shutdown_tasks:
                 self._process_shutdown_recovery_checks.pop(task, None)
-            return False
+            return recoverable
         cancelled_tasks = process_shutdown_tasks.union(pending)
         pending = await _cancel_pending_responses(
             pending,
             timeout_seconds=cancel_after_seconds,
             shutdown_intent=shutdown_intent,
         )
-        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in cancelled_tasks)
+        cancelled_responses_recoverable = await self._recovery_proofs_are_ready(cancelled_tasks, recovery_checks)
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         if pending:
             msg = f"{len(pending)} response tasks did not stop within bounded cleanup"
             raise ResponseShutdownTimeoutError(msg)
         for task in process_shutdown_tasks:
             self._process_shutdown_recovery_checks.pop(task, None)
-        return False
+        return cancelled_responses_recoverable if process_shutdown_tasks else False
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""

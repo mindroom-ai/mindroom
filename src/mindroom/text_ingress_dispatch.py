@@ -483,6 +483,14 @@ async def _apply_turn_plan(
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
+
+    async def response_recovery_ready() -> bool:
+        if prepared.dispatch.target.resolved_thread_id is not None and controller.deps.interrupted_turn_rooms.contains(
+            prepared.event.event_id,
+        ):
+            return True
+        return await controller.deps.response_recovery_ready(handled_turn)
+
     response_task = controller.deps.response_runner.track_inbox_response(
         _run_claimed_response(
             controller,
@@ -503,10 +511,7 @@ async def _apply_turn_plan(
             ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
-        recovery_proof_ready=lambda: (
-            prepared.dispatch.target.resolved_thread_id is not None
-            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
-        ),
+        recovery_proof_ready=response_recovery_ready,
         on_failure=lambda: (
             controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
         ),

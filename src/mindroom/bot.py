@@ -23,7 +23,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import legacy_responses_file_path
+from mindroom.handled_turns import TurnRecord, legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -98,6 +98,7 @@ from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     ApprovalView,
+    DeliveryStage,
     EventJournalStore,
     MembershipFence,
     PrincipalStore,
@@ -768,6 +769,7 @@ class AgentBot:
                 visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+                response_recovery_ready=self._response_recovery_ready,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -1546,6 +1548,27 @@ class AgentBot:
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
+
+    async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
+        """Prove that a terminal response still has one durable recovery owner."""
+        if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
+            return False
+        principal = self._journal_store.principal(self._journal_principal_id)
+        pending_sources = await asyncio.gather(
+            *(principal.is_pending(event_id) for event_id in turn_record.source_event_ids),
+        )
+        if all(pending_sources):
+            return True
+        if any(pending_sources):
+            return False
+        turn_id = turn_record.anchor_event_id
+        if turn_id is None:
+            return False
+        final_delivery = await principal.load_delivery(
+            turn_id=turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+        return final_delivery is not None and final_delivery.acknowledged_event_id is None
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.

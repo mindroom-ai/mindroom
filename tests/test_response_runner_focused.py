@@ -171,6 +171,41 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_reports_terminal_durable_response_as_drained() -> None:
+    """A terminal process-cancelled response with durable recovery proof is drained."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    recovery_proof_checked = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def durable_recovery_ready() -> bool:
+        recovery_proof_checked.set()
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_durable_process_shutdown_response",
+        recovery_proof_ready=durable_recovery_ready,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    assert (
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        is True
+    )
+    assert recovery_proof_checked.is_set()
+    assert runner.incomplete_inbox_responses_recoverable is True
+    assert response_task.done()
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() -> None:
     """Finite cancellation-resistant cleanup must not survive the shutdown budget."""
     runner = ResponseRunner(deps=MagicMock())
@@ -201,7 +236,7 @@ async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() ->
                 cancel_after_seconds=0.1,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
-            is False
+            is True
         )
     finally:
         release_response.set()
@@ -328,7 +363,7 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
                     coordinator.drain_inbox_responses(cancel_after_seconds=0.01),
                     timeout=0.2,
                 )
-                is False
+                is True
             )
         finally:
             release_settlement.set()
