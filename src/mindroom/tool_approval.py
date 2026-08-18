@@ -33,7 +33,11 @@ __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
+    "AutomationToolOrigin",
+    "BackgroundScriptToolOrigin",
+    "DynamicWorkflowToolOrigin",
     "MatrixApprovalAction",
+    "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
@@ -53,6 +57,38 @@ logger = get_logger(__name__)
 
 class ToolApprovalScriptError(RuntimeError):
     """One approval-script load or execution failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicWorkflowToolOrigin:
+    """Durable identity for a tool call made by one Dynamic Workflow run."""
+
+    workflow_id: str
+    run_id: str
+    origin_kind: Literal["dynamic_workflow"] = "dynamic_workflow"
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundScriptToolOrigin:
+    """Durable identity for one background-script tool call."""
+
+    run_id: str
+    call_id: str
+    requester_id: str
+    toolkit_name: str
+    function_name: str
+    origin_kind: Literal["background_script"] = "background_script"
+
+
+type AutomationToolOrigin = DynamicWorkflowToolOrigin | BackgroundScriptToolOrigin
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalDecision:
+    """One terminal automation approval decision."""
+
+    approved: bool
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

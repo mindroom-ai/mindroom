@@ -10,7 +10,7 @@ from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
+    from mindroom.tool_approval import AutomationToolOrigin, BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
@@ -62,6 +63,21 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 _ToolHookResult = Any
+
+
+class _ToolApprovalGate(Protocol):
+    """Approval callback inserted between before-call hooks and the tool body."""
+
+    async def __call__(
+        self,
+        origin: AutomationToolOrigin,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolApprovalDecision:
+        """Return the terminal decision for one typed automation origin."""
+        ...
+
+
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
 # in uv.lock, and drop them once upstream supports this as public API.
@@ -96,6 +112,7 @@ class _ResolvedToolContext:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
+    origin: AutomationToolOrigin | None
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -124,9 +141,16 @@ class _ToolHookBridgeContext:
     config: Config | None
     runtime_paths: RuntimePaths | None
     dispatch_context: ToolDispatchContext | None
+    origin: AutomationToolOrigin | None
 
 
-def _correlation_id_for_runtime_context(runtime_context: ToolRuntimeContext | None) -> str:
+def _correlation_id_for_runtime_context(
+    runtime_context: ToolRuntimeContext | None,
+    origin: AutomationToolOrigin | None,
+) -> str:
+    if origin is not None and origin.origin_kind == "background_script":
+        background_origin = cast("BackgroundScriptToolOrigin", origin)
+        return f"background-script:{background_origin.run_id}:{background_origin.call_id}"
     if runtime_context is not None and runtime_context.correlation_id:
         return runtime_context.correlation_id
     request_context = current_llm_request_log_context()
@@ -182,12 +206,13 @@ def _resolve_tool_context(
             channel=dispatch_context.execution_identity.channel,
             config=runtime_context.config,
             runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(runtime_context),
+            correlation_id=_correlation_id_for_runtime_context(runtime_context, bridge_context.origin),
             message_sender=bindings.message_sender,
             matrix_admin=bindings.matrix_admin,
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             message_received_depth=bindings.message_received_depth,
+            origin=bridge_context.origin,
         )
 
     if dispatch_context is not None:
@@ -205,12 +230,13 @@ def _resolve_tool_context(
             channel=dispatch_context.execution_identity.channel,
             config=bridge_context.config,
             runtime_paths=resolved_runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(None),
+            correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
             message_sender=None,
             matrix_admin=None,
             room_state_querier=None,
             room_state_putter=None,
             message_received_depth=0,
+            origin=bridge_context.origin,
         )
 
     request_context = current_llm_request_log_context()
@@ -225,12 +251,13 @@ def _resolve_tool_context(
         channel=None,
         config=bridge_context.config,
         runtime_paths=bridge_context.runtime_paths,
-        correlation_id=_correlation_id_for_runtime_context(None),
+        correlation_id=_correlation_id_for_runtime_context(None, bridge_context.origin),
         message_sender=None,
         matrix_admin=None,
         room_state_querier=None,
         room_state_putter=None,
         message_received_depth=0,
+        origin=bridge_context.origin,
     )
 
 
@@ -266,6 +293,7 @@ def _record_debug_tool_success(
         correlation_id=resolved_context.correlation_id,
         execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
         runtime_paths=resolved_context.runtime_paths,
+        origin=resolved_context.origin,
     )
 
 
@@ -609,6 +637,8 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
+    origin: AutomationToolOrigin | None,
+    approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     timing = _ToolBridgeTiming(started_at=started_at)
@@ -618,6 +648,7 @@ async def _execute_bridge(
         config=config,
         runtime_paths=runtime_paths,
         dispatch_context=effective_dispatch_context,
+        origin=origin,
     )
     resolved_context = _resolve_tool_context(
         bridge_context=bridge_context,
@@ -654,6 +685,24 @@ async def _execute_bridge(
             has_after_hooks=has_after_hooks,
             outcome="blocked_before_hooks",
         )
+
+    if origin is not None and approval_gate is not None:
+        decision = await approval_gate(origin, tool_name, deepcopy(args))
+        if not decision.approved:
+            return await _finish_blocked_tool_call(
+                timing=timing,
+                hook_registry=hook_registry,
+                resolved_context=resolved_context,
+                hook_arguments=hook_arguments,
+                args=args,
+                tool_name=tool_name,
+                blocked_result=_format_declined_result(
+                    tool_name,
+                    decision.reason or "The bound requester declined this background tool call.",
+                ),
+                has_after_hooks=has_after_hooks,
+                outcome="blocked_approval",
+            )
 
     result: _ToolHookResult = None
     error: BaseException | None = None
@@ -720,6 +769,7 @@ async def _execute_bridge(
                     effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
                 ),
                 runtime_paths=resolved_context.runtime_paths,
+                origin=resolved_context.origin,
             )
         except Exception:
             logger.exception(
@@ -795,6 +845,8 @@ def build_tool_hook_bridge(
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
+    origin: AutomationToolOrigin | None = None,
+    approval_gate: _ToolApprovalGate | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -812,6 +864,8 @@ def build_tool_hook_bridge(
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
+            origin=origin,
+            approval_gate=approval_gate,
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
@@ -828,6 +882,8 @@ def build_tool_hook_bridge(
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
+                    origin=origin,
+                    approval_gate=approval_gate,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -842,6 +898,8 @@ def build_tool_hook_bridge(
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
+                origin=origin,
+                approval_gate=approval_gate,
             ),
         )
 

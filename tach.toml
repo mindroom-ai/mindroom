@@ -1011,6 +1011,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.script_gateway"
+depends_on = [
+    "mindroom.script_runs.broker",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.store",
+]
+
+[[modules]]
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
@@ -1028,6 +1036,7 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.api.report_publishing",
     "mindroom.api.schedules",
+    "mindroom.api.script_gateway",
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.workers",
@@ -4801,6 +4810,14 @@ expose = ["build_tool_hook_bridge", "prepend_tool_hook_bridge"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[interfaces]]
+expose = ["bind_script_tool_broker", "router"]
+from = ["mindroom.api.script_gateway"]
+
+[[interfaces]]
+expose = ["MindRoomToolCallError", "MindRoomTools"]
+from = ["mindroom.script_sdk"]
+
+[[interfaces]]
 expose = ["ApprovalMatrixTransport"]
 from = ["mindroom.approval_transport"]
 
@@ -4809,7 +4826,11 @@ expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
+    "AutomationToolOrigin",
+    "BackgroundScriptToolOrigin",
+    "DynamicWorkflowToolOrigin",
     "MatrixApprovalAction",
+    "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",
