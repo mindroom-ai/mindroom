@@ -1935,13 +1935,13 @@ class AgentBot:
         self._response_runner.refuse_pending_admissions()
         if shutdown_intent.stop_reason == "shutdown":
             self._response_runner.begin_process_shutdown()
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
         if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
             cast(
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
                 self.client,
             ).begin_process_shutdown_transport_fence()
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)

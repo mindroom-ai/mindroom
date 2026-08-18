@@ -30,7 +30,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
@@ -790,6 +790,70 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
     finally:
         release_close.set()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_router_process_shutdown_fences_transport_before_first_await() -> None:
+    """Router cleanup cannot yield before new Matrix sends are refused."""
+    router_cleanup_started = asyncio.Event()
+    release_router_cleanup = asyncio.Event()
+
+    class ProbeSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "router send reached the HTTP session before the shutdown fence"
+            raise AssertionError(message)
+
+        async def close(self) -> None:
+            return
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_router:example.org")
+    client.client_session = ProbeSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
+    )
+
+    async def block_router_cleanup() -> None:
+        router_cleanup_started.set()
+        await release_router_cleanup.wait()
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@mindroom_router:localhost",
+        display_name="Router",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(return_value=drain_result))
+    bot._cancel_deferred_overdue_task_drain = block_router_cleanup
+    bot.logger = MagicMock()
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+        preparation = asyncio.create_task(
+            bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
+        )
+        await asyncio.wait_for(router_cleanup_started.wait(), timeout=0.2)
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="transport is fenced for process shutdown",
+            ):
+                await client.send("GET", "/_matrix/client/v3/account/whoami")
+        finally:
+            release_router_cleanup.set()
+            await asyncio.wait_for(preparation, timeout=0.2)
+            await client.close()
 
 
 @pytest.mark.asyncio
