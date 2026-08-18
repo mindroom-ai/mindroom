@@ -4793,6 +4793,7 @@ expose = [
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
+    "reconcile_tool_presentation",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
 ]

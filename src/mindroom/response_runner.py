@@ -893,7 +893,7 @@ class ResponseRunner:
                     calls=plan.calls,
                     state=continuation_state,
                     response_text=visible_text,
-                    response_tool_trace=serialize_tool_trace(visible_tool_trace),
+                    response_tool_trace=serialize_tool_trace(visible_tool_trace, include_tool_call_ids=True),
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
@@ -1010,7 +1010,7 @@ class ResponseRunner:
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
             tool_trace=visible_tool_trace,
-            response_tool_trace=serialize_tool_trace(visible_tool_trace),
+            response_tool_trace=serialize_tool_trace(visible_tool_trace, include_tool_call_ids=True),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -1459,6 +1459,8 @@ class ResponseRunner:
                         history_scope=continuation.history_scope,
                         tool_trace_collector=tool_trace_collector,
                         show_tool_calls=show_tool_calls,
+                        prior_response_text=continuation.response_text,
+                        prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
                     )
 
                 async with typing_indicator(self._client(), continuation.room_id):

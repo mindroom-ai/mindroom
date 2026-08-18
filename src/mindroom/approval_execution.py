@@ -24,14 +24,19 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_system.events import format_assistant_tool_transcript, format_tool_completed_event
+from mindroom.tool_system.events import (
+    deserialize_tool_trace,
+    format_assistant_tool_transcript,
+    reconcile_tool_presentation,
+)
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
+    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -47,26 +52,43 @@ def _approval_response_presentation(
     response: RunOutput,
     paused: PausedAttempt | None,
     *,
+    continuation: ApprovalContinuation,
+    requirement_tools: Sequence[ToolExecution] = (),
+    prior_message_ids: set[str] | frozenset[str] = frozenset(),
     show_tool_calls: bool,
 ) -> tuple[str, list[ToolTraceEntry]]:
-    """Rebuild one continued agent run's ordered body and structured trace."""
+    """Reconcile one continued agent run with its durable visible snapshot."""
+    presentation_tools = list(response.tools or ())
+    seen_tool_call_ids = {tool.tool_call_id for tool in presentation_tools if tool.tool_call_id is not None}
+    additional_tools = [*requirement_tools, *(paused.tools if paused is not None else ())]
+    for tool in additional_tools:
+        if tool.tool_call_id is not None and tool.tool_call_id in seen_tool_call_ids:
+            continue
+        presentation_tools.append(tool)
+        if tool.tool_call_id is not None:
+            seen_tool_call_ids.add(tool.tool_call_id)
     pending_tool_call_ids = (
         {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
     )
-    return format_assistant_tool_transcript(
+    prior_tool_trace = deserialize_tool_trace(continuation.response_tool_trace)
+    current_text, current_tool_trace = format_assistant_tool_transcript(
         response.messages or (),
-        response.tools or (),
+        presentation_tools,
+        pending_tool_call_ids=pending_tool_call_ids,
+        start_index=len(prior_tool_trace) + 1,
+        show_tool_calls=show_tool_calls,
+        skip_message_ids=prior_message_ids if continuation.response_text else frozenset(),
+    )
+    return reconcile_tool_presentation(
+        prior_text=continuation.response_text,
+        prior_tool_trace=prior_tool_trace,
+        current_text=current_text,
+        current_tool_trace=current_tool_trace,
+        tools=presentation_tools,
+        fallback_text=str(response.content or ""),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )
-
-
-def _append_fallback_tool_trace(response: RunOutput, tool_trace: list[ToolTraceEntry]) -> None:
-    """Retain trace metadata for providers that omit ordered assistant messages."""
-    for tool in response.tools or ():
-        _, trace_entry = format_tool_completed_event(tool)
-        if trace_entry is not None:
-            tool_trace.append(trace_entry)
 
 
 @dataclass(frozen=True)
@@ -140,6 +162,7 @@ class AgentApprovalExecution:
             if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
+            prior_message_ids = {message.id for message in persisted.messages or () if message.role == "assistant"}
             requirements = apply_exact_approval_decisions(
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
@@ -191,6 +214,11 @@ class AgentApprovalExecution:
         response_text, response_tool_trace = _approval_response_presentation(
             response,
             paused,
+            continuation=continuation,
+            requirement_tools=[
+                requirement.tool_execution for requirement in requirements if requirement.tool_execution is not None
+            ],
+            prior_message_ids=prior_message_ids,
             show_tool_calls=show_tool_calls,
         )
         if paused is not None:
@@ -201,8 +229,6 @@ class AgentApprovalExecution:
             )
         if response.status != RunStatus.completed:
             raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-        if not response_tool_trace and show_tool_calls:
-            _append_fallback_tool_trace(response, response_tool_trace)
         tool_trace_collector.extend(response_tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(

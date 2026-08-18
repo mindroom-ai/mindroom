@@ -79,6 +79,7 @@ from mindroom.team_exact_members import (
 )
 from mindroom.teams import (
     TeamMode,
+    _continued_team_approval_presentation,
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
@@ -90,6 +91,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
@@ -102,8 +104,6 @@ from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from mindroom.tool_system.events import ToolTraceEntry
 
 
 _TEST_MODEL = "openai:gpt-5.4"
@@ -503,6 +503,68 @@ async def test_team_continuation_executes_real_agno_confirmation(
         session_type=SessionType.TEAM,
         entity_name="research",
     )
+
+
+def test_team_continuation_reconciles_restart_snapshot_without_member_responses() -> None:
+    """A restarted team must retain member output when Agno stores only the leader continuation."""
+    completed_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+        result="details",
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Final consensus.",
+        tools=[completed_tool],
+        member_responses=[
+            RunOutput(
+                run_id="member-run-1",
+                agent_name="GeneralAgent",
+                content="Prior analysis.",
+                messages=[Message(id="member-message-before-pause", role="assistant", content="Prior analysis.")],
+            ),
+        ],
+    )
+    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Prior analysis.\n\n🔧 `inspect` [1] ⏳"
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            tool_call_id="call-1",
+        ),
+    ]
+
+    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[completed_tool],
+        paused=None,
+        prior_response_text=prior_text,
+        prior_tool_trace=prior_trace,
+        prior_message_ids={"member-message-before-pause"},
+        show_tool_calls=True,
+    )
+
+    assert "Prior analysis." in response_text
+    assert response_text.count("Prior analysis.") == 1
+    assert response_text.count("🔧 `inspect` [1]") == 1
+    assert "🔧 `inspect` [1] ⏳" not in response_text
+    assert response_text.index("Prior analysis.") < response_text.index("🔧 `inspect` [1]")
+    assert response_text.index("🔧 `inspect` [1]") < response_text.index("Final consensus.")
+    assert presentation_tools == [completed_tool]
+    assert response_trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
 
 
 @pytest.mark.parametrize(

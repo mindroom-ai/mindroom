@@ -46,7 +46,7 @@ def test_format_assistant_tool_transcript_preserves_message_order() -> None:
             content="Now I will save the result.",
             tool_calls=[
                 {
-                    "id": "call-2",
+                    "call_id": "call-2",
                     "type": "function",
                     "function": {"name": "save", "arguments": '{"path":"summary.txt"}'},
                 },
@@ -79,11 +79,50 @@ def test_format_assistant_tool_transcript_preserves_message_order() -> None:
             tool_name="inspect",
             args_preview="path=report.txt",
             result_preview="details",
+            tool_call_id="call-1",
         ),
         ToolTraceEntry(
             type="tool_call_started",
             tool_name="save",
             args_preview="path=summary.txt",
+            tool_call_id="call-2",
+        ),
+    ]
+
+
+def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snapshot() -> None:
+    """Continuation rendering must append only assistant messages added after the pause."""
+    messages = [
+        Message(id="message-before-pause", role="assistant", content="Before approval."),
+        Message(
+            id="message-after-pause",
+            role="assistant",
+            content="Need one more step.",
+            tool_calls=[
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {"name": "save", "arguments": '{"path":"summary.txt"}'},
+                },
+            ],
+        ),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(
+        messages,
+        [ToolExecution(tool_call_id="call-2", tool_name="save", tool_args={"path": "summary.txt"})],
+        pending_tool_call_ids={"call-2"},
+        start_index=2,
+        skip_message_ids={"message-before-pause"},
+    )
+
+    assert body == "Need one more step.\n\n🔧 `save` [2] ⏳"
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save",
+            args_preview="path=summary.txt",
+            tool_call_id="call-2",
         ),
     ]
 
@@ -91,7 +130,14 @@ def test_format_assistant_tool_transcript_preserves_message_order() -> None:
 def test_format_assistant_tool_transcript_hides_tools_without_concatenating_messages() -> None:
     """Hidden anchors must still leave readable text, including multimodal text blocks."""
     messages = [
-        Message(role="assistant", content=[{"type": "text", "text": "First thought."}]),
+        Message(
+            role="assistant",
+            content=[
+                {"type": "text", "text": "  First thought.\n"},
+                {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}},
+                {"type": "text", "text": "Second part.  "},
+            ],
+        ),
         Message(
             role="assistant",
             content="Second thought.",
@@ -112,7 +158,7 @@ def test_format_assistant_tool_transcript_hides_tools_without_concatenating_mess
         show_tool_calls=False,
     )
 
-    assert body == "First thought.\n\nSecond thought.\n\nFinished."
+    assert body == "  First thought.\nSecond part.  \n\nSecond thought.\n\nFinished."
     assert trace == []
 
 
@@ -132,6 +178,129 @@ def test_tool_trace_snapshot_round_trips_for_durable_continuations() -> None:
     restored = tool_events.deserialize_tool_trace(stored)
 
     assert restored == original
+
+
+def test_tool_trace_snapshot_can_retain_internal_call_identity() -> None:
+    """Durable snapshots need call IDs without exposing them in public trace metadata."""
+    original = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            tool_call_id="call-1",
+        ),
+    ]
+
+    public = tool_events.serialize_tool_trace(original)
+    durable = tool_events.serialize_tool_trace(original, include_tool_call_ids=True)
+
+    assert public == ({"type": "tool_call_started", "tool_name": "inspect", "args_preview": "path=report.txt"},)
+    assert durable == (
+        {
+            "type": "tool_call_started",
+            "tool_name": "inspect",
+            "args_preview": "path=report.txt",
+            "tool_call_id": "call-1",
+        },
+    )
+    assert tool_events.deserialize_tool_trace(durable) == original
+
+
+def test_reconcile_tool_presentation_completes_durable_pending_marker_in_place() -> None:
+    """Missing provider tool messages must not separate the marker from its metadata."""
+    prior_text = "Before approval.\n\n🔧 `inspect` [1] ⏳"
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            tool_call_id="call-1",
+        ),
+    ]
+    completed = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+        result="details",
+    )
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text=prior_text,
+        prior_tool_trace=prior_trace,
+        current_text="After approval.",
+        current_tool_trace=[],
+        tools=[completed],
+        fallback_text="After approval.",
+    )
+
+    assert body == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
+
+
+def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text() -> None:
+    """A chained pause remains ordered when the provider omits its assistant tool call."""
+    prior_text = "Before.\n\n🔧 `inspect` [1]"
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details"),
+        ToolExecution(
+            tool_call_id="call-2",
+            tool_name="save",
+            tool_args={"path": "summary.txt"},
+            requires_confirmation=True,
+        ),
+    ]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text=prior_text,
+        prior_tool_trace=prior_trace,
+        current_text="Need one more step.",
+        current_tool_trace=[],
+        tools=tools,
+        fallback_text="Need one more step.",
+        pending_tool_call_ids={"call-2"},
+    )
+
+    assert body == ("Before.\n\n🔧 `inspect` [1]\n\nNeed one more step.\n\n🔧 `save` [2] ⏳")
+    assert trace == [
+        prior_trace[0],
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save",
+            args_preview="path=summary.txt",
+            tool_call_id="call-2",
+        ),
+    ]
+
+
+def test_reconcile_tool_presentation_keeps_repeated_new_prose() -> None:
+    """A genuinely new assistant message is not deduplicated by matching its text."""
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="Done.",
+        prior_tool_trace=[],
+        current_text="Done.",
+        current_tool_trace=[],
+        tools=[],
+        fallback_text="Done.",
+    )
+
+    assert body == "Done.\n\nDone."
+    assert trace == []
 
 
 def _room_threads_result(

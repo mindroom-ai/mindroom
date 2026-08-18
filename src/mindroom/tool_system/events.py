@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
@@ -13,7 +13,7 @@ from agno.models.response import ToolExecution
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from agno.models.message import Message
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -42,6 +42,7 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
+    tool_call_id: str | None = field(default=None, compare=False)
 
 
 @dataclass(slots=True)
@@ -448,13 +449,23 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
-def _assistant_message_content(message: object) -> str:
+def _assistant_message_content(message: Message) -> str:
     """Return visible text without exposing multimodal blocks as a Python repr."""
-    content = getattr(message, "content", None)
+    content = message.content
     if isinstance(content, str):
-        return content.strip()
-    get_content_string = getattr(message, "get_content_string", None)
-    return get_content_string().strip() if callable(get_content_string) else ""
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    text_parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, Mapping):
+            text = block.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
 
 
 def _tool_execution_for_call(
@@ -466,6 +477,8 @@ def _tool_execution_for_call(
         return None
     call = cast("Mapping[str, object]", raw_call)
     call_id_value = call.get("id")
+    if not isinstance(call_id_value, str):
+        call_id_value = call.get("call_id")
     call_id = call_id_value if isinstance(call_id_value, str) else None
     raw_function = call.get("function")
     function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
@@ -476,12 +489,13 @@ def _tool_execution_for_call(
 
 
 def format_assistant_tool_transcript(
-    messages: Sequence[object],
+    messages: Sequence[Message],
     tools: Sequence[ToolExecution],
     *,
     pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
     start_index: int = 1,
     show_tool_calls: bool = True,
+    skip_message_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Rebuild one run's visible assistant transcript from its persisted message order."""
     tools_by_id = {tool.tool_call_id: tool for tool in tools if tool.tool_call_id}
@@ -489,14 +503,14 @@ def format_assistant_tool_transcript(
     tool_trace: list[ToolTraceEntry] = []
 
     for message in messages:
-        if getattr(message, "role", None) != "assistant" or getattr(message, "from_history", False):
+        if message.role != "assistant" or message.from_history or message.id in skip_message_ids:
             continue
         content_text = _assistant_message_content(message)
-        if content_text:
+        if content_text.strip():
             transcript_parts.append(content_text)
         if not show_tool_calls:
             continue
-        for raw_call in getattr(message, "tool_calls", None) or ():
+        for raw_call in message.tool_calls or ():
             resolved_call = _tool_execution_for_call(raw_call, tools_by_id)
             if resolved_call is None:
                 continue
@@ -513,7 +527,11 @@ def format_assistant_tool_transcript(
     return "\n\n".join(transcript_parts), tool_trace
 
 
-def serialize_tool_trace(tool_trace: Sequence[ToolTraceEntry]) -> tuple[dict[str, object], ...]:
+def serialize_tool_trace(
+    tool_trace: Sequence[ToolTraceEntry],
+    *,
+    include_tool_call_ids: bool = False,
+) -> tuple[dict[str, object], ...]:
     """Serialize structured tool trace for an opaque durable response snapshot."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
@@ -527,6 +545,8 @@ def serialize_tool_trace(tool_trace: Sequence[ToolTraceEntry]) -> tuple[dict[str
             event["result_preview"] = redact_sensitive_text(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
+        if include_tool_call_ids and entry.tool_call_id is not None:
+            event["tool_call_id"] = entry.tool_call_id
         serialized.append(event)
     return tuple(serialized)
 
@@ -540,6 +560,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         args_preview = event.get("args_preview")
         result_preview = event.get("result_preview")
         truncated = event.get("truncated", False)
+        tool_call_id = event.get("tool_call_id")
         if event_type not in {"tool_call_started", "tool_call_completed"}:
             msg = f"Invalid persisted tool trace type: {event_type!r}"
             raise ValueError(msg)
@@ -555,6 +576,9 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         if not isinstance(truncated, bool):
             msg = "Persisted tool trace truncated flag must be boolean"
             raise TypeError(msg)
+        if tool_call_id is not None and not isinstance(tool_call_id, str):
+            msg = "Persisted tool trace call ID must be text"
+            raise TypeError(msg)
         tool_trace.append(
             ToolTraceEntry(
                 type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
@@ -562,9 +586,166 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
                 args_preview=args_preview,
                 result_preview=result_preview,
                 truncated=truncated,
+                tool_call_id=tool_call_id,
             ),
         )
     return tool_trace
+
+
+def _visible_text_without_tool_markers(text: str) -> str:
+    """Return presentation prose while ignoring display-only tool marker lines."""
+    lines = text.splitlines()
+    if not any(_is_visible_tool_marker_line(line) for line in lines):
+        return text
+    return "\n".join(line for line in lines if not _is_visible_tool_marker_line(line)).strip()
+
+
+def _trace_entry_for_tool(
+    tool: ToolExecution,
+    *,
+    pending_tool_call_ids: set[str] | frozenset[str],
+    tool_index: int,
+) -> tuple[str, ToolTraceEntry]:
+    pending = tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids
+    if pending:
+        marker, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
+    else:
+        marker, trace_entry = format_tool_completed_event(tool, tool_index=tool_index)
+    assert trace_entry is not None
+    return marker.strip(), trace_entry
+
+
+def _append_presentation_part(body: str, part: str) -> str:
+    """Append one known-new presentation part without rewriting durable bytes."""
+    return f"{body}\n\n{part}" if body and part else body or part
+
+
+def _matching_prior_trace_index(
+    trace: Sequence[ToolTraceEntry],
+    tool: ToolExecution,
+    used_indexes: set[int],
+) -> int | None:
+    """Match executions to durable entries by call ID, with legacy name fallback."""
+    if tool.tool_call_id is not None:
+        for index, entry in enumerate(trace):
+            if index not in used_indexes and entry.tool_call_id == tool.tool_call_id:
+                return index
+    tool_name = tool.tool_name or "tool"
+    for index, entry in enumerate(trace):
+        if index not in used_indexes and entry.tool_call_id is None and entry.tool_name == tool_name:
+            return index
+    return None
+
+
+def _trace_represents_tool(trace: Sequence[ToolTraceEntry], tool: ToolExecution) -> bool:
+    """Match a continued execution to its ordered message trace."""
+    if tool.tool_call_id is not None:
+        if any(entry.tool_call_id == tool.tool_call_id for entry in trace):
+            return True
+        if any(entry.tool_call_id is not None for entry in trace):
+            return False
+    tool_name = tool.tool_name or "tool"
+    return any(entry.tool_call_id is None and entry.tool_name == tool_name for entry in trace)
+
+
+def _reindex_tool_markers(
+    text: str,
+    trace: Sequence[ToolTraceEntry],
+    *,
+    old_start_index: int,
+    new_start_index: int,
+) -> str:
+    """Shift marker indices when recovery-only tools precede ordered messages."""
+    if old_start_index == new_start_index:
+        return text
+    for offset, entry in enumerate(trace):
+        pending = entry.type == "tool_call_started"
+        old_marker = _tool_marker_line(entry.tool_name, old_start_index + offset, pending=pending)
+        new_marker = _tool_marker_line(entry.tool_name, new_start_index + offset, pending=pending)
+        text = text.replace(old_marker, new_marker, 1)
+    return text
+
+
+def reconcile_tool_presentation(
+    *,
+    prior_text: str,
+    prior_tool_trace: Sequence[ToolTraceEntry],
+    current_text: str,
+    current_tool_trace: Sequence[ToolTraceEntry],
+    tools: Sequence[ToolExecution],
+    fallback_text: str,
+    pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
+    show_tool_calls: bool = True,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Reconcile a continued run against the last transport-committed presentation."""
+    if not show_tool_calls:
+        body = _visible_text_without_tool_markers(prior_text)
+        continuation_text = current_text if current_text.strip() else fallback_text
+        return _append_presentation_part(body, continuation_text), []
+
+    body = prior_text
+    trace = [replace(entry) for entry in prior_tool_trace]
+    used_prior_indexes: set[int] = set()
+    missing_tools: list[ToolExecution] = []
+
+    for tool in tools:
+        prior_index = _matching_prior_trace_index(trace, tool, used_prior_indexes)
+        if prior_index is None:
+            if not _trace_represents_tool(current_tool_trace, tool):
+                missing_tools.append(tool)
+            continue
+
+        used_prior_indexes.add(prior_index)
+        if tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids:
+            continue
+        marker_index = prior_index + 1
+        tool_name = tool.tool_name or trace[prior_index].tool_name
+        body, _ = complete_pending_tool_block(body, tool_name, tool.result, marker_index)
+        _, completed_entry = format_tool_completed_event(tool, tool_index=marker_index)
+        assert completed_entry is not None
+        previous_entry = trace[prior_index]
+        trace[prior_index] = replace(
+            completed_entry,
+            args_preview=completed_entry.args_preview or previous_entry.args_preview,
+            truncated=completed_entry.truncated or previous_entry.truncated,
+        )
+
+    missing_completed = [
+        tool for tool in missing_tools if tool.tool_call_id is None or tool.tool_call_id not in pending_tool_call_ids
+    ]
+    missing_pending = [
+        tool for tool in missing_tools if tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids
+    ]
+    for tool in missing_completed:
+        marker, trace_entry = _trace_entry_for_tool(
+            tool,
+            pending_tool_call_ids=pending_tool_call_ids,
+            tool_index=len(trace) + 1,
+        )
+        body = _append_presentation_part(body, marker)
+        trace.append(trace_entry)
+
+    current_text = _reindex_tool_markers(
+        current_text,
+        current_tool_trace,
+        old_start_index=len(prior_tool_trace) + 1,
+        new_start_index=len(trace) + 1,
+    )
+    body = _append_presentation_part(body, current_text)
+    trace.extend(replace(entry) for entry in current_tool_trace)
+    if not _visible_text_without_tool_markers(current_text):
+        body = _append_presentation_part(body, fallback_text)
+
+    for tool in missing_pending:
+        marker, trace_entry = _trace_entry_for_tool(
+            tool,
+            pending_tool_call_ids=pending_tool_call_ids,
+            tool_index=len(trace) + 1,
+        )
+        body = _append_presentation_part(body, marker)
+        trace.append(trace_entry)
+
+    return body, trace
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -684,6 +865,7 @@ def format_tool_started_event(
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
     text, trace = _format_tool_started(tool_name, tool_args, tool_index=tool_index)
+    trace.tool_call_id = _streaming_tool_call_id(tool)
     return text, trace
 
 
@@ -697,6 +879,7 @@ def format_tool_completed_event(
     tool_name = tool.tool_name or "tool"
     tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
     text, trace = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
+    trace.tool_call_id = _streaming_tool_call_id(tool)
     return text, trace
 
 

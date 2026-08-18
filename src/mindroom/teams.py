@@ -115,6 +115,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_assistant_tool_transcript,
     format_tool_completed_event,
+    reconcile_tool_presentation,
 )
 
 if TYPE_CHECKING:
@@ -348,6 +349,22 @@ def _format_terminal_team_response(
     return _format_team_header(team_display_names) + _team_response_text(response)
 
 
+def _approval_member_content(
+    response: RunOutput,
+    rendered_content: str,
+    skip_message_ids: set[str] | frozenset[str],
+) -> str:
+    """Use raw member content only when it is not entirely from the paused snapshot."""
+    if rendered_content:
+        return rendered_content
+    assistant_messages = [
+        message for message in response.messages or () if message.role == "assistant" and not message.from_history
+    ]
+    if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
+        return ""
+    return _get_response_content(response)
+
+
 def _format_approval_contributions_recursive(
     response: TeamRunOutput | RunOutput,
     *,
@@ -356,6 +373,7 @@ def _format_approval_contributions_recursive(
     start_index: int,
     indent: int,
     include_consensus: bool,
+    skip_message_ids: set[str] | frozenset[str],
 ) -> tuple[list[str], list[ToolTraceEntry]]:
     """Render one continued team's contributions with globally indexed tool anchors."""
     parts: list[str] = []
@@ -374,6 +392,7 @@ def _format_approval_contributions_recursive(
                     start_index=start_index + len(trace),
                     indent=indent + 1,
                     include_consensus=False,
+                    skip_message_ids=skip_message_ids,
                 )
                 parts.extend(nested_parts)
                 trace.extend(nested_trace)
@@ -384,8 +403,9 @@ def _format_approval_contributions_recursive(
                     pending_tool_call_ids=pending_tool_call_ids,
                     start_index=start_index + len(trace),
                     show_tool_calls=show_tool_calls,
+                    skip_message_ids=skip_message_ids,
                 )
-                content = content or _get_response_content(member_response)
+                content = _approval_member_content(member_response, content, skip_message_ids)
                 if content.strip():
                     parts.append(
                         _format_member_contribution(
@@ -403,6 +423,7 @@ def _format_approval_contributions_recursive(
                 pending_tool_call_ids=pending_tool_call_ids,
                 start_index=start_index + len(trace),
                 show_tool_calls=show_tool_calls,
+                skip_message_ids=skip_message_ids,
             )
             consensus = consensus or str(response.content or "")
             if consensus.strip():
@@ -417,8 +438,9 @@ def _format_approval_contributions_recursive(
             pending_tool_call_ids=pending_tool_call_ids,
             start_index=start_index,
             show_tool_calls=show_tool_calls,
+            skip_message_ids=skip_message_ids,
         )
-        content = content or _get_response_content(response)
+        content = _approval_member_content(response, content, skip_message_ids)
         if content.strip():
             parts.append(_format_member_contribution(response.agent_name or "Agent", content, indent))
         trace.extend(response_trace)
@@ -432,15 +454,18 @@ def _format_approval_team_response(
     team_display_names: list[str],
     pending_tool_call_ids: set[str],
     show_tool_calls: bool,
+    start_index: int = 1,
+    skip_message_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Render a continued team run and its trace from persisted message order."""
     parts, trace = _format_approval_contributions_recursive(
         response,
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
-        start_index=1,
+        start_index=start_index,
         indent=0,
         include_consensus=True,
+        skip_message_ids=skip_message_ids,
     )
     body = "\n\n".join(parts) if parts else (_get_response_content(response) or "No team response generated.")
     return _format_team_header(team_display_names) + body, trace
@@ -1348,6 +1373,71 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
     return tools
 
 
+def _assistant_message_ids(response: TeamRunOutput | RunOutput) -> set[str]:
+    """Collect stable assistant-message identities from a nested persisted run."""
+    message_ids = {message.id for message in response.messages or () if message.role == "assistant"}
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                message_ids.update(_assistant_message_ids(member_response))
+    return message_ids
+
+
+def _merge_approval_presentation_tools(
+    response: TeamRunOutput,
+    *additional_groups: Sequence[ToolExecution],
+) -> list[ToolExecution]:
+    """Merge persisted and continued executions by stable call identity."""
+    tools = _collect_team_tool_executions(response)
+    seen_tool_call_ids = {tool.tool_call_id for tool in tools if tool.tool_call_id is not None}
+    for group in additional_groups:
+        for tool in group:
+            if tool.tool_call_id is not None and tool.tool_call_id in seen_tool_call_ids:
+                continue
+            tools.append(tool)
+            if tool.tool_call_id is not None:
+                seen_tool_call_ids.add(tool.tool_call_id)
+    return tools
+
+
+def _continued_team_approval_presentation(
+    continued: TeamRunOutput,
+    *,
+    team_display_names: list[str],
+    requirement_tools: Sequence[ToolExecution],
+    paused: PausedAttempt | None,
+    prior_response_text: str,
+    prior_tool_trace: Sequence[ToolTraceEntry],
+    prior_message_ids: set[str] | frozenset[str],
+    show_tool_calls: bool,
+) -> tuple[str, list[ToolTraceEntry], list[ToolExecution]]:
+    """Reconcile one continued team result with its transport-committed snapshot."""
+    paused_tools = paused.tools if paused is not None else ()
+    pending_tool_call_ids = {tool.tool_call_id for tool in paused_tools if tool.tool_call_id}
+    current_text, current_tool_trace = _format_approval_team_response(
+        continued,
+        team_display_names=team_display_names,
+        pending_tool_call_ids=pending_tool_call_ids,
+        start_index=len(prior_tool_trace) + 1,
+        show_tool_calls=show_tool_calls,
+        skip_message_ids=prior_message_ids if prior_response_text else frozenset(),
+    )
+    if prior_response_text:
+        current_text = current_text.removeprefix(_format_team_header(team_display_names))
+    presentation_tools = _merge_approval_presentation_tools(continued, requirement_tools, paused_tools)
+    response_text, response_tool_trace = reconcile_tool_presentation(
+        prior_text=prior_response_text,
+        prior_tool_trace=prior_tool_trace,
+        current_text=current_text,
+        current_tool_trace=current_tool_trace,
+        tools=presentation_tools,
+        fallback_text=_team_response_text(continued).lstrip("\n"),
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+    )
+    return response_text, response_tool_trace, presentation_tools
+
+
 def _aggregate_team_usage_metrics(
     metrics: RunMetrics | None,
     member_responses: Sequence[TeamRunOutput | RunOutput],
@@ -2024,6 +2114,8 @@ async def continue_paused_team_run(
     history_scope: HistoryScope | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     show_tool_calls: bool = True,
+    prior_response_text: str = "",
+    prior_tool_trace: Sequence[ToolTraceEntry] = (),
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
@@ -2077,6 +2169,7 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
+        prior_message_ids = _assistant_message_ids(persisted)
         requirements = apply_exact_approval_decisions(
             persisted.requirements or (),
             decisions=decisions,
@@ -2101,13 +2194,16 @@ async def continue_paused_team_run(
             fallback_session_id=session_id,
             fallback_run_id=run_id,
         )
-        pending_tool_call_ids = (
-            {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
-        )
-        response_text, response_tool_trace = _format_approval_team_response(
+        response_text, response_tool_trace, presentation_tools = _continued_team_approval_presentation(
             continued,
             team_display_names=members.display_names,
-            pending_tool_call_ids=pending_tool_call_ids,
+            requirement_tools=tuple(
+                requirement.tool_execution for requirement in requirements if requirement.tool_execution is not None
+            ),
+            paused=paused,
+            prior_response_text=prior_response_text,
+            prior_tool_trace=prior_tool_trace,
+            prior_message_ids=prior_message_ids,
             show_tool_calls=show_tool_calls,
         )
         if paused is not None:
@@ -2131,7 +2227,7 @@ async def continue_paused_team_run(
                 model=continued.model,
                 model_provider=continued.model_provider,
                 metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
-                tool_count=len(_collect_team_tool_executions(continued)),
+                tool_count=len(presentation_tools),
             ),
         )
     finally:

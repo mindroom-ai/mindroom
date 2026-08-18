@@ -28,7 +28,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
-from mindroom import approval_receipt, response_runner
+from mindroom import approval_execution, approval_receipt, response_runner
 from mindroom import background_tasks as background_tasks_module
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
@@ -2465,6 +2465,66 @@ async def test_completed_approval_continuation_preserves_ordered_tool_anchors(tm
     assert final_request.tool_trace == trace
 
 
+def test_agent_approval_presentation_reconciles_provider_without_tool_messages() -> None:
+    """Agent continuation keeps the durable anchor when only tool execution data survives."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-provider-gap",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
+        response_tool_trace=(
+            {
+                "type": "tool_call_started",
+                "tool_name": "inspect",
+                "args_preview": "path=report.txt",
+                "tool_call_id": "call-1",
+            },
+        ),
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After approval.",
+        messages=[],
+        tools=[],
+    )
+    completed_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+        result="details",
+    )
+
+    body, trace = approval_execution._approval_response_presentation(
+        response,
+        None,
+        continuation=continuation,
+        requirement_tools=[completed_tool],
+        show_tool_calls=True,
+    )
+
+    assert body == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_path: Path) -> None:
     """Fail-closed automatic denial must not claim that a nonexistent recipient can approve it."""
@@ -3218,6 +3278,14 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_member_names=("general",),
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
+        response_text="Before.\n\n🔧 `inspect` [1] ⏳",
+        response_tool_trace=(
+            {
+                "type": "tool_call_started",
+                "tool_name": "inspect",
+                "tool_call_id": "call-1",
+            },
+        ),
     )
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
 
@@ -3242,6 +3310,14 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     assert isinstance(result, CompletedApprovalRun)
     assert continued.await_args.kwargs.get("member_model_names") == {"general": "large"}
     assert continued.await_args.kwargs["show_tool_calls"] is False
+    assert continued.await_args.kwargs["prior_response_text"] == continuation.response_text
+    assert continued.await_args.kwargs["prior_tool_trace"] == [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            tool_call_id="call-1",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
