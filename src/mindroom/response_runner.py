@@ -179,15 +179,25 @@ def _merge_response_extra_content(
     return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
-def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> PausedAttempt:
+def _paused_with_committed_presentation(
+    error: ResponsePausedForApproval,
+    *,
+    show_tool_calls: bool,
+) -> PausedAttempt:
     """Attach only the response state acknowledged before the stream suspended."""
     if error.presentation is None:
         return error.paused
+    if show_tool_calls:
+        tool_trace = error.presentation.tool_trace
+        presentation_state = error.presentation.state or {}
+    else:
+        tool_trace = error.paused.tool_trace
+        presentation_state = error.paused.response_presentation_state
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
-        tool_trace=error.presentation.tool_trace,
-        response_presentation_state=error.presentation.state or {},
+        tool_trace=tool_trace,
+        response_presentation_state=presentation_state,
     )
 
 
@@ -2781,7 +2791,14 @@ class ResponseRunner:
             if approval_suspension_handler is None:
                 raise
             try:
-                progress.settle(await approval_suspension_handler(_paused_with_committed_presentation(error)))
+                progress.settle(
+                    await approval_suspension_handler(
+                        _paused_with_committed_presentation(
+                            error,
+                            show_tool_calls=self._show_tool_calls(),
+                        ),
+                    ),
+                )
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                 progress.failure_reason = str(suspension_error) or "approval_suspension_failed"

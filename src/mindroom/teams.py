@@ -112,6 +112,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
+    append_stream_text,
     complete_pending_tool_block,
     format_tool_completed_event,
 )
@@ -444,13 +445,11 @@ class _TeamStreamPresentation:
         if member_id not in self.per_member:
             msg = f"Team event has no frozen member slot for {member_id!r}"
             raise RuntimeError(msg)
-        if content:
-            self.per_member[member_id] += str(content)
+        self.per_member[member_id] = append_stream_text(self.per_member[member_id], content)
 
     def append_consensus(self, content: object | None) -> None:
         """Append a coordinator content delta to the consensus slot."""
-        if content:
-            self.consensus += str(content)
+        self.consensus = append_stream_text(self.consensus, content)
 
     def _append_tool_marker(self, scope_key: str, marker: str) -> None:
         if scope_key == "team":
@@ -3595,14 +3594,18 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         fallback_run_id=attempt_run_id,
                     )
                     if paused_attempt is not None:
+                        paused_attempt = _continued_team_pause(presentation, paused_attempt)
+                        if paused_attempt.response_text:
+                            yield StructuredStreamChunk(
+                                content=paused_attempt.response_text,
+                                tool_trace=list(paused_attempt.tool_trace),
+                                presentation_state=paused_attempt.response_presentation_state,
+                            )
                         yield AttemptResolved(
                             replace(
                                 paused_attempt,
                                 runtime_model_name=prepared_execution.runtime_model_name,
                                 team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                                response_text=presentation.render_body(),
-                                tool_trace=tuple(presentation.tool_trace),
-                                response_presentation_state=presentation.to_state(),
                             ),
                         )
                         return

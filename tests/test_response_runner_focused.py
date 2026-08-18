@@ -97,6 +97,7 @@ from mindroom.streaming import (
     StreamingResponse,
 )
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
@@ -2449,7 +2450,7 @@ async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path
             response_text="Before approval.",
         ),
     )
-    handed_off = response_runner._paused_with_committed_presentation(error)
+    handed_off = response_runner._paused_with_committed_presentation(error, show_tool_calls=True)
     identity = runner.deps.tool_runtime.build_execution_identity(
         target=request.response_envelope.target,
         user_id=request.user_id,
@@ -2512,7 +2513,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
     error.capture_presentation(
         StreamingPresentation(response_text=""),
     )
-    handed_off = response_runner._paused_with_committed_presentation(error)
+    handed_off = response_runner._paused_with_committed_presentation(error, show_tool_calls=True)
     identity = runner.deps.tool_runtime.build_execution_identity(
         target=request.response_envelope.target,
         user_id=request.user_id,
@@ -2590,11 +2591,52 @@ def test_streaming_pause_handoff_uses_only_transport_committed_presentation() ->
         ),
     )
 
-    paused = response_runner._paused_with_committed_presentation(error)
+    paused = response_runner._paused_with_committed_presentation(error, show_tool_calls=True)
 
     assert paused.response_text == "Committed.\n\n🔧 `inspect` [1] ⏳"
     assert paused.tool_trace == (trace,)
     assert paused.response_presentation_state == {"kind": "team", "consensus": "Committed."}
+
+
+def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> None:
+    """Hidden tool state is continuation-only and survives an empty committed presentation."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect")
+    trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="inspect",
+        tool_call_id="call-1",
+        scope_key="agent:member-a",
+    )
+    state = {
+        "kind": "team_stream",
+        "version": 2,
+        "members": [{"id": "member-a", "display_name": "Member A", "content": ""}],
+        "consensus": "",
+    }
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            tool_trace=(trace,),
+            response_presentation_state=state,
+        ),
+    )
+    error.capture_presentation(StreamingPresentation(response_text=""))
+
+    paused = response_runner._paused_with_committed_presentation(error, show_tool_calls=False)
+
+    assert paused.response_text == ""
+    assert paused.tool_trace == (trace,)
+    assert paused.response_presentation_state == state
+    restored = _TeamStreamPresentation.restore(
+        member_ids=["member-a"],
+        show_tool_calls=False,
+        state=paused.response_presentation_state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    assert restored.tool_trace == [trace]
 
 
 @pytest.mark.asyncio

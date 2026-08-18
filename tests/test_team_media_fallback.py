@@ -162,6 +162,34 @@ def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -
     assert restored.tool_trace[0].type == "tool_call_completed"
 
 
+def test_team_stream_presentation_scopes_reused_call_ids_to_members() -> None:
+    """Two member model runs can reuse a provider call ID without suppressing either tool."""
+    presentation = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=True,
+    )
+    presentation.start_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}),
+    )
+    presentation.start_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}),
+    )
+    presentation.complete_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done"),
+    )
+
+    assert [(entry.scope_key, entry.type) for entry in presentation.tool_trace] == [
+        ("agent:first", "tool_call_completed"),
+        ("agent:second", "tool_call_started"),
+    ]
+    assert "🔧 `inspect` [1]" in presentation.per_member["first"]
+    assert "🔧 `inspect` [2] ⏳" in presentation.per_member["second"]
+
+
 @pytest.mark.asyncio
 async def test_team_continuation_appends_terminal_only_consensus() -> None:
     """Terminal team content remains visible when the provider emitted no content deltas."""
@@ -2932,7 +2960,6 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield TeamRunContentEvent(content="Before approval.")
-        yield TeamToolCallStartedEvent(tool=tool)
         yield TeamRunPausedEvent(
             run_id="run-paused",
             session_id="session-team",

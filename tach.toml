@@ -4787,6 +4787,7 @@ expose = [
     "StreamingToolTracker",
     "StructuredStreamChunk",
     "ToolTraceEntry",
+    "append_stream_text",
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",

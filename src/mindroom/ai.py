@@ -754,17 +754,35 @@ def _track_stream_tool_started(
     event: ToolCallStartedEvent,
     *,
     show_tool_calls: bool,
-) -> None:
+) -> bool:
     """Track started tool-call metadata for streaming output."""
-    state.observed_tool_calls += 1
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, _ = state.tool_tracker.start(event.tool, tool_index=display_tool_index)
+    tool_msg, trace_entry = state.tool_tracker.start(event.tool, tool_index=display_tool_index)
+    if trace_entry is None:
+        return False
+    state.observed_tool_calls += 1
     if not show_tool_calls or display_tool_index is None:
-        return
+        return True
 
     state.tool_count = display_tool_index
     if tool_msg:
         state.full_response += tool_msg
+    return True
+
+
+def _materialize_paused_agent_tool_events(
+    state: _StreamingAttemptState,
+    tools: Sequence[ToolExecution],
+    *,
+    show_tool_calls: bool,
+) -> tuple[ToolCallStartedEvent, ...]:
+    """Return exact missing tool-start events for one native approval pause."""
+    materialized: list[ToolCallStartedEvent] = []
+    for tool in tools:
+        event = ToolCallStartedEvent(tool=tool)
+        if _track_stream_tool_started(state, event, show_tool_calls=show_tool_calls):
+            materialized.append(event)
+    return tuple(materialized)
 
 
 def _track_stream_tool_completed(
@@ -2148,6 +2166,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     fallback_run_id=attempt.attempt_run_id,
                 )
                 if paused_attempt is not None:
+                    for tool_event in _materialize_paused_agent_tool_events(
+                        state,
+                        paused_attempt.tools,
+                        show_tool_calls=show_tool_calls,
+                    ):
+                        _sync_live_turn_recorder()
+                        yield tool_event
                     yield AttemptResolved(
                         replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name),
                     )

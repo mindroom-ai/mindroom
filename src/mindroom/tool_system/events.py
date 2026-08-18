@@ -81,7 +81,9 @@ class StreamingToolTracker:
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker."""
         call_id = _streaming_tool_call_id(tool)
-        if call_id is not None and any(pending.tool_call_id == call_id for pending in self.pending_tools):
+        if call_id is not None and any(
+            pending.scope_key == scope_key and pending.tool_call_id == call_id for pending in self.pending_tools
+        ):
             return "", None
         visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
         if trace_entry is not None:
@@ -159,7 +161,7 @@ class StreamingToolTracker:
         if call_id is not None:
             for pos in range(len(self.pending_tools) - 1, -1, -1):
                 pending_tool = self.pending_tools[pos]
-                if pending_tool.tool_call_id == call_id:
+                if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
                     return pos
         info = extract_tool_completed_info(tool)
         if info is None:
@@ -193,8 +195,7 @@ class CollectedStreamPresentation:
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
-        if content:
-            self.response_text += str(content)
+        self.response_text = append_stream_text(self.response_text, content)
 
     def start_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
         """Record one tool start and append its marker when visible."""
@@ -522,6 +523,16 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
         if next_line is not None and next_line.strip():
             spaced_lines.append(_line_ending(line) if line.endswith(("\n", "\r")) else "\n\n")
     return "".join(spaced_lines)
+
+
+def append_stream_text(existing_text: str, content: object | None) -> str:
+    """Append one delta while keeping a trailing visible tool marker on its own line."""
+    if not content:
+        return existing_text
+    delta = str(content)
+    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
+    separator = "\n\n" if not delta.startswith(("\n", "\r")) and _is_visible_tool_marker_line(last_line) else ""
+    return f"{existing_text}{separator}{delta}"
 
 
 def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:

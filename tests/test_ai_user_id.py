@@ -3684,16 +3684,21 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                async for _chunk in stream_agent_response(
-                    make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
-                    prompt="Run the action",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
-                ):
-                    pass
+                await _collect_streamed_response_content(
+                    stream_agent_response(
+                        make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
+                        prompt="Run the action",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                    ),
+                    show_tool_calls=True,
+                )
 
         assert raised.value.paused.run_id == "run-paused"
         assert raised.value.paused.tools == (tool,)
+        assert raised.value.presentation is not None
+        assert raised.value.presentation.response_text.strip() == "🔧 `dangerous` [1] ⏳"
+        assert raised.value.presentation.tool_trace[0].tool_call_id == "call-stream-approval"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_real_agno_confirmation_run_paused(self, tmp_path: Path) -> None:

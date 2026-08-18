@@ -13,7 +13,7 @@ from agno.run.requirement import RunRequirement
 from mindroom.approval_execution import _collect_agent_continuation
 from mindroom.approval_response import identify_approval_tools
 from mindroom.response_turn import PausedAttempt
-from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -85,3 +85,39 @@ async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> Non
     assert len(presentation.tool_trace) == 1
     assert presentation.tool_trace[0].type == "tool_call_started"
     assert presentation.tool_trace[0].tool_call_id == "call-2"
+
+
+@pytest.mark.asyncio
+async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> None:
+    """Continuation content without leading whitespace must not join the marker line."""
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={},
+        result="done",
+    )
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=True,
+        response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
+        tool_trace=[
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="inspect",
+                tool_call_id="call-1",
+            ),
+        ],
+    )
+    terminal = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="After approval.")
+        yield terminal
+
+    await _collect_agent_continuation(events(), presentation)
+
+    assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
