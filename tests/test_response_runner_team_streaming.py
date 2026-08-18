@@ -17,6 +17,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 
 from mindroom.bot import AgentBot
+from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -119,6 +120,63 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
     message = mock_team_response.await_args.kwargs["message"]
     assert "Describe this image" in message
     assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_consumes_cancel(
+    tmp_path: Path,
+) -> None:
+    """A team provider that consumes process cancellation must leave its durable turn for replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    generation_started = asyncio.Event()
+
+    async def cancellation_resistant_team_response(*_args: object, **_kwargs: object) -> str:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert current_task_is_process_shutdown()
+        return "late team response"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(side_effect=cancellation_resistant_team_response),
+        ),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        deliver_final = AsyncMock(
+            return_value=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$team-response",
+            ),
+        )
+        _set_gateway_method(coordinator.deps.delivery_gateway, "deliver_final", deliver_final)
+        task = asyncio.create_task(
+            coordinator.generate_team_response_helper(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                team_mode="coordinate",
+            ),
+        )
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    deliver_final.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -363,6 +363,7 @@ class ResponseLifecycleDeps:
 
     response_hooks: ResponseHookService
     logger: BoundLogger
+    process_shutdown_requested: Callable[[], bool]
 
 
 def _session_exists(
@@ -408,6 +409,11 @@ class ResponseLifecycle:
         self.deps = deps
         self.identity = identity
         self.pipeline_timing = pipeline_timing
+
+    def _raise_if_process_shutdown(self) -> None:
+        """Stop best-effort lifecycle work once orderly process shutdown owns cancellation."""
+        if self.deps.process_shutdown_requested():
+            raise asyncio.CancelledError
 
     def _log_effects_failure_after_visible_delivery(
         self,
@@ -515,8 +521,12 @@ class ResponseLifecycle:
 
     async def emit_session_started(self, watch: _SessionStartedWatch) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
+        if self.deps.process_shutdown_requested():
+            return
         try:
             await self._maybe_emit_session_started(watch)
+            if self.deps.process_shutdown_requested():
+                return
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -536,6 +546,7 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
+        self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if final_delivery_outcome.terminal_status == "completed":
@@ -557,8 +568,9 @@ class ResponseLifecycle:
                     visible_response_event_id=response_event_id,
                     failure_reason=final_delivery_outcome.failure_reason,
                 )
+            self._raise_if_process_shutdown()
         except asyncio.CancelledError as error:
-            if response_event_id is None:
+            if self.deps.process_shutdown_requested() or response_event_id is None:
                 raise
             self._log_effects_failure_after_visible_delivery(
                 response_event_id=response_event_id,
@@ -588,6 +600,7 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
+        self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
             if callable(post_response_outcome):
@@ -599,8 +612,9 @@ class ResponseLifecycle:
                 post_response_outcome,
                 post_response_deps,
             )
+            self._raise_if_process_shutdown()
         except asyncio.CancelledError as error:
-            if response_event_id is None:
+            if self.deps.process_shutdown_requested() or response_event_id is None:
                 raise
             self._log_effects_failure_after_visible_delivery(
                 response_event_id=response_event_id,

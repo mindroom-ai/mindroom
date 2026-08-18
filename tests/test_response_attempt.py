@@ -249,8 +249,10 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
         assert "$existing" in stop_manager.tracked_messages
     finally:
         release_child.set()
-        await asyncio.gather(outer, *child_tasks, return_exceptions=True)
+        results = await asyncio.gather(outer, *child_tasks, return_exceptions=True)
 
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert outer.cancelled()
     assert stop_manager.cleared_messages == [("$existing", False)]
 
 

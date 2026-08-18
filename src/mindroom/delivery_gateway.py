@@ -153,6 +153,8 @@ class ResponseHookService:
         identity: ResponseIdentity,
         response_text: str,
     ) -> FinalResponseDraft:
+        if current_task_is_process_shutdown():
+            raise asyncio.CancelledError
         draft = FinalResponseDraft(
             response_text=response_text,
             response_kind=identity.response_kind,
@@ -164,11 +166,14 @@ class ResponseHookService:
             **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, identity.correlation_id),
             draft=draft,
         )
-        return await emit_final_response_transform(
+        draft = await emit_final_response_transform(
             self.hook_context.registry,
             EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
             context,
         )
+        if current_task_is_process_shutdown():
+            raise asyncio.CancelledError
+        return draft
 
     async def emit_after_response(  # noqa: D102
         self,

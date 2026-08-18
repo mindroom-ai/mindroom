@@ -11,6 +11,7 @@ import nio
 import pytest
 
 from mindroom.bot import TeamBot
+from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -30,9 +31,11 @@ from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
+    EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     AfterResponseContext,
     BeforeResponseContext,
     CancelledResponseContext,
+    FinalResponseTransformContext,
     HookRegistry,
     MessageEnvelope,
     hook,
@@ -131,6 +134,7 @@ def _response_lifecycle(
         ResponseLifecycleDeps(
             response_hooks=response_hooks,
             logger=get_logger("tests.response_lifecycle"),
+            process_shutdown_requested=lambda: False,
         ),
         identity=ResponseIdentity(
             response_kind="ai",
@@ -625,6 +629,92 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     assert delivery_result.delivery_kind == expected_delivery_kind
     assert delivery_result.response_text == "visible response"
     assert cancelled_seen == []
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_escapes_real_best_effort_after_response_hook(
+    tmp_path: Path,
+) -> None:
+    """Process stop must not run post-response effects after the real hook executor consumes cancellation."""
+    after_started = asyncio.Event()
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def slow_after_response(ctx: AfterResponseContext) -> None:
+        del ctx
+        after_started.set()
+        await asyncio.Event().wait()
+
+    registry = HookRegistry.from_plugins([_plugin("test-process-stop-after", [slow_after_response])])
+    _, response_hooks = _response_hook_service(tmp_path, registry)
+    envelope = _envelope()
+    lifecycle = ResponseLifecycle(
+        ResponseLifecycleDeps(
+            response_hooks=response_hooks,
+            logger=get_logger("tests.response_lifecycle"),
+            process_shutdown_requested=current_task_is_process_shutdown,
+        ),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-process-stop-after",
+        ),
+        pipeline_timing=None,
+    )
+    post_effects = AsyncMock()
+
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects):
+        task = asyncio.create_task(
+            lifecycle.finalize(
+                FinalDeliveryOutcome(
+                    terminal_status="completed",
+                    event_id="$response",
+                    is_visible_response=True,
+                    final_visible_body="visible response",
+                    delivery_kind="sent",
+                ),
+                build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+                post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            ),
+        )
+        await asyncio.wait_for(after_started.wait(), timeout=1.0)
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    post_effects.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_escapes_real_best_effort_final_response_transform(
+    tmp_path: Path,
+) -> None:
+    """Process stop must not resume terminal delivery after a final-transform hook consumes cancellation."""
+    transform_started = asyncio.Event()
+
+    @hook(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM)
+    async def slow_transform(ctx: FinalResponseTransformContext) -> None:
+        del ctx
+        transform_started.set()
+        await asyncio.Event().wait()
+
+    registry = HookRegistry.from_plugins([_plugin("test-process-stop-transform", [slow_transform])])
+    _, response_hooks = _response_hook_service(tmp_path, registry)
+    identity = ResponseIdentity(
+        response_kind="ai",
+        response_envelope=_envelope(),
+        correlation_id="corr-process-stop-transform",
+    )
+    task = asyncio.create_task(
+        response_hooks._apply_final_response_transform(
+            identity=identity,
+            response_text="visible response",
+        ),
+    )
+    await asyncio.wait_for(transform_started.wait(), timeout=1.0)
+    request_task_cancel(task, process_shutdown=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

@@ -141,6 +141,7 @@ class ResponseAttemptRunner:
             task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
             tracked_message_id = message_id or f"__pending_response__:{id(task)}"
             show_stop_button = False
+            process_shutdown = False
 
             self.deps.stop_manager.set_current(
                 tracked_message_id,
@@ -162,6 +163,7 @@ class ResponseAttemptRunner:
 
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
+                process_shutdown = current_task_is_process_shutdown()
                 cancellation = caught_cancellation
                 if task.done() and task.cancelled():
                     try:
@@ -180,6 +182,8 @@ class ResponseAttemptRunner:
                     user_stop_message="Response cancelled by user",
                     interrupted_message="Response interrupted — traceback for diagnosis",
                 )
+                if process_shutdown:
+                    raise
             except Exception as error:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 raise
@@ -189,7 +193,7 @@ class ResponseAttemptRunner:
                 self.deps.stop_manager.clear_message(
                     tracked_message_id,
                     self.deps.client,
-                    remove_button=show_stop_button and not button_already_removed,
+                    remove_button=show_stop_button and not button_already_removed and not process_shutdown,
                 )
 
             return message_id

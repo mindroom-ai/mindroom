@@ -44,6 +44,7 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     log_cancelled_response,
     log_cancelled_response_source,
     request_task_cancel,
@@ -428,6 +429,12 @@ def _generation_outcome(
         delivery=delivery,
         run_succeeded=turn_recorder.outcome == "completed",
     )
+
+
+def _raise_if_process_shutdown() -> None:
+    """Restore process cancellation when generation code consumed it."""
+    if current_task_is_process_shutdown():
+        raise asyncio.CancelledError
 
 
 @dataclass(frozen=True)
@@ -965,6 +972,8 @@ class ResponseRunner:
                     signal_queued_message=request.sync_restart_retry_source_event_id is None,
                 )
             except asyncio.CancelledError as error:
+                if current_task_is_process_shutdown():
+                    raise
                 if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
                     await self._finalize_early_placeholder_cancellation(
                         early_placeholder,
@@ -1523,6 +1532,8 @@ class ResponseRunner:
                 post_response_deps=post_response_deps,
             )
         except asyncio.CancelledError as exc:
+            if current_task_is_process_shutdown():
+                raise
             failure_reason = cancel_failure_reason(classify_cancel_source(exc))
             cancelled_outcome = FinalDeliveryOutcome(
                 terminal_status="cancelled",
@@ -1540,7 +1551,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _run_and_settle_locked_response(  # noqa: C901
+    async def _run_and_settle_locked_response(  # noqa: C901, PLR0912
         self,
         request: ResponseRequest,
         *,
@@ -1572,6 +1583,8 @@ class ResponseRunner:
                 on_cancelled=progress.note_task_cancelled,
             )
         except asyncio.CancelledError as error:
+            if current_task_is_process_shutdown():
+                raise
             progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
             await self._settle_missing_delivery_outcome(
                 target=target,
@@ -1583,6 +1596,13 @@ class ResponseRunner:
             )
             deferred_error = error
         except Exception as error:
+            if current_task_is_process_shutdown():
+                if isinstance(error, StreamingDeliveryError) and isinstance(
+                    error.error,
+                    asyncio.CancelledError,
+                ):
+                    raise error.error from error
+                raise
             if isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
                 progress.settle(await streaming_delivery_error_handler(error))
             elif progress.stage_started or progress.delivery_outcome is not None:
@@ -1660,6 +1680,7 @@ class ResponseRunner:
             ResponseLifecycleDeps(
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
                 logger=self.deps.logger,
+                process_shutdown_requested=current_task_is_process_shutdown,
             ),
             identity=identity,
             pipeline_timing=request.pipeline_timing,
@@ -1950,6 +1971,8 @@ class ResponseRunner:
         )
 
         async def persist_failed_team_turn() -> None:
+            if current_task_is_process_shutdown():
+                return
             if team_turn_recorder.outcome == "completed" or team_turn_recorder.original_status is RunStatus.cancelled:
                 return
             if team_turn_recorder.outcome == "pending":
@@ -2055,6 +2078,8 @@ class ResponseRunner:
                         event_id = transport_outcome.last_physical_stream_event_id
                         progress.track_event(event_id)
                     except asyncio.CancelledError:
+                        if current_task_is_process_shutdown():
+                            raise
                         await self._persist_interrupted_recorder_off_loop(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
@@ -2067,6 +2092,7 @@ class ResponseRunner:
                         raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
+                _raise_if_process_shutdown()
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
                 await persist_failed_team_turn()
@@ -2130,6 +2156,8 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
+                                if current_task_is_process_shutdown():
+                                    raise
                                 await self._persist_interrupted_recorder_off_loop(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
@@ -2143,7 +2171,10 @@ class ResponseRunner:
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                         await persist_failed_team_turn()
+                    _raise_if_process_shutdown()
                 except asyncio.CancelledError as exc:
+                    if current_task_is_process_shutdown():
+                        raise
                     log_cancelled_response(
                         self.deps.logger,
                         exc=exc,
@@ -2195,6 +2226,8 @@ class ResponseRunner:
                     )
                     progress.settle(delivery)
                 except asyncio.CancelledError:
+                    if current_task_is_process_shutdown():
+                        raise
                     await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
                         session_scope=session_scope,
@@ -2449,6 +2482,8 @@ class ResponseRunner:
                     run_metadata_content=run_metadata_content,
                 )
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -2569,6 +2604,8 @@ class ResponseRunner:
                     )
                 return transport_outcome
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -2580,7 +2617,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901
+    async def _process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2643,8 +2680,13 @@ class ResponseRunner:
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
-                await lifecycle.emit_session_started(session_started_watch)
-                if turn_recorder.outcome != "completed" and turn_recorder.original_status is not RunStatus.cancelled:
+                if not current_task_is_process_shutdown():
+                    await lifecycle.emit_session_started(session_started_watch)
+                if (
+                    not current_task_is_process_shutdown()
+                    and turn_recorder.outcome != "completed"
+                    and turn_recorder.original_status is not RunStatus.cancelled
+                ):
                     if turn_recorder.outcome == "pending":
                         turn_recorder.mark_interrupted(RunStatus.error)
                     await self._persist_interrupted_recorder_off_loop(
@@ -2656,7 +2698,10 @@ class ResponseRunner:
                         is_team=False,
                         response_event_id=request.existing_event_id,
                     )
+            _raise_if_process_shutdown()
         except asyncio.CancelledError as exc:
+            if current_task_is_process_shutdown():
+                raise
             cancel_source = classify_cancel_source(exc)
             log_cancelled_response(
                 self.deps.logger,
@@ -2709,6 +2754,8 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=session_scope,
@@ -2727,7 +2774,7 @@ class ResponseRunner:
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 
-    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2801,7 +2848,13 @@ class ResponseRunner:
                 )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
+            _raise_if_process_shutdown()
         except StreamingDeliveryError as error:
+            if current_task_is_process_shutdown() and isinstance(
+                error.error,
+                asyncio.CancelledError,
+            ):
+                raise error.error from error
             stream_transport_outcome = error.transport_outcome
             if stream_transport_outcome.terminal_status == "cancelled":
                 log_cancelled_response_source(
@@ -2859,6 +2912,8 @@ class ResponseRunner:
             )
             raise
         except Exception as error:
+            if current_task_is_process_shutdown():
+                raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
             return build_outcome(
                 await self.deps.delivery_gateway.finalize_streamed_response(

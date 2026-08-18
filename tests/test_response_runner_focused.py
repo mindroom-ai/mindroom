@@ -18,7 +18,7 @@ import pytest
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.cancellation import request_task_cancel
+from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
@@ -167,6 +167,90 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
 
     assert await runner.drain_inbox_responses(cancel_after_seconds=0) is True
     assert runner.incomplete_inbox_responses_recoverable is False
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_drains_four_owned_response_lifecycles(
+    tmp_path: Path,
+) -> None:
+    """Process stop must unwind every tracked response before terminal cleanup can resist cancellation."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    all_attempts_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+    started_count = 0
+
+    async def blocked_attempt(*_args: object, **_kwargs: object) -> None:
+        nonlocal started_count
+        started_count += 1
+        if started_count == 4:
+            all_attempts_started.set()
+        await asyncio.Event().wait()
+
+    async def cancellation_resistant_settlement(**_kwargs: object) -> None:
+        while not release_settlement.is_set():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                continue
+
+    async def owned_response(index: int) -> None:
+        await coordinator.generate_response(
+            _plain_request(
+                _target(thread_id=f"$thread-{index}"),
+                source_event_id=f"$source-{index}",
+            ),
+        )
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch.object(
+            coordinator,
+            "_process_and_respond",
+            new=AsyncMock(side_effect=blocked_attempt),
+        ),
+        patch.object(
+            coordinator,
+            "_settle_missing_delivery_outcome",
+            new=AsyncMock(side_effect=cancellation_resistant_settlement),
+        ) as settle,
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        tasks = [
+            coordinator.track_inbox_response(
+                owned_response(index),
+                name=f"test_process_shutdown_response_{index}",
+                recovery_proof_ready=lambda: True,
+            )
+            for index in range(4)
+        ]
+        await asyncio.wait_for(all_attempts_started.wait(), timeout=1.0)
+        coordinator.begin_process_shutdown()
+        try:
+            assert (
+                await asyncio.wait_for(
+                    coordinator.drain_inbox_responses(cancel_after_seconds=0.01),
+                    timeout=0.2,
+                )
+                is False
+            )
+        finally:
+            release_settlement.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0)
+
+    settle.assert_not_awaited()
+    assert coordinator.pending_inbox_response_count == 0
+    assert not coordinator._inbox_response_tasks
 
 
 @pytest.mark.asyncio
@@ -935,6 +1019,100 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_skips_non_streaming_replay_persistence(
+    tmp_path: Path,
+) -> None:
+    """Orderly stop leaves the durable pending turn instead of blocking on history cleanup."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+    persistence_started = asyncio.Event()
+    release_persistence = asyncio.Event()
+
+    async def blocked_generation(*_args: object, **_kwargs: object) -> str:
+        generation_started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def blocked_persistence(**_kwargs: object) -> None:
+        persistence_started.set()
+        await release_persistence.wait()
+
+    with (
+        patch_response_runner_module(
+            ai_response=AsyncMock(side_effect=blocked_generation),
+            typing_indicator=_noop_typing,
+        ),
+        patch.object(
+            coordinator,
+            "_persist_interrupted_recorder_off_loop",
+            new=AsyncMock(side_effect=blocked_persistence),
+        ) as persist,
+    ):
+        task = asyncio.create_task(
+            coordinator._process_and_respond(_plain_request(_target())),
+        )
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        finally:
+            release_persistence.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    persist.assert_not_awaited()
+    assert not persistence_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_blocks_terminal_delivery_after_non_streaming_generation_consumes_cancel(
+    tmp_path: Path,
+) -> None:
+    """A provider that consumes process cancellation must still leave the durable turn for replay."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+    deliver_final = AsyncMock(return_value=_completed_outcome())
+
+    async def cancellation_resistant_generation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> response_runner._NonStreamingGeneration:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert current_task_is_process_shutdown()
+        return response_runner._NonStreamingGeneration(
+            response_text="late response",
+            tool_trace=[],
+            run_metadata_content={},
+        )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+        patch.object(
+            coordinator,
+            "generate_non_streaming_ai_response",
+            new=AsyncMock(side_effect=cancellation_resistant_generation),
+        ),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        task = asyncio.create_task(coordinator.generate_response(_plain_request(_target())))
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    deliver_final.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
     """A failed final delivery must not turn a thinking placeholder into a substantive reply."""
     bot = _bot(tmp_path)
@@ -1032,6 +1210,177 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_unwraps_streaming_cancellation_without_persistence(
+    tmp_path: Path,
+) -> None:
+    """A normalized stream cancellation must still unwind directly during process stop."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+
+    async def cancelled_stream(
+        *_args: object,
+        **_kwargs: object,
+    ) -> StreamTransportOutcome:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as error:
+            raise StreamingDeliveryError(
+                error,
+                event_id="$stream",
+                accumulated_text="partial",
+                tool_trace=[],
+                transport_outcome=StreamTransportOutcome(
+                    last_physical_stream_event_id="$stream",
+                    terminal_status="cancelled",
+                    rendered_body="partial",
+                    visible_body_state="visible_body",
+                    failure_reason="interrupted",
+                ),
+            ) from error
+
+    persist = AsyncMock()
+    finalize = AsyncMock(
+        return_value=FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$stream",
+            is_visible_response=True,
+            failure_reason="interrupted",
+        ),
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=cancelled_stream),
+        ),
+        patch.object(
+            coordinator,
+            "_persist_interrupted_recorder_off_loop",
+            new=persist,
+        ),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=finalize,
+        ),
+    ):
+        task = asyncio.create_task(
+            coordinator._process_and_respond_streaming(
+                _plain_request(_target()),
+            ),
+        )
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    persist.assert_not_awaited()
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_skips_stream_terminalization_after_cancelled_generation_errors(
+    tmp_path: Path,
+) -> None:
+    """A stream that replaces process cancellation with an error must not touch Matrix terminal delivery."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+
+    async def cancelled_then_failed_stream(
+        *_args: object,
+        **_kwargs: object,
+    ) -> StreamTransportOutcome:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as error:
+            msg = "stream cleanup failed after cancellation"
+            raise RuntimeError(msg) from error
+
+    persist = AsyncMock()
+    finalize = AsyncMock(return_value=_completed_outcome("$stream"))
+
+    with (
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=cancelled_then_failed_stream),
+        ),
+        patch.object(
+            coordinator,
+            "_persist_interrupted_recorder_off_loop",
+            new=persist,
+        ),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=finalize,
+        ),
+    ):
+        task = asyncio.create_task(
+            coordinator._process_and_respond_streaming(
+                _plain_request(_target()),
+            ),
+        )
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(RuntimeError, match="stream cleanup failed after cancellation"):
+            await task
+
+    persist.assert_not_awaited()
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_blocks_stream_finalization_after_generation_consumes_cancel(
+    tmp_path: Path,
+) -> None:
+    """A stream generator that consumes process cancellation cannot finalize its transport outcome."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+    finalize = AsyncMock(return_value=_completed_outcome("$stream"))
+
+    async def cancellation_resistant_generation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> StreamTransportOutcome:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert current_task_is_process_shutdown()
+        return StreamTransportOutcome(
+            last_physical_stream_event_id="$stream",
+            terminal_status="completed",
+            rendered_body="late response",
+            visible_body_state="visible_body",
+        )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(side_effect=cancellation_resistant_generation),
+        ),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=True),
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        task = asyncio.create_task(coordinator.generate_response(_plain_request(_target())))
+        await generation_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    finalize.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1573,6 +1922,111 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_propagates_from_visible_response_hooks(
+    tmp_path: Path,
+) -> None:
+    """Orderly stop must not suppress hook cancellation and continue post-response effects."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"))
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    hook_started = asyncio.Event()
+
+    async def blocked_hook(**_kwargs: object) -> None:
+        hook_started.set()
+        await asyncio.Event().wait()
+
+    lifecycle.deps.response_hooks.emit_after_response = AsyncMock(
+        side_effect=blocked_hook,
+    )
+    post_effects = AsyncMock()
+    outcome = _completed_outcome()
+    with patch_response_runner_module(apply_post_response_effects=post_effects):
+        task = asyncio.create_task(
+            lifecycle.finalize(
+                outcome,
+                build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+                post_response_deps=PostResponseEffectsDeps(
+                    logger=get_logger("tests.post_response"),
+                ),
+            ),
+        )
+        await hook_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    post_effects.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
+    tmp_path: Path,
+) -> None:
+    """Orderly stop must not wait on Matrix cleanup after durable response cancellation."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"))
+    progress = response_runner._DeliveryProgress()
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    attempt_started = asyncio.Event()
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def cancelled_attempt(**_kwargs: object) -> None:
+        attempt_started.set()
+        await asyncio.Event().wait()
+
+    async def blocked_settlement(**_kwargs: object) -> None:
+        settlement_started.set()
+        await release_settlement.wait()
+
+    with (
+        patch.object(
+            coordinator,
+            "_run_cancellable_response",
+            new=AsyncMock(side_effect=cancelled_attempt),
+        ),
+        patch.object(
+            coordinator,
+            "_settle_missing_delivery_outcome",
+            new=AsyncMock(side_effect=blocked_settlement),
+        ) as settle,
+    ):
+        task = asyncio.create_task(
+            coordinator._run_and_settle_locked_response(
+                request,
+                target=request.response_envelope.target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=AsyncMock(),
+                user_id=request.user_id,
+                run_id="run-process-shutdown",
+                build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+                post_response_deps=PostResponseEffectsDeps(
+                    logger=get_logger("tests.post_response"),
+                ),
+            ),
+        )
+        await attempt_started.wait()
+        request_task_cancel(task, process_shutdown=True)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        finally:
+            release_settlement.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    settle.assert_not_awaited()
 
 
 @pytest.mark.asyncio
