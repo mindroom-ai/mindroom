@@ -361,6 +361,7 @@ class AgentBot:
     _local_departures_awaiting_sync: set[str]
     _local_membership_lock: asyncio.Lock
     _sync_continuity_store: SyncContinuityStore
+    _response_recovery_diagnostic_classes: set[str]
 
     def __init__(
         self,
@@ -426,6 +427,7 @@ class AgentBot:
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
         self._local_membership_lock = asyncio.Lock()
+        self._response_recovery_diagnostic_classes = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -1560,6 +1562,11 @@ class AgentBot:
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""
         if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
+            self._record_response_recovery_not_ready(
+                reason="live_turn_claim",
+                source_count=len(turn_record.source_event_ids),
+                pending_source_count=None,
+            )
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
         turn_id = turn_record.anchor_event_id
@@ -1570,10 +1577,25 @@ class AgentBot:
         if all(pending_sources):
             return True
         if any(pending_sources):
+            self._record_response_recovery_not_ready(
+                reason="mixed_source_pending",
+                source_count=len(turn_record.source_event_ids),
+                pending_source_count=sum(pending_sources),
+            )
             return False
         if turn_id is None:
+            self._record_response_recovery_not_ready(
+                reason="missing_turn_anchor",
+                source_count=len(turn_record.source_event_ids),
+                pending_source_count=0,
+            )
             return False
         if final_delivery is None:
+            self._record_response_recovery_not_ready(
+                reason="missing_final_delivery",
+                source_count=len(turn_record.source_event_ids),
+                pending_source_count=0,
+            )
             return False
         completed_response_event_ids = {
             event_id
@@ -1583,7 +1605,7 @@ class AgentBot:
             )
             if event_id is not None
         }
-        return final_delivery.acknowledged_event_id is None or all(
+        ready = final_delivery.acknowledged_event_id is None or all(
             (
                 completed_turn is not None
                 and completed_turn.completed
@@ -1592,6 +1614,31 @@ class AgentBot:
                 and completed_turn.response_event_id in completed_response_event_ids
             )
             for completed_turn in map(self._turn_store.get_turn_record, turn_record.indexed_event_ids)
+        )
+        if not ready:
+            self._record_response_recovery_not_ready(
+                reason="terminal_turn_mismatch",
+                source_count=len(turn_record.source_event_ids),
+                pending_source_count=0,
+            )
+        return ready
+
+    def _record_response_recovery_not_ready(
+        self,
+        *,
+        reason: str,
+        source_count: int,
+        pending_source_count: int | None,
+    ) -> None:
+        """Log each non-sensitive recovery boundary once per bot lifetime."""
+        if reason in self._response_recovery_diagnostic_classes:
+            return
+        self._response_recovery_diagnostic_classes.add(reason)
+        self.logger.info(
+            "response_recovery_proof_not_ready",
+            reason=reason,
+            source_count=source_count,
+            pending_source_count=pending_source_count,
         )
 
     async def try_start(self) -> bool:

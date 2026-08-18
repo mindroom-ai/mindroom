@@ -2074,6 +2074,8 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     bot._journal_store = harness.journal_store
     bot._journal_principal_id = harness.controller.deps.matrix_id.full_id
     bot._turn_store = harness.turn_store
+    bot.logger = MagicMock()
+    bot._response_recovery_diagnostic_classes = set()
 
     journal_source_id = "$journal-owned:localhost"
     journal_turn = TurnRecord.create([journal_source_id])
@@ -2097,6 +2099,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
 
     await harness.journal_principal.settle(journal_source_id)
     assert await bot._response_recovery_ready(journal_turn) is False
+    assert await bot._response_recovery_ready(replace(journal_turn, anchor_event_id=None)) is False
 
     mixed_source_ids = ("$mixed-pending:localhost", "$mixed-settled:localhost")
     mixed_turn = TurnRecord.create(mixed_source_ids)
@@ -2164,6 +2167,17 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         ),
     )
     assert await bot._response_recovery_ready(outbox_turn) is False
+    diagnostic_calls = [
+        call for call in bot.logger.info.call_args_list if call.args == ("response_recovery_proof_not_ready",)
+    ]
+    assert [call.kwargs["reason"] for call in diagnostic_calls] == [
+        "live_turn_claim",
+        "missing_final_delivery",
+        "missing_turn_anchor",
+        "mixed_source_pending",
+        "terminal_turn_mismatch",
+    ]
+    assert all(set(call.kwargs) <= {"reason", "source_count", "pending_source_count"} for call in diagnostic_calls)
 
 
 @pytest.mark.asyncio
