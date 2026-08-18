@@ -2573,6 +2573,38 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
         require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
+def test_pause_presentation_rejects_a_duplicate_visible_marker() -> None:
+    """One trace slot cannot authorize two visible markers."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+        ),
+    )
+    duplicated = replace(paused, response_text=f"{paused.response_text}\n\n{paused.response_text}")
+
+    with pytest.raises(RuntimeError, match="ordered presentation"):
+        require_ordered_pause_presentation(duplicated, show_tool_calls=True)
+
+
+def test_pause_presentation_rejects_an_unmatched_visible_marker() -> None:
+    """Visible markers without a trace slot must fail the approval handoff."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+        ),
+    )
+    unmatched = replace(paused, response_text=f"{paused.response_text}\n\n🔧 `other` [2] ⏳")
+
+    with pytest.raises(RuntimeError, match="ordered presentation"):
+        require_ordered_pause_presentation(unmatched, show_tool_calls=True)
+
+
 def test_streaming_pause_handoff_uses_only_transport_committed_presentation() -> None:
     """The lifecycle persists the body/trace acknowledged by Matrix, not buffered stream state."""
     error = ResponsePausedForApproval(

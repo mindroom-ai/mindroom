@@ -26,7 +26,6 @@ _TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
 _MAX_TOOL_TRACE_EVENTS = 120
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
-_TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
@@ -535,6 +534,16 @@ def append_stream_text(existing_text: str, content: object | None) -> str:
     return f"{existing_text}{separator}{delta}"
 
 
+def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
+    """Return whether visible marker lines exactly match the ordered trace slots."""
+    visible_markers = tuple(line.strip() for line in text.splitlines() if _is_visible_tool_marker_line(line))
+    expected_markers = tuple(
+        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
+        for index, entry in enumerate(tool_trace, start=1)
+    )
+    return visible_markers == expected_markers
+
+
 def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
@@ -747,21 +756,8 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
 
     trace_list = list(tool_trace)
 
-    events: list[dict[str, object]] = []
-    has_truncated_content = False
-    for entry in trace_list:
-        event: dict[str, object] = {
-            "type": entry.type,
-            "tool_name": entry.tool_name,
-        }
-        if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
-        if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
-        if entry.truncated:
-            event["truncated"] = True
-            has_truncated_content = True
-        events.append(event)
+    events = list(serialize_tool_trace(trace_list))
+    has_truncated_content = any(entry.truncated for entry in trace_list)
 
     payload: dict[str, object] = {
         "version": _TOOL_TRACE_VERSION,

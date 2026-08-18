@@ -233,6 +233,38 @@ async def test_team_continuation_falls_back_per_unstreamed_slot() -> None:
     assert "**Team Consensus**:\n\nConsensus delta." in body
 
 
+@pytest.mark.asyncio
+async def test_team_continuation_completes_terminal_only_member_tool_in_its_slot() -> None:
+    """A terminal member result must complete the pending marker owned by that member."""
+    presentation = _TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=True)
+    presentation.start_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        member_responses=[
+            RunOutput(
+                agent_id="general",
+                agent_name="GeneralAgent",
+                tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done")],
+            ),
+        ],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert presentation.tool_trace[0].type == "tool_call_completed"
+    assert presentation.tool_trace[0].scope_key == "agent:general"
+    assert "🔧 `inspect` [1] ⏳" not in presentation.per_member["general"]
+    assert "🔧 `inspect` [1]" in presentation.per_member["general"]
+
+
 def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
     """A blocking pause must reach approval with its pending marker already anchored."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)

@@ -2326,10 +2326,30 @@ async def _collect_team_continuation(
         top_level=True,
         skip_scopes=content_delta_scopes,
     )
-    for tool in _collect_team_tool_executions(response):
-        if not tool.is_paused:
-            presentation.complete_tool("team", tool)
+    _complete_terminal_team_tools(presentation, response)
     return response
+
+
+def _complete_terminal_team_tools(
+    presentation: _TeamStreamPresentation,
+    output: TeamRunOutput | RunOutput,
+) -> None:
+    """Complete terminal-only tools in the structural slot that owns them."""
+    scope = (
+        _blocking_team_member_scope(
+            presentation,
+            member_id=output.agent_id,
+            member_name=output.agent_name,
+        )
+        if isinstance(output, RunOutput)
+        else "team"
+    )
+    for tool in output.tools or ():
+        if not tool.is_paused:
+            presentation.complete_tool(scope, tool)
+    if isinstance(output, TeamRunOutput):
+        for member_response in output.member_responses:
+            _complete_terminal_team_tools(presentation, member_response)
 
 
 def _continued_team_pause(

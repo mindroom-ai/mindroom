@@ -25,13 +25,13 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
-from mindroom.tool_system.events import format_tool_started_event, serialize_tool_trace
+from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
 
 def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
-    """Raise when a chained pause was not made visible."""
+    """Raise outside the publication try block's I/O expression when an edit fails."""
     if not succeeded:
         raise RuntimeError(failure_reason)
 
@@ -100,6 +100,9 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     """Reject a visible approval handoff whose pending tools have no ordered anchors."""
     if not show_tool_calls:
         return
+    if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
+        msg = "Approval suspension requires an ordered presentation for every pending tool"
+        raise RuntimeError(msg)
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
@@ -115,14 +118,10 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         if call_id is None or len(matches) != 1:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
-        index, entry = matches[0]
+        _, entry = matches[0]
         requirement = requirements_by_call_id.get(call_id)
         member_id = requirement.member_agent_id if requirement is not None else None
         if member_id is not None and entry.scope_key != f"agent:{member_id}":
-            msg = "Approval suspension requires an ordered presentation for every pending tool"
-            raise RuntimeError(msg)
-        marker, _trace = format_tool_started_event(tool, tool_index=index)
-        if marker.strip() not in paused.response_text:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
 

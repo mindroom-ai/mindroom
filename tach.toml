@@ -4797,6 +4797,7 @@ expose = [
     "format_tool_started_event",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "tool_markers_match_trace",
 ]
 from = ["mindroom.tool_system.events"]
 
