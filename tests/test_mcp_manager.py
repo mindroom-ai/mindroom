@@ -1085,6 +1085,9 @@ async def test_mcp_bridge_returns_structured_nonterminal_refresh_failure(
     assert payload["requires_host_browser"] is True
     assert "oauth_connection_required" not in payload
     assert retained_credentials is not None
+    assert retained_credentials["token"] == "expired-access-token"  # noqa: S105
+    assert retained_credentials["refresh_token"] == "retained-refresh-token"  # noqa: S105
+    assert retained_credentials["expires_at"] == 900.0
 
 
 @pytest.mark.asyncio
