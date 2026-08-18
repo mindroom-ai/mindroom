@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import tempfile
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -70,7 +71,12 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    paused_attempt_from_response,
+)
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -141,9 +147,28 @@ def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slot
 def test_blocking_team_pause_freezes_member_tool_in_restartable_id_slot() -> None:
     """A non-stream pause persists the same stable presentation required by continuation."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, requires_confirmation=True)
+    completed_tool = ToolExecution(
+        tool_call_id="call-0",
+        tool_name="load",
+        tool_args={"path": "report.txt"},
+        result="ready",
+    )
     requirement = RunRequirement(tool_execution=tool)
     requirement.member_agent_id = "member-b"
     requirement.member_agent_name = "Same"
+    response = TeamRunOutput(
+        content="Consensus before approval.",
+        tools=[tool],
+        member_responses=[
+            RunOutput(
+                agent_id="member-a",
+                agent_name="Same",
+                content="First answer.",
+                tools=[completed_tool],
+            ),
+        ],
+        status=RunStatus.paused,
+    )
 
     paused = _attach_team_pause_presentation(
         PausedAttempt(
@@ -152,12 +177,17 @@ def test_blocking_team_pause_freezes_member_tool_in_restartable_id_slot() -> Non
             tools=(tool,),
             requirements=(requirement,),
         ),
+        response=response,
         member_ids=["member-a", "member-b"],
         display_names=["Same", "Same"],
         show_tool_calls=True,
     )
 
-    assert paused.tool_trace[0].scope_key == "agent:member-b"
+    trace_by_id = {entry.tool_call_id: entry for entry in paused.tool_trace}
+    assert trace_by_id["call-0"].type == "tool_call_completed"
+    assert trace_by_id["call-0"].scope_key == "agent:member-a"
+    assert trace_by_id["call-1"].type == "tool_call_started"
+    assert trace_by_id["call-1"].scope_key == "agent:member-b"
     restored = _TeamStreamPresentation.restore(
         member_ids=["member-a", "member-b"],
         show_tool_calls=True,
@@ -165,14 +195,19 @@ def test_blocking_team_pause_freezes_member_tool_in_restartable_id_slot() -> Non
         tool_trace=paused.tool_trace,
         prior_response_text=paused.response_text,
     )
+    assert "First answer." in restored.per_member["member-a"]
+    assert "🔧 `load`" in restored.per_member["member-a"]
+    assert "🔧 `inspect`" in restored.per_member["member-b"]
+    assert restored.consensus == "Consensus before approval."
     restored.complete_member_tool(
         "member-b",
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done"),
     )
 
-    assert restored.per_member["member-a"] == ""
+    assert "First answer." in restored.per_member["member-a"]
     assert "⏳" not in restored.per_member["member-b"]
-    assert restored.tool_trace[0].result_preview == "done"
+    assert trace_by_id["call-0"].result_preview == "ready"
+    assert {entry.tool_call_id: entry for entry in restored.tool_trace}["call-1"].result_preview == "done"
 
 
 @pytest.mark.parametrize(
@@ -702,15 +737,18 @@ async def test_team_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    prior = _TeamStreamPresentation.new([], [], show_tool_calls=True)
-    prior.append_consensus("Before approval.")
-    prior.start_tool(
-        "team",
-        ToolExecution(
-            tool_call_id=tool_call_id,
-            tool_name=requirement.tool_execution.tool_name,
-            tool_args=requirement.tool_execution.tool_args,
-        ),
+    paused_attempt = paused_attempt_from_response(
+        paused,
+        fallback_session_id="session-1",
+        fallback_run_id=paused.run_id,
+    )
+    assert paused_attempt is not None
+    prior = _attach_team_pause_presentation(
+        paused_attempt,
+        response=replace(paused, content="Before approval."),
+        member_ids=[],
+        display_names=[],
+        show_tool_calls=True,
     )
     collected_trace = []
     config = _build_test_config()
@@ -762,9 +800,9 @@ async def test_team_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
-            prior_response_text=prior.render_body(),
+            prior_response_text=prior.response_text,
             prior_tool_trace=prior.tool_trace,
-            prior_presentation_state=prior.to_state(),
+            prior_presentation_state=prior.response_presentation_state,
             show_tool_calls=True,
             tool_trace_collector=collected_trace,
         )

@@ -1215,12 +1215,18 @@ class TestUserIdPassthrough:
             tool_args={"value": 1},
             requires_confirmation=True,
         )
+        completed_tool = ToolExecution(
+            tool_call_id="call-0",
+            tool_name="inspect",
+            tool_args={"path": "report.txt"},
+            result="ready",
+        )
         paused_run = RunOutput(
             run_id="run-paused",
             agent_id="general",
             session_id="session1",
             content="Approval required",
-            tools=[paused_tool],
+            tools=[completed_tool, paused_tool],
             status=RunStatus.paused,
         )
 
@@ -1242,6 +1248,15 @@ class TestUserIdPassthrough:
                 )
 
         assert raised.value.paused.tools == (paused_tool,)
+        assert raised.value.paused.response_text.index("Approval required") < raised.value.paused.response_text.index(
+            "🔧 `inspect` [1]",
+        )
+        assert "🔧 `inspect` [1] ⏳" not in raised.value.paused.response_text
+        assert "🔧 `dangerous` [2] ⏳" in raised.value.paused.response_text
+        assert [(entry.tool_call_id, entry.type) for entry in raised.value.paused.tool_trace] == [
+            ("call-0", "tool_call_completed"),
+            ("call-1", "tool_call_started"),
+        ]
         assert storage.session is None
 
     @pytest.mark.asyncio

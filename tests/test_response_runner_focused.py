@@ -30,6 +30,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, approval_response, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval_execution import _collect_agent_continuation, _validate_decided_agent_tools
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
@@ -87,7 +88,13 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    ResponseTurnContext,
+    paused_attempt_from_response,
+)
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.stop import StopManager
 from mindroom.streaming import (
@@ -101,7 +108,7 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
+from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
@@ -1805,6 +1812,20 @@ def test_initial_team_pause_scopes_private_tool_identity_by_stable_member_id() -
     ]
 
 
+def _blocking_agent_pause_presentation(response: RunOutput) -> PausedAttempt:
+    paused = paused_attempt_from_response(
+        response,
+        fallback_session_id="session-1",
+        fallback_run_id=response.run_id,
+    )
+    assert paused is not None
+    return _attach_blocking_pause_presentation(
+        paused,
+        replace(response, content="Before approval."),
+        show_tool_calls=True,
+    )
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -1856,6 +1877,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
+    initial_presentation = _blocking_agent_pause_presentation(paused)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -1879,14 +1901,8 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         execution_identity={},
         source_event_ids=("$source",),
         state="claimed",
-        response_text="Before approval.\n\n🔧 `run_shell_command` [1] ⏳",
-        response_tool_trace=(
-            {
-                "type": "tool_call_started",
-                "tool_name": "run_shell_command",
-                "tool_call_id": tool_call_id,
-            },
-        ),
+        response_text=initial_presentation.response_text,
+        response_tool_trace=serialize_tool_trace(initial_presentation.tool_trace, include_internal=True),
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continue_run = MagicMock(wraps=agent.acontinue_run)

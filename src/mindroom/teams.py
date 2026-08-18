@@ -535,39 +535,146 @@ class _TeamStreamPresentation:
         return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
 
 
-def _attach_team_pause_presentation(
-    paused: PausedAttempt,
+def _team_pause_requirement_scope(
+    presentation: _TeamStreamPresentation,
+    requirement: RunRequirement | None,
+) -> str | None:
+    """Resolve one paused requirement to its frozen member slot."""
+    member_id = requirement.member_agent_id if requirement is not None else None
+    member_name = requirement.member_agent_name if requirement is not None else None
+    if member_name and not member_id:
+        msg = "Paused team approval tool is missing its stable member identity"
+        raise RuntimeError(msg)
+    if not member_id:
+        return None
+    if member_id not in presentation.per_member:
+        msg = f"Paused team approval tool has no frozen member slot for {member_id!r}"
+        raise RuntimeError(msg)
+    return f"agent:{member_id}"
+
+
+def _collect_blocking_team_pause_output(
+    presentation: _TeamStreamPresentation,
+    response: TeamRunOutput | RunOutput,
     *,
-    member_ids: Sequence[str],
-    display_names: Sequence[str],
-    show_tool_calls: bool,
-) -> PausedAttempt:
-    """Freeze a blocking team's member slots and pending tools at its pause boundary."""
-    presentation = _TeamStreamPresentation.new(
-        member_ids,
-        display_names,
-        show_tool_calls=show_tool_calls,
-    )
+    top_level: bool = True,
+) -> list[tuple[ToolExecution, str]]:
+    """Seed aggregate text and return tools with their structural owner slots."""
+    if isinstance(response, RunOutput):
+        member_id = presentation.resolve_member_id(response.agent_id, response.agent_name)
+        presentation.append_member(member_id, _get_response_content(response))
+        default_scope = f"agent:{member_id}"
+    else:
+        if top_level:
+            presentation.append_consensus(_get_response_content(response))
+        default_scope = "team"
+
+    scoped_tools = [(tool, default_scope) for tool in response.tools or ()]
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            scoped_tools.extend(
+                _collect_blocking_team_pause_output(
+                    presentation,
+                    member_response,
+                    top_level=False,
+                ),
+            )
+    return scoped_tools
+
+
+def _merge_blocking_team_pause_tool(
+    presentation: _TeamStreamPresentation,
+    requirements_by_call_id: Mapping[str, RunRequirement],
+    ordered_tool_ids: list[str],
+    tools_by_id: dict[str, tuple[ToolExecution, str]],
+    tool: ToolExecution,
+    default_scope: str,
+) -> None:
+    """Merge an aggregate tool snapshot by exact identity and strongest owner."""
+    tool_call_id = tool_execution_call_id(tool)
+    if tool_call_id is None:
+        msg = "Blocking team approval output has a tool without stable identity"
+        raise RuntimeError(msg)
+    requirement = requirements_by_call_id.get(tool_call_id)
+    scope = _team_pause_requirement_scope(presentation, requirement) or default_scope
+    existing = tools_by_id.get(tool_call_id)
+    if existing is None:
+        ordered_tool_ids.append(tool_call_id)
+        tools_by_id[tool_call_id] = (tool, scope)
+        return
+    existing_tool, existing_scope = existing
+    if existing_tool.tool_name != tool.tool_name:
+        msg = "Blocking team approval output has conflicting tool identity"
+        raise RuntimeError(msg)
+    if existing_scope == "team" and scope != "team":
+        tools_by_id[tool_call_id] = (tool, scope)
+    elif scope not in {"team", existing_scope}:
+        msg = "Blocking team approval output has conflicting member tool ownership"
+        raise RuntimeError(msg)
+
+
+def _blocking_team_pause_tools(
+    presentation: _TeamStreamPresentation,
+    paused: PausedAttempt,
+    scoped_tools: Sequence[tuple[ToolExecution, str]],
+) -> list[tuple[ToolExecution, str, bool]]:
+    """Return ordered aggregate tools classified as completed or pending."""
     requirements_by_call_id = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
     }
+    pending_by_id: dict[str, ToolExecution] = {}
     for tool in paused.tools:
-        tool_call_id = tool.tool_call_id
-        if not tool_call_id:
+        tool_call_id = tool_execution_call_id(tool)
+        if tool_call_id is None or tool_call_id in pending_by_id:
             msg = "Paused team approval tool is missing its exact identity"
             raise RuntimeError(msg)
-        requirement = requirements_by_call_id.get(tool_call_id)
-        member_id = requirement.member_agent_id if requirement is not None else None
-        member_name = requirement.member_agent_name if requirement is not None else None
-        if member_name and not member_id:
-            msg = "Paused team approval tool is missing its stable member identity"
-            raise RuntimeError(msg)
-        if member_id:
-            presentation.start_member_tool(member_id, tool)
-        else:
-            presentation.start_tool("team", tool)
+        pending_by_id[tool_call_id] = tool
+
+    ordered_tool_ids: list[str] = []
+    tools_by_id: dict[str, tuple[ToolExecution, str]] = {}
+    for tool, default_scope in scoped_tools:
+        _merge_blocking_team_pause_tool(
+            presentation,
+            requirements_by_call_id,
+            ordered_tool_ids,
+            tools_by_id,
+            tool,
+            default_scope,
+        )
+    for tool_call_id, tool in pending_by_id.items():
+        if tool_call_id not in tools_by_id:
+            _merge_blocking_team_pause_tool(
+                presentation,
+                requirements_by_call_id,
+                ordered_tool_ids,
+                tools_by_id,
+                tool,
+                "team",
+            )
+    return [(*tools_by_id[tool_call_id], tool_call_id in pending_by_id) for tool_call_id in ordered_tool_ids]
+
+
+def _attach_team_pause_presentation(
+    paused: PausedAttempt,
+    *,
+    response: TeamRunOutput | RunOutput,
+    member_ids: Sequence[str],
+    display_names: Sequence[str],
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Seed a blocking team's aggregate output into its continuation document."""
+    presentation = _TeamStreamPresentation.new(
+        member_ids,
+        display_names,
+        show_tool_calls=show_tool_calls,
+    )
+    scoped_tools = _collect_blocking_team_pause_output(presentation, response)
+    for tool, scope, is_pending in _blocking_team_pause_tools(presentation, paused, scoped_tools):
+        presentation.start_tool(scope, tool)
+        if not is_pending:
+            presentation.complete_tool(scope, tool)
     return replace(
         paused,
         response_text=presentation.render_body(),
@@ -2844,6 +2951,7 @@ async def team_response(  # noqa: C901, PLR0915
             if paused_attempt is not None:
                 paused_attempt = _attach_team_pause_presentation(
                     paused_attempt,
+                    response=response,
                     member_ids=team_members.requested_agent_names,
                     display_names=team_members.display_names,
                     show_tool_calls=show_tool_calls,
