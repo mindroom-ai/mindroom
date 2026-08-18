@@ -471,6 +471,7 @@ def _assistant_message_content(message: Message) -> str:
 def _tool_execution_for_call(
     raw_call: object,
     tools_by_id: Mapping[str, ToolExecution],
+    idless_tools_by_name: dict[str, list[ToolExecution]],
 ) -> tuple[str | None, ToolExecution] | None:
     """Resolve one persisted assistant tool call to its execution payload."""
     if not isinstance(raw_call, Mapping):
@@ -485,7 +486,18 @@ def _tool_execution_for_call(
     raw_tool_name = function.get("name") or call.get("name")
     tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
     tool = tools_by_id.get(call_id) if call_id is not None else None
+    if call_id is None and (matching_tools := idless_tools_by_name.get(tool_name)):
+        tool = matching_tools.pop(0)
     return call_id, tool or ToolExecution(tool_call_id=call_id, tool_name=tool_name)
+
+
+def _idless_tools_by_name(tools: Sequence[ToolExecution]) -> dict[str, list[ToolExecution]]:
+    """Index legacy executions without call IDs while retaining occurrence order."""
+    tools_by_name: dict[str, list[ToolExecution]] = {}
+    for tool in tools:
+        if tool.tool_call_id is None and tool.tool_name:
+            tools_by_name.setdefault(tool.tool_name, []).append(tool)
+    return tools_by_name
 
 
 def format_assistant_tool_transcript(
@@ -499,6 +511,7 @@ def format_assistant_tool_transcript(
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Rebuild one run's visible assistant transcript from its persisted message order."""
     tools_by_id = {tool.tool_call_id: tool for tool in tools if tool.tool_call_id}
+    idless_tools_by_name = _idless_tools_by_name(tools)
     transcript_parts: list[str] = []
     tool_trace: list[ToolTraceEntry] = []
 
@@ -511,7 +524,7 @@ def format_assistant_tool_transcript(
         if not show_tool_calls:
             continue
         for raw_call in message.tool_calls or ():
-            resolved_call = _tool_execution_for_call(raw_call, tools_by_id)
+            resolved_call = _tool_execution_for_call(raw_call, tools_by_id, idless_tools_by_name)
             if resolved_call is None:
                 continue
             call_id, tool = resolved_call
@@ -592,7 +605,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
     return tool_trace
 
 
-def _visible_text_without_tool_markers(text: str) -> str:
+def visible_text_without_tool_markers(text: str) -> str:
     """Return presentation prose while ignoring display-only tool marker lines."""
     lines = text.splitlines()
     if not any(_is_visible_tool_marker_line(line) for line in lines):
@@ -681,7 +694,7 @@ def reconcile_tool_presentation(
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Reconcile a continued run against the last transport-committed presentation."""
     if not show_tool_calls:
-        body = _visible_text_without_tool_markers(prior_text)
+        body = visible_text_without_tool_markers(prior_text)
         continuation_text = current_text if current_text.strip() else fallback_text
         return _append_presentation_part(body, continuation_text), []
 
@@ -708,6 +721,7 @@ def reconcile_tool_presentation(
         previous_entry = trace[prior_index]
         trace[prior_index] = replace(
             completed_entry,
+            tool_name=tool.tool_name or previous_entry.tool_name,
             args_preview=completed_entry.args_preview or previous_entry.args_preview,
             result_preview=completed_entry.result_preview or previous_entry.result_preview,
             truncated=completed_entry.truncated or previous_entry.truncated,
@@ -736,7 +750,7 @@ def reconcile_tool_presentation(
     )
     body = _append_presentation_part(body, current_text)
     trace.extend(replace(entry) for entry in current_tool_trace)
-    if not _visible_text_without_tool_markers(current_text):
+    if not visible_text_without_tool_markers(current_text):
         body = _append_presentation_part(body, fallback_text)
 
     for tool in missing_pending:

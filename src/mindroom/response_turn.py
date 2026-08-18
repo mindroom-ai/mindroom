@@ -109,7 +109,14 @@ def resolve_approval_response_content(
         message for message in response.messages or () if message.role == "assistant" and not message.from_history
     ]
     if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
-        return ""
+        skipped_content = [
+            message.content.strip()
+            for message in assistant_messages
+            if isinstance(message.content, str) and message.content.strip()
+        ]
+        normalized_fallback = fallback_content.strip()
+        if normalized_fallback in {*skipped_content, "\n\n".join(skipped_content)}:
+            return ""
     return "" if response.status == RunStatus.paused else fallback_content
 
 

@@ -2576,8 +2576,18 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
     ]
 
 
-def test_agent_approval_presentation_does_not_repeat_skipped_content_fallback() -> None:
-    """A persisted pre-pause message must not be replayed from terminal response content."""
+@pytest.mark.parametrize(
+    ("fallback_content", "expected_body"),
+    [
+        pytest.param("Before approval.", "Before approval.", id="replayed"),
+        pytest.param("After approval.", "Before approval.\n\nAfter approval.", id="fresh"),
+    ],
+)
+def test_agent_approval_presentation_reconciles_skipped_content_fallback(
+    fallback_content: str,
+    expected_body: str,
+) -> None:
+    """Terminal fallback is appended only when it differs from persisted assistant prose."""
     continuation = ApprovalContinuation(
         approval_id="approval-persisted-message",
         run_id="run-1",
@@ -2597,7 +2607,7 @@ def test_agent_approval_presentation_does_not_repeat_skipped_content_fallback() 
         run_id="run-1",
         session_id="session-1",
         status=RunStatus.completed,
-        content="Before approval.",
+        content=fallback_content,
         messages=[
             Message(
                 id="before-pause",
@@ -2616,7 +2626,7 @@ def test_agent_approval_presentation_does_not_repeat_skipped_content_fallback() 
         show_tool_calls=True,
     )
 
-    assert body == "Before approval."
+    assert body == expected_body
     assert trace == []
 
 
@@ -2814,7 +2824,15 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             ToolTraceEntry(type="tool_call_started", tool_name="conditional_write"),
         ),
     )
-    edit_text = AsyncMock(return_value=True)
+    journal_at_edit: list[tuple[int, str]] = []
+
+    async def edit_text_call(_request: object) -> bool:
+        persisted_at_edit = await store.approval_continuation(continuation.approval_id)
+        assert persisted_at_edit is not None
+        journal_at_edit.append((persisted_at_edit.generation, persisted_at_edit.response_text))
+        return True
+
+    edit_text = AsyncMock(side_effect=edit_text_call)
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
@@ -2862,6 +2880,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         {"type": "tool_call_started", "tool_name": "conditional_read"},
         {"type": "tool_call_started", "tool_name": "conditional_write"},
     )
+    assert journal_at_edit == [(1, paused.response_text)]
     edit_request = edit_text.await_args.args[0]
     assert edit_request.new_text == paused.response_text
     assert edit_request.tool_trace == list(paused.tool_trace)

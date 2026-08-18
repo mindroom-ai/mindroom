@@ -595,6 +595,95 @@ def test_team_continuation_does_not_repeat_skipped_consensus_fallback() -> None:
     assert presentation_tools == []
 
 
+def test_team_continuation_omits_empty_replayed_nested_team_shell() -> None:
+    """A replayed nested team with no new output must not append headings or consensus notes."""
+    nested_member = RunOutput(
+        run_id="nested-member-run",
+        agent_name="NestedMember",
+        status=RunStatus.completed,
+        content="Prior analysis.",
+        messages=[Message(id="nested-before-pause", role="assistant", content="Prior analysis.")],
+    )
+    nested = TeamRunOutput(
+        run_id="nested-run",
+        team_name="NestedTeam",
+        status=RunStatus.completed,
+        member_responses=[nested_member],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        member_responses=[nested],
+    )
+    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**NestedTeam** (Team):\n\n  **NestedMember**: Prior analysis."
+
+    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[],
+        paused=None,
+        prior_response_text=prior_text,
+        prior_tool_trace=[],
+        prior_message_ids={"nested-before-pause"},
+        show_tool_calls=True,
+    )
+
+    assert response_text == prior_text
+    assert response_trace == []
+    assert presentation_tools == []
+
+
+def test_team_continuation_recovers_member_content_after_marker_only_messages() -> None:
+    """A member's terminal content follows tool markers when its messages contain no prose."""
+    completed_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        result="details",
+    )
+    member = RunOutput(
+        run_id="member-run",
+        agent_name="GeneralAgent",
+        status=RunStatus.completed,
+        content="Final member answer.",
+        messages=[
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[completed_tool],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        member_responses=[member],
+    )
+
+    response_text, response_trace, _ = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[],
+        paused=None,
+        prior_response_text="",
+        prior_tool_trace=[],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    assert "Final member answer." in response_text
+    assert response_text.index("🔧 `inspect` [1]") < response_text.index("Final member answer.")
+    assert response_trace[0].result_preview == "details"
+
+
 @pytest.mark.asyncio
 async def test_team_continuation_reloads_chained_member_output_after_restart() -> None:
     """A restarted member's newly persisted prose and second pause must rejoin the outer transcript."""

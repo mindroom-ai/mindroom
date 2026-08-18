@@ -273,17 +273,6 @@ class ApprovalResponseCoordinator:
         snapshot_tool_trace = response_tool_trace if snapshot_text else ()
         visible_text = snapshot_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        if not await self.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=target,
-                event_id=current.response_event_id,
-                new_text=visible_text,
-                extra_content={STREAM_STATUS_KEY: stream_status},
-                tool_trace=list(tool_trace) or None,
-            ),
-        ):
-            msg = "Could not publish the chained approval response"
-            raise RuntimeError(msg)
         publishing = await self.store.advance_approval_continuation(
             current.approval_id,
             claimant_generation=current.generation,
@@ -296,17 +285,33 @@ class ApprovalResponseCoordinator:
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
+        failure_reason = "Chained approval publication failed"
+        edit_request = EditTextRequest(
+            target=target,
+            event_id=current.response_event_id,
+            new_text=visible_text,
+            extra_content={STREAM_STATUS_KEY: stream_status},
+            tool_trace=list(tool_trace) or None,
+        )
+        try:
+            edit_succeeded = await self.delivery_gateway.edit_text(edit_request)
+        except (asyncio.CancelledError, Exception):
+            await self.request_failure(publishing, failure_reason)
+            raise
+        if not edit_succeeded:
+            await self.request_failure(publishing, failure_reason)
+            raise RuntimeError(failure_reason)
         try:
             await self.publish_generation(
                 publishing,
                 plan,
                 target=target,
-                failure_reason="Chained approval card creation failed",
+                failure_reason=failure_reason,
             )
         except (asyncio.CancelledError, Exception):
             await self.request_failure(
                 publishing,
-                "Chained approval card creation failed",
+                failure_reason,
             )
             raise
         return _ApprovalPausePresentation(

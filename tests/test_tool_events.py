@@ -90,6 +90,32 @@ def test_format_assistant_tool_transcript_preserves_message_order() -> None:
     ]
 
 
+def test_format_assistant_tool_transcript_matches_idless_tools_by_occurrence() -> None:
+    """Legacy id-less calls retain each execution's metadata in message order."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+        Message(
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_name="inspect", tool_args={"path": "first.txt"}, result="first result"),
+        ToolExecution(tool_name="inspect", tool_args={"path": "second.txt"}, result="second result"),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, tools)
+
+    assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]"
+    assert [(entry.args_preview, entry.result_preview) for entry in trace] == [
+        ("path=first.txt", "first result"),
+        ("path=second.txt", "second result"),
+    ]
+
+
 def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snapshot() -> None:
     """Continuation rendering must append only assistant messages added after the pause."""
     messages = [
@@ -245,8 +271,8 @@ def test_reconcile_tool_presentation_completes_durable_pending_marker_in_place()
     ]
 
 
-def test_reconcile_tool_presentation_preserves_durable_completed_result() -> None:
-    """A provider's result-less replay must not erase the persisted result preview."""
+def test_reconcile_tool_presentation_preserves_durable_completed_metadata() -> None:
+    """An incomplete provider replay must not erase persisted completed metadata."""
     prior_trace = [
         ToolTraceEntry(
             type="tool_call_completed",
@@ -258,7 +284,7 @@ def test_reconcile_tool_presentation_preserves_durable_completed_result() -> Non
     ]
     replayed = ToolExecution(
         tool_call_id="call-1",
-        tool_name="inspect",
+        tool_name=None,
         tool_args={"path": "report.txt"},
         result=None,
     )
@@ -272,7 +298,7 @@ def test_reconcile_tool_presentation_preserves_durable_completed_result() -> Non
         fallback_text="After approval.",
     )
 
-    assert trace[0].result_preview == "details"
+    assert (trace[0].tool_name, trace[0].result_preview) == ("inspect", "details")
 
 
 def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text() -> None:

@@ -117,6 +117,7 @@ from mindroom.tool_system.events import (
     format_assistant_tool_transcript,
     format_tool_completed_event,
     reconcile_tool_presentation,
+    visible_text_without_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -357,12 +358,28 @@ def _approval_response_content(
     skip_message_ids: set[str] | frozenset[str],
 ) -> str:
     """Use raw content only when it is not control state or an already-rendered snapshot."""
+    if rendered_content and not visible_text_without_tool_markers(rendered_content):
+        fallback_content = resolve_approval_response_content(
+            response,
+            "",
+            skip_message_ids,
+            fallback_content=_get_response_content(response),
+        )
+        if fallback_content:
+            return f"{rendered_content}\n\n{fallback_content}"
     return resolve_approval_response_content(
         response,
         rendered_content,
         skip_message_ids,
         fallback_content=_get_response_content(response),
     )
+
+
+def _with_nested_team_header(team_name: str, nested_parts: list[str], indent: str) -> list[str]:
+    """Prefix a nested team only when its continued subtree has visible output."""
+    if not nested_parts:
+        return []
+    return [f"{indent}**{team_name}** (Team):", *nested_parts]
 
 
 def _format_approval_contributions_recursive(
@@ -384,7 +401,6 @@ def _format_approval_contributions_recursive(
         for member_response in response.member_responses or ():
             if isinstance(member_response, TeamRunOutput):
                 team_name = member_response.team_name or "Nested Team"
-                parts.append(f"{indent_str}**{team_name}** (Team):")
                 nested_parts, nested_trace = _format_approval_contributions_recursive(
                     member_response,
                     pending_tool_call_ids=pending_tool_call_ids,
@@ -394,7 +410,7 @@ def _format_approval_contributions_recursive(
                     include_consensus=False,
                     skip_message_ids=skip_message_ids,
                 )
-                parts.extend(nested_parts)
+                parts.extend(_with_nested_team_header(team_name, nested_parts, indent_str))
                 trace.extend(nested_trace)
             elif isinstance(member_response, RunOutput):
                 content, member_trace = format_assistant_tool_transcript(
