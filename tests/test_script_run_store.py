@@ -181,6 +181,34 @@ def test_run_store_replays_terminal_receipt_with_different_mapping_order(runtime
     assert duplicate.result == {"title": "Status", "body": "ok"}
 
 
+def test_run_store_normalizes_mixed_json_mapping_keys_before_replay(runtime_paths: RuntimePaths) -> None:
+    """JSON-supported non-string keys replay as their canonical wire mapping."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.claim_call(
+        run_id="run-1",
+        call_id="call-1",
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest="digest-a",
+    )
+
+    first = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result={2: "two", "one": 1},
+    )
+    duplicate = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result={"one": 1, "2": "two"},
+    )
+
+    assert first == duplicate
+    assert duplicate.result == {"2": "two", "one": 1}
+
+
 def test_run_store_rejects_terminal_run_mutation(runtime_paths: RuntimePaths) -> None:
     """A terminal lifecycle record cannot change mutable process details."""
     store = ScriptRunStore(runtime_paths)
