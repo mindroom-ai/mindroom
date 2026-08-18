@@ -3,9 +3,11 @@
 import json
 
 import pytest
+from agno.models.message import Message
 from agno.models.response import ToolExecution
 
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.tool_system import events as tool_events
 from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,
     _MAX_TOOL_TRACE_EVENTS,
@@ -22,6 +24,114 @@ from mindroom.tool_system.events import (
 )
 
 TEST_CURSOR = "cursor_1234567890"
+
+
+def test_format_assistant_tool_transcript_preserves_message_order() -> None:
+    """A continued run must keep each tool anchor where its assistant message placed it."""
+    messages = [
+        Message(
+            role="assistant",
+            content="First, I will inspect it.",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
+                },
+            ],
+        ),
+        Message(role="tool", content="details", tool_call_id="call-1"),
+        Message(
+            role="assistant",
+            content="Now I will save the result.",
+            tool_calls=[
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {"name": "save", "arguments": '{"path":"summary.txt"}'},
+                },
+            ],
+        ),
+        Message(role="assistant", content="Finished."),
+    ]
+    tools = [
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"path": "report.txt"}, result="details"),
+        ToolExecution(
+            tool_call_id="call-2",
+            tool_name="save",
+            tool_args={"path": "summary.txt"},
+            requires_confirmation=True,
+        ),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(
+        messages,
+        tools,
+        pending_tool_call_ids={"call-2"},
+    )
+
+    assert body == (
+        "First, I will inspect it.\n\n🔧 `inspect` [1]\n\nNow I will save the result.\n\n🔧 `save` [2] ⏳\n\nFinished."
+    )
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+        ),
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="save",
+            args_preview="path=summary.txt",
+        ),
+    ]
+
+
+def test_format_assistant_tool_transcript_hides_tools_without_concatenating_messages() -> None:
+    """Hidden anchors must still leave readable text, including multimodal text blocks."""
+    messages = [
+        Message(role="assistant", content=[{"type": "text", "text": "First thought."}]),
+        Message(
+            role="assistant",
+            content="Second thought.",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+            ],
+        ),
+        Message(role="assistant", content="Finished."),
+    ]
+
+    body, trace = tool_events.format_assistant_tool_transcript(
+        messages,
+        [ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")],
+        show_tool_calls=False,
+    )
+
+    assert body == "First thought.\n\nSecond thought.\n\nFinished."
+    assert trace == []
+
+
+def test_tool_trace_snapshot_round_trips_for_durable_continuations() -> None:
+    """Approval persistence must restore the same structured trace the frontend consumes."""
+    original = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            truncated=True,
+        ),
+    ]
+
+    stored = tool_events.serialize_tool_trace(original)
+    restored = tool_events.deserialize_tool_trace(stored)
+
+    assert restored == original
 
 
 def _room_threads_result(

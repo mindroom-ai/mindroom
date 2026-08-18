@@ -143,6 +143,8 @@ class ApprovalContinuation:
     source_event_ids: tuple[str, ...]
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
+    response_text: str = ""
+    response_tool_trace: tuple[dict[str, object], ...] = ()
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
@@ -177,6 +179,8 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
+        "response_text": continuation.response_text,
+        "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
         "team_member_names": list(continuation.team_member_names),
@@ -282,6 +286,10 @@ def _from_rows(
         source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
+        response_text=cast("str", stored.get("response_text", "")),
+        response_tool_trace=tuple(
+            dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
+        ),
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -552,6 +560,8 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
+    response_text: str | None = None,
+    response_tool_trace: tuple[dict[str, object], ...] | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -565,6 +575,8 @@ def advance(
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        response_text=current.response_text if response_text is None else response_text,
+        response_tool_trace=(current.response_tool_trace if response_tool_trace is None else response_tool_trace),
         state=state,
         runtime_generation=publication_owner,
         failure_reason=None,

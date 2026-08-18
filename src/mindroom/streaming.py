@@ -74,6 +74,7 @@ __all__ = [
     "StreamInputChunk",
     "StreamingDeliveryError",
     "StreamingLifecycleSuspensionError",
+    "StreamingPresentation",
     "StreamingResponse",
     "TerminalEdit",
     "TerminalSend",
@@ -91,8 +92,24 @@ __all__ = [
 _PROGRESS_PLACEHOLDER = "Thinking..."
 
 
+@dataclass(frozen=True, slots=True)
+class StreamingPresentation:
+    """The ordered response state known to have reached Matrix before a suspension."""
+
+    response_text: str
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+
+
 class StreamingLifecycleSuspensionError(Exception):
     """A response-stream exit that must reach the lifecycle owner unchanged."""
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self.presentation: StreamingPresentation | None = None
+
+    def capture_presentation(self, presentation: StreamingPresentation) -> None:
+        """Attach the last transport-committed presentation before handoff."""
+        self.presentation = presentation
 
 
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
@@ -1106,6 +1123,13 @@ class StreamingResponse:
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
 
+    def committed_presentation(self) -> StreamingPresentation:
+        """Return the ordered text and trace that the latest successful update carried."""
+        return StreamingPresentation(
+            response_text=_normalize_stream_accumulated_text(self._last_delivered_text).rstrip(),
+            tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
+        )
+
     def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
         """Return the content status for the current send or edit."""
         if stream_status is not None:
@@ -2022,6 +2046,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                             terminal_status="error",
                             tool_trace_collector=tool_trace_collector,
                         ) from delivery_cleanup_error
+                exc.capture_presentation(streaming.committed_presentation())
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))

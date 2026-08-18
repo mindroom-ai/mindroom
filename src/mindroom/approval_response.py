@@ -51,6 +51,15 @@ class _ApprovalPausePlan:
     waiting_text: str | None
 
 
+@dataclass(frozen=True)
+class _ApprovalPausePresentation:
+    """Visible response state published for one chained approval generation."""
+
+    response_text: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+    approval_pending: bool
+
+
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
@@ -252,21 +261,23 @@ class ApprovalResponseCoordinator:
         paused: PausedAttempt,
         *,
         target: MessageTarget,
-        tool_trace: list[ToolTraceEntry],
         pending_text: str,
-    ) -> str | None:
+        tool_trace: tuple[ToolTraceEntry, ...],
+        response_tool_trace: tuple[dict[str, object], ...],
+    ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
-        visible_text = plan.waiting_text or pending_text
-        stream_status = STREAM_STATUS_APPROVAL_PENDING if plan.waiting_text is not None else STREAM_STATUS_PENDING
+        approval_pending = plan.waiting_text is not None
+        visible_text = paused.response_text or current.response_text or plan.waiting_text or pending_text
+        stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         if not await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
                 new_text=visible_text,
                 extra_content={STREAM_STATUS_KEY: stream_status},
-                tool_trace=tool_trace or None,
+                tool_trace=list(tool_trace) or None,
             ),
         ):
             msg = "Could not publish the chained approval response"
@@ -277,6 +288,8 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            response_text=visible_text,
+            response_tool_trace=response_tool_trace,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
@@ -294,7 +307,11 @@ class ApprovalResponseCoordinator:
                 "Chained approval card creation failed",
             )
             raise
-        return plan.waiting_text
+        return _ApprovalPausePresentation(
+            response_text=visible_text,
+            tool_trace=tool_trace,
+            approval_pending=approval_pending,
+        )
 
     async def request_failure(
         self,

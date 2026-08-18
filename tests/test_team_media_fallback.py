@@ -103,6 +103,8 @@ from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.tool_system.events import ToolTraceEntry
+
 
 _TEST_MODEL = "openai:gpt-5.4"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
@@ -447,6 +449,7 @@ async def test_team_continuation_executes_real_agno_confirmation(
     persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
     storage_factory = MagicMock()
     scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
+    tool_trace: list[ToolTraceEntry] = []
 
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
@@ -475,9 +478,15 @@ async def test_team_continuation_executes_real_agno_confirmation(
             denial_reasons={tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
+            tool_trace_collector=tool_trace,
         )
 
     assert isinstance(result, CompletedApprovalRun)
+    marker = "🔧 `run_shell_command` [1]"
+    assert str(paused.content) in result.response_text
+    assert result.response_text.count(marker) == 1
+    assert result.response_text.index(str(paused.content)) < result.response_text.index(marker)
+    assert [entry.tool_name for entry in tool_trace] == ["run_shell_command"]
     assert AI_RUN_METADATA_KEY in result.metadata_content
     assert bool(executed) is approved
     assert observed_metadata == ([original_metadata] if approved else [])

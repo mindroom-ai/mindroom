@@ -113,6 +113,7 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
+    format_assistant_tool_transcript,
     format_tool_completed_event,
 )
 
@@ -345,6 +346,104 @@ def _format_terminal_team_response(
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
     return _format_team_header(team_display_names) + _team_response_text(response)
+
+
+def _format_approval_contributions_recursive(
+    response: TeamRunOutput | RunOutput,
+    *,
+    pending_tool_call_ids: set[str],
+    show_tool_calls: bool,
+    start_index: int,
+    indent: int,
+    include_consensus: bool,
+) -> tuple[list[str], list[ToolTraceEntry]]:
+    """Render one continued team's contributions with globally indexed tool anchors."""
+    parts: list[str] = []
+    trace: list[ToolTraceEntry] = []
+    indent_str = "  " * indent
+
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses or ():
+            if isinstance(member_response, TeamRunOutput):
+                team_name = member_response.team_name or "Nested Team"
+                parts.append(f"{indent_str}**{team_name}** (Team):")
+                nested_parts, nested_trace = _format_approval_contributions_recursive(
+                    member_response,
+                    pending_tool_call_ids=pending_tool_call_ids,
+                    show_tool_calls=show_tool_calls,
+                    start_index=start_index + len(trace),
+                    indent=indent + 1,
+                    include_consensus=False,
+                )
+                parts.extend(nested_parts)
+                trace.extend(nested_trace)
+            elif isinstance(member_response, RunOutput):
+                content, member_trace = format_assistant_tool_transcript(
+                    member_response.messages or (),
+                    member_response.tools or (),
+                    pending_tool_call_ids=pending_tool_call_ids,
+                    start_index=start_index + len(trace),
+                    show_tool_calls=show_tool_calls,
+                )
+                content = content or _get_response_content(member_response)
+                if content.strip():
+                    parts.append(
+                        _format_member_contribution(
+                            member_response.agent_name or "Team Member",
+                            content,
+                            indent,
+                        ),
+                    )
+                trace.extend(member_trace)
+
+        if include_consensus:
+            consensus, consensus_trace = format_assistant_tool_transcript(
+                response.messages or (),
+                response.tools or (),
+                pending_tool_call_ids=pending_tool_call_ids,
+                start_index=start_index + len(trace),
+                show_tool_calls=show_tool_calls,
+            )
+            consensus = consensus or str(response.content or "")
+            if consensus.strip():
+                parts.extend(_format_team_consensus(consensus, indent))
+            elif parts:
+                parts.append(_format_no_consensus_note(indent))
+            trace.extend(consensus_trace)
+    else:
+        content, response_trace = format_assistant_tool_transcript(
+            response.messages or (),
+            response.tools or (),
+            pending_tool_call_ids=pending_tool_call_ids,
+            start_index=start_index,
+            show_tool_calls=show_tool_calls,
+        )
+        content = content or _get_response_content(response)
+        if content.strip():
+            parts.append(_format_member_contribution(response.agent_name or "Agent", content, indent))
+        trace.extend(response_trace)
+
+    return parts, trace
+
+
+def _format_approval_team_response(
+    response: TeamRunOutput | RunOutput,
+    *,
+    team_display_names: list[str],
+    pending_tool_call_ids: set[str],
+    show_tool_calls: bool,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Render a continued team run and its trace from persisted message order."""
+    parts, trace = _format_approval_contributions_recursive(
+        response,
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+        start_index=1,
+        indent=0,
+        include_consensus=True,
+    )
+    body = "\n\n".join(parts) if parts else (_get_response_content(response) or "No team response generated.")
+    return _format_team_header(team_display_names) + body, trace
 
 
 def _register_team_notice_storage(
@@ -1924,6 +2023,7 @@ async def continue_paused_team_run(
     member_model_names: Mapping[str, str] | None = None,
     history_scope: HistoryScope | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
+    show_tool_calls: bool = True,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
     members = await asyncio.to_thread(
@@ -2001,14 +2101,27 @@ async def continue_paused_team_run(
             fallback_session_id=session_id,
             fallback_run_id=run_id,
         )
+        pending_tool_call_ids = (
+            {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
+        )
+        response_text, response_tool_trace = _format_approval_team_response(
+            continued,
+            team_display_names=members.display_names,
+            pending_tool_call_ids=pending_tool_call_ids,
+            show_tool_calls=show_tool_calls,
+        )
         if paused is not None:
-            return paused
+            return replace(
+                paused,
+                response_text=response_text,
+                tool_trace=tuple(response_tool_trace),
+            )
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None:
-            tool_trace_collector.extend(_extract_completed_team_tool_trace(continued))
+            tool_trace_collector.extend(response_tool_trace)
         return CompletedApprovalRun(
-            response_text=_format_terminal_team_response(continued, team_display_names=members.display_names),
+            response_text=response_text,
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

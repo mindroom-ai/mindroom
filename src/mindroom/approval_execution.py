@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from agno.db.base import SessionType
@@ -24,7 +24,7 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_system.events import format_tool_completed_event
+from mindroom.tool_system.events import format_assistant_tool_transcript, format_tool_completed_event
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
@@ -41,6 +41,32 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _approval_response_presentation(
+    response: RunOutput,
+    paused: PausedAttempt | None,
+    *,
+    show_tool_calls: bool,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Rebuild one continued agent run's ordered body and structured trace."""
+    pending_tool_call_ids = (
+        {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
+    )
+    return format_assistant_tool_transcript(
+        response.messages or (),
+        response.tools or (),
+        pending_tool_call_ids=pending_tool_call_ids,
+        show_tool_calls=show_tool_calls,
+    )
+
+
+def _append_fallback_tool_trace(response: RunOutput, tool_trace: list[ToolTraceEntry]) -> None:
+    """Retain trace metadata for providers that omit ordered assistant messages."""
+    for tool in response.tools or ():
+        _, trace_entry = format_tool_completed_event(tool)
+        if trace_entry is not None:
+            tool_trace.append(trace_entry)
 
 
 @dataclass(frozen=True)
@@ -63,6 +89,7 @@ class AgentApprovalExecution:
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
+        show_tool_calls: bool = True,
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
         config = self.config()
@@ -161,17 +188,25 @@ class AgentApprovalExecution:
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
         )
+        response_text, response_tool_trace = _approval_response_presentation(
+            response,
+            paused,
+            show_tool_calls=show_tool_calls,
+        )
         if paused is not None:
-            return paused
+            return replace(
+                paused,
+                response_text=response_text or str(response.content or ""),
+                tool_trace=tuple(response_tool_trace),
+            )
         if response.status != RunStatus.completed:
             raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-        for tool in response.tools or ():
-            _, trace_entry = format_tool_completed_event(tool)
-            if trace_entry is not None:
-                tool_trace_collector.append(trace_entry)
+        if not response_tool_trace and show_tool_calls:
+            _append_fallback_tool_trace(response, response_tool_trace)
+        tool_trace_collector.extend(response_tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(
-            response_text=str(response.content or "Tool approval continuation completed"),
+            response_text=response_text or str(response.content or "Tool approval continuation completed"),
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

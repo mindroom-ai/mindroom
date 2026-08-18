@@ -167,6 +167,45 @@ async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Co
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
+async def test_lifecycle_suspension_captures_last_committed_presentation(config: Config) -> None:
+    """Approval handoff must retain the ordered body and trace that already reached Matrix."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content="I checked the input.")
+        await gateway.wait_for_ops(1)
+        yield ToolCallStartedEvent(
+            tool=ToolExecution(
+                tool_call_id="call-1",
+                tool_name="inspect",
+                tool_args={"path": "report.txt"},
+            ),
+        )
+        await gateway.wait_for_ops(2)
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_stream(config, suspended_stream())
+
+    assert raised.value is suspension
+    assert raised.value.presentation is not None
+    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳"
+    assert raised.value.presentation.tool_trace == (
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
 async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config) -> None:
     """A scripted stream produces placeholder → progressive edits → final tool trace."""
     gateway = _FakeGateway()

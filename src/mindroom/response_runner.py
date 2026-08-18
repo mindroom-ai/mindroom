@@ -99,7 +99,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import format_tool_trace_markers
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
@@ -176,6 +176,17 @@ def _merge_response_extra_content(
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
     return merged_extra_content if extra_content is not None or attachment_ids else None
+
+
+def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> PausedAttempt:
+    """Attach the last transport-committed body and trace to an approval pause."""
+    if error.presentation is None:
+        return error.paused
+    return replace(
+        error.paused,
+        response_text=error.presentation.response_text,
+        tool_trace=error.presentation.tool_trace,
+    )
 
 
 def _split_delivery_tool_trace(
@@ -828,7 +839,9 @@ class ResponseRunner:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
-            visible_text = plan.waiting_text or PROGRESS_PLACEHOLDER
+            show_tool_calls = self._show_tool_calls()
+            visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
+            visible_text = paused.response_text or plan.waiting_text or PROGRESS_PLACEHOLDER
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery_kind: Literal["sent", "edited"] | None = None
             final_visible_body: str | None = None
@@ -838,22 +851,24 @@ class ResponseRunner:
                         target=target,
                         response_text=visible_text,
                         extra_content={STREAM_STATUS_KEY: stream_status},
+                        tool_trace=list(visible_tool_trace) or None,
                         delivery_turn_id=request.response_envelope.source_event_id,
                         delivery_stage=DeliveryStage.INITIAL,
                     ),
                 )
                 delivery_kind = "sent"
                 final_visible_body = visible_text
-            elif approval_pending and not await self.deps.delivery_gateway.edit_text(
+            elif (approval_pending or bool(paused.response_text)) and not await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
                     target=target,
                     event_id=response_event_id,
                     new_text=visible_text,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
                 ),
             ):
                 response_event_id = None
-            elif approval_pending:
+            elif approval_pending or bool(paused.response_text):
                 delivery_kind = "edited"
                 final_visible_body = visible_text
             if response_event_id is None:
@@ -877,6 +892,8 @@ class ResponseRunner:
                     source_event_ids=source_event_ids,
                     calls=plan.calls,
                     state=continuation_state,
+                    response_text=visible_text,
+                    response_tool_trace=serialize_tool_trace(visible_tool_trace),
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
                     team_member_names=team_member_names,
@@ -929,6 +946,7 @@ class ResponseRunner:
                 is_visible_response=True,
                 final_visible_body=final_visible_body,
                 delivery_kind=delivery_kind,
+                tool_trace=visible_tool_trace,
                 extra_content={STREAM_STATUS_KEY: stream_status},
             )
         except (asyncio.CancelledError, Exception) as error:
@@ -957,21 +975,15 @@ class ResponseRunner:
         )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
-            show_tool_calls = self._show_tool_calls()
+            show_tool_calls = self._show_tool_calls(claimed.entity_name)
             visible_tool_trace = tool_trace if show_tool_calls else []
-            tool_markers = format_tool_trace_markers(visible_tool_trace)
-            response_text = (
-                f"{tool_markers}\n\n{result.response_text}"
-                if tool_markers and result.response_text
-                else tool_markers or result.response_text
-            )
             return (
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
                         target=target,
                         existing_event_id=claimed.response_event_id,
                         existing_event_is_placeholder=False,
-                        response_text=response_text,
+                        response_text=result.response_text,
                         identity=self._response_identity(
                             request,
                             response_kind="team" if claimed.entity_kind == "team" else "ai",
@@ -986,12 +998,19 @@ class ResponseRunner:
                 ),
                 current,
             )
-        waiting_text = await self._approval_responses.advance_pause(
+        show_tool_calls = self._show_tool_calls(claimed.entity_name)
+        visible_tool_trace = (
+            tuple(result.tool_trace) or tuple(deserialize_tool_trace(claimed.response_tool_trace))
+            if show_tool_calls
+            else ()
+        )
+        presentation = await self._approval_responses.advance_pause(
             claimed,
             result,
             target=target,
-            tool_trace=tool_trace if self._show_tool_calls() else [],
             pending_text=PROGRESS_PLACEHOLDER,
+            tool_trace=visible_tool_trace,
+            response_tool_trace=serialize_tool_trace(visible_tool_trace),
         )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         return (
@@ -999,12 +1018,12 @@ class ResponseRunner:
                 terminal_status="suspended",
                 event_id=claimed.response_event_id,
                 is_visible_response=True,
-                final_visible_body=waiting_text or PROGRESS_PLACEHOLDER,
+                final_visible_body=presentation.response_text,
                 delivery_kind="edited",
-                tool_trace=tuple(tool_trace) if self._show_tool_calls() else (),
+                tool_trace=presentation.tool_trace,
                 extra_content={
                     STREAM_STATUS_KEY: (
-                        STREAM_STATUS_APPROVAL_PENDING if waiting_text is not None else STREAM_STATUS_PENDING
+                        STREAM_STATUS_APPROVAL_PENDING if presentation.approval_pending else STREAM_STATUS_PENDING
                     ),
                 },
             ),
@@ -1409,6 +1428,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         decisions = {call.tool_call_id: call.decision is ContinuationDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
+        show_tool_calls = self._show_tool_calls(continuation.entity_name)
         with approval_receipt_context(build_approval_receipt(continuation.calls)):
             if continuation.entity_kind == "team":
 
@@ -1438,6 +1458,7 @@ class ResponseRunner:
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
                         tool_trace_collector=tool_trace_collector,
+                        show_tool_calls=show_tool_calls,
                     )
 
                 async with typing_indicator(self._client(), continuation.room_id):
@@ -1453,6 +1474,7 @@ class ResponseRunner:
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     tool_trace_collector=tool_trace_collector,
+                    show_tool_calls=show_tool_calls,
                 )
         return response_text
 
@@ -2760,7 +2782,7 @@ class ResponseRunner:
             if approval_suspension_handler is None:
                 raise
             try:
-                progress.settle(await approval_suspension_handler(error.paused))
+                progress.settle(await approval_suspension_handler(_paused_with_committed_presentation(error)))
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                 progress.failure_reason = str(suspension_error) or "approval_suspension_failed"

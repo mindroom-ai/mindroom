@@ -4787,12 +4787,14 @@ expose = [
     "ToolTraceEntry",
     "build_tool_trace_content",
     "complete_pending_tool_block",
+    "deserialize_tool_trace",
     "extract_tool_completed_info",
+    "format_assistant_tool_transcript",
     "format_tool_combined",
     "format_tool_completed_event",
     "format_tool_started_event",
-    "format_tool_trace_markers",
     "render_tool_trace_for_context",
+    "serialize_tool_trace",
 ]
 from = ["mindroom.tool_system.events"]
 

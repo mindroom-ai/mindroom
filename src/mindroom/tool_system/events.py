@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -447,16 +448,123 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
-def format_tool_trace_markers(tool_trace: Sequence[ToolTraceEntry]) -> str:
-    """Render indexed visible anchors for structured tool-trace entries."""
-    return "\n\n".join(
-        _tool_marker_line(
-            trace_entry.tool_name,
-            tool_index,
-            pending=trace_entry.type == "tool_call_started",
+def _assistant_message_content(message: object) -> str:
+    """Return visible text without exposing multimodal blocks as a Python repr."""
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    get_content_string = getattr(message, "get_content_string", None)
+    return get_content_string().strip() if callable(get_content_string) else ""
+
+
+def _tool_execution_for_call(
+    raw_call: object,
+    tools_by_id: Mapping[str, ToolExecution],
+) -> tuple[str | None, ToolExecution] | None:
+    """Resolve one persisted assistant tool call to its execution payload."""
+    if not isinstance(raw_call, Mapping):
+        return None
+    call = cast("Mapping[str, object]", raw_call)
+    call_id_value = call.get("id")
+    call_id = call_id_value if isinstance(call_id_value, str) else None
+    raw_function = call.get("function")
+    function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
+    raw_tool_name = function.get("name") or call.get("name")
+    tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
+    tool = tools_by_id.get(call_id) if call_id is not None else None
+    return call_id, tool or ToolExecution(tool_call_id=call_id, tool_name=tool_name)
+
+
+def format_assistant_tool_transcript(
+    messages: Sequence[object],
+    tools: Sequence[ToolExecution],
+    *,
+    pending_tool_call_ids: set[str] | frozenset[str] = frozenset(),
+    start_index: int = 1,
+    show_tool_calls: bool = True,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Rebuild one run's visible assistant transcript from its persisted message order."""
+    tools_by_id = {tool.tool_call_id: tool for tool in tools if tool.tool_call_id}
+    transcript_parts: list[str] = []
+    tool_trace: list[ToolTraceEntry] = []
+
+    for message in messages:
+        if getattr(message, "role", None) != "assistant" or getattr(message, "from_history", False):
+            continue
+        content_text = _assistant_message_content(message)
+        if content_text:
+            transcript_parts.append(content_text)
+        if not show_tool_calls:
+            continue
+        for raw_call in getattr(message, "tool_calls", None) or ():
+            resolved_call = _tool_execution_for_call(raw_call, tools_by_id)
+            if resolved_call is None:
+                continue
+            call_id, tool = resolved_call
+            tool_index = start_index + len(tool_trace)
+            if call_id is not None and call_id in pending_tool_call_ids:
+                marker, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
+            else:
+                marker, trace_entry = format_tool_completed_event(tool, tool_index=tool_index)
+            transcript_parts.append(marker.strip())
+            if trace_entry is not None:
+                tool_trace.append(trace_entry)
+
+    return "\n\n".join(transcript_parts), tool_trace
+
+
+def serialize_tool_trace(tool_trace: Sequence[ToolTraceEntry]) -> tuple[dict[str, object], ...]:
+    """Serialize structured tool trace for an opaque durable response snapshot."""
+    serialized: list[dict[str, object]] = []
+    for entry in tool_trace:
+        event: dict[str, object] = {
+            "type": entry.type,
+            "tool_name": entry.tool_name,
+        }
+        if entry.args_preview is not None:
+            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+        if entry.result_preview is not None:
+            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+        if entry.truncated:
+            event["truncated"] = True
+        serialized.append(event)
+    return tuple(serialized)
+
+
+def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
+    """Restore structured tool trace from an opaque durable response snapshot."""
+    tool_trace: list[ToolTraceEntry] = []
+    for event in stored:
+        event_type = event.get("type")
+        tool_name = event.get("tool_name")
+        args_preview = event.get("args_preview")
+        result_preview = event.get("result_preview")
+        truncated = event.get("truncated", False)
+        if event_type not in {"tool_call_started", "tool_call_completed"}:
+            msg = f"Invalid persisted tool trace type: {event_type!r}"
+            raise ValueError(msg)
+        if not isinstance(tool_name, str):
+            msg = "Persisted tool trace entry is missing its tool name"
+            raise TypeError(msg)
+        if args_preview is not None and not isinstance(args_preview, str):
+            msg = "Persisted tool trace args preview must be text"
+            raise TypeError(msg)
+        if result_preview is not None and not isinstance(result_preview, str):
+            msg = "Persisted tool trace result preview must be text"
+            raise TypeError(msg)
+        if not isinstance(truncated, bool):
+            msg = "Persisted tool trace truncated flag must be boolean"
+            raise TypeError(msg)
+        tool_trace.append(
+            ToolTraceEntry(
+                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
+                tool_name=tool_name,
+                args_preview=args_preview,
+                result_preview=result_preview,
+                truncated=truncated,
+            ),
         )
-        for tool_index, trace_entry in enumerate(tool_trace, start=1)
-    )
+    return tool_trace
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -612,21 +720,8 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
 
     trace_list = list(tool_trace)
 
-    events: list[dict[str, object]] = []
-    has_truncated_content = False
-    for entry in trace_list:
-        event: dict[str, object] = {
-            "type": entry.type,
-            "tool_name": entry.tool_name,
-        }
-        if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
-        if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
-        if entry.truncated:
-            event["truncated"] = True
-            has_truncated_content = True
-        events.append(event)
+    events = list(serialize_tool_trace(trace_list))
+    has_truncated_content = any(event.get("truncated") is True for event in events)
 
     payload: dict[str, object] = {
         "version": _TOOL_TRACE_VERSION,
