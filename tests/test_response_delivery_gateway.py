@@ -1752,6 +1752,98 @@ class TestTurnDeliverySerialization:
         assert completed_turn.completed
         assert completed_turn.response_event_id == response_event_id
 
+    async def test_process_shutdown_accepts_final_edit_of_persisted_placeholder(
+        self,
+        tmp_path: Path,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """A FINAL edit transfers ownership without rebinding its visible message."""
+        source_event_id = "$source"
+        placeholder_event_id = "$placeholder"
+        final_edit_event_id = "$final-edit"
+        turn = TurnRecord.create(
+            [source_event_id],
+            completed=False,
+            response_event_id=placeholder_event_id,
+            response_owner="agent",
+        )
+        turn_store = await _store(journal_store, agent_name="agent")
+        await turn_store.record_pending_turn(turn)
+        await alice.admit(
+            InboundEvent(
+                event_id=source_event_id,
+                room_id=_ROOM_ID,
+                thread_id=source_event_id,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1_000,
+                source={
+                    "event_id": source_event_id,
+                    "content": {"msgtype": "m.text", "body": "question"},
+                },
+            ),
+        )
+        handoff = TurnHandoff(
+            sources_for_turn=lambda turn_id: turn.source_event_ids if turn_id == source_event_id else (),
+            released=lambda _source_event_ids: None,
+        )
+        gateway = _gateway(
+            tmp_path,
+            alice,
+            terminal_turn_for=turn_store.terminal_turn_record,
+            terminal_turn_committed=turn_store.publish_committed_response,
+            turn_handoff=handoff,
+        )
+        bot = object.__new__(AgentBot)
+        bot._journal_store = journal_store
+        bot._journal_principal_id = "agent@alice"
+        bot._turn_store = turn_store
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+
+        async def send(_delivery: OutboxDelivery) -> str:
+            send_started.set()
+            await finish_send.wait()
+            return final_edit_event_id
+
+        delivery = gateway._response_delivery(send, handoff=handoff)
+        runner = ResponseRunner(deps=MagicMock())
+        response_task = runner.track_inbox_response(
+            delivery.deliver(
+                turn_id=source_event_id,
+                stage=DeliveryStage.FINAL,
+                room_id=_ROOM_ID,
+                thread_id=source_event_id,
+                payload={"msgtype": "m.text", "body": "answer"},
+                edits_event_id=placeholder_event_id,
+            ),
+            name="test_process_shutdown_completed_final_edit",
+            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        )
+        await send_started.wait()
+        runner.begin_process_shutdown()
+        finish_send.set()
+
+        assert (
+            await runner.drain_inbox_responses(
+                cancel_after_seconds=0.1,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            )
+            is True
+        )
+        assert response_task.cancelled()
+        stored = await alice.load_delivery(turn_id=source_event_id, stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == final_edit_event_id
+        assert stored.edits_event_id == placeholder_event_id
+        completed_turn = turn_store.get_turn_record(source_event_id)
+        assert completed_turn is not None
+        assert completed_turn.completed
+        assert completed_turn.response_event_id == placeholder_event_id
+        assert turn_store.is_handled(source_event_id)
+
     async def test_cancelled_final_finishes_after_its_enqueue_commits(
         self,
     ) -> None:

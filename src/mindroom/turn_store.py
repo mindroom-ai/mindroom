@@ -178,11 +178,12 @@ class TurnStore:
         message has nothing to edit. Committing the two together is what closes
         that window; a startup pass used to rejoin them afterwards.
 
-        Nothing is returned when there is nothing to bind: no record for this
-        turn, or one that already names a response event. A record that already
-        names one is left alone deliberately -- it may name a later, better
-        answer than the first thing ever sent, and overwriting it would undo
-        that.
+        Nothing is returned when there is nothing to complete: no record for
+        this turn, or one that is already terminal.  An incomplete record may
+        already name the visible placeholder that a FINAL edit answers.  That
+        identity is preserved while the acknowledgement completes the record;
+        rebinding it to the edit event would make later edits target an edit
+        instead of the original visible message.
 
         Pure by design. The in-memory map is not touched here, because this is
         called *before* the transaction and the transaction may lose the
@@ -194,9 +195,13 @@ class TurnStore:
         which already owns that boundary, turns it into a row.
         """
         record = self._ledger.get_turn_record(turn_id)
-        if record is None or record.response_event_id is not None:
+        if record is None or record.completed:
             return None
-        bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
+        bound = canonicalize_turn_record(
+            record,
+            response_event_id=record.response_event_id or response_event_id,
+            completed=True,
+        )
         return None if bound.anchor_event_id is None else bound
 
     async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:

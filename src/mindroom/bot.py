@@ -1579,13 +1579,21 @@ class AgentBot:
         )
         if final_delivery is None:
             return False
+        completed_response_event_ids = {
+            event_id
+            for event_id in (
+                final_delivery.acknowledged_event_id,
+                final_delivery.edits_event_id,
+            )
+            if event_id is not None
+        }
         return final_delivery.acknowledged_event_id is None or all(
             (
                 completed_turn is not None
                 and completed_turn.completed
                 and completed_turn.source_event_ids == turn_record.source_event_ids
                 and completed_turn.anchor_event_id == turn_record.anchor_event_id
-                and completed_turn.response_event_id == final_delivery.acknowledged_event_id
+                and completed_turn.response_event_id in completed_response_event_ids
             )
             for completed_turn in map(self._turn_store.get_turn_record, turn_record.indexed_event_ids)
         )

@@ -2271,6 +2271,34 @@ async def test_a_record_that_already_names_an_answer_is_left_alone(
 
 
 @pytest.mark.asyncio
+async def test_an_incomplete_placeholder_is_completed_without_rebinding_response_identity(
+    journal_store: EventJournalStore,
+) -> None:
+    """A FINAL edit completes the visible placeholder in its acknowledgement commit.
+
+    Streaming binds the placeholder before its final edit is sent.  The edit's
+    Matrix event ID is a transport receipt, while later edits must keep
+    targeting the original visible event.  Refusing the terminal write here
+    leaves an acknowledged answer with an incomplete turn after a crash.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(
+            ["$source"],
+            completed=False,
+            response_event_id="$placeholder",
+            response_owner="agent",
+        ),
+    )
+
+    bound = store.terminal_turn_record("$source", "$final-edit")
+
+    assert bound is not None
+    assert bound.completed is True
+    assert bound.response_event_id == "$placeholder"
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_turn_has_no_record_to_commit(journal_store: EventJournalStore) -> None:
     """An acknowledgement for a turn this ledger never recorded carries nothing."""
     store = await _store(journal_store)
