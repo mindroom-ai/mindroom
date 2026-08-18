@@ -85,7 +85,13 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    ResponseTurnContext,
+    stable_assistant_message_ids,
+)
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.stop import StopManager
 from mindroom.streaming import (
@@ -2556,7 +2562,7 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
         result="details",
     )
 
-    body, trace = approval_execution._approval_response_presentation(
+    body, trace, presentation_tools = approval_execution._approval_response_presentation(
         response,
         None,
         continuation=continuation,
@@ -2574,6 +2580,7 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
             tool_call_id="call-1",
         ),
     ]
+    assert presentation_tools == [completed_tool]
 
 
 @pytest.mark.parametrize(
@@ -2618,7 +2625,7 @@ def test_agent_approval_presentation_reconciles_skipped_terminal_content(
         tools=[],
     )
 
-    body, trace = approval_execution._approval_response_presentation(
+    body, trace, _presentation_tools = approval_execution._approval_response_presentation(
         response,
         None,
         continuation=continuation,
@@ -2656,7 +2663,7 @@ def test_agent_approval_presentation_keeps_distinct_terminal_content_after_new_m
         tools=[],
     )
 
-    body, trace = approval_execution._approval_response_presentation(
+    body, trace, _presentation_tools = approval_execution._approval_response_presentation(
         response,
         None,
         continuation=continuation,
@@ -2665,6 +2672,54 @@ def test_agent_approval_presentation_keeps_distinct_terminal_content_after_new_m
 
     assert body == "Before approval.\n\nIntermediate update.\n\nFresh terminal answer."
     assert trace == []
+
+
+def test_agent_approval_presentation_deduplicates_multimodal_terminal_content() -> None:
+    """Text blocks and equivalent terminal content produce one visible answer."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-multimodal-content",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Final answer.",
+        messages=[Message(role="assistant", content=[{"type": "text", "text": "Final answer."}])],
+        tools=[],
+    )
+
+    body, trace, presentation_tools = approval_execution._approval_response_presentation(
+        response,
+        None,
+        continuation=continuation,
+        show_tool_calls=True,
+    )
+
+    assert body == "Final answer."
+    assert trace == []
+    assert presentation_tools == []
+
+
+def test_stable_assistant_message_ids_excludes_missing_identity() -> None:
+    """ID-less messages cannot suppress unrelated ID-less continuation output."""
+    messages = [
+        Message(id="", role="assistant", content="No durable identity."),
+        Message(id="stable-message", role="assistant", content="Durable."),
+        Message(id="tool-message", role="tool", content="result"),
+    ]
+
+    assert stable_assistant_message_ids(messages) == {"stable-message"}
 
 
 @pytest.mark.parametrize("show_tool_calls", [True, False])
@@ -2730,7 +2785,7 @@ def test_agent_approval_presentation_excludes_framework_pause_status(
         tools=(pending_tool,),
     )
 
-    body, trace = approval_execution._approval_response_presentation(
+    body, trace, _presentation_tools = approval_execution._approval_response_presentation(
         response,
         paused,
         continuation=continuation,

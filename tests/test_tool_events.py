@@ -170,6 +170,60 @@ def test_format_assistant_tool_transcript_matches_idless_call_to_identified_tool
     ]
 
 
+def test_format_assistant_tool_transcript_reserves_exact_id_before_legacy_matching() -> None:
+    """An earlier id-less call cannot consume a later call's exact execution."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+            ],
+        ),
+    ]
+    tools = [
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="exact result"),
+        ToolExecution(tool_name="inspect", result="legacy result"),
+    ]
+
+    _body, trace = tool_events.format_assistant_tool_transcript(messages, tools)
+
+    assert [entry.result_preview for entry in trace] == ["legacy result", "exact result"]
+    assert [entry.tool_call_id for entry in trace] == [None, "call-1"]
+
+
+def test_format_assistant_tool_transcript_enriches_incomplete_execution_from_call() -> None:
+    """Persisted call name and arguments fill gaps in an execution payload."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
+                },
+            ],
+        ),
+    ]
+    tool = ToolExecution(tool_call_id="call-1", tool_name=None, tool_args=None, result="details")
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, [tool])
+
+    assert body == "🔧 `inspect` [1]"
+    assert trace[0].tool_name == "inspect"
+    assert trace[0].args_preview == "path=report.txt"
+    assert trace[0].result_preview == "details"
+    assert trace[0].tool_call_id == "call-1"
+
+
 def test_format_assistant_tool_transcript_skips_messages_already_in_durable_snapshot() -> None:
     """Continuation rendering must append only assistant messages added after the pause."""
     messages = [
@@ -461,6 +515,70 @@ def test_reconcile_tool_presentation_consumes_idless_trace_matches() -> None:
 
     assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]"
     assert [entry.result_preview for entry in trace] == ["first result", "second result"]
+
+
+def test_reconcile_tool_presentation_reserves_prior_exact_id_before_legacy_matching() -> None:
+    """Legacy execution matching cannot overwrite a later exact stable trace."""
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            result_preview="old exact",
+            tool_call_id="call-1",
+        ),
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="old legacy"),
+    ]
+    tools = [
+        ToolExecution(tool_name="inspect", result="new legacy"),
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="new exact"),
+    ]
+
+    _body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="🔧 `inspect` [1]\n\n🔧 `inspect` [2]",
+        prior_tool_trace=prior_trace,
+        current_text="",
+        current_tool_trace=[],
+        tools=tools,
+    )
+
+    assert [entry.result_preview for entry in trace] == ["new exact", "new legacy"]
+    assert [entry.tool_call_id for entry in trace] == ["call-1", None]
+
+
+def test_reconcile_tool_presentation_deduplicates_replayed_prior_marker() -> None:
+    """A replayed stable call with a new message ID does not create a second marker."""
+    completed = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+    trace_entry = ToolTraceEntry(type="tool_call_completed", tool_name="inspect", tool_call_id="call-1")
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="🔧 `inspect` [1]",
+        prior_tool_trace=[trace_entry],
+        current_text="🔧 `inspect` [2]\n\nAfter approval.",
+        current_tool_trace=[trace_entry],
+        tools=[completed],
+    )
+
+    assert body == "🔧 `inspect` [1]\n\nAfter approval."
+    assert len(trace) == 1
+    assert trace[0].tool_call_id == "call-1"
+
+
+def test_reconcile_tool_presentation_merges_recovery_tools_in_execution_order() -> None:
+    """A later omitted execution follows an earlier anchored call and precedes final prose."""
+    first = ToolExecution(tool_call_id="call-1", tool_name="first", result="first result")
+    second = ToolExecution(tool_call_id="call-2", tool_name="second", result="second result")
+    current_trace = [ToolTraceEntry(type="tool_call_completed", tool_name="first", tool_call_id="call-1")]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="Starting.\n\n🔧 `first` [1]\n\nFinished.",
+        current_tool_trace=current_trace,
+        tools=[first, second],
+    )
+
+    assert body == "Starting.\n\n🔧 `first` [1]\n\n🔧 `second` [2]\n\nFinished."
+    assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
 
 
 def test_reconcile_tool_presentation_reindexes_repeated_markers_without_collisions() -> None:

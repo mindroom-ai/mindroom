@@ -468,12 +468,15 @@ def _assistant_message_content(message: Message) -> str:
     return "".join(text_parts)
 
 
-def _tool_execution_for_call(
-    raw_call: object,
-    tools: Sequence[ToolExecution],
-    used_tool_indexes: set[int],
-) -> tuple[str | None, ToolExecution] | None:
-    """Resolve one persisted assistant tool call to its execution payload."""
+@dataclass(frozen=True, slots=True)
+class _AssistantToolCall:
+    call_id: str | None
+    tool_name: str
+    tool_args: dict[str, object]
+
+
+def _assistant_tool_call(raw_call: object) -> _AssistantToolCall | None:
+    """Normalize one persisted assistant tool-call payload."""
     if not isinstance(raw_call, Mapping):
         return None
     call = cast("Mapping[str, object]", raw_call)
@@ -485,23 +488,89 @@ def _tool_execution_for_call(
     function = cast("Mapping[str, object]", raw_function) if isinstance(raw_function, Mapping) else {}
     raw_tool_name = function.get("name") or call.get("name")
     tool_name = raw_tool_name if isinstance(raw_tool_name, str) and raw_tool_name else "tool"
-    tool: ToolExecution | None = None
-    if call_id is not None:
-        for index, candidate in enumerate(tools):
-            if candidate.tool_call_id == call_id:
-                tool = candidate
-                used_tool_indexes.add(index)
-                break
-    if tool is None:
-        for index, candidate in enumerate(tools):
-            if index in used_tool_indexes or (candidate.tool_name or "tool") != tool_name:
+    raw_args = function.get("arguments") or call.get("arguments")
+    parsed_args: object = raw_args
+    if isinstance(raw_args, str):
+        try:
+            parsed_args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            parsed_args = {}
+    tool_args = {str(key): value for key, value in parsed_args.items()} if isinstance(parsed_args, Mapping) else {}
+    return _AssistantToolCall(call_id=call_id, tool_name=tool_name, tool_args=tool_args)
+
+
+def _execution_with_call_metadata(tool: ToolExecution, call: _AssistantToolCall) -> ToolExecution:
+    """Fill provider execution gaps from its persisted assistant call."""
+    updates: dict[str, object] = {}
+    if tool.tool_call_id is None and call.call_id is not None:
+        updates["tool_call_id"] = call.call_id
+    if not tool.tool_name:
+        updates["tool_name"] = call.tool_name
+    if not tool.tool_args and call.tool_args:
+        updates["tool_args"] = call.tool_args
+    return replace(tool, **updates) if updates else tool
+
+
+def _assistant_tool_calls(
+    messages: Sequence[Message],
+) -> list[tuple[tuple[int, int], _AssistantToolCall]]:
+    """Collect normalized assistant calls with stable message positions."""
+    calls: list[tuple[tuple[int, int], _AssistantToolCall]] = []
+    for message_index, message in enumerate(messages):
+        if message.role != "assistant":
+            continue
+        for call_index, raw_call in enumerate(message.tool_calls or ()):
+            if (call := _assistant_tool_call(raw_call)) is not None:
+                calls.append(((message_index, call_index), call))
+    return calls
+
+
+def _reserve_exact_tool_matches(
+    calls: Sequence[tuple[tuple[int, int], _AssistantToolCall]],
+    tools: Sequence[ToolExecution],
+) -> tuple[dict[tuple[int, int], int], set[int]]:
+    """Reserve execution slots for every assistant call with an exact stable ID."""
+    matched_indexes: dict[tuple[int, int], int] = {}
+    used_tool_indexes: set[int] = set()
+    tools_by_id = {
+        tool.tool_call_id: index for index, tool in reversed(list(enumerate(tools))) if tool.tool_call_id is not None
+    }
+    for key, call in calls:
+        if call.call_id is None:
+            continue
+        tool_index = tools_by_id.get(call.call_id)
+        if tool_index is not None and tool_index not in used_tool_indexes:
+            matched_indexes[key] = tool_index
+            used_tool_indexes.add(tool_index)
+    return matched_indexes, used_tool_indexes
+
+
+def _match_assistant_tool_calls(
+    messages: Sequence[Message],
+    tools: Sequence[ToolExecution],
+) -> dict[tuple[int, int], tuple[str | None, ToolExecution]]:
+    """Match exact IDs first, then assign remaining legacy calls by occurrence."""
+    calls = _assistant_tool_calls(messages)
+    matched_indexes, used_tool_indexes = _reserve_exact_tool_matches(calls, tools)
+
+    for key, call in calls:
+        if key in matched_indexes:
+            continue
+        for tool_index, tool in enumerate(tools):
+            if tool_index in used_tool_indexes or (tool.tool_name or "tool") != call.tool_name:
                 continue
-            if call_id is not None and candidate.tool_call_id is not None:
+            if call.call_id is not None and tool.tool_call_id is not None:
                 continue
-            tool = candidate
-            used_tool_indexes.add(index)
+            matched_indexes[key] = tool_index
+            used_tool_indexes.add(tool_index)
             break
-    return call_id, tool or ToolExecution(tool_call_id=call_id, tool_name=tool_name)
+
+    matches: dict[tuple[int, int], tuple[str | None, ToolExecution]] = {}
+    for key, call in calls:
+        tool_index = matched_indexes.get(key)
+        tool = tools[tool_index] if tool_index is not None else ToolExecution(tool_name=call.tool_name)
+        matches[key] = (call.call_id, _execution_with_call_metadata(tool, call))
+    return matches
 
 
 def format_assistant_tool_transcript(
@@ -514,11 +583,11 @@ def format_assistant_tool_transcript(
     skip_message_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Rebuild one run's visible assistant transcript from its persisted message order."""
-    used_tool_indexes: set[int] = set()
+    matched_calls = _match_assistant_tool_calls(messages, tools)
     transcript_parts: list[str] = []
     tool_trace: list[ToolTraceEntry] = []
 
-    for message in messages:
+    for message_index, message in enumerate(messages):
         if message.role != "assistant":
             continue
         render_message = not message.from_history and message.id not in skip_message_ids
@@ -528,8 +597,8 @@ def format_assistant_tool_transcript(
                 transcript_parts.append(content_text)
         if not show_tool_calls:
             continue
-        for raw_call in message.tool_calls or ():
-            resolved_call = _tool_execution_for_call(raw_call, tools, used_tool_indexes)
+        for call_index, _raw_call in enumerate(message.tool_calls or ()):
+            resolved_call = matched_calls.get((message_index, call_index))
             if resolved_call is None or not render_message:
                 continue
             call_id, tool = resolved_call
@@ -639,25 +708,50 @@ def _append_presentation_part(body: str, part: str) -> str:
     return f"{body}\n\n{part}" if body and part else body or part
 
 
-def _matching_trace_index(
+def _tool_trace_matches(
+    tools: Sequence[ToolExecution],
     trace: Sequence[ToolTraceEntry],
-    tool: ToolExecution,
-    used_indexes: set[int],
-) -> int | None:
-    """Match one execution to one trace entry by ID, then legacy name and occurrence."""
-    if tool.tool_call_id is not None:
+    *,
+    prefer_latest_tools: bool = False,
+) -> list[int | None]:
+    """Match exact IDs first, then remaining legacy entries by name and occurrence."""
+    matches: list[int | None] = [None] * len(tools)
+    used_trace_indexes: set[int] = set()
+    for tool_index, tool in enumerate(tools):
+        if tool.tool_call_id is None:
+            continue
         for index, entry in enumerate(trace):
-            if index not in used_indexes and entry.tool_call_id == tool.tool_call_id:
-                return index
-    tool_name = tool.tool_name or "tool"
-    for index, entry in enumerate(trace):
-        if (
-            index not in used_indexes
-            and entry.tool_name == tool_name
-            and (tool.tool_call_id is None or entry.tool_call_id is None)
-        ):
-            return index
-    return None
+            if index not in used_trace_indexes and entry.tool_call_id == tool.tool_call_id:
+                matches[tool_index] = index
+                used_trace_indexes.add(index)
+                break
+
+    tool_indexes = range(len(tools) - 1, -1, -1) if prefer_latest_tools else range(len(tools))
+    for tool_index in tool_indexes:
+        if matches[tool_index] is not None:
+            continue
+        tool = tools[tool_index]
+        tool_name = tool.tool_name or "tool"
+        for index, entry in enumerate(trace):
+            if index in used_trace_indexes or entry.tool_name != tool_name:
+                continue
+            if tool.tool_call_id is not None and entry.tool_call_id is not None:
+                continue
+            matches[tool_index] = index
+            used_trace_indexes.add(index)
+            break
+    return matches
+
+
+def partition_tools_by_trace(
+    tools: Sequence[ToolExecution],
+    trace: Sequence[ToolTraceEntry],
+) -> tuple[list[ToolExecution], list[ToolExecution]]:
+    """Partition executions into one-to-one represented and missing groups."""
+    matches = _tool_trace_matches(tools, trace)
+    represented = [tool for tool, match in zip(tools, matches, strict=True) if match is not None]
+    missing = [tool for tool, match in zip(tools, matches, strict=True) if match is None]
+    return represented, missing
 
 
 def tools_not_represented_in_trace(
@@ -665,35 +759,124 @@ def tools_not_represented_in_trace(
     trace: Sequence[ToolTraceEntry],
 ) -> list[ToolExecution]:
     """Return executions without a one-to-one stable or legacy trace match."""
-    used_indexes: set[int] = set()
-    missing: list[ToolExecution] = []
-    for tool in tools:
-        trace_index = _matching_trace_index(trace, tool, used_indexes)
-        if trace_index is None:
-            missing.append(tool)
-        else:
-            used_indexes.add(trace_index)
-    return missing
+    return partition_tools_by_trace(tools, trace)[1]
 
 
-def _reindex_tool_markers(
+def _filter_tool_trace_presentation(
     text: str,
     trace: Sequence[ToolTraceEntry],
     *,
-    old_start_index: int,
-    new_start_index: int,
-) -> str:
-    """Shift marker indices when recovery-only tools precede ordered messages."""
-    if old_start_index == new_start_index or not trace:
-        return text
-    replacements: dict[str, str] = {}
+    excluded_indexes: set[int],
+    start_index: int,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Remove replayed markers and compact the remaining marker indexes."""
+    filtered_trace: list[ToolTraceEntry] = []
     for offset, entry in enumerate(trace):
         pending = entry.type == "tool_call_started"
-        old_marker = _tool_marker_line(entry.tool_name, old_start_index + offset, pending=pending)
-        new_marker = _tool_marker_line(entry.tool_name, new_start_index + offset, pending=pending)
-        replacements[old_marker] = new_marker
-    marker_pattern = re.compile("|".join(re.escape(marker) for marker in replacements))
-    return marker_pattern.sub(lambda match: replacements[match.group(0)], text)
+        old_marker = _tool_marker_line(entry.tool_name, start_index + offset, pending=pending)
+        if offset in excluded_indexes:
+            text = text.replace(old_marker, "", 1)
+            continue
+        new_marker = _tool_marker_line(entry.tool_name, start_index + len(filtered_trace), pending=pending)
+        text = text.replace(old_marker, new_marker, 1)
+        filtered_trace.append(replace(entry))
+    text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", text).strip("\n")
+    return text, filtered_trace
+
+
+def _merge_current_tool_presentation(
+    text: str,
+    trace: Sequence[ToolTraceEntry],
+    tools: Sequence[ToolExecution],
+    matches: Sequence[int | None],
+    *,
+    pending_tool_call_ids: set[str] | frozenset[str],
+    start_index: int,
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Insert recovery-only markers beside anchored calls in execution order."""
+    token_entries: dict[str, ToolTraceEntry] = {}
+    trace_tokens: list[str] = []
+    for trace_index, entry in enumerate(trace):
+        token = f"\x00mindroom-tool-{trace_index}\x00"
+        marker = _tool_marker_line(
+            entry.tool_name,
+            start_index + trace_index,
+            pending=entry.type == "tool_call_started",
+        )
+        text = text.replace(marker, token, 1)
+        token_entries[token] = replace(entry)
+        trace_tokens.append(token)
+
+    tool_tokens = [trace_tokens[match] if match is not None else None for match in matches]
+    for tool_index, tool in enumerate(tools):
+        if tool_tokens[tool_index] is not None:
+            continue
+        token = f"\x00mindroom-recovery-{tool_index}\x00"
+        _, trace_entry = _trace_entry_for_tool(
+            tool,
+            pending_tool_call_ids=pending_tool_call_ids,
+            tool_index=1,
+        )
+        token_entries[token] = trace_entry
+        next_token = next((candidate for candidate in tool_tokens[tool_index + 1 :] if candidate), None)
+        previous_token = next((candidate for candidate in reversed(tool_tokens[:tool_index]) if candidate), None)
+        if next_token is not None:
+            text = text.replace(next_token, f"{token}\n\n{next_token}", 1)
+        elif tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids:
+            text = _append_presentation_part(text, token)
+        elif previous_token is not None:
+            text = text.replace(previous_token, f"{previous_token}\n\n{token}", 1)
+        else:
+            text = f"{token}\n\n{text}" if text else token
+        tool_tokens[tool_index] = token
+
+    ordered_tokens = sorted(token_entries, key=text.index)
+    merged_trace: list[ToolTraceEntry] = []
+    for token in ordered_tokens:
+        entry = token_entries[token]
+        marker = _tool_marker_line(
+            entry.tool_name,
+            start_index + len(merged_trace),
+            pending=entry.type == "tool_call_started",
+        )
+        text = text.replace(token, marker, 1)
+        merged_trace.append(entry)
+    return text, merged_trace
+
+
+def _complete_prior_tool_presentation(
+    body: str,
+    trace: list[ToolTraceEntry],
+    tools: Sequence[ToolExecution],
+    matches: Sequence[int | None],
+    pending_tool_call_ids: set[str] | frozenset[str],
+) -> tuple[str, list[ToolTraceEntry]]:
+    """Complete tools already represented in the durable snapshot."""
+    for tool, prior_index in zip(tools, matches, strict=True):
+        if prior_index is None:
+            continue
+        previous_entry = trace[prior_index]
+        matched_call_id = tool.tool_call_id or previous_entry.tool_call_id
+        if matched_call_id is not None and matched_call_id in pending_tool_call_ids:
+            continue
+        marker_index = prior_index + 1
+        body, _ = complete_pending_tool_block(
+            body,
+            tool.tool_name or previous_entry.tool_name,
+            tool.result,
+            marker_index,
+        )
+        _, completed_entry = format_tool_completed_event(tool, tool_index=marker_index)
+        assert completed_entry is not None
+        trace[prior_index] = replace(
+            completed_entry,
+            tool_call_id=completed_entry.tool_call_id or previous_entry.tool_call_id,
+            tool_name=tool.tool_name or previous_entry.tool_name,
+            args_preview=completed_entry.args_preview or previous_entry.args_preview,
+            result_preview=completed_entry.result_preview or previous_entry.result_preview,
+            truncated=completed_entry.truncated or previous_entry.truncated,
+        )
+    return body, trace
 
 
 def reconcile_tool_presentation(
@@ -715,80 +898,35 @@ def reconcile_tool_presentation(
     body = prior_text
     trace = [replace(entry) for entry in prior_tool_trace]
     current_start_index = current_start_index or len(prior_tool_trace) + 1
-    marker_index_offset = current_start_index - len(prior_tool_trace) - 1
-    if marker_index_offset < 0:
+    if current_start_index < len(prior_tool_trace) + 1:
         msg = "Current tool marker index overlaps the prior trace"
         raise ValueError(msg)
-    used_prior_indexes: set[int] = set()
-    tools_without_prior: list[ToolExecution] = []
-
-    for tool in tools:
-        prior_index = _matching_trace_index(trace, tool, used_prior_indexes)
-        if prior_index is None:
-            tools_without_prior.append(tool)
-            continue
-
-        used_prior_indexes.add(prior_index)
-        matched_call_id = tool.tool_call_id or trace[prior_index].tool_call_id
-        if matched_call_id is not None and matched_call_id in pending_tool_call_ids:
-            continue
-        marker_index = prior_index + 1
-        tool_name = tool.tool_name or trace[prior_index].tool_name
-        body, _ = complete_pending_tool_block(body, tool_name, tool.result, marker_index)
-        _, completed_entry = format_tool_completed_event(tool, tool_index=marker_index)
-        assert completed_entry is not None
-        previous_entry = trace[prior_index]
-        trace[prior_index] = replace(
-            completed_entry,
-            tool_call_id=completed_entry.tool_call_id or previous_entry.tool_call_id,
-            tool_name=tool.tool_name or previous_entry.tool_name,
-            args_preview=completed_entry.args_preview or previous_entry.args_preview,
-            result_preview=completed_entry.result_preview or previous_entry.result_preview,
-            truncated=completed_entry.truncated or previous_entry.truncated,
-        )
-
-    used_current_indexes: set[int] = set()
-    missing_tools: list[ToolExecution] = []
-    for tool in reversed(tools_without_prior):
-        current_index = _matching_trace_index(current_tool_trace, tool, used_current_indexes)
-        if current_index is None:
-            missing_tools.append(tool)
-        else:
-            used_current_indexes.add(current_index)
-    missing_tools.reverse()
-
-    missing_completed = [
-        tool for tool in missing_tools if tool.tool_call_id is None or tool.tool_call_id not in pending_tool_call_ids
-    ]
-    missing_pending = [
-        tool for tool in missing_tools if tool.tool_call_id is not None and tool.tool_call_id in pending_tool_call_ids
-    ]
-    for tool in missing_completed:
-        marker, trace_entry = _trace_entry_for_tool(
-            tool,
-            pending_tool_call_ids=pending_tool_call_ids,
-            tool_index=len(trace) + marker_index_offset + 1,
-        )
-        body = _append_presentation_part(body, marker)
-        trace.append(trace_entry)
-
-    current_text = _reindex_tool_markers(
+    prior_matches = _tool_trace_matches(tools, trace)
+    body, trace = _complete_prior_tool_presentation(body, trace, tools, prior_matches, pending_tool_call_ids)
+    original_current_matches = _tool_trace_matches(tools, current_tool_trace, prefer_latest_tools=True)
+    replayed_current_indexes = {
+        current_match
+        for prior_match, current_match in zip(prior_matches, original_current_matches, strict=True)
+        if prior_match is not None and current_match is not None
+    }
+    current_text, filtered_current_trace = _filter_tool_trace_presentation(
         current_text,
         current_tool_trace,
-        old_start_index=current_start_index,
-        new_start_index=len(trace) + marker_index_offset + 1,
+        excluded_indexes=replayed_current_indexes,
+        start_index=current_start_index,
+    )
+    current_tools = [tool for tool, prior_match in zip(tools, prior_matches, strict=True) if prior_match is None]
+    current_matches = _tool_trace_matches(current_tools, filtered_current_trace, prefer_latest_tools=True)
+    current_text, merged_current_trace = _merge_current_tool_presentation(
+        current_text,
+        filtered_current_trace,
+        current_tools,
+        current_matches,
+        pending_tool_call_ids=pending_tool_call_ids,
+        start_index=current_start_index,
     )
     body = _append_presentation_part(body, current_text)
-    trace.extend(replace(entry) for entry in current_tool_trace)
-
-    for tool in missing_pending:
-        marker, trace_entry = _trace_entry_for_tool(
-            tool,
-            pending_tool_call_ids=pending_tool_call_ids,
-            tool_index=len(trace) + marker_index_offset + 1,
-        )
-        body = _append_presentation_part(body, marker)
-        trace.append(trace_entry)
+    trace.extend(merged_current_trace)
 
     return body, trace
 

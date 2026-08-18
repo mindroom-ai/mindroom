@@ -23,6 +23,18 @@ class TestExtractContent:
         result = _get_response_content(response)
         assert result == "Direct content"
 
+    def test_get_response_content_flattens_multimodal_text_blocks(self) -> None:
+        """Multimodal response content must not leak its container representation."""
+        response = MagicMock()
+        response.content = [
+            {"type": "text", "text": "First part. "},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}},
+            {"type": "text", "text": "Second part."},
+        ]
+        response.messages = []
+
+        assert _get_response_content(response) == "First part. Second part."
+
     def test_get_response_content_from_messages(self) -> None:
         """Test extracting content from messages when no direct content."""
         msg1 = Message(role="assistant", content="First message")

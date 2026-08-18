@@ -24,6 +24,8 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
     resolve_approval_response_content,
+    response_content_text,
+    stable_assistant_message_ids,
 )
 from mindroom.tool_system.events import (
     deserialize_tool_trace,
@@ -57,7 +59,7 @@ def _approval_response_presentation(
     requirement_tools: Sequence[ToolExecution] = (),
     prior_message_ids: set[str] | frozenset[str] = frozenset(),
     show_tool_calls: bool,
-) -> tuple[str, list[ToolTraceEntry]]:
+) -> tuple[str, list[ToolTraceEntry], list[ToolExecution]]:
     """Reconcile one continued agent run with its durable visible snapshot."""
     presentation_tools = list(response.tools or ())
     seen_tool_call_ids = {tool.tool_call_id for tool in presentation_tools if tool.tool_call_id is not None}
@@ -84,9 +86,9 @@ def _approval_response_presentation(
     current_text = resolve_approval_response_content(
         response,
         current_text,
-        terminal_content=str(response.content or ""),
+        terminal_content=response_content_text(response.content),
     )
-    return reconcile_tool_presentation(
+    response_text, response_tool_trace = reconcile_tool_presentation(
         prior_text=continuation.response_text,
         prior_tool_trace=prior_tool_trace,
         current_text=current_text,
@@ -95,6 +97,7 @@ def _approval_response_presentation(
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )
+    return response_text, response_tool_trace, presentation_tools
 
 
 @dataclass(frozen=True)
@@ -168,7 +171,7 @@ class AgentApprovalExecution:
             if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
-            prior_message_ids = {message.id for message in persisted.messages or () if message.role == "assistant"}
+            prior_message_ids = stable_assistant_message_ids(persisted.messages or ())
             requirements = apply_exact_approval_decisions(
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
@@ -217,7 +220,7 @@ class AgentApprovalExecution:
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
         )
-        response_text, response_tool_trace = _approval_response_presentation(
+        response_text, response_tool_trace, presentation_tools = _approval_response_presentation(
             response,
             paused,
             continuation=continuation,
@@ -248,6 +251,6 @@ class AgentApprovalExecution:
                 model=response.model,
                 model_provider=response.model_provider,
                 metrics=response.metrics,
-                tool_count=len(response.tools or ()),
+                tool_count=len(presentation_tools),
             ),
         )

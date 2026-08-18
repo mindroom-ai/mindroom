@@ -728,6 +728,111 @@ def test_team_continuation_recovers_member_content_after_marker_only_messages() 
     assert response_trace[0].result_preview == "details"
 
 
+def test_team_continuation_starts_marker_only_member_content_on_new_line() -> None:
+    """Member labels must not hide tool markers from visibility cleanup."""
+    pending_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    member = RunOutput(
+        run_id="member-run",
+        agent_name="GeneralAgent",
+        status=RunStatus.paused,
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[pending_tool],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        member_responses=[member],
+    )
+    paused = PausedAttempt(session_id="session-1", run_id="run-1", tools=(pending_tool,))
+
+    response_text, response_trace, _ = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[],
+        paused=paused,
+        prior_response_text="",
+        prior_tool_trace=[],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    assert "**GeneralAgent**:\n\n🔧 `inspect` [1] ⏳" in response_text
+    assert "**GeneralAgent**: 🔧" not in response_text
+
+    completed_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+    completed = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="Done.",
+        messages=[Message(role="assistant", content="Done.")],
+    )
+    hidden_text, hidden_trace, _ = _continued_team_approval_presentation(
+        completed,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[completed_tool],
+        paused=None,
+        prior_response_text=response_text,
+        prior_tool_trace=response_trace,
+        prior_message_ids=set(),
+        show_tool_calls=False,
+    )
+
+    assert "🔧" not in hidden_text
+    assert "Done." in hidden_text
+    assert hidden_trace == []
+
+
+def test_paused_team_continuation_does_not_claim_missing_consensus() -> None:
+    """A temporary approval pause cannot become a permanent no-consensus statement."""
+    pending_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        member_responses=[
+            RunOutput(
+                run_id="member-run",
+                agent_name="GeneralAgent",
+                status=RunStatus.paused,
+                content="Need approval.",
+                messages=[Message(role="assistant", content="Need approval.")],
+            ),
+        ],
+    )
+    paused = PausedAttempt(session_id="session-1", run_id="run-1", tools=(pending_tool,))
+
+    response_text, _response_trace, _ = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[],
+        paused=paused,
+        prior_response_text="",
+        prior_tool_trace=[],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    assert "Need approval." in response_text
+    assert "No team consensus" not in response_text
+
+
 def test_team_continuation_recovers_unanchored_tools_in_contribution_order() -> None:
     """Recovery-only tool markers stay with their member and consensus prose."""
     approved_tool = ToolExecution(tool_call_id="approved-call", tool_name="approved_tool", result="approved")

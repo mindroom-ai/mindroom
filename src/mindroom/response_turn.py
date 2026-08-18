@@ -19,9 +19,10 @@ out of it and crosses via ``TurnSinks`` or the adapters.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
 from agno.run.base import RunStatus
@@ -41,9 +42,10 @@ from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractContextManager
 
+    from agno.models.message import Message
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunPausedEvent
     from agno.run.requirement import RunRequirement
@@ -82,7 +84,9 @@ __all__ = [
     "paused_attempt_from_event",
     "paused_attempt_from_response",
     "resolve_approval_response_content",
+    "response_content_text",
     "run_blocking_response_turn",
+    "stable_assistant_message_ids",
     "stream_response_turn",
 ]
 
@@ -93,6 +97,42 @@ class CompletedApprovalRun:
 
     response_text: str
     metadata_content: dict[str, Any]
+
+
+def response_content_text(content: object) -> str:
+    """Return normalized text from string or multimodal response content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Mapping):
+        mapping = cast("Mapping[object, object]", content)
+        text = mapping.get("text")
+        return text if isinstance(text, str) else str(content)
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    text_parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+        elif isinstance(block, Mapping):
+            mapping = cast("Mapping[object, object]", block)
+            text = mapping.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "".join(text_parts)
+
+
+def _assistant_message_text(message: Message) -> str:
+    """Return normalized visible text from one assistant message."""
+    return response_content_text(message.content)
+
+
+def stable_assistant_message_ids(messages: Sequence[Message]) -> set[str]:
+    """Return only durable assistant identities that can safely suppress replay."""
+    return {
+        message.id
+        for message in messages
+        if message.role == "assistant" and isinstance(message.id, str) and bool(message.id)
+    }
 
 
 def resolve_approval_response_content(
@@ -108,9 +148,7 @@ def resolve_approval_response_content(
         message for message in response.messages or () if message.role == "assistant" and not message.from_history
     ]
     message_content = [
-        message.content.strip()
-        for message in assistant_messages
-        if isinstance(message.content, str) and message.content.strip()
+        text.strip() for message in assistant_messages if (text := _assistant_message_text(message)).strip()
     ]
     normalized_terminal = terminal_content.strip()
     represented_content = {*message_content, "\n\n".join(message_content)}

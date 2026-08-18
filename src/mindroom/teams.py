@@ -99,7 +99,9 @@ from mindroom.response_turn import (
     paused_attempt_from_event,
     paused_attempt_from_response,
     resolve_approval_response_content,
+    response_content_text,
     run_blocking_response_turn,
+    stable_assistant_message_ids,
     stream_response_turn,
 )
 from mindroom.team_exact_members import (
@@ -116,8 +118,10 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_assistant_tool_transcript,
     format_tool_completed_event,
+    partition_tools_by_trace,
     reconcile_tool_presentation,
     tools_not_represented_in_trace,
+    visible_text_without_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -379,6 +383,20 @@ def _local_approval_recovery_tools(
     return [tool for tool in response.tools or () if any(tool is candidate for candidate in recovery_tools)]
 
 
+def _local_approval_presentation_tools(
+    response: TeamRunOutput | RunOutput,
+    trace: Sequence[ToolTraceEntry],
+    recovery_tools: Sequence[ToolExecution],
+) -> list[ToolExecution]:
+    """Keep anchored and recovery-eligible executions in local run order."""
+    anchored_tools, _ = partition_tools_by_trace(response.tools or (), trace)
+    return [
+        tool
+        for tool in response.tools or ()
+        if any(tool is candidate for candidate in (*anchored_tools, *recovery_tools))
+    ]
+
+
 def _format_approval_response_segment(
     response: TeamRunOutput | RunOutput,
     *,
@@ -403,7 +421,7 @@ def _format_approval_response_segment(
         prior_tool_trace=(),
         current_text=content,
         current_tool_trace=trace,
-        tools=_local_approval_recovery_tools(response, recovery_tools),
+        tools=_local_approval_presentation_tools(response, trace, recovery_tools),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
         current_start_index=start_index,
@@ -475,11 +493,14 @@ def _format_approval_contributions_recursive(
                     recovery_tools=recovery_tools,
                 )
                 if content.strip():
+                    member_name = member_response.agent_name or "Team Member"
+                    first_line = content.splitlines()[0]
+                    marker_first = bool(first_line.strip()) and not visible_text_without_tool_markers(first_line)
                     parts.append(
-                        _format_member_contribution(
-                            member_response.agent_name or "Team Member",
-                            content,
-                            indent,
+                        (
+                            f"{'  ' * indent}**{member_name}**:\n\n{content}"
+                            if marker_first
+                            else _format_member_contribution(member_name, content, indent)
                         ),
                     )
                 trace.extend(member_trace)
@@ -495,7 +516,7 @@ def _format_approval_contributions_recursive(
             )
             if consensus.strip():
                 parts.extend(_format_team_consensus(consensus, indent))
-            elif parts:
+            elif parts and response.status == RunStatus.completed:
                 parts.append(_format_no_consensus_note(indent))
             trace.extend(consensus_trace)
         else:
@@ -638,12 +659,12 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     a content-less run cannot recycle earlier turns' text as its output.
     """
     if response.content:
-        return str(response.content)
+        return response_content_text(response.content)
 
     if response.messages:
         messages_list: list[Any] = response.messages
         content_parts = [
-            str(msg.content)
+            response_content_text(msg.content)
             for msg in messages_list
             if isinstance(msg, Message) and msg.role == "assistant" and msg.content and not msg.from_history
         ]
@@ -1455,7 +1476,7 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
 
 def _assistant_message_ids(response: TeamRunOutput | RunOutput) -> set[str]:
     """Collect stable assistant-message identities from a nested persisted run."""
-    message_ids = {message.id for message in response.messages or () if message.role == "assistant"}
+    message_ids = stable_assistant_message_ids(response.messages or ())
     if isinstance(response, TeamRunOutput):
         for member_response in response.member_responses:
             if isinstance(member_response, TeamRunOutput | RunOutput):
