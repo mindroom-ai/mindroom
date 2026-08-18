@@ -523,6 +523,7 @@ async def _apply_turn_plan(
         on_failure=lambda: (
             controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
         ),
+        on_terminal=lambda: controller.deps.turn_store.release_pending_turn_claim(turn_claim),
     )
     # Ownership moves synchronously after task creation. If this dispatch task
     # is cancelled while waiting for the lifecycle lock, its finally block must

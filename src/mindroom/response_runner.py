@@ -556,6 +556,7 @@ class ResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
+        on_terminal: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         if self._process_shutdown_started:
@@ -566,6 +567,8 @@ class ResponseRunner:
             recovery_proof_ready=recovery_proof_ready,
             on_failure=on_failure,
         )
+        if on_terminal is not None:
+            task.add_done_callback(lambda _finished: on_terminal())
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 

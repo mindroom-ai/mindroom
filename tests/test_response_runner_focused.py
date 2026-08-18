@@ -162,6 +162,51 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_releases_claim_when_response_never_starts() -> None:
+    """Task-lifetime cleanup must release a claim before recovery proof."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = False
+    claim_live = True
+    proof_claim_states: list[bool] = []
+
+    async def never_started_response() -> None:
+        nonlocal response_started
+        response_started = True
+
+    def release_claim() -> None:
+        nonlocal claim_live
+        claim_live = False
+
+    def recovery_proof_ready() -> bool:
+        proof_claim_states.append(claim_live)
+        return not claim_live
+
+    response = never_started_response()
+    try:
+        response_task = runner.track_inbox_response(
+            response,
+            name="test_never_started_claimed_response",
+            recovery_proof_ready=recovery_proof_ready,
+            on_terminal=release_claim,
+        )
+    except BaseException:
+        response.close()
+        raise
+    runner.begin_process_shutdown()
+
+    assert await runner.drain_inbox_responses(
+        cancel_after_seconds=0.01,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    await asyncio.gather(response_task, return_exceptions=True)
+
+    assert response_started is False
+    assert claim_live is False
+    assert proof_claim_states == [False]
+    assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
 async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() -> None:
     """Later recoverable and empty drains must not erase an earlier unsafe cancellation."""
     runner = ResponseRunner(deps=MagicMock())

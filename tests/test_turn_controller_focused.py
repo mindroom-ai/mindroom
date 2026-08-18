@@ -136,6 +136,7 @@ class _RecordingResponseRunner:
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
     failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    terminal_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
     process_shutdown_started: bool = False
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
@@ -160,13 +161,17 @@ class _RecordingResponseRunner:
         name: str,
         recovery_proof_ready: Callable[[], Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
+        on_terminal: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         if self.process_shutdown_started:
             response.close()
             raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
         self.failure_callbacks.append(on_failure)
+        self.terminal_callbacks.append(on_terminal)
         task = asyncio.get_running_loop().create_task(response, name=name)
+        if on_terminal is not None:
+            task.add_done_callback(lambda _finished: on_terminal())
         self.inbox_tasks.append(task)
         return task
 
@@ -2466,6 +2471,36 @@ async def test_process_shutdown_race_refuses_owner_without_leaking_response_coro
     assert record.completed is False
     assert harness.runner.inbox_tasks == []
     assert not [warning for warning in recwarn if issubclass(warning.category, RuntimeWarning)]
+
+
+@pytest.mark.asyncio
+async def test_never_started_runner_task_releases_transferred_turn_claim(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task cancelled before its first step must release dispatch ownership."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("cancel my owner before the response starts")
+    track_response = harness.runner.track_inbox_response
+
+    def track_then_cancel(
+        response: Coroutine[Any, Any, None],
+        **kwargs: object,
+    ) -> asyncio.Task[None]:
+        task = track_response(response, **kwargs)
+        task.cancel()
+        return task
+
+    monkeypatch.setattr(harness.runner, "track_inbox_response", track_then_cancel)
+
+    await harness.controller.handle_text_event(room, event)
+    await harness.gate.drain_all()
+    await asyncio.gather(*harness.runner.inbox_tasks, return_exceptions=True)
+
+    assert harness.runner.terminal_callbacks
+    assert harness.turn_store.has_live_turn_claim(event.event_id) is False
 
 
 @pytest.mark.asyncio
