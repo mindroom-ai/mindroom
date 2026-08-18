@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -11,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
+    ScriptCallPreparationPendingError,
     ScriptCallReceipt,
     ScriptToolCallRequest,
 )
@@ -26,12 +26,12 @@ _SUBMISSION_TASKS: set[asyncio.Task[ScriptCallReceipt]] = set()
 class _ScriptGatewayBroker(Protocol):
     """Broker surface consumed by the primary HTTP gateway."""
 
-    async def submit_authenticated(
+    async def accept_authenticated(
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> ScriptCallReceipt:
-        """Authenticate and submit one stable call."""
+        """Authenticate and durably claim one stable call."""
         ...
 
     def get_authenticated(
@@ -72,6 +72,7 @@ class ScriptCallReceiptResponse(BaseModel):
     call_id: str
     toolkit_name: str
     function_name: str
+    arguments_digest: str
     state: ScriptCallState
     created_at: str
     updated_at: str
@@ -86,6 +87,7 @@ class ScriptCallReceiptResponse(BaseModel):
             call_id=receipt.call_id,
             toolkit_name=receipt.grant.toolkit_name,
             function_name=receipt.grant.function_name,
+            arguments_digest=receipt.arguments_digest,
             state=receipt.state,
             created_at=receipt.created_at,
             updated_at=receipt.updated_at,
@@ -145,19 +147,6 @@ def _consume_submission_result(task: asyncio.Task[ScriptCallReceipt]) -> None:
         task.exception()
 
 
-def _pending_receipt(payload: ScriptToolCallRequestModel) -> ScriptCallReceipt:
-    """Return a bounded-wait acknowledgement while retained submission continues."""
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    return ScriptCallReceipt(
-        run_id=payload.run_id,
-        call_id=payload.call_id,
-        grant=ScriptToolGrant(payload.toolkit_name, payload.function_name),
-        state=ScriptCallState.PENDING,
-        created_at=now,
-        updated_at=now,
-    )
-
-
 @router.post("/calls", response_model=ScriptCallReceiptResponse)
 async def submit_script_call(
     request: Request,
@@ -168,20 +157,24 @@ async def submit_script_call(
     payload = await _bounded_payload(request)
     broker = _app_script_tool_broker(request.app)
     task = asyncio.create_task(
-        broker.submit_authenticated(payload.to_domain(), authorization),
+        broker.accept_authenticated(payload.to_domain(), authorization),
         name=f"script-gateway:{payload.run_id}:{payload.call_id}",
     )
     _SUBMISSION_TASKS.add(task)
     task.add_done_callback(_consume_submission_result)
     try:
         receipt = await asyncio.wait_for(asyncio.shield(task), timeout=_INITIAL_WAIT_SECONDS)
-    except TimeoutError:
-        receipt = _pending_receipt(payload)
-        response.status_code = 202
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Background script call acceptance is not yet determined.",
+        ) from exc
     except (ScriptBrokerAuthenticationError, ScriptCapabilityError) as exc:
         raise _unavailable() from exc
     except ScriptCallConflictError as exc:
         raise HTTPException(status_code=409, detail="Stable call ID conflicts with its accepted request.") from exc
+    if receipt.state is ScriptCallState.PENDING:
+        response.status_code = 202
     return ScriptCallReceiptResponse.from_domain(receipt)
 
 
@@ -198,6 +191,8 @@ async def get_script_call(
         receipt = await asyncio.to_thread(broker.get_authenticated, run_id, call_id, authorization)
     except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError) as exc:
         raise _unavailable() from exc
+    except ScriptCallPreparationPendingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ScriptCallReceiptResponse.from_domain(receipt)
 
 

@@ -15,7 +15,12 @@ from httpx import ASGITransport, AsyncClient
 
 from mindroom.api import script_gateway
 from mindroom.api.script_gateway import bind_script_tool_broker, router
-from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptCallReceipt, ScriptToolBroker
+from mindroom.script_runs.broker import (
+    ScriptBrokerAuthenticationError,
+    ScriptCallReceipt,
+    ScriptToolBroker,
+    digest_arguments,
+)
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,
@@ -23,7 +28,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
 )
-from mindroom.script_runs.store import ScriptCapabilityError
+from mindroom.script_runs.store import ScriptCallConflictError, ScriptCapabilityError
 
 if TYPE_CHECKING:
     from mindroom.script_runs.broker import ScriptToolCallRequest
@@ -34,6 +39,7 @@ def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptC
         run_id="run-1",
         call_id="call-1",
         grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest=digest_arguments({"url": "https://example.org/"}),
         state=state,
         created_at="2026-08-18T00:00:00Z",
         updated_at="2026-08-18T00:00:01Z",
@@ -45,19 +51,16 @@ def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptC
 class _GatewayBroker:
     submit_receipt: ScriptCallReceipt
     get_receipt: ScriptCallReceipt
-    submit_gate: asyncio.Event | None = None
     submitted: ScriptToolCallRequest | None = None
     authorization: str | None = None
 
-    async def submit_authenticated(
+    async def accept_authenticated(
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> ScriptCallReceipt:
         self.submitted = request
         self.authorization = authorization
-        if self.submit_gate is not None:
-            await self.submit_gate.wait()
         return self.submit_receipt
 
     def get_authenticated(
@@ -109,6 +112,7 @@ async def test_script_gateway_passes_bearer_only_to_broker_and_returns_wire_rece
         "call_id": "call-1",
         "toolkit_name": "website",
         "function_name": "read_url",
+        "arguments_digest": digest_arguments({"url": "https://example.org/"}),
         "state": "completed",
         "created_at": "2026-08-18T00:00:00Z",
         "updated_at": "2026-08-18T00:00:01Z",
@@ -121,31 +125,25 @@ async def test_script_gateway_passes_bearer_only_to_broker_and_returns_wire_rece
 
 
 @pytest.mark.asyncio
-async def test_script_gateway_returns_pending_after_bounded_initial_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A long approval cannot pin the initial HTTP request indefinitely."""
-    gate = asyncio.Event()
+async def test_script_gateway_returns_pending_only_after_durable_acceptance() -> None:
+    """A durable accepted claim may return pending while execution continues."""
     broker = _GatewayBroker(
-        submit_receipt=_receipt(ScriptCallState.COMPLETED, result="later"),
+        submit_receipt=_receipt(ScriptCallState.PENDING),
         get_receipt=_receipt(ScriptCallState.PENDING),
-        submit_gate=gate,
     )
-    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.001)
-
     async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
         response = await client.post(
             "/api/script-gateway/calls",
             json=_payload(),
             headers={"Authorization": "Bearer secret-token"},
         )
-        gate.set()
-        await asyncio.sleep(0)
 
     assert response.status_code == 202
     assert response.json()["state"] == "pending"
 
 
 @pytest.mark.asyncio
-async def test_script_gateway_bound_survives_blocking_durable_broker_preparation(
+async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Synchronous capability and claim work cannot hostage the API event loop."""
@@ -159,11 +157,12 @@ async def test_script_gateway_bound_survives_blocking_durable_broker_preparation
         grants=(grant,),
         token_hash=hashlib.sha256(b"secret-token").hexdigest(),
     )
+    old_arguments_digest = digest_arguments({"url": "https://old.example/"})
     call = ScriptCallRecord(
         run_id="run-1",
         call_id="call-1",
         grant=grant,
-        arguments_digest="digest",
+        arguments_digest=old_arguments_digest,
         state=ScriptCallState.COMPLETED,
         created_at="2026-08-18T00:00:00Z",
         updated_at="2026-08-18T00:00:01Z",
@@ -181,7 +180,8 @@ async def test_script_gateway_bound_survives_blocking_durable_broker_preparation
             return run
 
         def claim_call(self, **_kwargs: object) -> ScriptCallClaim:
-            return ScriptCallClaim(call=call, created=False)
+            message = "Stable call ID was already claimed with different arguments."
+            raise ScriptCallConflictError(message)
 
         def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
             assert (run_id, call_id) == ("run-1", "call-1")
@@ -199,8 +199,18 @@ async def test_script_gateway_bound_survives_blocking_durable_broker_preparation
         )
 
     assert time.monotonic() - started < 0.07
-    assert response.status_code == 202
-    assert response.json()["state"] == "pending"
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Background script call acceptance is not yet determined."}
+    await asyncio.sleep(0.12)
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        old_response = await client.get(
+            "/api/script-gateway/runs/run-1/calls/call-1",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert old_response.status_code == 200
+    assert old_response.json()["arguments_digest"] == old_arguments_digest
 
 
 @pytest.mark.asyncio
@@ -229,7 +239,7 @@ async def test_script_gateway_unknown_and_revoked_capabilities_are_indistinguish
     """Capability enumeration must not reveal whether a durable run exists."""
 
     class RejectingBroker(_GatewayBroker):
-        async def submit_authenticated(
+        async def accept_authenticated(
             self,
             request: ScriptToolCallRequest,
             authorization: str | None,
@@ -258,7 +268,7 @@ async def test_script_gateway_hides_capability_revocation_racing_after_authentic
     """A run revoked between authentication and claim must keep the generic unavailable response."""
 
     class RacingBroker(_GatewayBroker):
-        async def submit_authenticated(
+        async def accept_authenticated(
             self,
             request: ScriptToolCallRequest,
             authorization: str | None,

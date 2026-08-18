@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import urllib.error
@@ -16,13 +17,34 @@ if TYPE_CHECKING:
     from urllib.request import Request
 
 
-def _receipt(state: str, *, result: object | None = None, error: object | None = None) -> bytes:
+def _arguments_digest(arguments: dict[str, object]) -> str:
+    encoded = json.dumps(
+        arguments,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _receipt(
+    state: str,
+    *,
+    result: object | None = None,
+    error: object | None = None,
+    arguments: dict[str, object] | None = None,
+    toolkit_name: str = "website",
+    function_name: str = "read_url",
+) -> bytes:
+    receipt_arguments = {"url": "https://example.org/"} if arguments is None else arguments
     return json.dumps(
         {
             "run_id": "run-1",
             "call_id": "stable-call",
-            "toolkit_name": "website",
-            "function_name": "read_url",
+            "toolkit_name": toolkit_name,
+            "function_name": function_name,
+            "arguments_digest": _arguments_digest(receipt_arguments),
             "state": state,
             "created_at": "2026-08-18T00:00:00Z",
             "updated_at": "2026-08-18T00:00:01Z",
@@ -128,6 +150,61 @@ def test_script_sdk_retryable_submit_http_failure_polls_without_resubmitting(
     assert methods == ["POST", "GET"]
 
 
+@pytest.mark.parametrize(
+    ("receipt_toolkit", "receipt_function", "receipt_arguments"),
+    [
+        ("other", "read_url", {"url": "https://example.org/"}),
+        ("website", "other", {"url": "https://example.org/"}),
+        ("website", "read_url", {"url": "https://old.example/"}),
+    ],
+)
+def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    receipt_toolkit: str,
+    receipt_function: str,
+    receipt_arguments: dict[str, object],
+) -> None:
+    """Polling after ambiguous acceptance cannot consume a different call identity."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        if request.method == "POST":
+            raise urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b'{"detail":"acceptance not yet determined"}'),
+            )
+        return io.BytesIO(
+            _receipt(
+                "completed",
+                result="old result",
+                arguments=receipt_arguments,
+                toolkit_name=receipt_toolkit,
+                function_name=receipt_function,
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0).call(
+            "website",
+            "read_url",
+            url="https://example.org/",
+        )
+
+    assert exc_info.value.kind == "stable_call_conflict"
+    assert exc_info.value.retryable is False
+    assert methods == ["POST", "GET"]
+
+
 def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A terminal broker failure must retain its failure kind and retryability."""
     _configure(monkeypatch, tmp_path)
@@ -167,7 +244,7 @@ def test_script_sdk_returns_ordinary_completed_decline_result(
 
     def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
         del timeout
-        return io.BytesIO(_receipt("completed", result=declined))
+        return io.BytesIO(_receipt("completed", result=declined, arguments={}))
 
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)

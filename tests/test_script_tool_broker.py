@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import FunctionCall
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -28,6 +31,7 @@ from mindroom.hooks import (
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
+    ScriptCallPreparationPendingError,
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
     ScriptToolCallRequest,
@@ -348,8 +352,65 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
         "Adjust your approach — try a different tool or different arguments."
     )
     assert events == [
-        "tool:before_call",
         "approval:run-1:authored-confirmation",
+        "tool:before_call",
+        "tool:after_call",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached result cannot bypass a function-authored confirmation requirement."""
+    events: list[str] = []
+
+    class ConfirmingCachedToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+            function = self.functions["add"]
+            function.requires_confirmation = True
+            function.cache_results = True
+            function.cache_dir = str(tmp_path / "agno-cache")
+
+        def add(self, a: int, b: int) -> int:
+            events.append("tool:body")
+            return a + b
+
+    toolkit = ConfirmingCachedToolkit()
+    cached = await FunctionCall(
+        function=toolkit.functions["add"],
+        arguments={"a": 1, "b": 2},
+        call_id="cache-primer",
+    ).aexecute()
+    assert cached.result == 3
+    events.clear()
+    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: toolkit)
+    monkeypatch.setattr(
+        broker_module,
+        "_script_allowed_toolkits",
+        lambda _config, _agent_name: frozenset({"calculator"}),
+    )
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        approval_decision=ToolApprovalDecision(approved=False, reason="Cached result denied."),
+        preapprove_script_tool=True,
+    )
+
+    receipt = await broker.submit_call(_request(token, call_id="cached-confirmation"))
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: add\n"
+        "Reason: Cached result denied.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert events == [
+        "approval:run-1:cached-confirmation",
+        "tool:before_call",
         "tool:after_call",
     ]
 
@@ -429,6 +490,72 @@ async def test_script_broker_keeps_toolkit_connected_while_materializing_generat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == [1, 2]
     assert lifecycle == ["connect", "body", "close"]
+
+
+@pytest.mark.asyncio
+async def test_script_broker_offloads_blocking_sync_toolkit_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synchronous toolkit connect cannot block unrelated event-loop timers."""
+
+    class BlockingConnectToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            time.sleep(0.1)
+
+        def close(self) -> None:
+            pass
+
+        def add(self, a: int, b: int) -> int:
+            return a + b
+
+    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingConnectToolkit())
+    broker, token = _broker(tmp_path, events=[])
+    started = time.monotonic()
+    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="blocking-connect")))
+
+    await asyncio.sleep(0.01)
+
+    assert time.monotonic() - started < 0.07
+    assert (await submission).state is ScriptCallState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_script_broker_offloads_blocking_sync_toolkit_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synchronous toolkit close cannot block unrelated event-loop timers."""
+
+    class BlockingCloseToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            time.sleep(0.1)
+
+        async def add(self, a: int, b: int) -> int:
+            return a + b
+
+    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingCloseToolkit())
+    broker, token = _broker(tmp_path, events=[])
+    started = time.monotonic()
+    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="blocking-close")))
+
+    await asyncio.sleep(0.01)
+
+    assert time.monotonic() - started < 0.07
+    assert (await submission).state is ScriptCallState.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -532,6 +659,45 @@ async def test_script_broker_get_keeps_owned_execution_pending(
 
     release.set()
     assert (await submission).state is ScriptCallState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_script_broker_get_reports_retryable_preclaim_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Polling an in-flight acceptance cannot fabricate a durable pending receipt."""
+    broker, token = _broker(tmp_path, events=[])
+    original_require = broker.store.require_active_capability
+    preparation_started = threading.Event()
+    release_preparation = threading.Event()
+
+    def blocking_require(run_id: str, capability: str) -> ScriptRunRecord:
+        preparation_started.set()
+        assert release_preparation.wait(timeout=1)
+        return original_require(run_id, capability)
+
+    monkeypatch.setattr(broker.store, "require_active_capability", blocking_require)
+    acceptance = asyncio.create_task(
+        broker.accept_authenticated(
+            replace(_request(token, call_id="preclaim-poll"), token=""),
+            f"Bearer {token}",
+        ),
+    )
+    assert await asyncio.to_thread(preparation_started.wait, 1)
+
+    with pytest.raises(ScriptCallPreparationPendingError):
+        await asyncio.to_thread(
+            broker.get_authenticated,
+            "run-1",
+            "preclaim-poll",
+            f"Bearer {token}",
+        )
+
+    release_preparation.set()
+    assert (await acceptance).state is ScriptCallState.PENDING
+    [execution] = broker._tasks.values()
+    assert (await execution).state is ScriptCallState.COMPLETED
 
 
 @pytest.mark.asyncio

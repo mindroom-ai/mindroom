@@ -7,9 +7,8 @@ import hashlib
 import hmac
 import inspect
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from agno.tools import Toolkit
@@ -60,6 +59,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ScriptBrokerAuthenticationError",
+    "ScriptCallPreparationPendingError",
     "ScriptCallReceipt",
     "ScriptRuntimeResolver",
     "ScriptRuntimeWorkerAuthority",
@@ -91,6 +91,10 @@ _ACTIVE_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING}
 
 class ScriptBrokerAuthenticationError(ValueError):
     """Raised when a gateway capability cannot be authenticated safely."""
+
+
+class ScriptCallPreparationPendingError(RuntimeError):
+    """Raised when a call is still authenticating and has no durable claim yet."""
 
 
 class ScriptRuntimeResolver(Protocol):
@@ -157,6 +161,12 @@ class _PreparedExecution:
     approval_config: Config
 
 
+@dataclass(frozen=True, slots=True)
+class _AcceptedScriptCall:
+    receipt: ScriptCallReceipt
+    execution_task: asyncio.Task[ScriptCallReceipt] | None = None
+
+
 class _CurrentGrantRevokedError(ValueError):
     """Raised when a launch grant is absent from the current live surface."""
 
@@ -188,6 +198,7 @@ class ScriptCallReceipt:
     run_id: str
     call_id: str
     grant: ScriptToolGrant
+    arguments_digest: str
     state: ScriptCallState
     created_at: str
     updated_at: str
@@ -213,6 +224,7 @@ def _receipt_from_record(record: ScriptCallRecord) -> ScriptCallReceipt:
         run_id=record.run_id,
         call_id=record.call_id,
         grant=record.grant,
+        arguments_digest=record.arguments_digest,
         state=record.state,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -229,7 +241,6 @@ class ScriptToolBroker:
     runtime_resolver: ScriptRuntimeResolver
     _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallReceipt]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
-    _preparing_receipts: dict[tuple[str, str], ScriptCallReceipt] = field(default_factory=dict, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
     async def submit_call(self, request: ScriptToolCallRequest) -> ScriptCallReceipt:  # noqa: Vulture
@@ -265,20 +276,19 @@ class ScriptToolBroker:
         *,
         authorization: str | None,
     ) -> ScriptCallReceipt:
+        accepted = await self._accept_prepared_call(request, authorization=authorization)
+        if accepted.execution_task is None:
+            return accepted.receipt
+        return await asyncio.shield(accepted.execution_task)
+
+    async def _accept_prepared_call(
+        self,
+        request: ScriptToolCallRequest,
+        *,
+        authorization: str | None,
+    ) -> _AcceptedScriptCall:
         key = (request.run_id, request.call_id)
         self._preparing[key] = self._preparing.get(key, 0) + 1
-        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        self._preparing_receipts.setdefault(
-            key,
-            ScriptCallReceipt(
-                run_id=request.run_id,
-                call_id=request.call_id,
-                grant=request.grant,
-                state=ScriptCallState.PENDING,
-                created_at=now,
-                updated_at=now,
-            ),
-        )
         preparation_finished = False
         try:
             if authorization is None:
@@ -291,12 +301,17 @@ class ScriptToolBroker:
                 self._finish_preparation(key)
                 preparation_finished = True
                 if prepared.call.state is ScriptCallState.PENDING and not owned_elsewhere:
-                    return await self._publish_async(
-                        prepared.call,
-                        state=ScriptCallState.INDETERMINATE,
-                        error=_INDETERMINATE_ERROR,
+                    return _AcceptedScriptCall(
+                        receipt=await self._publish_async(
+                            prepared.call,
+                            state=ScriptCallState.INDETERMINATE,
+                            error=_INDETERMINATE_ERROR,
+                        ),
                     )
-                return _receipt_from_record(prepared.call)
+                return _AcceptedScriptCall(
+                    receipt=_receipt_from_record(prepared.call),
+                    execution_task=self._tasks.get(key),
+                )
 
             task = asyncio.create_task(
                 self._execute_claimed_call(prepared.run, prepared.call, prepared.arguments),
@@ -313,11 +328,10 @@ class ScriptToolBroker:
                     self._run_locks.pop(prepared.run.run_id, None)
 
             task.add_done_callback(forget_completed_task)
-            try:
-                return await asyncio.shield(task)
-            finally:
-                if task.done():
-                    self._tasks.pop(key, None)
+            return _AcceptedScriptCall(
+                receipt=_receipt_from_record(prepared.call),
+                execution_task=task,
+            )
         finally:
             if not preparation_finished:
                 self._finish_preparation(key)
@@ -328,7 +342,6 @@ class ScriptToolBroker:
             self._preparing[key] = remaining
         else:
             self._preparing.pop(key, None)
-            self._preparing_receipts.pop(key, None)
 
     def _call_is_owned(
         self,
@@ -350,9 +363,9 @@ class ScriptToolBroker:
         try:
             record = self.store.get_call(run_id, call_id)
         except ScriptCallNotFoundError:
-            preparing_receipt = self._preparing_receipts.get(key)
-            if preparing_receipt is not None and self._call_is_owned(key):
-                return preparing_receipt
+            if self._call_is_owned(key):
+                msg = "Background script call acceptance is not yet determined."
+                raise ScriptCallPreparationPendingError(msg) from None
             raise
         if record.state is ScriptCallState.PENDING and not self._call_is_owned(key):
             record = self.store.publish_call_result(
@@ -379,13 +392,14 @@ class ScriptToolBroker:
             raise ScriptBrokerAuthenticationError(msg)
         return token
 
-    async def submit_authenticated(
+    async def accept_authenticated(
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> ScriptCallReceipt:
-        """Authenticate and submit one gateway call without trusting body identity fields."""
-        return await self._submit_prepared_call(request, authorization=authorization)
+        """Authenticate and durably claim one gateway call before acknowledging it."""
+        accepted = await self._accept_prepared_call(request, authorization=authorization)
+        return accepted.receipt
 
     def get_authenticated(
         self,
@@ -432,28 +446,6 @@ class ScriptToolBroker:
             context = prepared.context
             toolkit = prepared.toolkit
             function = prepared.function
-            approval_gate = _build_background_approval_gate(
-                runtime_resolver=self.runtime_resolver,
-                context=context,
-                run=run,
-                call=call,
-                approval_config=prepared.approval_config,
-                function_requires_confirmation=function.requires_confirmation is True,
-            )
-
-            bridge = build_tool_hook_bridge(
-                context.hook_registry,
-                agent_name=run.agent_name,
-                dispatch_context=LiveToolDispatchContext(
-                    execution_identity=prepared.execution_identity,
-                    runtime_context=context,
-                ),
-                config=prepared.approval_config,
-                runtime_paths=context.runtime_paths,
-                origin=origin,
-                approval_gate=approval_gate,
-            )
-            prepend_tool_hook_bridge(toolkit, bridge)
             materialized: object = None
             await _connect_toolkit(toolkit)
             try:
@@ -461,6 +453,39 @@ class ScriptToolBroker:
 
                 async def execute_function() -> tuple[FunctionExecutionResult, object]:
                     with tool_runtime_context(context):
+                        authored_decision = await _request_authored_confirmation(
+                            runtime_resolver=self.runtime_resolver,
+                            origin=origin,
+                            context=context,
+                            run=run,
+                            call=call,
+                            arguments=arguments,
+                            approval_config=prepared.approval_config,
+                            required=function.requires_confirmation is True,
+                        )
+                        approval_gate = _build_background_approval_gate(
+                            runtime_resolver=self.runtime_resolver,
+                            context=context,
+                            run=run,
+                            call=call,
+                            approval_config=prepared.approval_config,
+                            authored_decision=authored_decision,
+                        )
+                        bridge = build_tool_hook_bridge(
+                            context.hook_registry,
+                            agent_name=run.agent_name,
+                            dispatch_context=LiveToolDispatchContext(
+                                execution_identity=prepared.execution_identity,
+                                runtime_context=context,
+                            ),
+                            config=prepared.approval_config,
+                            runtime_paths=context.runtime_paths,
+                            origin=origin,
+                            approval_gate=approval_gate,
+                        )
+                        prepend_tool_hook_bridge(toolkit, bridge)
+                        if authored_decision is not None:
+                            function.cache_results = function.cache_results and authored_decision.approved
                         execution_result = await FunctionCall(
                             function=function,
                             arguments=arguments,
@@ -629,7 +654,7 @@ def _build_background_approval_gate(
     run: ScriptRunRecord,
     call: ScriptCallRecord,
     approval_config: Config,
-    function_requires_confirmation: bool,
+    authored_decision: ToolApprovalDecision | None,
 ) -> _BackgroundApprovalGate:
 
     async def approval_gate(
@@ -638,6 +663,8 @@ def _build_background_approval_gate(
         arguments: dict[str, object],
     ) -> ToolApprovalDecision:
         assert tool_name == call.grant.function_name
+        if authored_decision is not None:
+            return authored_decision
         policy_requires_approval, timeout_seconds = await evaluate_tool_approval(
             approval_config,
             context.runtime_paths,
@@ -645,7 +672,7 @@ def _build_background_approval_gate(
             arguments,
             run.agent_name,
         )
-        if not policy_requires_approval and not function_requires_confirmation:
+        if not policy_requires_approval:
             return ToolApprovalDecision(approved=True)
         assert isinstance(origin, BackgroundScriptToolOrigin)
         return await runtime_resolver.request_approval(
@@ -657,6 +684,36 @@ def _build_background_approval_gate(
         )
 
     return approval_gate
+
+
+async def _request_authored_confirmation(
+    *,
+    runtime_resolver: ScriptRuntimeResolver,
+    origin: BackgroundScriptToolOrigin,
+    context: ToolRuntimeContext,
+    run: ScriptRunRecord,
+    call: ScriptCallRecord,
+    arguments: dict[str, object],
+    approval_config: Config,
+    required: bool,
+) -> ToolApprovalDecision | None:
+    """Resolve function-authored confirmation before Agno can return a cached value."""
+    if not required:
+        return None
+    _, timeout_seconds = await evaluate_tool_approval(
+        approval_config,
+        context.runtime_paths,
+        call.grant.function_name,
+        arguments,
+        run.agent_name,
+    )
+    return await runtime_resolver.request_approval(
+        origin=origin,
+        context=context,
+        grant=call.grant,
+        arguments=arguments,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _script_allowed_toolkits(config: Config, agent_name: str) -> frozenset[str]:
@@ -763,12 +820,20 @@ async def _maybe_await(value: object) -> object:
 
 async def _connect_toolkit(toolkit: Toolkit) -> None:
     if toolkit.requires_connect:
-        await _maybe_await(toolkit.connect())
+        await _run_toolkit_lifecycle(toolkit.connect)
 
 
 async def _close_toolkit(toolkit: Toolkit) -> None:
     if toolkit.requires_connect:
-        await _maybe_await(toolkit.close())
+        await _run_toolkit_lifecycle(toolkit.close)
+
+
+async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
+    if inspect.iscoroutinefunction(operation):
+        await operation()
+        return
+    result = await asyncio.to_thread(operation)
+    await _maybe_await(result)
 
 
 async def _materialize_result(result: object) -> object:

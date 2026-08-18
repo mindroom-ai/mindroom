@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -21,6 +22,7 @@ _DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 _MAX_TOKEN_BYTES = 4096
 _TRANSPORT_ERROR = "The background tool gateway transport failed after dispatch may have been accepted."
 _INVALID_RECEIPT_ERROR = "The background tool gateway returned an invalid receipt."
+_CONFLICTING_RECEIPT_ERROR = "The stable call ID belongs to a different tool request."
 _CAPABILITY_UNAVAILABLE_MESSAGE = "The MindRoom script capability token is unavailable."
 _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
@@ -60,6 +62,9 @@ class MindRoomToolCallError(RuntimeError):
 class _Receipt:
     run_id: str
     call_id: str
+    toolkit_name: str
+    function_name: str
+    arguments_digest: str
     state: str
     result: object | None
     error: object | None
@@ -87,8 +92,15 @@ class MindRoomTools:
     def call(self, toolkit_name: str, function_name: str, **arguments: object) -> object:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
+        arguments_digest = _digest_arguments(arguments)
         try:
-            receipt = self._submit(call_id, toolkit_name, function_name, arguments)
+            receipt = self._submit(
+                call_id,
+                toolkit_name,
+                function_name,
+                arguments,
+                arguments_digest=arguments_digest,
+            )
         except MindRoomToolCallError as exc:
             if not exc.retryable:
                 raise
@@ -98,7 +110,12 @@ class MindRoomTools:
             if self._poll_interval_seconds > 0:
                 time.sleep(self._poll_interval_seconds)
             try:
-                receipt = self._poll(call_id)
+                receipt = self._poll(
+                    call_id,
+                    toolkit_name=toolkit_name,
+                    function_name=function_name,
+                    arguments_digest=arguments_digest,
+                )
             except MindRoomToolCallError as exc:
                 if not exc.retryable:
                     raise
@@ -114,6 +131,8 @@ class MindRoomTools:
         toolkit_name: str,
         function_name: str,
         arguments: dict[str, object],
+        *,
+        arguments_digest: str,
     ) -> _Receipt:
         payload = {
             "run_id": self._run_id,
@@ -130,9 +149,19 @@ class MindRoomTools:
                 method="POST",
             ),
             call_id=call_id,
+            toolkit_name=toolkit_name,
+            function_name=function_name,
+            arguments_digest=arguments_digest,
         )
 
-    def _poll(self, call_id: str) -> _Receipt:
+    def _poll(
+        self,
+        call_id: str,
+        *,
+        toolkit_name: str,
+        function_name: str,
+        arguments_digest: str,
+    ) -> _Receipt:
         run_id = urllib.parse.quote(self._run_id, safe="")
         encoded_call_id = urllib.parse.quote(call_id, safe="")
         return self._request(
@@ -142,9 +171,20 @@ class MindRoomTools:
                 method="GET",
             ),
             call_id=call_id,
+            toolkit_name=toolkit_name,
+            function_name=function_name,
+            arguments_digest=arguments_digest,
         )
 
-    def _request(self, request: urllib.request.Request, *, call_id: str) -> _Receipt:
+    def _request(
+        self,
+        request: urllib.request.Request,
+        *,
+        call_id: str,
+        toolkit_name: str,
+        function_name: str,
+        arguments_digest: str,
+    ) -> _Receipt:
         try:
             with urllib.request.urlopen(request, timeout=self._http_timeout_seconds) as response:  # noqa: S310
                 payload = json.loads(response.read())
@@ -164,7 +204,14 @@ class MindRoomTools:
                 retryable=False,
                 call_id=call_id,
             ) from exc
-        return _parse_receipt(payload, expected_run_id=self._run_id, expected_call_id=call_id)
+        return _parse_receipt(
+            payload,
+            expected_run_id=self._run_id,
+            expected_call_id=call_id,
+            expected_toolkit_name=toolkit_name,
+            expected_function_name=function_name,
+            expected_arguments_digest=arguments_digest,
+        )
 
 
 def _required_env(name: str) -> str:
@@ -186,7 +233,26 @@ def _read_token(path: Path) -> str:
     return token
 
 
-def _parse_receipt(value: object, *, expected_run_id: str, expected_call_id: str) -> _Receipt:
+def _digest_arguments(arguments: dict[str, object]) -> str:
+    encoded = json.dumps(
+        arguments,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_receipt(
+    value: object,
+    *,
+    expected_run_id: str,
+    expected_call_id: str,
+    expected_toolkit_name: str,
+    expected_function_name: str,
+    expected_arguments_digest: str,
+) -> _Receipt:
     if not isinstance(value, dict):
         raise MindRoomToolCallError(
             _INVALID_RECEIPT_ERROR,
@@ -197,6 +263,9 @@ def _parse_receipt(value: object, *, expected_run_id: str, expected_call_id: str
     payload = cast("dict[str, object]", value)
     run_id = payload.get("run_id")
     call_id = payload.get("call_id")
+    toolkit_name = payload.get("toolkit_name")
+    function_name = payload.get("function_name")
+    arguments_digest = payload.get("arguments_digest")
     state = payload.get("state")
     if (
         run_id != expected_run_id
@@ -217,9 +286,23 @@ def _parse_receipt(value: object, *, expected_run_id: str, expected_call_id: str
             retryable=False,
             call_id=expected_call_id,
         )
+    if (
+        toolkit_name != expected_toolkit_name
+        or function_name != expected_function_name
+        or arguments_digest != expected_arguments_digest
+    ):
+        raise MindRoomToolCallError(
+            _CONFLICTING_RECEIPT_ERROR,
+            kind="stable_call_conflict",
+            retryable=False,
+            call_id=expected_call_id,
+        )
     return _Receipt(
         run_id=expected_run_id,
         call_id=expected_call_id,
+        toolkit_name=expected_toolkit_name,
+        function_name=expected_function_name,
+        arguments_digest=expected_arguments_digest,
         state=cast("str", state),
         result=payload.get("result"),
         error=payload.get("error"),
