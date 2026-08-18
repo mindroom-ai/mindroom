@@ -5690,7 +5690,9 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The subprocess helper sends the scheduled config snapshot via stdin."""
+    """The subprocess gets its config snapshot and the launcher's executable path."""
+    launcher_bin = tmp_path / "nix-profile" / "bin"
+    monkeypatch.setenv("PATH", str(launcher_bin))
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
@@ -5752,6 +5754,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["PATH"] == str(launcher_bin)
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
     assert captured_request["base_id"] == "docs"
