@@ -153,6 +153,34 @@ def test_run_store_replays_equivalent_serialized_terminal_receipt(runtime_paths:
     assert duplicate.result == ["page body"]
 
 
+def test_run_store_replays_terminal_receipt_with_different_mapping_order(runtime_paths: RuntimePaths) -> None:
+    """Equivalent JSON mappings retain one durable terminal receipt."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.claim_call(
+        run_id="run-1",
+        call_id="call-1",
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest="digest-a",
+    )
+
+    first = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result={"title": "Status", "body": "ok"},
+    )
+    duplicate = store.publish_call_result(
+        run_id="run-1",
+        call_id="call-1",
+        state=ScriptCallState.COMPLETED,
+        result={"body": "ok", "title": "Status"},
+    )
+
+    assert first == duplicate
+    assert duplicate.result == {"title": "Status", "body": "ok"}
+
+
 def test_run_store_rejects_terminal_run_mutation(runtime_paths: RuntimePaths) -> None:
     """A terminal lifecycle record cannot change mutable process details."""
     store = ScriptRunStore(runtime_paths)

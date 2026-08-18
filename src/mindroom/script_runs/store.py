@@ -568,7 +568,12 @@ def _call_from_row(row: sqlite3.Row) -> ScriptCallRecord:
 
 def _serialize_receipt(*, result: object | None, error: object | None) -> str:
     try:
-        serialized = json.dumps({"result": result, "error": error}, separators=(",", ":"), ensure_ascii=False)
+        serialized = json.dumps(
+            {"result": result, "error": error},
+            separators=(",", ":"),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     except (TypeError, ValueError) as exc:
         raise ScriptRunStoreError(_RECEIPT_NOT_SERIALIZABLE) from exc
     if len(serialized.encode("utf-8")) > _MAX_RECEIPT_BYTES:
