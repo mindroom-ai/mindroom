@@ -24,9 +24,7 @@ class ScriptCallState(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
-    DECLINED = "declined"
     INDETERMINATE = "indeterminate"
-    CANCELLED = "cancelled"
 
 
 class ScriptRunEntityKind(StrEnum):

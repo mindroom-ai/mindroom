@@ -275,9 +275,7 @@ def _parse_receipt(
             "pending",
             "completed",
             "failed",
-            "declined",
             "indeterminate",
-            "cancelled",
         }
     ):
         raise MindRoomToolCallError(

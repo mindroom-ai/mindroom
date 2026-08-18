@@ -250,3 +250,25 @@ def test_script_sdk_returns_ordinary_completed_decline_result(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     assert MindRoomTools(poll_interval_seconds=0).call("website", "read_url") == declined
+
+
+@pytest.mark.parametrize("removed_state", ["declined", "cancelled"])
+def test_script_sdk_rejects_removed_call_states(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    removed_state: str,
+) -> None:
+    """Legacy call-only states must not be accepted as current gateway receipts."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(_receipt(removed_state))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+
+    assert exc_info.value.kind == "invalid_response"

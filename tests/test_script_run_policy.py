@@ -14,10 +14,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.message_target import MessageTarget
+from mindroom.script_runs import policy as policy_module
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import (
     effective_script_grants,
-    resolve_current_script_grants,
     resolve_script_launch_grants,
 )
 from mindroom.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
@@ -160,7 +160,25 @@ def test_current_grants_use_live_config_and_agent_removal_revokes_surface(tmp_pa
     )
     context = replace(context, config_provider=lambda: removed)
 
-    assert resolve_current_script_grants(context) == frozenset()
+    assert policy_module.resolve_current_script_tool_surface(context).grants == frozenset()
+
+
+def test_current_surface_returns_exact_grants_with_their_built_toolkits(tmp_path: Path) -> None:
+    """The broker must be able to execute the same toolkit instance used to derive live authority."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+    )
+    context = replace(context, tool_function_filter=lambda function: function.name == "add")
+
+    surface = policy_module.resolve_current_script_tool_surface(context)
+
+    assert surface.grants == frozenset({ScriptToolGrant("calculator", "add")})
+    assert surface.toolkits_by_name["calculator"].functions["add"].name == "add"
 
 
 def test_background_approval_overlay_never_preapproves_system_mutation() -> None:

@@ -11,7 +11,6 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
-from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
 from mindroom.script_runs.models import (
@@ -21,7 +20,7 @@ from mindroom.script_runs.models import (
     ScriptRunState,
     ScriptToolGrant,
 )
-from mindroom.script_runs.policy import effective_script_grants, resolve_current_script_grants
+from mindroom.script_runs.policy import effective_script_grants, resolve_current_script_tool_surface
 from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptCapabilityError,
@@ -35,8 +34,6 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
 )
 from mindroom.tool_system.automation_approval import build_automation_approval_config
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -55,6 +52,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from agno.tools import Toolkit
+
     from mindroom.config.main import Config
 
 __all__ = [
@@ -243,10 +242,6 @@ class ScriptToolBroker:
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
 
-    async def submit_call(self, request: ScriptToolCallRequest) -> ScriptCallReceipt:  # noqa: Vulture
-        """Claim and execute one call, or replay its existing durable receipt."""
-        return await self._submit_prepared_call(request, authorization=None)
-
     def _prepare_call(self, request: ScriptToolCallRequest) -> _PreparedScriptCall:
         run = self.store.require_active_capability(request.run_id, request.token)
         claim = self.store.claim_call(
@@ -270,17 +265,6 @@ class ScriptToolBroker:
         token = self.authenticate(request.run_id, authorization)
         return self._prepare_call(replace(request, token=token))
 
-    async def _submit_prepared_call(
-        self,
-        request: ScriptToolCallRequest,
-        *,
-        authorization: str | None,
-    ) -> ScriptCallReceipt:
-        accepted = await self._accept_prepared_call(request, authorization=authorization)
-        if accepted.execution_task is None:
-            return accepted.receipt
-        return await asyncio.shield(accepted.execution_task)
-
     async def _accept_prepared_call(
         self,
         request: ScriptToolCallRequest,
@@ -291,10 +275,7 @@ class ScriptToolBroker:
         self._preparing[key] = self._preparing.get(key, 0) + 1
         preparation_finished = False
         try:
-            if authorization is None:
-                prepared = await asyncio.to_thread(self._prepare_call, request)
-            else:
-                prepared = await asyncio.to_thread(self._prepare_authenticated_call, request, authorization)
+            prepared = await asyncio.to_thread(self._prepare_authenticated_call, request, authorization)
 
             if not prepared.created:
                 owned_elsewhere = self._call_is_owned(key, exclude_current_preparation=True)
@@ -542,19 +523,21 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
-        current_grants = resolve_current_script_grants(context)
-        if call.grant not in effective_script_grants(run.grants, current_grants):
+        current_surface = resolve_current_script_tool_surface(context)
+        if call.grant not in effective_script_grants(run.grants, current_surface.grants):
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
-        toolkit = _build_current_toolkit(context, call.grant, execution_identity)
+        toolkit = current_surface.toolkits_by_name.get(call.grant.toolkit_name)
+        if toolkit is None:
+            raise _CurrentGrantRevokedError
         function = _toolkit_function(toolkit, call.grant.function_name)
         return _PreparedExecution(
             context=context,
             execution_identity=execution_identity,
             toolkit=toolkit,
             function=function,
-            approval_config=_background_approval_config(context, current_grants, toolkit),
+            approval_config=_background_approval_config(context, current_surface.toolkits_by_name),
         )
 
     async def _publish_async(
@@ -730,78 +713,15 @@ def _script_allowed_toolkits(config: Config, agent_name: str) -> frozenset[str]:
 
 def _background_approval_config(
     context: ToolRuntimeContext,
-    current_grants: frozenset[ScriptToolGrant],
-    selected_toolkit: Toolkit,
+    toolkits_by_name: Mapping[str, Toolkit],
 ) -> Config:
     config = context.current_config
-    toolkits: dict[str, Toolkit] = {}
-    for grant in current_grants:
-        toolkit = toolkits.setdefault(grant.toolkit_name, Toolkit(name=grant.toolkit_name))
-        toolkit.functions[grant.function_name] = selected_toolkit.functions.get(
-            grant.function_name,
-            selected_toolkit.async_functions.get(grant.function_name, Function(name=grant.function_name)),
-        )
     return build_automation_approval_config(
         config,
-        toolkits_by_name=toolkits,
+        toolkits_by_name=toolkits_by_name,
         preapproved_toolkits=_script_allowed_toolkits(config, context.agent_name),
         never_preapprove_toolkits=_NEVER_PREAPPROVE_TOOLKITS,
     )
-
-
-def _build_current_toolkit(
-    context: ToolRuntimeContext,
-    grant: ScriptToolGrant,
-    execution_identity: ToolExecutionIdentity,
-) -> Toolkit:
-    config = context.current_config
-    ensure_tool_registry_loaded(context.runtime_paths, config)
-    entity_view = config.resolve_entity(context.agent_name)
-    all_deferred_tools = [entry.name for entry in entity_view.authored_deferred_tool_configs]
-    surface = visible_tool_surface(
-        agent_name=context.agent_name,
-        config=config,
-        loaded_tools=all_deferred_tools,
-        enable_dynamic_tools_manager=False,
-    )
-    tool_entry = next((entry for entry in surface.runtime_tool_configs if entry.name == grant.toolkit_name), None)
-    if tool_entry is None:
-        msg = "The requested tool is no longer available to this script run."
-        raise ScriptCapabilityError(msg)
-
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
-    from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
-
-    agent_runtime = resolve_agent_runtime(
-        context.agent_name,
-        config,
-        context.runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        config,
-        context.runtime_paths,
-        [grant.toolkit_name],
-        tool_registry_preloaded=True,
-    )
-    toolkit = build_agent_toolkit(
-        grant.toolkit_name,
-        agent_name=context.agent_name,
-        config=config,
-        runtime_paths=context.runtime_paths,
-        worker_tools=worker_tools,
-        runtime_overrides=entity_view.tool_runtime_overrides(grant.toolkit_name),
-        agent_runtime=agent_runtime,
-        tool_config_overrides=tool_entry.tool_config_overrides,
-        execution_identity=execution_identity,
-        session_id=execution_identity.session_id,
-    )
-    if toolkit is None:
-        msg = "The requested tool is no longer available to this script run."
-        raise ScriptCapabilityError(msg)
-    return toolkit
 
 
 def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:

@@ -73,7 +73,9 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert first.created is True
     assert duplicate.created is False
     assert duplicate.call.call_id == first.call.call_id
-    assert store.capability_matches(run.run_id, token) is True
+    authenticated = store.require_active_capability(run.run_id, token)
+    assert authenticated.run_id == run.run_id
+    assert authenticated.call_count == 1
 
 
 def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths: RuntimePaths) -> None:

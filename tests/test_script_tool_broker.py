@@ -14,6 +14,7 @@ import pytest
 from agno.tools import Toolkit
 from agno.tools.function import FunctionCall
 
+import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -32,6 +33,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptCallPreparationPendingError,
+    ScriptCallReceipt,
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
     ScriptToolCallRequest,
@@ -50,6 +52,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.tool_approval import BackgroundScriptToolOrigin
@@ -259,17 +262,68 @@ def _request(token: str, *, call_id: str = "call-1", b: int = 2) -> ScriptToolCa
     )
 
 
+async def _call_through_gateway(
+    broker: ScriptToolBroker,
+    request: ScriptToolCallRequest,
+) -> ScriptCallReceipt:
+    authorization = f"Bearer {request.token}"
+    request_without_token = replace(request, token="")
+    receipt = await broker.accept_authenticated(request_without_token, authorization)
+    while receipt.state is ScriptCallState.PENDING:
+        await asyncio.sleep(0)
+        receipt = broker.get_authenticated(request.run_id, request.call_id, authorization)
+    return receipt
+
+
+def _replace_calculator_toolkit(
+    monkeypatch: pytest.MonkeyPatch,
+    build_replacement: Callable[[], Toolkit],
+) -> None:
+    original_build = agents_module.build_agent_toolkit
+
+    def build_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "calculator":
+            return build_replacement()
+        return original_build(tool_name, **kwargs)
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+
 @pytest.mark.asyncio
 async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Path) -> None:
     """Removing the canonical hook bridge would skip events around the real registered tool."""
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events)
 
-    receipt = await broker.submit_call(_request(token))
+    receipt = await _call_through_gateway(broker, _request(token))
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
     assert events == ["tool:before_call", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_script_broker_builds_the_selected_live_toolkit_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live authority resolution and execution must share one freshly built toolkit instance."""
+    builds = 0
+    original_build = agents_module.build_agent_toolkit
+
+    def counting_build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        nonlocal builds
+        if tool_name == "calculator":
+            builds += 1
+        return original_build(tool_name, **kwargs)
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", counting_build)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(token, call_id="single-build"))
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert builds == 1
 
 
 @pytest.mark.asyncio
@@ -288,7 +342,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
             events.append("tool:body")
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: RecordingToolkit())
+    _replace_calculator_toolkit(monkeypatch, RecordingToolkit)
     broker, token = _broker(
         tmp_path,
         events=events,
@@ -296,7 +350,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
         approval_decision=ToolApprovalDecision(approved=False, reason="Not this time."),
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="approval-call"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="approval-call"))
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -329,7 +383,7 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
             events.append("tool:body")
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: ConfirmingToolkit())
+    _replace_calculator_toolkit(monkeypatch, ConfirmingToolkit)
     monkeypatch.setattr(
         broker_module,
         "_script_allowed_toolkits",
@@ -342,7 +396,7 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
         preapprove_script_tool=True,
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="authored-confirmation"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="authored-confirmation"))
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -386,7 +440,7 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
     ).aexecute()
     assert cached.result == 3
     events.clear()
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: toolkit)
+    _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
     monkeypatch.setattr(
         broker_module,
         "_script_allowed_toolkits",
@@ -399,7 +453,7 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
         preapprove_script_tool=True,
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="cached-confirmation"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="cached-confirmation"))
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -422,8 +476,8 @@ async def test_script_broker_returns_existing_receipt_without_reexecution(tmp_pa
     broker, token = _broker(tmp_path, events=events)
     request = _request(token, call_id="stable-call")
 
-    first = await broker.submit_call(request)
-    second = await broker.submit_call(request)
+    first = await _call_through_gateway(broker, request)
+    second = await _call_through_gateway(broker, request)
 
     assert second == first
     assert events == ["tool:before_call", "tool:after_call"]
@@ -434,7 +488,7 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
     """The ordinary audit log must correlate a script call without exposing its capability token."""
     broker, token = _broker(tmp_path, events=[], log_tool_calls=True)
 
-    receipt = await broker.submit_call(_request(token, call_id="audited-call"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="audited-call"))
 
     assert receipt.state is ScriptCallState.COMPLETED
     [record] = [
@@ -482,10 +536,10 @@ async def test_script_broker_keeps_toolkit_connected_while_materializing_generat
             yield a
             yield b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: ConnectedToolkit())
+    _replace_calculator_toolkit(monkeypatch, ConnectedToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await broker.submit_call(_request(token, call_id="stream-call"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="stream-call"))
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == [1, 2]
@@ -544,11 +598,11 @@ async def test_script_broker_enforces_exact_stream_json_byte_boundary(
             yield "é"
             yield "x"
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BoundedToolkit())
+    _replace_calculator_toolkit(monkeypatch, BoundedToolkit)
     monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", maximum_bytes)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await broker.submit_call(_request(token, call_id=f"stream-bytes-{maximum_bytes}"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id=f"stream-bytes-{maximum_bytes}"))
 
     assert receipt.state is expected_state
     if expected_error_kind is None:
@@ -573,10 +627,10 @@ async def test_script_broker_rejects_nonfinite_stream_item(
             del a, b
             yield float("nan")
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: NonFiniteStreamToolkit())
+    _replace_calculator_toolkit(monkeypatch, NonFiniteStreamToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await broker.submit_call(_request(token, call_id="nonfinite-stream"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="nonfinite-stream"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert isinstance(receipt.error, dict)
@@ -605,10 +659,10 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
         def add(self, a: int, b: int) -> int:
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingConnectToolkit())
+    _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
     started = time.monotonic()
-    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="blocking-connect")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="blocking-connect")))
 
     await asyncio.sleep(0.01)
 
@@ -638,10 +692,10 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
         async def add(self, a: int, b: int) -> int:
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingCloseToolkit())
+    _replace_calculator_toolkit(monkeypatch, BlockingCloseToolkit)
     broker, token = _broker(tmp_path, events=[])
     started = time.monotonic()
-    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="blocking-close")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="blocking-close")))
 
     await asyncio.sleep(0.01)
 
@@ -667,9 +721,9 @@ async def test_script_broker_forgets_retained_execution_after_submitter_cancella
             await release.wait()
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingToolkit())
+    _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
-    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="cancelled-waiter")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="cancelled-waiter")))
     await entered.wait()
     submission.cancel()
 
@@ -697,7 +751,7 @@ async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path:
         arguments_digest=request.arguments_digest,
     )
 
-    receipt = await broker.submit_call(request)
+    receipt = await _call_through_gateway(broker, request)
 
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert receipt.error == {
@@ -741,9 +795,9 @@ async def test_script_broker_get_keeps_owned_execution_pending(
             await release.wait()
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: BlockingToolkit())
+    _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
-    submission = asyncio.create_task(broker.submit_call(_request(token, call_id="owned-call")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="owned-call")))
     await entered.wait()
 
     assert broker.get_call("run-1", "owned-call").state is ScriptCallState.PENDING
@@ -819,7 +873,7 @@ async def test_script_broker_rejects_durable_execution_identity_mismatch_before_
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events, execution_identity=identity)
 
-    receipt = await broker.submit_call(_request(token, call_id=f"bad-{field_name}"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id=f"bad-{field_name}"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -840,7 +894,7 @@ async def test_script_broker_rejects_live_thread_when_durable_thread_is_none(tmp
         thread_root_event_id=None,
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="threadless"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="threadless"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -857,7 +911,7 @@ async def test_script_broker_rejects_durable_live_worker_mismatch_before_dispatc
         live_worker_id="worker-b",
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="wrong-worker"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-worker"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -873,7 +927,7 @@ async def test_script_broker_rejects_live_private_scope_mismatch_before_dispatch
         live_private_agent_names=frozenset({"watcher"}),
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="wrong-private-scope"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-private-scope"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -890,7 +944,7 @@ async def test_script_broker_rejects_durable_live_local_execution_mismatch(tmp_p
         live_local_unsafe=False,
     )
 
-    receipt = await broker.submit_call(_request(token, call_id="wrong-local-mode"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-local-mode"))
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -918,11 +972,11 @@ async def test_script_broker_serializes_distinct_calls_within_one_run(
                 second_entered.set()
             return a + b
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: SerialToolkit())
+    _replace_calculator_toolkit(monkeypatch, SerialToolkit)
     broker, token = _broker(tmp_path, events=[])
-    first = asyncio.create_task(broker.submit_call(_request(token, call_id="serial-1", b=2)))
+    first = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="serial-1", b=2)))
     await first_entered.wait()
-    second = asyncio.create_task(broker.submit_call(_request(token, call_id="serial-2", b=3)))
+    second = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="serial-2", b=3)))
     await asyncio.sleep(0.02)
 
     assert not second_entered.is_set()
@@ -951,10 +1005,10 @@ async def test_script_broker_never_publishes_nonfinite_completed_receipt(
             del a, b
             return result
 
-    monkeypatch.setattr(broker_module, "_build_current_toolkit", lambda *_args: NonFiniteToolkit())
+    _replace_calculator_toolkit(monkeypatch, NonFiniteToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await broker.submit_call(_request(token, call_id=f"nonfinite-{result!s}"))
+    receipt = await _call_through_gateway(broker, _request(token, call_id=f"nonfinite-{result!s}"))
 
     assert receipt.state is ScriptCallState.FAILED
     json.dumps(receipt.result, allow_nan=False)
@@ -972,7 +1026,7 @@ async def test_script_broker_rechecks_current_grants_before_execution(tmp_path: 
         config_provider=lambda: removed,
     )
 
-    receipt = await broker.submit_call(_request(token))
+    receipt = await _call_through_gateway(broker, _request(token))
 
     assert receipt.state is ScriptCallState.FAILED
     assert receipt.error == {

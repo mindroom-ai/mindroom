@@ -49,9 +49,7 @@ _TERMINAL_CALL_STATES = frozenset(
     {
         ScriptCallState.COMPLETED,
         ScriptCallState.FAILED,
-        ScriptCallState.DECLINED,
         ScriptCallState.INDETERMINATE,
-        ScriptCallState.CANCELLED,
     },
 )
 _RUN_TRANSITIONS = {
@@ -182,12 +180,6 @@ class ScriptRunStore:
                 tuple(params),
             ).fetchall()
         return [_run_from_row(row) for row in rows]
-
-    def capability_matches(self, run_id: str, token: str) -> bool:  # noqa: Vulture
-        """Return whether a bearer token matches the run's stored digest."""
-        with self._read_connection() as connection:
-            row = connection.execute("SELECT token_hash FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
-        return row is not None and hmac.compare_digest(str(row["token_hash"]), _capability_hash(token))
 
     def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:  # noqa: Vulture
         """Authenticate a token and reject runs that may no longer start calls."""

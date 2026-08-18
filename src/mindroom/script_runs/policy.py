@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
@@ -10,17 +12,32 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from agno.tools import Toolkit
 
     from mindroom.config.main import Config
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["effective_script_grants", "resolve_current_script_grants", "resolve_script_launch_grants"]
+__all__ = [
+    "ResolvedScriptToolSurface",
+    "effective_script_grants",
+    "resolve_current_script_tool_surface",
+    "resolve_script_launch_grants",
+]
 
 
 _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
     {"script", "compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedScriptToolSurface:
+    """Live script grants and the exact toolkit instances that define them."""
+
+    grants: frozenset[ScriptToolGrant]
+    toolkits_by_name: Mapping[str, Toolkit]
 
 
 def effective_script_grants(
@@ -35,20 +52,28 @@ def resolve_script_launch_grants(
     context: ToolRuntimeContext,
 ) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    return _resolve_script_grants(context, context.config)
+    grants, _ = _resolve_script_tool_surface(context, context.config)
+    return grants
 
 
-def resolve_current_script_grants(
+def resolve_current_script_tool_surface(
     context: ToolRuntimeContext,
-) -> frozenset[ScriptToolGrant]:
-    """Resolve the owning agent's registered function surface from live configuration."""
+) -> ResolvedScriptToolSurface:
+    """Resolve live grants with the exact freshly built toolkits that define them."""
     config = context.current_config
     if context.agent_name not in config.agents:
-        return frozenset()
-    return frozenset(_resolve_script_grants(context, config))
+        return ResolvedScriptToolSurface(grants=frozenset(), toolkits_by_name=MappingProxyType({}))
+    grants, toolkits = _resolve_script_tool_surface(context, config)
+    return ResolvedScriptToolSurface(
+        grants=frozenset(grants),
+        toolkits_by_name=MappingProxyType(toolkits),
+    )
 
 
-def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple[ScriptToolGrant, ...]:
+def _resolve_script_tool_surface(
+    context: ToolRuntimeContext,
+    config: Config,
+) -> tuple[tuple[ScriptToolGrant, ...], dict[str, Toolkit]]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
@@ -87,7 +112,7 @@ def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple
         tool_names,
         tool_registry_preloaded=True,
     )
-    toolkits: list[tuple[str, Toolkit]] = []
+    toolkits: dict[str, Toolkit] = {}
     for tool_entry in tool_configs:
         toolkit_name = tool_entry.name
         toolkit = build_agent_toolkit(
@@ -103,10 +128,10 @@ def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple
             session_id=context.session_id,
         )
         if toolkit is not None:
-            toolkits.append((toolkit_name, toolkit))
+            toolkits[toolkit_name] = toolkit
 
     grants: list[ScriptToolGrant] = []
-    for toolkit_name, toolkit in toolkits:
+    for toolkit_name, toolkit in toolkits.items():
         if context.tool_function_filter is None:
             function_names = dict.fromkeys((*toolkit.functions, *toolkit.async_functions))
         else:
@@ -118,4 +143,4 @@ def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple
             )
             function_names = dict.fromkeys((*visible_sync_names, *visible_async_names))
         grants.extend(ScriptToolGrant(toolkit_name, function_name) for function_name in function_names)
-    return tuple(grants)
+    return tuple(grants), toolkits
