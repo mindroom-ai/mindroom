@@ -176,16 +176,7 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
         sync_restart_retry_source_event_id="$source",
     )
 
-    edit_message = AsyncMock(
-        return_value=delivered_matrix_event(
-            "$edit",
-            {
-                "body": "* No team available",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "No team available", "msgtype": "m.text"},
-            },
-        ),
-    )
+    edit_message = AsyncMock(return_value=delivered_matrix_event("$edit"))
     with (
         patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
         patch("mindroom.delivery_gateway.send_message_outcome", new=edit_message),

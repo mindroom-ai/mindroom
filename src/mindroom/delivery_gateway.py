@@ -274,25 +274,6 @@ class EditTextRequest:  # noqa: D101
     defer_source_handoff: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class TextDeliveryOutcome:
-    """Exact visible message identity and body acknowledged by Matrix."""
-
-    event_id: str
-    visible_body: str
-
-
-def _delivered_visible_body(delivered: DeliveredMatrixEvent) -> str:
-    """Read the replacement body from the exact payload accepted by Matrix."""
-    nested = delivered.content_sent.get("m.new_content")
-    visible_content = nested if isinstance(nested, dict) else delivered.content_sent
-    body = visible_content.get("body")
-    if not isinstance(body, str):
-        msg = "Acknowledged Matrix text delivery has no visible body"
-        raise TypeError(msg)
-    return body
-
-
 @dataclass(frozen=True)
 class FinalDeliveryRequest:  # noqa: D101
     target: MessageTarget
@@ -918,8 +899,8 @@ class DeliveryGateway:
         # delivered answer look lost and invite a duplicate.
         return await self._acknowledged_delivery(request.delivery_turn_id, request.delivery_stage, event_id, content)
 
-    async def send_text_outcome(self, request: SendTextRequest) -> TextDeliveryOutcome | None:
-        """Send one response and return the exact formatted body that was acknowledged."""
+    async def send_text(self, request: SendTextRequest) -> str | None:
+        """Send one response message to a room."""
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -965,21 +946,13 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-            return TextDeliveryOutcome(
-                event_id=delivered.event_id,
-                visible_body=_delivered_visible_body(delivered),
-            )
+            return delivered.event_id
         self.deps.logger.error(
             "Failed to send response to room",
             error=failure_reason,
             **resolved_target.log_context,
         )
         return None
-
-    async def send_text(self, request: SendTextRequest) -> str | None:
-        """Send one response message to a room."""
-        outcome = await self.send_text_outcome(request)
-        return None if outcome is None else outcome.event_id
 
     async def _edit_content(
         self,
@@ -1082,8 +1055,8 @@ class DeliveryGateway:
         # earlier run, so nothing was sent and the callback never ran.
         return await self._acknowledged_delivery(request.delivery_turn_id, DeliveryStage.FINAL, event_id, envelope)
 
-    async def edit_text_outcome(self, request: EditTextRequest) -> TextDeliveryOutcome | None:
-        """Edit one response and return the exact formatted body that was acknowledged."""
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        """Edit one existing response message."""
         config = self.deps.runtime.config
         target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
@@ -1107,21 +1080,14 @@ class DeliveryGateway:
                 failure_reason = _matrix_delivery_failure_reason(outcome)
         if delivered is not None:
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return TextDeliveryOutcome(
-                event_id=request.event_id,
-                visible_body=_delivered_visible_body(delivered),
-            )
+            return True
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
             error=failure_reason,
             **target.log_context,
         )
-        return None
-
-    async def edit_text(self, request: EditTextRequest) -> bool:
-        """Edit one existing response message."""
-        return await self.edit_text_outcome(request) is not None
+        return False
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,

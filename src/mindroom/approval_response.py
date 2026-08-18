@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING
 
-from agno.models.response import ToolExecution
-
-from mindroom import approval_manager, interactive
+from mindroom import approval_manager
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
@@ -17,7 +16,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.delivery_gateway import DeliveryStage, EditTextRequest, SendTextRequest, TextDeliveryOutcome
+from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
@@ -26,15 +25,23 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
-from mindroom.tool_system.events import deserialize_tool_trace, format_tool_started_event, serialize_tool_trace
+from mindroom.tool_system.events import serialize_tool_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
+
+
+def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
+    """Raise when a chained pause was not made visible."""
+    if not succeeded:
+        raise RuntimeError(failure_reason)
 
 
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -62,132 +69,6 @@ class _ApprovalPausePresentation:
     approval_pending: bool
 
 
-@dataclass(frozen=True)
-class _ApprovalPauseDelivery:
-    """One initial pause body after transport acknowledgement."""
-
-    event_id: str
-    visible_body: str
-    delivery_kind: Literal["sent", "edited"] | None
-
-
-@dataclass(frozen=True)
-class _StagedApprovalPresentation:
-    """One recoverable chained-pause edit and its frozen semantic state."""
-
-    delivery_id: str
-    delivery_text: str
-    response_text: str
-    response_tool_trace: tuple[dict[str, object], ...]
-    response_presentation_state: dict[str, object]
-    visible_tool_trace: tuple[ToolTraceEntry, ...]
-    stream_status: str
-    tools: tuple[ToolExecution, ...]
-
-
-def _staged_presentation(continuation: ApprovalContinuation) -> _StagedApprovalPresentation:
-    """Validate and restore a chained generation's durable publication intent."""
-    raw = continuation.staged_presentation
-    if raw is None or raw.get("version") != 1:
-        msg = "Approval continuation has no valid staged presentation"
-        raise RuntimeError(msg)
-    delivery_id = raw.get("delivery_id")
-    delivery_text = raw.get("delivery_text")
-    response_text = raw.get("response_text")
-    response_tool_trace = raw.get("response_tool_trace")
-    response_presentation_state = raw.get("response_presentation_state")
-    visible_tool_trace = raw.get("visible_tool_trace")
-    stream_status = raw.get("stream_status")
-    stored_tools = raw.get("tools")
-    if (
-        not isinstance(delivery_id, str)
-        or delivery_id != f"approval-presentation:{continuation.approval_id}:{continuation.generation}"
-        or not isinstance(delivery_text, str)
-        or not isinstance(response_text, str)
-        or not isinstance(response_tool_trace, list)
-        or any(not isinstance(entry, dict) for entry in response_tool_trace)
-        or not isinstance(response_presentation_state, dict)
-        or not isinstance(visible_tool_trace, list)
-        or not isinstance(stream_status, str)
-        or stream_status not in {STREAM_STATUS_APPROVAL_PENDING, STREAM_STATUS_PENDING}
-        or not isinstance(stored_tools, list)
-    ):
-        msg = "Approval continuation staged presentation is invalid"
-        raise RuntimeError(msg)
-    tools: list[ToolExecution] = []
-    for stored_tool in stored_tools:
-        if not isinstance(stored_tool, dict):
-            msg = "Approval continuation staged tool is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
-        tool = cast("dict[str, object]", stored_tool)
-        tool_call_id = tool.get("tool_call_id")
-        tool_name = tool.get("tool_name")
-        tool_args = tool.get("tool_args")
-        if (
-            not isinstance(tool_call_id, str)
-            or not tool_call_id
-            or not isinstance(tool_name, str)
-            or not tool_name
-            or not isinstance(tool_args, dict)
-        ):
-            msg = "Approval continuation staged tool is invalid"
-            raise RuntimeError(msg)
-        tools.append(
-            ToolExecution(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                tool_args=cast("dict[str, Any]", tool_args),
-            ),
-        )
-    durable_trace = tuple(dict(cast("dict[str, object]", entry)) for entry in response_tool_trace)
-    public_trace = tuple(
-        deserialize_tool_trace(
-            [dict(cast("dict[str, object]", entry)) for entry in visible_tool_trace],
-            strict=True,
-        ),
-    )
-    if [(tool.tool_call_id, tool.tool_name) for tool in tools] != [
-        (call.tool_call_id, call.tool_name) for call in continuation.calls
-    ]:
-        msg = "Approval continuation staged tools do not match its exact calls"
-        raise RuntimeError(msg)
-    return _StagedApprovalPresentation(
-        delivery_id=delivery_id,
-        delivery_text=delivery_text,
-        response_text=response_text,
-        response_tool_trace=durable_trace,
-        response_presentation_state=cast("dict[str, object]", response_presentation_state),
-        visible_tool_trace=public_trace,
-        stream_status=stream_status,
-        tools=tuple(tools),
-    )
-
-
-def _approval_pause_delivery_text(paused: PausedAttempt, fallback: str) -> str:
-    """Render one pause without confusing raw renderer state with visible text."""
-    if paused.visible_response_text:
-        return paused.visible_response_text
-    source_text = paused.response_text or fallback
-    return interactive.parse_and_format_interactive(source_text, extract_mapping=True).formatted_text
-
-
-def _require_text_delivery(outcome: TextDeliveryOutcome | None, failure_reason: str) -> TextDeliveryOutcome:
-    """Return an acknowledged text delivery or raise the owning publication error."""
-    if outcome is None:
-        raise RuntimeError(failure_reason)
-    return outcome
-
-
-def _require_continuation(
-    continuation: ApprovalContinuation | None,
-    failure_reason: str,
-) -> ApprovalContinuation:
-    """Return a journal-owned continuation or raise its publication error."""
-    if continuation is None:
-        raise RuntimeError(failure_reason)
-    return continuation
-
-
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
@@ -213,40 +94,6 @@ def identify_approval_tools(
             ),
         )
     return tuple(identified)
-
-
-def durable_pause_tool_trace(
-    paused: PausedAttempt,
-    identified: tuple[tuple[ToolExecution, str, str, str], ...],
-    *,
-    entity_kind: Literal["agent", "team"],
-) -> tuple[ToolTraceEntry, ...]:
-    """Add private pending identity when a blocking pause had no streaming tool event."""
-    trace = list(paused.tool_trace)
-    seen_ids = {entry.tool_call_id for entry in trace if entry.tool_call_id is not None}
-    requirements_by_call_id = {
-        requirement.tool_execution.tool_call_id: requirement
-        for requirement in paused.requirements
-        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
-    }
-    for tool, tool_call_id, _tool_name, _invoking_agent in identified:
-        if tool_call_id in seen_ids:
-            continue
-        _marker, entry = format_tool_started_event(tool, tool_index=len(trace) + 1)
-        if entry is None or entry.tool_call_id != tool_call_id:
-            msg = "Paused approval tool could not be assigned durable presentation identity"
-            raise RuntimeError(msg)
-        if entity_kind == "team":
-            requirement = requirements_by_call_id.get(tool_call_id)
-            member_id = requirement.member_agent_id if requirement is not None else None
-            member_name = requirement.member_agent_name if requirement is not None else None
-            if member_name and not member_id:
-                msg = "Paused team approval tool is missing its stable member identity"
-                raise RuntimeError(msg)
-            entry.scope_key = f"agent:{member_id}" if member_id else "team"
-        trace.append(entry)
-        seen_ids.add(tool_call_id)
-    return tuple(trace)
 
 
 def continuation_target(
@@ -417,192 +264,60 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.source_event_ids)
 
-    async def _commit_staged_presentation(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        target: MessageTarget,
-        failure_reason: str,
-    ) -> tuple[ApprovalContinuation, _StagedApprovalPresentation, TextDeliveryOutcome | None]:
-        """Deliver one frozen edit idempotently and promote only its acknowledged body."""
-        staged = _staged_presentation(continuation)
-        outcome: TextDeliveryOutcome | None = None
-        committed = continuation
-        if continuation.presentation_generation != continuation.generation:
-            outcome = _require_text_delivery(
-                await self.delivery_gateway.edit_text_outcome(
-                    EditTextRequest(
-                        target=target,
-                        event_id=continuation.response_event_id,
-                        new_text=staged.delivery_text,
-                        extra_content={STREAM_STATUS_KEY: staged.stream_status},
-                        tool_trace=list(staged.visible_tool_trace) or None,
-                        delivery_turn_id=staged.delivery_id,
-                        defer_source_handoff=True,
-                    ),
-                ),
-                failure_reason,
-            )
-            committed = _require_continuation(
-                await self.store.commit_approval_continuation_presentation(
-                    continuation.approval_id,
-                    expected_generation=continuation.generation,
-                    visible_response_text=outcome.visible_body,
-                ),
-                failure_reason,
-            )
-        return committed, staged, outcome
-
-    async def recover_staged_pause(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        target: MessageTarget,
-    ) -> ApprovalContinuation:
-        """Finish one stale generation from its frozen edit and exact call snapshot."""
-        failure_reason = "Chained approval publication recovery failed"
-        committed, staged, _outcome = await self._commit_staged_presentation(
-            continuation,
-            target=target,
-            failure_reason=failure_reason,
-        )
-        plan = _ApprovalPausePlan(
-            tools=staged.tools,
-            calls=committed.calls,
-            waiting_text=("Waiting for approval" if any(call.decision is None for call in committed.calls) else None),
-        )
-        await self.publish_generation(
-            committed,
-            plan,
-            target=target,
-            failure_reason=failure_reason,
-        )
-        refreshed = await self.store.approval_continuation(continuation.approval_id)
-        if refreshed is None:
-            raise RuntimeError(failure_reason)
-        return refreshed
-
     async def advance_pause(
         self,
         current: ApprovalContinuation,
         paused: PausedAttempt,
         *,
-        materialize_presentation: Callable[[PausedAttempt], PausedAttempt],
         target: MessageTarget,
         pending_text: str,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
-        published_paused = paused
-        paused = materialize_presentation(paused)
-        if plan.waiting_text is not None:
-            published_paused = paused
-        durable_tool_trace = durable_pause_tool_trace(
-            paused,
-            identified,
-            entity_kind=current.entity_kind,
-        )
         approval_pending = plan.waiting_text is not None
-        visible_tool_trace = tuple(published_paused.tool_trace) if current.show_tool_calls else ()
-        delivery_text = _approval_pause_delivery_text(published_paused, plan.waiting_text or pending_text)
+        visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
+        visible_text = paused.response_text or plan.waiting_text or pending_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        next_generation = current.generation + 1
-        staged_presentation: dict[str, object] = {
-            "version": 1,
-            "delivery_id": f"approval-presentation:{current.approval_id}:{next_generation}",
-            "delivery_text": delivery_text,
-            "response_text": paused.response_text,
-            "response_tool_trace": list(serialize_tool_trace(durable_tool_trace, include_internal=True)),
-            "response_presentation_state": paused.response_presentation_state,
-            "visible_tool_trace": list(serialize_tool_trace(visible_tool_trace, include_internal=True)),
-            "stream_status": stream_status,
-            "tools": [
-                {
-                    "tool_call_id": tool_call_id,
-                    "tool_name": tool_name,
-                    "tool_args": deepcopy(dict(tool.tool_args or {})),
-                }
-                for tool, tool_call_id, tool_name, _invoking_agent in identified
-            ],
-        }
         publishing = await self.store.advance_approval_continuation(
             current.approval_id,
             claimant_generation=current.generation,
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            staged_presentation=staged_presentation,
+            response_text=paused.response_text,
+            response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+            response_presentation_state=paused.response_presentation_state,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
             raise RuntimeError(msg)
         failure_reason = "Chained approval publication failed"
-        committed, staged, edit_outcome = await self._commit_staged_presentation(
-            publishing,
-            target=target,
-            failure_reason=failure_reason,
-        )
-        await self.publish_generation(
-            committed,
-            plan,
-            target=target,
-            failure_reason=failure_reason,
-        )
+        try:
+            edit_succeeded = await self.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=current.response_event_id,
+                    new_text=visible_text,
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
+                ),
+            )
+            _require_successful_edit(edit_succeeded, failure_reason)
+            await self.publish_generation(
+                publishing,
+                plan,
+                target=target,
+                failure_reason=failure_reason,
+            )
+        except (asyncio.CancelledError, Exception):
+            await self.request_failure(publishing, failure_reason)
+            raise
         return _ApprovalPausePresentation(
-            response_text=edit_outcome.visible_body if edit_outcome is not None else committed.visible_response_text,
-            tool_trace=staged.visible_tool_trace,
+            response_text=visible_text,
+            tool_trace=visible_tool_trace,
             approval_pending=approval_pending,
         )
-
-    async def publish_initial_pause(
-        self,
-        paused: PausedAttempt,
-        plan: _ApprovalPausePlan,
-        *,
-        target: MessageTarget,
-        existing_event_id: str | None,
-        source_event_id: str,
-        show_tool_calls: bool,
-        pending_text: str,
-    ) -> _ApprovalPauseDelivery:
-        """Publish and acknowledge the exact visible body for a continuation's first generation."""
-        approval_pending = plan.waiting_text is not None
-        delivery_text = _approval_pause_delivery_text(paused, plan.waiting_text or pending_text)
-        tool_trace = list(paused.tool_trace) if show_tool_calls and paused.tool_trace else None
-        stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        extra_content = {STREAM_STATUS_KEY: stream_status}
-        failure_reason = "Could not publish the suspended approval response"
-        if existing_event_id is None:
-            outcome = _require_text_delivery(
-                await self.delivery_gateway.send_text_outcome(
-                    SendTextRequest(
-                        target=target,
-                        response_text=delivery_text,
-                        extra_content=extra_content,
-                        tool_trace=tool_trace,
-                        delivery_turn_id=source_event_id,
-                        delivery_stage=DeliveryStage.INITIAL,
-                    ),
-                ),
-                failure_reason,
-            )
-            return _ApprovalPauseDelivery(outcome.event_id, outcome.visible_body, "sent")
-        if approval_pending or bool(paused.response_text):
-            outcome = _require_text_delivery(
-                await self.delivery_gateway.edit_text_outcome(
-                    EditTextRequest(
-                        target=target,
-                        event_id=existing_event_id,
-                        new_text=delivery_text,
-                        extra_content=extra_content,
-                        tool_trace=tool_trace,
-                    ),
-                ),
-                failure_reason,
-            )
-            return _ApprovalPauseDelivery(existing_event_id, outcome.visible_body, "edited")
-        return _ApprovalPauseDelivery(existing_event_id, delivery_text, None)
 
     async def request_failure(
         self,

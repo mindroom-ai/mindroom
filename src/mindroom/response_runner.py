@@ -14,20 +14,13 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import (
-    ResponseTurnContext,
-    ai_response,
-    build_matrix_run_metadata,
-    materialize_agent_pause_presentation,
-    stream_agent_response,
-)
+from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
     ApprovalResponseCoordinator,
     continuation_target,
-    durable_pause_tool_trace,
     identify_approval_tools,
 )
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
@@ -98,12 +91,10 @@ from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,
-    materialize_team_pause_presentation,
     resolve_team_turn_models,
     select_model_for_team,
     team_response,
     team_response_stream,
-    validated_empty_team_presentation_shell,
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
@@ -123,6 +114,7 @@ from .delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryStage,
+    EditTextRequest,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -187,36 +179,15 @@ def _merge_response_extra_content(
 
 
 def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> PausedAttempt:
-    """Reconcile transport-committed output with the pause's private renderer state."""
+    """Attach only the response state acknowledged before the stream suspended."""
     if error.presentation is None:
         return error.paused
-    presentation_state = error.presentation.state or {}
-    if not presentation_state and not error.presentation.response_text:
-        # Before any team body exists, retain only the validated static slot
-        # shell. Pending tool identity is rebuilt from the paused requirements
-        # after this handoff; no buffered dynamic renderer state crosses it.
-        presentation_state = validated_empty_team_presentation_shell(error.paused.response_presentation_state) or {}
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
-        visible_response_text=error.presentation.visible_response_text,
         tool_trace=error.presentation.tool_trace,
-        response_presentation_state=presentation_state,
+        response_presentation_state=error.presentation.state or {},
     )
-
-
-def _materialize_visible_pause_presentation(
-    paused: PausedAttempt,
-    *,
-    entity_kind: Literal["agent", "team"],
-    show_tool_calls: bool,
-) -> PausedAttempt:
-    """Build exact missing tool anchors only at an approval publication boundary."""
-    if not show_tool_calls:
-        return paused
-    if entity_kind == "team":
-        return materialize_team_pause_presentation(paused)
-    return materialize_agent_pause_presentation(paused)
 
 
 def _split_delivery_tool_trace(
@@ -867,38 +838,44 @@ class ResponseRunner:
         )
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
-            published_paused = paused
-            show_tool_calls = self._show_tool_calls()
-            paused = _materialize_visible_pause_presentation(
-                paused,
-                entity_kind=entity_kind,
-                show_tool_calls=show_tool_calls,
-            )
-            if plan.waiting_text is not None:
-                published_paused = paused
-            durable_tool_trace = durable_pause_tool_trace(
-                paused,
-                identified_tools,
-                entity_kind=entity_kind,
-            )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
-            visible_tool_trace = tuple(published_paused.tool_trace) if show_tool_calls else ()
+            show_tool_calls = self._show_tool_calls()
+            visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
+            visible_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-            delivery = await self._approval_responses.publish_initial_pause(
-                published_paused,
-                plan,
-                target=target,
-                existing_event_id=response_event_id,
-                source_event_id=request.response_envelope.source_event_id,
-                show_tool_calls=show_tool_calls,
-                pending_text=PROGRESS_PLACEHOLDER,
-            )
-            response_event_id = delivery.event_id
-            acknowledged_body = delivery.visible_body
-            delivery_kind = delivery.delivery_kind
-            final_visible_body = acknowledged_body if delivery_kind is not None else None
+            delivery_kind: Literal["sent", "edited"] | None = None
+            final_visible_body: str | None = None
+            if response_event_id is None:
+                response_event_id = await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=visible_text,
+                        extra_content={STREAM_STATUS_KEY: stream_status},
+                        tool_trace=list(visible_tool_trace) or None,
+                        delivery_turn_id=request.response_envelope.source_event_id,
+                        delivery_stage=DeliveryStage.INITIAL,
+                    ),
+                )
+                delivery_kind = "sent"
+                final_visible_body = visible_text
+            elif (approval_pending or bool(snapshot_text)) and not await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=response_event_id,
+                    new_text=visible_text,
+                    extra_content={STREAM_STATUS_KEY: stream_status},
+                    tool_trace=list(visible_tool_trace) or None,
+                ),
+            ):
+                response_event_id = None
+            elif approval_pending or bool(snapshot_text):
+                delivery_kind = "edited"
+                final_visible_body = visible_text
+            if response_event_id is None:
+                msg = "Could not publish the suspended approval response"
+                raise RuntimeError(msg)  # noqa: TRY301
 
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
@@ -917,10 +894,8 @@ class ResponseRunner:
                     source_event_ids=source_event_ids,
                     calls=plan.calls,
                     state=continuation_state,
-                    presentation_generation=0,
                     response_text=snapshot_text,
-                    visible_response_text=acknowledged_body,
-                    response_tool_trace=serialize_tool_trace(durable_tool_trace, include_internal=True),
+                    response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
                     response_presentation_state=paused.response_presentation_state,
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
@@ -1030,11 +1005,6 @@ class ResponseRunner:
         presentation = await self._approval_responses.advance_pause(
             claimed,
             result,
-            materialize_presentation=lambda paused: _materialize_visible_pause_presentation(
-                paused,
-                entity_kind=claimed.entity_kind,
-                show_tool_calls=claimed.show_tool_calls,
-            ),
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
         )
@@ -1433,12 +1403,6 @@ class ResponseRunner:
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
     ) -> CompletedApprovalRun | PausedAttempt:
-        if continuation.presentation_version != 1:
-            msg = "Approval continuation has no supported presentation version"
-            raise RuntimeError(msg)
-        if continuation.presentation_generation != continuation.generation:
-            msg = "Approval continuation presentation was not acknowledged for its generation"
-            raise RuntimeError(msg)
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
@@ -1489,10 +1453,7 @@ class ResponseRunner:
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
                         prior_response_text=continuation.response_text,
-                        prior_tool_trace=deserialize_tool_trace(
-                            continuation.response_tool_trace,
-                            strict=True,
-                        ),
+                        prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
                         prior_presentation_state=continuation.response_presentation_state or None,
                         show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,
@@ -2142,7 +2103,7 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def _recover_nonready_approval(  # noqa: PLR0911
+    async def _recover_nonready_approval(
         self,
         owned: ApprovalContinuation,
         *,
@@ -2151,20 +2112,6 @@ class ResponseRunner:
         """Recover a non-ready owner, leaving ready execution to the caller."""
         if owned.state == "waiting":
             if owned.runtime_generation is not None:
-                if owned.staged_presentation is not None:
-                    try:
-                        recovered = await self._approval_responses.recover_staged_pause(
-                            owned,
-                            target=target,
-                        )
-                    except Exception:
-                        self.deps.logger.exception(
-                            "approval_staged_presentation_recovery_failed",
-                            approval_id=owned.approval_id,
-                            generation=owned.generation,
-                        )
-                        return True, None
-                    return True, recovered.response_event_id
                 reason = "Tool approval card publication was interrupted and denied safely."
                 failing = await self._approval_responses.request_failure(owned, reason)
                 if failing is not None:
@@ -3389,7 +3336,6 @@ class ResponseRunner:
                                     else None,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
-                                    show_tool_calls=show_tool_calls,
                                     turn_recorder=team_turn_recorder,
                                 )
 

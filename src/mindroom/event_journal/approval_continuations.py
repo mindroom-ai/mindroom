@@ -143,13 +143,9 @@ class ApprovalContinuation:
     source_event_ids: tuple[str, ...]
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
-    presentation_version: int | None = 1
-    presentation_generation: int | None = 0
     response_text: str = ""
-    visible_response_text: str = ""
     response_tool_trace: tuple[dict[str, object], ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
-    staged_presentation: dict[str, object] | None = None
     show_tool_calls: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
@@ -185,13 +181,9 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
-        "response_presentation_version": continuation.presentation_version,
-        "response_presentation_generation": continuation.presentation_generation,
         "response_text": continuation.response_text,
-        "visible_response_text": continuation.visible_response_text,
         "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "response_presentation_state": continuation.response_presentation_state,
-        "staged_presentation": continuation.staged_presentation,
         "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
@@ -271,18 +263,6 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
-    stored_presentation_version = stored.get("response_presentation_version")
-    presentation_version = (
-        stored_presentation_version
-        if isinstance(stored_presentation_version, int) and not isinstance(stored_presentation_version, bool)
-        else None
-    )
-    stored_presentation_generation = stored.get("response_presentation_generation")
-    presentation_generation = (
-        stored_presentation_generation
-        if isinstance(stored_presentation_generation, int) and not isinstance(stored_presentation_generation, bool)
-        else None
-    )
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -310,10 +290,7 @@ def _from_rows(
         source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
-        presentation_version=presentation_version,
-        presentation_generation=presentation_generation,
         response_text=cast("str", stored.get("response_text", "")),
-        visible_response_text=cast("str", stored.get("visible_response_text", "")),
         response_tool_trace=tuple(
             dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
         ),
@@ -321,12 +298,7 @@ def _from_rows(
             "dict[str, object]",
             stored.get("response_presentation_state", {}),
         ),
-        staged_presentation=(
-            cast("dict[str, object]", stored["staged_presentation"])
-            if isinstance(stored.get("staged_presentation"), dict)
-            else None
-        ),
-        show_tool_calls=stored.get("show_tool_calls") is True,
+        show_tool_calls=stored.get("show_tool_calls", True) is not False,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -597,25 +569,31 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
-    staged_presentation: dict[str, object],
+    response_text: str | None = None,
+    response_tool_trace: tuple[dict[str, object], ...] | None = None,
+    response_presentation_state: dict[str, object] | None = None,
 ) -> ApprovalContinuation | None:
-    """Stage the next exact Agno pause without replacing acknowledged presentation."""
+    """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
     if current is None:
         return None
     next_generation = claimant_generation + 1
-    state: ApprovalContinuationState = "waiting"
-    publication_owner = current.runtime_generation
+    state: ApprovalContinuationState = "ready" if all(call.decision is not None for call in calls) else "waiting"
+    publication_owner = None if state == "ready" else current.runtime_generation
     advanced = replace(
         current,
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        response_text=current.response_text if response_text is None else response_text,
+        response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
+        response_presentation_state=(
+            current.response_presentation_state if response_presentation_state is None else response_presentation_state
+        ),
         state=state,
         runtime_generation=publication_owner,
         failure_reason=None,
         generation=next_generation,
-        staged_presentation=staged_presentation,
     )
     updated = transaction.fetchone(
         """
@@ -642,61 +620,6 @@ def advance(
     return get(transaction, principal_id, approval_id=approval_id)
 
 
-def commit_presentation(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    approval_id: str,
-    expected_generation: int,
-    visible_response_text: str,
-) -> ApprovalContinuation | None:
-    """Promote one transport-acknowledged presentation for a staged generation."""
-    current = get(transaction, principal_id, approval_id=approval_id)
-    if (
-        current is None
-        or current.state != "waiting"
-        or current.generation != expected_generation
-        or current.runtime_generation is None
-        or current.staged_presentation is None
-    ):
-        return None
-    staged = current.staged_presentation
-    response_text = staged.get("response_text")
-    response_tool_trace = staged.get("response_tool_trace")
-    response_presentation_state = staged.get("response_presentation_state")
-    if (
-        not isinstance(response_text, str)
-        or not isinstance(response_tool_trace, list)
-        or any(not isinstance(entry, dict) for entry in response_tool_trace)
-        or not isinstance(response_presentation_state, dict)
-    ):
-        msg = "Staged approval presentation is invalid"
-        raise TypeError(msg)
-    committed = replace(
-        current,
-        presentation_generation=expected_generation,
-        response_text=response_text,
-        visible_response_text=visible_response_text,
-        response_tool_trace=tuple(dict(cast("dict[str, object]", entry)) for entry in response_tool_trace),
-        response_presentation_state=cast("dict[str, object]", response_presentation_state),
-    )
-    updated = transaction.fetchone(
-        """
-        UPDATE approval_continuations SET context_json = ?
-        WHERE principal_id = ? AND approval_id = ? AND state = 'waiting'
-          AND generation = ? AND runtime_generation IS NOT NULL
-        RETURNING approval_id
-        """,
-        (
-            _json(_context(committed)),
-            principal_id,
-            approval_id,
-            expected_generation,
-        ),
-    )
-    return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
-
-
 def activate(
     transaction: Transaction,
     principal_id: str,
@@ -705,15 +628,6 @@ def activate(
     expected_generation: int,
 ) -> ApprovalContinuation | None:
     """Release one publication lease and make its generation decidable or executable."""
-    current = get(transaction, principal_id, approval_id=approval_id)
-    if (
-        current is None
-        or current.state != "waiting"
-        or current.generation != expected_generation
-        or current.runtime_generation is None
-        or current.presentation_generation != expected_generation
-    ):
-        return None
     undecided = transaction.fetchone(
         """
         SELECT 1 AS present FROM approval_continuation_calls
@@ -723,15 +637,14 @@ def activate(
         (principal_id, approval_id, expected_generation),
     )
     state: Literal["waiting", "ready"] = "waiting" if undecided is not None else "ready"
-    activated = replace(current, state=state, runtime_generation=None, staged_presentation=None)
     updated = transaction.fetchone(
         """
-        UPDATE approval_continuations SET state = ?, runtime_generation = NULL, context_json = ?
+        UPDATE approval_continuations SET state = ?, runtime_generation = NULL
         WHERE principal_id = ? AND approval_id = ? AND state = 'waiting'
           AND generation = ? AND runtime_generation IS NOT NULL
         RETURNING approval_id
         """,
-        (state, _json(_context(activated)), principal_id, approval_id, expected_generation),
+        (state, principal_id, approval_id, expected_generation),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 

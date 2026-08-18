@@ -44,7 +44,6 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -66,7 +65,6 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.bot_helpers import make_test_agent_bot
@@ -3282,8 +3280,8 @@ class TestStreamingBehavior:
         assert shutdown_attempts == 2
 
     @pytest.mark.asyncio
-    async def test_failed_suspension_flush_captures_only_the_prior_committed_presentation(self) -> None:
-        """A failed forced flush leaves approval publication to anchor the pending tool."""
+    async def test_failed_suspension_flush_rejects_approval_handoff(self) -> None:
+        """A pause whose latest ordered presentation was not delivered must not escape."""
         mock_client = _make_matrix_client_mock()
         tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
         marker, trace_entry = format_tool_started_event(tool, tool_index=1)
@@ -3335,7 +3333,7 @@ class TestStreamingBehavior:
                 new=pause_after_buffering_tool,
             ),
             patch("mindroom.streaming.edit_message_result", new=edit),
-            pytest.raises(ResponsePausedForApproval) as raised,
+            pytest.raises(StreamingDeliveryError) as raised,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -3348,12 +3346,10 @@ class TestStreamingBehavior:
                 streaming_cls=RecordingStreamingResponse,
             )
 
-        assert raised.value is pause
+        assert "suspension" in str(raised.value.error).lower()
         assert recorded_force_flags == [True]
         assert edit.await_count == 2
-        assert pause.presentation is not None
-        assert pause.presentation.response_text == "Before approval."
-        assert pause.presentation.tool_trace == ()
+        assert pause.presentation is None
 
     @pytest.mark.asyncio
     async def test_worker_progress_and_content_updates_do_not_overlap_edits(self) -> None:

@@ -41,7 +41,6 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingLifecycleSuspensionError,
     StreamingResponse,
-    _CommittedDeliveryState,
     send_streaming_response,
 )
 from mindroom.timing import DispatchPipelineTiming
@@ -141,8 +140,6 @@ def fake_clock() -> Iterator[None]:
 async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
-    *,
-    show_tool_calls: bool = True,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -150,7 +147,6 @@ async def _run_stream(
         config=config,
         runtime_paths=runtime_paths_for(config),
         response_stream=response_stream,
-        show_tool_calls=show_tool_calls,
     )
 
 
@@ -198,109 +194,13 @@ async def test_lifecycle_suspension_captures_last_committed_presentation(config:
 
     assert raised.value is suspension
     assert raised.value.presentation is not None
-    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳\n\n"
-    assert raised.value.presentation.visible_response_text == gateway.ops[-1].display_text
+    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳"
     assert len(raised.value.presentation.tool_trace) == 1
     trace = raised.value.presentation.tool_trace[0]
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "inspect"
     assert trace.args_preview == "path=report.txt"
     assert trace.tool_call_id == "call-1"
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_lifecycle_suspension_separates_raw_renderer_state_from_exact_visible_body(config: Config) -> None:
-    """Resume state stays lossless even when Matrix received an interactive transform."""
-    suspension = StreamingLifecycleSuspensionError("paused")
-    gateway = _FakeGateway()
-    raw = """Please choose.
-
-```interactive
-{
-    "question": "Which option?",
-    "options": [
-        {"emoji": "✅", "label": "Approve", "value": "approve"}
-    ]
-}
-```  """
-
-    async def suspended_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content=raw)
-        await gateway.wait_for_ops(1)
-        raise suspension
-
-    with (
-        patch("mindroom.streaming.send_message_result", new=gateway.send),
-        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingLifecycleSuspensionError) as raised,
-    ):
-        await _run_stream(config, suspended_stream())
-
-    assert raised.value.presentation is not None
-    assert raised.value.presentation.response_text == raw
-    assert raised.value.presentation.visible_response_text == gateway.ops[-1].display_text
-    assert raised.value.presentation.visible_response_text != raw
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_hidden_tool_pause_captures_private_stable_identity(config: Config) -> None:
-    """Hidden rendering omits public metadata but retains the pending call for exact continuation."""
-    suspension = StreamingLifecycleSuspensionError("paused")
-    gateway = _FakeGateway()
-
-    async def suspended_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Before approval.")
-        await gateway.wait_for_ops(1)
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(tool_call_id="call-hidden", tool_name="inspect", tool_args={}),
-        )
-        await gateway.wait_for_ops(2)
-        raise suspension
-
-    with (
-        patch("mindroom.streaming.send_message_result", new=gateway.send),
-        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingLifecycleSuspensionError) as raised,
-    ):
-        await _run_stream(config, suspended_stream(), show_tool_calls=False)
-
-    assert raised.value.presentation is not None
-    assert raised.value.presentation.response_text == "Before approval.\n\n"
-    assert raised.value.presentation.visible_response_text == "Before approval.\n\n"
-    assert [(entry.tool_call_id, entry.type) for entry in raised.value.presentation.tool_trace] == [
-        ("call-hidden", "tool_call_started"),
-    ]
-    assert _TOOL_TRACE_KEY not in gateway.ops[-1].content
-
-
-def test_nonterminal_ack_comparison_includes_private_tool_identity(config: Config) -> None:
-    """A delayed acknowledgement for one call cannot clear pending state for another identical call."""
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    streaming.accumulated_text = "Same body"
-    streaming.tool_trace = [
-        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-2"),
-    ]
-    streaming.chars_since_last_update = 7
-    committed = _CommittedDeliveryState(
-        accumulated_text="Same body",
-        tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")],
-        presentation_state=None,
-        placeholder_progress_sent=False,
-        rendered_body="Same body",
-        visible_body_state="visible_body",
-        interactive_metadata=None,
-        stream_status=STREAM_STATUS_STREAMING,
-    )
-
-    streaming._mark_nonterminal_delivery(committed)
-
-    assert streaming.chars_since_last_update == 7
 
 
 @pytest.mark.asyncio
@@ -332,48 +232,6 @@ async def test_lifecycle_suspension_captures_committed_structured_state(config: 
         await _run_stream(config, suspended_stream())
 
     assert raised.value.presentation is not None
-    assert raised.value.presentation.state == state
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("fake_clock")
-async def test_lifecycle_suspension_flushes_state_only_presentation(config: Config) -> None:
-    """A controlled pause commits private structured state before lifecycle handoff."""
-    suspension = StreamingLifecycleSuspensionError("paused")
-    gateway = _FakeGateway()
-    trace = ToolTraceEntry(
-        type="tool_call_started",
-        tool_name="inspect",
-        tool_call_id="call-hidden",
-        scope_key="team",
-    )
-    state = {
-        "kind": "team_stream",
-        "version": 2,
-        "members": [],
-        "consensus": "",
-    }
-
-    async def suspended_stream() -> AsyncIterator[object]:
-        yield StructuredStreamChunk(
-            content="",
-            tool_trace=[trace],
-            presentation_state=state,
-        )
-        raise suspension
-
-    with (
-        patch("mindroom.streaming.send_message_result", new=gateway.send),
-        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
-        pytest.raises(StreamingLifecycleSuspensionError) as raised,
-    ):
-        await _run_stream(config, suspended_stream(), show_tool_calls=False)
-
-    assert [operation.display_text for operation in gateway.ops] == ["Thinking..."]
-    assert raised.value.presentation is not None
-    assert raised.value.presentation.response_text == ""
-    assert raised.value.presentation.visible_response_text == "Thinking..."
-    assert raised.value.presentation.tool_trace == (trace,)
     assert raised.value.presentation.state == state
 
 

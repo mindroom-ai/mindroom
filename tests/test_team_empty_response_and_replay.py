@@ -329,7 +329,7 @@ async def test_team_response_stream_records_interrupted_turn_when_stream_errors(
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
         yield TeamRunErrorEvent(content="provider exploded")
 
     mock_team = _make_test_team()
@@ -365,7 +365,7 @@ async def test_team_response_stream_records_interrupted_turn_on_errored_run_outp
     errored_run.status = RunStatus.error
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
         yield errored_run
 
     mock_team = _make_test_team()
@@ -429,7 +429,7 @@ async def test_team_response_stream_records_interrupted_turn_when_stream_raises(
     stream_error = "transport died"
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
         raise RuntimeError(stream_error)
 
     mock_team = _make_test_team()

@@ -71,8 +71,6 @@ class StreamingToolTracker:
 
     pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
-    seen_tool_call_ids: set[str] = field(default_factory=set)
-    completed_tool_call_ids: set[str] = field(default_factory=set)
 
     def start(
         self,
@@ -83,12 +81,10 @@ class StreamingToolTracker:
     ) -> tuple[str, ToolTraceEntry | None]:
         """Record one started tool call and return its visible marker."""
         call_id = _streaming_tool_call_id(tool)
-        if call_id is not None and call_id in self.seen_tool_call_ids:
+        if call_id is not None and any(pending.tool_call_id == call_id for pending in self.pending_tools):
             return "", None
         visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
         if trace_entry is not None:
-            if call_id is not None:
-                self.seen_tool_call_ids.add(call_id)
             self.pending_tools.append(
                 _PendingStreamingTool(
                     scope_key=scope_key,
@@ -108,9 +104,6 @@ class StreamingToolTracker:
         scope_key: str = "",
     ) -> tuple[str, object | None, _PendingStreamingTool | None, ToolTraceEntry | None] | None:
         """Record one completed tool call and return the matched pending state."""
-        call_id = _streaming_tool_call_id(tool)
-        if call_id is not None and call_id in self.completed_tool_call_ids:
-            return None
         info = extract_tool_completed_info(tool)
         if info is None:
             return None
@@ -121,9 +114,6 @@ class StreamingToolTracker:
         _, completed_trace = format_tool_completed_event(tool)
         if completed_trace is not None:
             self.completed_tools.append(completed_trace)
-            if call_id is not None:
-                self.seen_tool_call_ids.add(call_id)
-                self.completed_tool_call_ids.add(call_id)
         return tool_name, result, pending_tool, completed_trace
 
     def update_visible_trace_entry(
@@ -146,12 +136,8 @@ class StreamingToolTracker:
     def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
         """Restore only exact pending slots from a durable presentation snapshot."""
         for tool_index, trace_entry in enumerate(tool_trace, start=1):
-            if trace_entry.tool_call_id is not None:
-                self.seen_tool_call_ids.add(trace_entry.tool_call_id)
             if trace_entry.type == "tool_call_completed":
                 self.completed_tools.append(trace_entry)
-                if trace_entry.tool_call_id is not None:
-                    self.completed_tool_call_ids.add(trace_entry.tool_call_id)
                 continue
             self.pending_tools.append(
                 _PendingStreamingTool(
@@ -162,10 +148,6 @@ class StreamingToolTracker:
                     visible_tool_index=tool_index,
                 ),
             )
-
-    def pending_tool_call_ids(self) -> set[str]:
-        """Return stable identities for the exact durable slots still pending."""
-        return {pending.tool_call_id for pending in self.pending_tools if pending.tool_call_id is not None}
 
     def _find_pending_tool_index(
         self,
@@ -203,7 +185,6 @@ class CollectedStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     track_hidden_tools: bool = False
     canonical_final_body_candidate: str | None = None
-    content_delta_seen: bool = False
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
 
     def __post_init__(self) -> None:
@@ -213,7 +194,6 @@ class CollectedStreamPresentation:
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
         if content:
-            self.content_delta_seen = True
             self.response_text += str(content)
 
     def start_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
@@ -250,10 +230,8 @@ class CollectedStreamPresentation:
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
     def final_text(self) -> str:
-        """Append terminal event content only when no continuation delta preceded it."""
-        if not self.content_delta_seen and self.canonical_final_body_candidate:
-            return self.response_text + self.canonical_final_body_candidate
-        return self.response_text
+        """Return collected deltas, falling back to the provider's canonical final body."""
+        return self.response_text or self.canonical_final_body_candidate or ""
 
 
 def _streaming_tool_call_id(tool: ToolExecution | None) -> str | None:
@@ -725,54 +703,18 @@ def serialize_tool_trace(
     return tuple(serialized)
 
 
-def deserialize_tool_trace(
-    stored: Sequence[Mapping[str, object]],
-    *,
-    strict: bool = False,
-) -> list[ToolTraceEntry]:
+def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolTraceEntry]:
     """Restore a trace snapshot while rejecting malformed event records."""
     restored: list[ToolTraceEntry] = []
-    seen_ids: set[str] = set()
-    allowed_keys = {
-        "type",
-        "tool_name",
-        "args_preview",
-        "result_preview",
-        "truncated",
-        "tool_call_id",
-        "scope_key",
-    }
     for event in stored:
         event_type = event.get("type")
         tool_name = event.get("tool_name")
-        if (
-            event_type not in {"tool_call_started", "tool_call_completed"}
-            or not isinstance(tool_name, str)
-            or (strict and not tool_name.strip())
-        ):
-            if strict:
-                msg = "Continuation durable tool trace contains a malformed event"
-                raise RuntimeError(msg)
+        if event_type not in {"tool_call_started", "tool_call_completed"} or not isinstance(tool_name, str):
             continue
         args_preview = event.get("args_preview")
         result_preview = event.get("result_preview")
         tool_call_id = event.get("tool_call_id")
         scope_key = event.get("scope_key")
-        if strict and (
-            not set(event).issubset(allowed_keys)
-            or ("args_preview" in event and not isinstance(args_preview, str))
-            or ("result_preview" in event and not isinstance(result_preview, str))
-            or ("truncated" in event and not isinstance(event.get("truncated"), bool))
-            or ("scope_key" in event and (not isinstance(scope_key, str) or not scope_key.strip()))
-        ):
-            msg = "Continuation durable tool trace contains a malformed event"
-            raise RuntimeError(msg)
-        stable_id = tool_call_id.strip() if isinstance(tool_call_id, str) else ""
-        if strict and (not stable_id or stable_id in seen_ids):
-            msg = "Continuation durable tool trace has missing or duplicate stable identity"
-            raise RuntimeError(msg)
-        if stable_id:
-            seen_ids.add(stable_id)
         restored.append(
             ToolTraceEntry(
                 type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
@@ -780,7 +722,7 @@ def deserialize_tool_trace(
                 args_preview=args_preview if isinstance(args_preview, str) else None,
                 result_preview=result_preview if isinstance(result_preview, str) else None,
                 truncated=event.get("truncated") is True,
-                tool_call_id=stable_id or None,
+                tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
                 scope_key=scope_key if isinstance(scope_key, str) else None,
             ),
         )
