@@ -12,7 +12,12 @@ from agno.tools.function import Function
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.mcp.function_surface import local_mcp_function_name_collisions
-from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    OAuthRefreshFailedError,
+    oauth_connection_required_payload,
+    oauth_refresh_failed_payload,
+)
 
 if TYPE_CHECKING:
     from agno.tools.function import ToolResult
@@ -204,8 +209,13 @@ class MindRoomMCPToolkit(Toolkit):
             skip_entrypoint_processing=True,
         )
 
-    def _oauth_payload(self, exc: OAuthConnectionRequired) -> str:
-        return json.dumps(oauth_connection_required_payload(exc))
+    def _oauth_payload(self, exc: OAuthConnectionRequired | OAuthRefreshFailedError) -> str:
+        payload = (
+            oauth_connection_required_payload(exc)
+            if isinstance(exc, OAuthConnectionRequired)
+            else oauth_refresh_failed_payload(exc)
+        )
+        return json.dumps(payload)
 
     async def _oauth_request_catalog(self) -> MCPServerCatalog:
         if self.manager is None:
@@ -220,7 +230,7 @@ class MindRoomMCPToolkit(Toolkit):
     async def _oauth_connection_status(self) -> str:
         try:
             catalog = await self._oauth_request_catalog()
-        except OAuthConnectionRequired as exc:
+        except (OAuthConnectionRequired, OAuthRefreshFailedError) as exc:
             return self._oauth_payload(exc)
         return json.dumps(
             {
@@ -249,7 +259,7 @@ class MindRoomMCPToolkit(Toolkit):
     async def _oauth_list_tools(self) -> str:
         try:
             catalog = await self._oauth_request_catalog()
-        except OAuthConnectionRequired as exc:
+        except (OAuthConnectionRequired, OAuthRefreshFailedError) as exc:
             return self._oauth_payload(exc)
         return json.dumps(self._catalog_payload(catalog))
 
@@ -276,7 +286,7 @@ class MindRoomMCPToolkit(Toolkit):
                 include_tools=self.include_tools,
                 exclude_tools=self.exclude_tools,
             )
-        except OAuthConnectionRequired as exc:
+        except (OAuthConnectionRequired, OAuthRefreshFailedError) as exc:
             return self._oauth_payload(exc)
         except MCPToolUnavailableError as exc:
             return json.dumps(

@@ -82,6 +82,22 @@ class OAuthRefreshRejectedError(OAuthProviderError):
     refresh_expires_at: float | None = None
 
 
+class OAuthRefreshFailedError(OAuthProviderError):
+    """Raised when token refresh fails without proving the credential is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_id: str,
+        connect_url: str,
+        oauth_error: str | None = None,
+    ) -> None:
+        super().__init__(message, oauth_error=oauth_error)
+        self.provider_id = provider_id
+        self.connect_url = connect_url
+
+
 class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
@@ -129,6 +145,19 @@ def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str,
         payload["reason"] = exc.reason
     if exc.reset_required:
         payload["reset_required"] = True
+    if oauth_connect_url_requires_host_browser(exc.connect_url):
+        payload["requires_host_browser"] = True
+    return payload
+
+
+def oauth_refresh_failed_payload(exc: OAuthRefreshFailedError) -> dict[str, object]:
+    """Return a structured refresh failure without claiming the credential was rejected."""
+    payload: dict[str, object] = {
+        "error": str(exc),
+        "oauth_refresh_failed": True,
+        "provider": exc.provider_id,
+        "connect_url": exc.connect_url,
+    }
     if oauth_connect_url_requires_host_browser(exc.connect_url):
         payload["requires_host_browser"] = True
     return payload
