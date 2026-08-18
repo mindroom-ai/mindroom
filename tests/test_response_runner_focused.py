@@ -171,6 +171,45 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_accepts_clean_response_without_recovery_proof() -> None:
+    """A clean terminal response has completed its contract without recovery."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    recovery_proof_checked = False
+
+    async def response_finishes_cleanly() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return
+
+    def invalid_recovery_proof() -> bool:
+        nonlocal recovery_proof_checked
+        recovery_proof_checked = True
+        msg = "clean completion must not consult recovery"
+        raise RuntimeError(msg)
+
+    response_task = runner.track_inbox_response(
+        response_finishes_cleanly(),
+        name="test_clean_process_shutdown_response",
+        recovery_proof_ready=invalid_recovery_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    await response_task
+
+    assert (
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        is True
+    )
+    assert recovery_proof_checked is False
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_reports_terminal_durable_response_as_drained() -> None:
     """A terminal process-cancelled response with durable recovery proof is drained."""
     runner = ResponseRunner(deps=MagicMock())
@@ -292,6 +331,165 @@ async def test_process_shutdown_keeps_indefinitely_resistant_response_owned() ->
         if not response_task.done():
             response_task.cancel()
         await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_bounds_async_recovery_proof() -> None:
+    """A stuck journal/outbox proof must not outlive the response-drain budget."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    proof_cancelled = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def stuck_recovery_proof() -> bool:
+        proof_started.set()
+        try:
+            await release_proof.wait()
+        except asyncio.CancelledError:
+            proof_cancelled.set()
+            raise
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_stuck_process_shutdown_recovery_proof",
+        recovery_proof_ready=stuck_recovery_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    try:
+        with pytest.raises(
+            response_runner.ResponseShutdownTimeoutError,
+            match="recovery proof",
+        ):
+            await asyncio.wait_for(
+                runner.drain_inbox_responses(
+                    cancel_after_seconds=0.02,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                ),
+                timeout=0.2,
+            )
+        assert proof_started.is_set()
+        await asyncio.wait_for(proof_cancelled.wait(), timeout=0.02)
+        assert response_task.done()
+    finally:
+        release_proof.set()
+        await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_owner() -> None:
+    """The proof deadline returns while its still-live store reader stays owned."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    proof_cancelled = asyncio.Event()
+    release_proof = asyncio.Event()
+    proof_finished = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def cancellation_resistant_proof() -> bool:
+        proof_started.set()
+        try:
+            while not release_proof.is_set():
+                try:
+                    await release_proof.wait()
+                except asyncio.CancelledError:
+                    proof_cancelled.set()
+            return True
+        finally:
+            proof_finished.set()
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_resistant_process_shutdown_recovery_proof",
+        recovery_proof_ready=cancellation_resistant_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    async def delayed_release() -> None:
+        await asyncio.sleep(0.2)
+        release_proof.set()
+
+    release_task = asyncio.create_task(delayed_release())
+
+    try:
+        with pytest.raises(
+            response_runner.ResponseShutdownTimeoutError,
+            match="recovery proof",
+        ):
+            await asyncio.wait_for(
+                runner.drain_inbox_responses(
+                    cancel_after_seconds=0.01,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                ),
+                timeout=0.1,
+            )
+        assert loop.time() - started_at < 0.08
+        assert proof_started.is_set()
+        await asyncio.wait_for(proof_cancelled.wait(), timeout=0.02)
+        assert runner.pending_inbox_response_count == 1
+    finally:
+        release_proof.set()
+        await asyncio.wait_for(proof_finished.wait(), timeout=0.1)
+        await release_task
+        await asyncio.sleep(0)
+        await asyncio.gather(response_task, return_exceptions=True)
+
+    assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_recovery_proofs_wait_until_every_response_is_terminal() -> None:
+    """A live response must fail the gate before any durable proof can block."""
+    runner = ResponseRunner(deps=MagicMock())
+    proof_started = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def finished_response() -> None:
+        return
+
+    async def live_response() -> None:
+        await asyncio.Event().wait()
+
+    async def stuck_recovery_proof() -> bool:
+        proof_started.set()
+        await release_proof.wait()
+        return True
+
+    finished_task = asyncio.create_task(finished_response())
+    live_task = asyncio.create_task(live_response())
+    await finished_task
+
+    try:
+        assert (
+            await runner._recovery_proofs_are_ready(
+                {finished_task, live_task},
+                {
+                    finished_task: stuck_recovery_proof,
+                    live_task: lambda: True,
+                },
+                deadline=asyncio.get_running_loop().time() + 0.02,
+            )
+            is False
+        )
+        assert not proof_started.is_set()
+    finally:
+        release_proof.set()
+        live_task.cancel()
+        await asyncio.gather(live_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

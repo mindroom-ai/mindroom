@@ -538,6 +538,7 @@ class ResponseRunner:
         init=False,
         repr=False,
     )
+    _recovery_proof_tasks: set[asyncio.Task[bool]] = field(default_factory=set, init=False, repr=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
@@ -562,7 +563,7 @@ class ResponseRunner:
     @property
     def pending_inbox_response_count(self) -> int:
         """Return an event-loop-local snapshot of runner-owned unsettled responses."""
-        return sum(not task.done() for task in self._inbox_response_tasks)
+        return sum(not task.done() for task in (*self._inbox_response_tasks, *self._recovery_proof_tasks))
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
@@ -596,21 +597,73 @@ class ResponseRunner:
             self._process_shutdown_recovery_checks.setdefault(task, ownership.recovery_proof_ready)
             request_task_cancel(task, process_shutdown=True)
 
-    @staticmethod
     async def _recovery_proofs_are_ready(
+        self,
         tasks: set[asyncio.Task[None]],
         recovery_checks: dict[asyncio.Task[None], Callable[[], bool | Awaitable[bool]]],
+        *,
+        deadline: float | None = None,
     ) -> bool:
-        """Prove every terminal task transferred its obligation durably."""
-        for task in tasks:
-            if not task.done():
-                return False
+        """Prove terminal tasks transferred ownership within the drain deadline."""
+        if any(not task.done() for task in tasks):
+            return False
+        proof_targets = {task for task in tasks if task.cancelled() or task.exception() is not None}
+        if not proof_targets:
+            return True
+
+        async def evaluate(task: asyncio.Task[None]) -> bool:
             ready = recovery_checks[task]()
             if inspect.isawaitable(ready):
                 ready = await ready
-            if not ready:
-                return False
-        return True
+            return bool(ready)
+
+        proof_tasks = {
+            asyncio.create_task(evaluate(task), name=f"response_recovery_proof:{task.get_name()}")
+            for task in proof_targets
+        }
+        self._recovery_proof_tasks.update(proof_tasks)
+        for task in proof_tasks:
+            task.add_done_callback(self._finish_recovery_proof_task)
+        try:
+            if deadline is None:
+                return all(await asyncio.gather(*proof_tasks))
+            remaining_seconds = max(0.0, deadline - asyncio.get_running_loop().time())
+            _done, pending = await asyncio.wait(proof_tasks, timeout=remaining_seconds)
+            if pending:
+                msg = "response recovery proof exceeded bounded cleanup"
+                raise ResponseShutdownTimeoutError(msg)
+            return all(task.result() for task in proof_tasks)
+        finally:
+            pending = {task for task in proof_tasks if not task.done()}
+            for task in pending:
+                task.cancel()
+
+    def _finish_recovery_proof_task(self, task: asyncio.Task[bool]) -> None:
+        """Release one proof owner after its journal read has genuinely stopped."""
+        self._recovery_proof_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _bounded_recovery_proofs_are_ready(
+        self,
+        tasks: set[asyncio.Task[None]],
+        recovery_checks: dict[asyncio.Task[None], Callable[[], bool | Awaitable[bool]]],
+        *,
+        deadline: float,
+        process_shutdown_tasks: set[asyncio.Task[None]],
+    ) -> bool:
+        """Run process-shutdown proofs without losing a timed-out obligation."""
+        try:
+            return await self._recovery_proofs_are_ready(
+                tasks,
+                recovery_checks,
+                deadline=deadline,
+            )
+        except ResponseShutdownTimeoutError:
+            self._incomplete_inbox_responses_recoverable = False
+            for task in process_shutdown_tasks:
+                self._process_shutdown_recovery_checks.pop(task, None)
+            raise
 
     async def drain_inbox_responses(
         self,
@@ -658,12 +711,20 @@ class ResponseRunner:
             for task in process_shutdown_tasks:
                 self._process_shutdown_recovery_checks.pop(task, None)
             return recoverable
+        loop = asyncio.get_running_loop()
+        cancel_after_seconds = max(0.0, cancel_after_seconds)
+        proof_deadline = loop.time() + 2 * cancel_after_seconds
         process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             if not process_shutdown_tasks:
                 return True
-            recoverable = await self._recovery_proofs_are_ready(process_shutdown_tasks, recovery_checks)
+            recoverable = await self._bounded_recovery_proofs_are_ready(
+                process_shutdown_tasks,
+                recovery_checks,
+                deadline=proof_deadline,
+                process_shutdown_tasks=process_shutdown_tasks,
+            )
             self._incomplete_inbox_responses_recoverable &= recoverable
             for task in process_shutdown_tasks:
                 self._process_shutdown_recovery_checks.pop(task, None)
@@ -671,10 +732,15 @@ class ResponseRunner:
         cancelled_tasks = process_shutdown_tasks.union(pending)
         pending = await _cancel_pending_responses(
             pending,
-            timeout_seconds=cancel_after_seconds,
+            timeout_seconds=max(0.0, proof_deadline - loop.time()),
             shutdown_intent=shutdown_intent,
         )
-        cancelled_responses_recoverable = await self._recovery_proofs_are_ready(cancelled_tasks, recovery_checks)
+        cancelled_responses_recoverable = await self._bounded_recovery_proofs_are_ready(
+            cancelled_tasks,
+            recovery_checks,
+            deadline=proof_deadline,
+            process_shutdown_tasks=process_shutdown_tasks,
+        )
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         if pending:
             msg = f"{len(pending)} response tasks did not stop within bounded cleanup"
