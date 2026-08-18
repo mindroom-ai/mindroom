@@ -290,6 +290,66 @@ async def test_hidden_team_continuation_separates_text_across_the_tool_boundary(
 
 
 @pytest.mark.asyncio
+async def test_hidden_team_continuation_separates_text_across_a_new_tool_boundary() -> None:
+    """A hidden team tool started after restoration must separate later prose."""
+    presentation = _TeamStreamPresentation.new([], [], show_tool_calls=False)
+    presentation.append_consensus("Before tool.")
+    tool = ToolExecution(tool_call_id="call-2", tool_name="inspect", result="done")
+    terminal = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        content="After tool.",
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield TeamToolCallStartedEvent(
+            tool=ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}),
+        )
+        yield TeamToolCallCompletedEvent(tool=tool)
+        yield terminal
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert "Before tool.\n\nAfter tool." in presentation.render_body()
+
+
+def test_hidden_team_separator_state_survives_a_chained_pause_in_another_scope() -> None:
+    """A chained pause must preserve hidden boundaries for every member slot."""
+    prior = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=False,
+    )
+    prior.append_member("first", "Before tool.")
+    prior.start_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),
+    )
+    prior.complete_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"),
+    )
+    prior.append_member("second", "Waiting.")
+    prior.start_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}),
+    )
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=False,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+        prior_response_text=prior.render_body(),
+    )
+    restored.append_member("first", "After tool.")
+
+    assert "Before tool.\n\nAfter tool." in restored.render_body()
+
+
+@pytest.mark.asyncio
 async def test_team_continuation_reuses_an_existing_visible_tool_separator() -> None:
     """A restored team marker suffix must not become two blank paragraphs."""
     prior = _TeamStreamPresentation.new([], [], show_tool_calls=True)

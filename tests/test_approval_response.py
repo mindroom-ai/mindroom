@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunCompletedEvent, RunOutput
+from agno.run.agent import RunCompletedEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 
@@ -230,3 +230,32 @@ async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary
     await _collect_agent_continuation(events(), presentation)
 
     assert presentation.final_text() == "Before approval.\n\nAfter approval."
+
+
+@pytest.mark.asyncio
+async def test_hidden_agent_continuation_separates_text_across_a_new_tool_boundary() -> None:
+    """A hidden tool started after restoration must separate later prose."""
+    tool = ToolExecution(tool_call_id="call-2", tool_name="inspect", result="done")
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=False,
+        response_text="Before tool.",
+        track_hidden_tools=True,
+    )
+    terminal = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[tool],
+    )
+
+    async def events() -> AsyncIterator[object]:
+        yield ToolCallStartedEvent(
+            tool=ToolExecution(tool_call_id="call-2", tool_name="inspect", tool_args={}),
+        )
+        yield ToolCallCompletedEvent(tool=tool)
+        yield RunCompletedEvent(content="After tool.")
+        yield terminal
+
+    await _collect_agent_continuation(events(), presentation)
+
+    assert presentation.final_text() == "Before tool.\n\nAfter tool."

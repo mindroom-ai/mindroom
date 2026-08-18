@@ -229,6 +229,8 @@ class CollectedStreamPresentation:
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
             self.response_text += text
+        elif self.response_text:
+            self.separate_next_text = True
 
     def complete_tool(self, tool: ToolExecution | None, *, scope_key: str = "") -> None:
         """Complete the exact pending slot represented by a provider event."""

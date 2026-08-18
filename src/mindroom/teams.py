@@ -314,6 +314,31 @@ def _render_team_member_slots(
     return parts
 
 
+def _restore_hidden_team_separators(
+    state: Mapping[str, object],
+    *,
+    valid_tool_scopes: set[str],
+    show_tool_calls: bool,
+    per_member: Mapping[str, str],
+    consensus: str,
+) -> set[str]:
+    """Restore validated hidden-tool boundaries from a durable team snapshot."""
+    stored = state.get("separate_next_scopes", [])
+    if (
+        not isinstance(stored, list)
+        or any(not isinstance(scope, str) or scope not in valid_tool_scopes for scope in stored)
+        or len(stored) != len(set(stored))
+        or (show_tool_calls and stored)
+    ):
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)
+    scopes = cast("list[str]", stored)
+    if any(not (consensus if scope == "team" else per_member[scope.removeprefix("agent:")]) for scope in scopes):
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)
+    return set(scopes)
+
+
 @dataclass
 class _TeamStreamPresentation:
     """Structured team document that survives an approval continuation."""
@@ -433,6 +458,13 @@ class _TeamStreamPresentation:
         if not isinstance(consensus, str):
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)  # noqa: TRY004
+        restored_separators = _restore_hidden_team_separators(
+            state,
+            valid_tool_scopes=valid_tool_scopes,
+            show_tool_calls=show_tool_calls,
+            per_member=per_member,
+            consensus=consensus,
+        )
         restored = cls(
             member_ids=restored_ids,
             config_names_by_id=config_names_by_id,
@@ -442,6 +474,7 @@ class _TeamStreamPresentation:
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
         )
+        restored.separate_next_scopes.update(restored_separators)
         if restored.render_body() != prior_response_text:
             msg = "Team continuation presentation snapshot does not match its response text"
             raise RuntimeError(msg)
@@ -449,7 +482,7 @@ class _TeamStreamPresentation:
 
     def to_state(self) -> dict[str, object]:
         """Serialize only the structure needed to reproduce the current body."""
-        return {
+        state: dict[str, object] = {
             "kind": "team_stream",
             "version": 2,
             "members": [
@@ -463,6 +496,10 @@ class _TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
+        if not self.show_tool_calls and self.separate_next_scopes:
+            document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
+            state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
+        return state
 
     def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
         """Resolve an event only through its stable member identity."""
@@ -546,6 +583,8 @@ class _TeamStreamPresentation:
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
             self._append_tool_marker(scope_key, marker)
+        elif self._slot_text(scope_key):
+            self.separate_next_scopes.add(scope_key)
         self._align_tool_trace_with_document()
 
     def complete_tool(self, scope_key: str, tool: ToolExecution | None) -> None:
