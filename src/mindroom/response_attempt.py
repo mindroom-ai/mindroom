@@ -6,7 +6,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.cancellation import request_task_cancel, task_cancel_source_from_message
+from mindroom.cancellation import (
+    current_task_is_process_shutdown,
+    request_task_cancel,
+    task_cancel_source_from_message,
+)
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
@@ -89,10 +93,23 @@ class ResponseAttemptRunner:
         """
         if task.done():
             return
+        process_shutdown = current_task_is_process_shutdown()
         request_task_cancel(
             task,
             cancel_source=task_cancel_source_from_message(str(exc.args[0]) if exc.args else None),
+            process_shutdown=process_shutdown,
         )
+        if process_shutdown:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not task.done():
+                        request_task_cancel(task, process_shutdown=True)
+                except Exception:
+                    break
+            self._log_attempt_unwind_failure(task)
+            return
         done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
         if pending:
             self.deps.logger.warning(
@@ -133,25 +150,31 @@ class ResponseAttemptRunner:
                 run_id=request.run_id,
             )
 
-            if message_id is not None:
-                show_stop_button = await self._should_show_stop_button(request, message_id)
-                if show_stop_button:
-                    self.deps.logger.info("Adding stop button", message_id=message_id)
-                    await self.deps.stop_manager.add_stop_button(
-                        self.deps.client,
-                        message_id,
-                    )
-
             try:
-                await task
-            except asyncio.CancelledError as exc:
-                failure_reason = cancel_failure_reason(classify_cancel_source(exc))
+                if message_id is not None:
+                    show_stop_button = await self._should_show_stop_button(request, message_id)
+                    if show_stop_button:
+                        self.deps.logger.info("Adding stop button", message_id=message_id)
+                        await self.deps.stop_manager.add_stop_button(
+                            self.deps.client,
+                            message_id,
+                        )
+
+                await asyncio.shield(task)
+            except asyncio.CancelledError as caught_cancellation:
+                cancellation = caught_cancellation
+                if task.done() and task.cancelled():
+                    try:
+                        task.result()
+                    except asyncio.CancelledError as child_cancellation:
+                        cancellation = child_cancellation
+                failure_reason = cancel_failure_reason(classify_cancel_source(cancellation))
                 if request.on_cancelled is not None:
                     request.on_cancelled(failure_reason)
-                await self._forward_cancel_to_attempt_task(task, exc)
+                await self._forward_cancel_to_attempt_task(task, cancellation)
                 log_cancelled_response(
                     self.deps.logger,
-                    exc=exc,
+                    exc=cancellation,
                     message_id=message_id or tracked_message_id,
                     restart_message="Response interrupted by sync restart",
                     user_stop_message="Response cancelled by user",

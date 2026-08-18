@@ -21,6 +21,7 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     request_task_cancel,
 )
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
@@ -91,6 +92,7 @@ __all__ = [
     "cancel_task",
     "classify_cancel_source",
     "create_logged_task",
+    "current_task_is_process_shutdown",
     "is_permanent_startup_error",
     "is_sync_restart_cancel",
     "log_cancelled_response",

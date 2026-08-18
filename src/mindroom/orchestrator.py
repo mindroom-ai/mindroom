@@ -2057,10 +2057,13 @@ class _MultiAgentOrchestrator:
         )
         if cancellation is not None:
             phase_cancellations.append(cancellation)
+        pending_response_owner_count = sum(
+            count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
+        )
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         journal_failures: list[BaseException] = []
-        if self._open_journal is not None:
+        if self._open_journal is not None and pending_response_owner_count == 0:
             journal, self._open_journal = self._open_journal, None
             close_results, cancellation = await _run_shutdown_step(
                 "event_journal",
@@ -2069,6 +2072,11 @@ class _MultiAgentOrchestrator:
             if cancellation is not None:
                 phase_cancellations.append(cancellation)
             journal_failures.extend(result for result in close_results if isinstance(result, BaseException))
+        elif pending_response_owner_count > 0:
+            logger.warning(
+                "orchestrator_shared_journal_close_deferred",
+                live_response_owner_count=pending_response_owner_count,
+            )
         cleanup_failures = [
             result
             for results in (cancel_results, stop_results)

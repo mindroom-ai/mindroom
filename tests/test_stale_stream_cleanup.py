@@ -3220,6 +3220,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.try_start = AsyncMock(return_value=True)
     router_bot.stop = AsyncMock()
+    router_bot._quiesce_matrix_ingestion = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock(
         side_effect=lambda: call_order.append("turn_dispatch"),
     )

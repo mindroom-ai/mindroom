@@ -66,6 +66,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator, _run_shutdown_step
 from mindroom.response_delivery import RecoveryOutcome
+from mindroom.response_runner import ResponseRunner, ResponseShutdownTimeoutError
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -598,6 +599,59 @@ async def test_process_shutdown_cancellation_stays_prompt_without_sync_retry() -
     assert bot.response_completions == 0
     assert bot.response_cancel_sources == ["interrupted"]
     assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_signals_responses_before_coalescing_drain() -> None:
+    """Busy response cleanup starts while the shared shutdown budget is still available."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+
+    async def response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    response_task = runner.track_inbox_response(
+        response(),
+        name="test_early_process_shutdown_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await asyncio.wait_for(response_started.wait(), timeout=1.0)
+    cancellation_seen_at_coalescing: list[bool] = []
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        cancellation_seen_at_coalescing.append(response_task.cancelling() > 0)
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = runner
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+        await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert cancellation_seen_at_coalescing == [True]
+    assert response_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -1727,6 +1781,47 @@ async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
     assert response_timeouts == [0.5, 0.0]
 
 
+@pytest.mark.asyncio
+async def test_stop_does_not_close_runtime_resources_under_live_response_owner() -> None:
+    """A failed response drain cannot be followed by client/store teardown."""
+    shutdown_failure = RuntimeError("response tasks did not stop within bounded cleanup")
+    client = AsyncMock()
+    journal_dispatcher = MagicMock(stop=AsyncMock())
+    ingestion_session = MagicMock(close=AsyncMock())
+    journal = MagicMock(close=AsyncMock())
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot.running = True
+    bot.last_sync_time = None
+    bot._last_sync_monotonic = None
+    bot._first_sync_done = True
+    bot._orchestrator_ready_handled = True
+    bot._sync_shutting_down = False
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._response_runner = MagicMock(pending_inbox_response_count=1)
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=shutdown_failure)
+    bot._journal_dispatcher = journal_dispatcher
+    bot._ingestion_session = ingestion_session
+    bot._own_journal = journal
+    bot.logger = MagicMock()
+
+    with pytest.raises(RuntimeError, match="response tasks did not stop") as raised:
+        await bot.stop(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert raised.value is shutdown_failure
+    journal_dispatcher.stop.assert_not_awaited()
+    ingestion_session.close.assert_not_awaited()
+    journal.close.assert_not_awaited()
+    client.close.assert_not_awaited()
+
+
 def test_matrix_sync_change_restarts_existing_entities() -> None:
     """Changing matrix_sync must restart running bots so sync loops pick up the new transport."""
     plan = build_config_update_plan(
@@ -1917,6 +2012,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
+    bot._response_runner = MagicMock(pending_inbox_response_count=0)
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
 
@@ -2875,6 +2971,85 @@ async def test_orchestrator_stop_prioritizes_quiesce_failure_after_cleanup_failu
     assert raised.value is quiesce_failure
     assert orchestrator._sync_tasks == {}
     bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_live(
+    tmp_path: Path,
+) -> None:
+    """A live response owner keeps the shared journal open for its bounded unwind."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.stop = AsyncMock(side_effect=response_failure)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(ResponseShutdownTimeoutError) as raised:
+            await orchestrator.stop()
+
+    assert raised.value is response_failure
+    journal.close.assert_not_awaited()
+    assert orchestrator._open_journal is journal
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_retains_shared_journal_for_generic_failure_until_response_owner_stops(
+    tmp_path: Path,
+) -> None:
+    """Live ownership, not the surfaced error type, controls shared-journal close."""
+    preparation_failure = RuntimeError("preparation failed before response drain")
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    stop_calls = 0
+
+    async def fail_then_stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        nonlocal stop_calls
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        stop_calls += 1
+        if stop_calls == 1:
+            raise preparation_failure
+        bot.pending_response_owner_count = 0
+
+    bot.stop = AsyncMock(side_effect=fail_then_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(RuntimeError, match="preparation failed before response drain") as raised:
+            await orchestrator.stop()
+
+        assert raised.value is preparation_failure
+        journal.close.assert_not_awaited()
+        assert orchestrator._open_journal is journal
+
+        await orchestrator.stop()
+
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
 

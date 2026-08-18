@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom import response_attempt as response_attempt_module
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.cancellation import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    current_task_is_process_shutdown,
+    request_task_cancel,
+)
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -195,6 +200,118 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
 
     assert cancellation_reasons == ["sync_restart_cancelled"]
     assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orderly shutdown cannot finish the owned runner while its response child is live."""
+    monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, stop_manager = _runner()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+    child_tasks: list[asyncio.Task[None]] = []
+    child_shutdown_markers: list[bool] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        child = asyncio.current_task()
+        assert child is not None
+        child_tasks.append(child)
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_shutdown_markers.append(current_task_is_process_shutdown())
+            child_cancelled.set()
+            await release_child.wait()
+            raise
+
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+            ),
+        ),
+    )
+    await child_started.wait()
+    request_task_cancel(outer, process_shutdown=True)
+
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+        await asyncio.sleep(0.02)
+        assert child_shutdown_markers == [True]
+        assert not outer.done()
+        assert "$existing" in stop_manager.tracked_messages
+    finally:
+        release_child.set()
+        await asyncio.gather(outer, *child_tasks, return_exceptions=True)
+
+    assert stop_manager.cleared_messages == [("$existing", False)]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_during_stop_button_setup_still_owns_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during presence setup must not orphan the already-started response."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, stop_manager = _runner(show_stop_button=True)
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    presence_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_tasks: list[asyncio.Task[None]] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        child = asyncio.current_task()
+        assert child is not None
+        child_tasks.append(child)
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert current_task_is_process_shutdown()
+            child_cancelled.set()
+            await release_child.wait()
+            raise
+
+    async def wait_for_presence(*_args: object, **_kwargs: object) -> bool:
+        presence_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(response_attempt_module, "is_user_online", wait_for_presence)
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+                user_id="@user:localhost",
+            ),
+        ),
+    )
+    await child_started.wait()
+    await presence_started.wait()
+    request_task_cancel(outer, process_shutdown=True)
+
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+        assert not outer.done()
+        assert "$existing" in stop_manager.tracked_messages
+    finally:
+        for child in child_tasks:
+            if not child.done():
+                child.cancel()
+        release_child.set()
+        await asyncio.gather(outer, *child_tasks, return_exceptions=True)
+
+    assert stop_manager.cleared_messages == [("$existing", False)]
 
 
 @pytest.mark.asyncio

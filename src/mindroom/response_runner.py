@@ -130,6 +130,10 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 
 
+class ResponseShutdownTimeoutError(RuntimeError):
+    """Raised when a response still owns runtime resources after bounded cleanup."""
+
+
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: Sequence[str] | None,
@@ -490,6 +494,11 @@ class ResponseRunner:
         init=False,
     )
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
+    _process_shutdown_recovery_checks: dict[asyncio.Task[None], Callable[[], bool]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
@@ -540,34 +549,80 @@ class ResponseRunner:
                 error=str(error),
             )
 
-    async def drain_inbox_responses(
+    def begin_process_shutdown(self) -> None:
+        """Signal owned responses before other orderly-shutdown drains spend the budget."""
+        for task, ownership in tuple(self._inbox_response_tasks.items()):
+            if task.done():
+                continue
+            self._process_shutdown_recovery_checks.setdefault(task, ownership.recovery_proof_ready)
+            request_task_cancel(task, process_shutdown=True)
+
+    async def drain_inbox_responses(  # noqa: C901
         self,
         *,
         cancel_after_seconds: float | None = None,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> bool:
-        """Settle detached inbox responses: graceful drains await, bounded drains cancel.
+        """Settle detached inbox responses: graceful drains await, bounded grace cancels.
 
-        Returns False when a bounded drain had to cancel or abandon running work.
-        A bounded drain may take up to two cancel_after_seconds windows: one
-        waiting for completion and one letting cancelled tasks run cleanup.
+        Returns False when bounded grace had to cancel running work. The grace
+        period uses two ``cancel_after_seconds`` windows: one waiting for
+        completion and one letting cancelled tasks run cleanup. A task that
+        remains live after that cleanup window fails the shutdown boundary;
+        callers must not release resources it can still use.
         """
-        tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        tasks = list(
+            {
+                *(task for task in self._inbox_response_tasks if not task.done()),
+                *self._process_shutdown_recovery_checks,
+            },
+        )
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
-        recovery_checks = {task: self._inbox_response_tasks[task].recovery_proof_ready for task in tasks}
+        recovery_checks = {
+            task: (
+                self._process_shutdown_recovery_checks[task]
+                if task in self._process_shutdown_recovery_checks
+                else self._inbox_response_tasks[task].recovery_proof_ready
+            )
+            for task in tasks
+        }
         if not tasks:
             return True
         if cancel_after_seconds is None:
             await asyncio.gather(*tasks, return_exceptions=True)
-            return True
+            process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
+            if not process_shutdown_tasks:
+                return True
+            recoverable = all(task.done() and recovery_checks[task]() for task in process_shutdown_tasks)
+            self._incomplete_inbox_responses_recoverable &= recoverable
+            for task in process_shutdown_tasks:
+                self._process_shutdown_recovery_checks.pop(task, None)
+            return False
+        process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
-            return True
+            if not process_shutdown_tasks:
+                return True
+            recoverable = all(task.done() and recovery_checks[task]() for task in process_shutdown_tasks)
+            self._incomplete_inbox_responses_recoverable &= recoverable
+            for task in process_shutdown_tasks:
+                self._process_shutdown_recovery_checks.pop(task, None)
+            return False
+        cancelled_tasks = process_shutdown_tasks.union(pending)
         for task in pending:
-            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
-        await asyncio.wait(pending, timeout=cancel_after_seconds)
-        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+            request_task_cancel(
+                task,
+                cancel_source=shutdown_intent.cancel_source,
+                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+            )
+        _done, pending = await asyncio.wait(pending, timeout=cancel_after_seconds)
+        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in cancelled_tasks)
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
+        if pending:
+            msg = f"{len(pending)} response tasks did not stop within bounded cleanup"
+            raise ResponseShutdownTimeoutError(msg)
+        for task in process_shutdown_tasks:
+            self._process_shutdown_recovery_checks.pop(task, None)
         return False
 
     def _client(self) -> nio.AsyncClient:

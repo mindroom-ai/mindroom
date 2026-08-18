@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -156,9 +157,11 @@ async def _release_typing_state(
         await refresh_task
     client, room_id = key
     try:
-        await _set_typing(client, room_id, False, state.timeout_seconds)
-    except Exception:
-        logger.warning("Failed to stop typing indicator", room_id=room_id, exc_info=True)
+        if not current_task_is_process_shutdown():
+            try:
+                await _set_typing(client, room_id, False, state.timeout_seconds)
+            except Exception:
+                logger.warning("Failed to stop typing indicator", room_id=room_id, exc_info=True)
     finally:
         if _ACTIVE_TYPING.get(key) is state:
             del _ACTIVE_TYPING[key]

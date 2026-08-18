@@ -32,6 +32,8 @@ from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtim
 from mindroom.hooks.context import ResponseDraft
 from mindroom.message_target import MessageTarget
 from mindroom.response_delivery import RecoveryOutcome, ResponseDelivery
+from mindroom.response_runner import ResponseRunner
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
     FakeOutbox,
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
         PrincipalStore,
         TerminalTurnWrite,
     )
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -972,6 +975,97 @@ class TestAnEndedMembershipStopsTheAnswer:
 
         edit.assert_awaited()
         assert outcome.delivery_kind == "edited"
+
+    async def test_process_shutdown_does_not_send_cancellation_note(self, tmp_path: Path) -> None:
+        """Orderly teardown leaves visible cleanup to replay instead of using the client."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        runner = ResponseRunner(deps=MagicMock())
+        started = asyncio.Event()
+        outcomes: list[FinalDeliveryOutcome] = []
+
+        async def cancel_visible_note() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                outcomes.append(
+                    await gateway.deliver_cancelled_visible_note(
+                        CancelledVisibleNoteRequest(
+                            target=self._target(),
+                            event_id="$visible",
+                            existing_event_is_placeholder=True,
+                            cancel_source="interrupted",
+                            identity=TestTurnDeliveryGoesThroughTheOutbox._final_request("x").identity,
+                        ),
+                    ),
+                )
+                raise
+
+        task = runner.track_inbox_response(
+            cancel_visible_note(),
+            name="test_process_shutdown_cancel_note",
+            recovery_proof_ready=lambda: False,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        with patch("mindroom.delivery_gateway.edit_message_result", AsyncMock()) as edit:
+            assert (
+                await runner.drain_inbox_responses(
+                    cancel_after_seconds=0.1,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                )
+                is False
+            )
+
+        assert task.cancelled()
+        assert outcomes[0].terminal_status == "cancelled"
+        assert outcomes[0].event_id == "$visible"
+        assert outcomes[0].mark_handled is False
+        edit.assert_not_awaited()
+
+    async def test_process_shutdown_does_not_redact_nonstreaming_placeholder(self, tmp_path: Path) -> None:
+        """Cancellation during final hooks cannot start placeholder redaction at shutdown."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        hook_started = asyncio.Event()
+
+        async def blocked_hook(**_kwargs: object) -> ResponseDraft:
+            hook_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=blocked_hook)
+        runner = ResponseRunner(deps=MagicMock())
+        request = replace(
+            TestTurnDeliveryGoesThroughTheOutbox._final_request("answer"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+        )
+        cancelled = asyncio.Event()
+
+        async def deliver_final() -> None:
+            try:
+                await gateway.deliver_final(request)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        task = runner.track_inbox_response(
+            deliver_final(),
+            name="test_process_shutdown_final_hook",
+            recovery_proof_ready=lambda: False,
+        )
+        await asyncio.wait_for(hook_started.wait(), timeout=1.0)
+
+        assert (
+            await runner.drain_inbox_responses(
+                cancel_after_seconds=0.1,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            )
+            is False
+        )
+        assert cancelled.is_set()
+        assert task.cancelled()
+        gateway.deps.redact_message_event.assert_not_awaited()
 
     async def test_suppression_cleanup_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """The fence already dropped everything derived from that membership."""

@@ -127,7 +127,13 @@ from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .response_payload_preparation import ResponsePayloadPreparer
-from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
+from .response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    ResponseRunnerDeps,
+    ResponseShutdownTimeoutError,
+    prepare_memory_and_model_context,
+)
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -900,6 +906,11 @@ class AgentBot:
         return self._response_runner.in_flight_response_count
 
     @property
+    def pending_response_owner_count(self) -> int:
+        """Return response tasks that still own runtime resources."""
+        return self._response_runner.pending_inbox_response_count
+
+    @property
     def admission_gate(self) -> ResponseAdmissionGate:
         """Return the gate deciding whether responses may start right now."""
         return self._runtime_view.response_admission_gate
@@ -1586,7 +1597,7 @@ class AgentBot:
         """Remember one local leave while its source echo is still outstanding."""
         self._local_departures_awaiting_sync.add(room_id)
 
-    async def stop(
+    async def stop(  # noqa: C901
         self,
         *,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
@@ -1612,6 +1623,12 @@ class AgentBot:
             self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent),
             failures,
         )
+        pending_response_count = self._response_runner.pending_inbox_response_count
+        if pending_response_count > 0:
+            if failures:
+                raise failures[0]
+            msg = f"{pending_response_count} response tasks still own runtime resources"
+            raise ResponseShutdownTimeoutError(msg)
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -1719,6 +1736,8 @@ class AgentBot:
         self._sync_shutting_down = True
         self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
+        if shutdown_intent.stop_reason == "shutdown":
+            self._response_runner.begin_process_shutdown()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
         shutdown_budget = self._sync_shutdown_budget

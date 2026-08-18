@@ -63,6 +63,7 @@ from mindroom.streaming import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     interactive_response_for_visible_body,
     send_streaming_response,
 )
@@ -984,6 +985,8 @@ class DeliveryGateway:
         except asyncio.CancelledError as error:
             failure_reason = self._cancelled_error_failure_reason(error)
             cancel_source = classify_cancel_source(error)
+            if current_task_is_process_shutdown():
+                raise
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
@@ -1178,6 +1181,14 @@ class DeliveryGateway:
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
+        if current_task_is_process_shutdown():
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=request.event_id,
+                cancel_source=request.cancel_source,
+                failure_reason=failure_reason,
+                extra_content=extra_content,
+            )
         # A cancellation note is transport, not a turn's answer, so it never
         # reaches the outbox and nothing else would keep it out of a room this
         # bot has left.
@@ -1617,6 +1628,16 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Apply hooks and any final edit needed after streamed delivery completes."""
         stream_outcome = request.stream_transport_outcome
+        if current_task_is_process_shutdown() and stream_outcome.terminal_status == "cancelled":
+            failure_reason = stream_outcome.failure_reason or "interrupted"
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=stream_outcome.last_physical_stream_event_id or request.existing_event_id,
+                cancel_source=cancel_source_from_failure_reason(failure_reason),
+                failure_reason=failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+            )
         try:
             streamed_event_id = stream_outcome.last_physical_stream_event_id
             visible_stream_event_id = stream_outcome.visible_event_id

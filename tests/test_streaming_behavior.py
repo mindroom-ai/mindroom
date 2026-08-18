@@ -43,7 +43,8 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_sent_at
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -2318,6 +2319,63 @@ class TestStreamingBehavior:
 
         assert len(edited_texts) == 2
         assert edited_texts[-1] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
+
+    @pytest.mark.asyncio
+    async def test_process_shutdown_does_not_start_terminal_stream_edit(self) -> None:
+        """Orderly teardown must not start fresh Matrix cleanup under a closing client."""
+        mock_client = _make_matrix_client_mock()
+        first_edit_finished = asyncio.Event()
+        edited_texts: list[str] = []
+        transport_outcomes: list[StreamTransportOutcome] = []
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            _new_content: dict[str, object],
+            new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
+        ) -> DeliveredMatrixEvent:
+            edited_texts.append(new_text)
+            first_edit_finished.set()
+            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
+
+        async def blocked_stream() -> AsyncIterator[str]:
+            yield "Partial answer"
+            await asyncio.Event().wait()
+
+        async def run_stream() -> None:
+            try:
+                await send_streaming_response(
+                    client=mock_client,
+                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+                    config=self.config,
+                    runtime_paths=runtime_paths_for(self.config),
+                    response_stream=blocked_stream(),
+                    existing_event_id="$thinking_123",
+                )
+            except StreamingDeliveryError as error:
+                transport_outcomes.append(error.transport_outcome)
+
+        runner = ResponseRunner(deps=MagicMock())
+        response_task = runner.track_inbox_response(
+            run_stream(),
+            name="test_process_shutdown_stream",
+            recovery_proof_ready=lambda: False,
+        )
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            await asyncio.wait_for(first_edit_finished.wait(), timeout=1.0)
+            completed = await runner.drain_inbox_responses(
+                cancel_after_seconds=0.25,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            )
+
+        assert completed is False
+        assert response_task.done()
+        assert len(edited_texts) == 1
+        assert transport_outcomes[0].terminal_status == "cancelled"
+        assert transport_outcomes[0].failure_reason == "interrupted"
 
     @pytest.mark.asyncio
     async def test_cancelled_stream_reports_existing_event_id_to_callback(self) -> None:

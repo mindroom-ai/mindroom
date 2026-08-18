@@ -36,6 +36,7 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     log_cancelled_response,
 )
 from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
@@ -81,6 +82,7 @@ __all__ = [
     "cancel_failure_reason",
     "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
+    "current_task_is_process_shutdown",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
@@ -698,6 +700,17 @@ class StreamingResponse:
                 resolved_cancel_source = "sync_restart"
             elif cancelled:
                 resolved_cancel_source = "user_stop"
+        if resolved_cancel_source is not None and current_task_is_process_shutdown():
+            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=self.event_id,
+                terminal_status="cancelled",
+                rendered_body=committed_rendered_body,
+                visible_body_state=committed_visible_body_state,
+                canonical_final_body_candidate=canonical_final_body_candidate,
+                failure_reason=cancel_failure_reason(resolved_cancel_source),
+                interactive_metadata=self._last_committed_interactive_metadata,
+            )
         had_body_before_terminal = bool(self.accumulated_text.strip())
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,

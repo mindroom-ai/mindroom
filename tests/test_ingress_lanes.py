@@ -1449,6 +1449,49 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_path: Path) -> None:
+    """A response that never honors cancellation cannot erase the shutdown deadline."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancel_count = 0
+
+    async def cancellation_resistant_response() -> None:
+        nonlocal cancel_count
+        started.set()
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_count += 1
+                if release.is_set():
+                    raise
+
+    task = runner.track_inbox_response(
+        cancellation_resistant_response(),
+        name="test_cancellation_resistant_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    drain_task = asyncio.create_task(
+        runner.drain_inbox_responses(cancel_after_seconds=0.01),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="response tasks did not stop"):
+            await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.25)
+        assert cancel_count >= 1
+        assert not task.done()
+        assert runner.pending_inbox_response_count == 1
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, drain_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> None:
     """A sync-restart inbox drain preserves cancellation provenance."""
     bot = _make_bot(tmp_path, debounce_ms=0)

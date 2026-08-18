@@ -63,6 +63,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
 )
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
@@ -1361,6 +1362,80 @@ class TestAgentBot(AgentBotTestBase):
             reason="Completed placeholder-only streamed response",
         )
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_process_shutdown_does_not_redact_cancelled_stream_placeholder(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Process teardown leaves placeholder cleanup to durable replay, not a closing client."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
+        gateway = replace_delivery_gateway_deps(
+            bot,
+            redact_message_event=AsyncMock(return_value=True),
+            response_hooks=SimpleNamespace(
+                _apply_before_response=AsyncMock(),
+                emit_after_response=AsyncMock(),
+                emit_cancelled_response=AsyncMock(),
+            ),
+        )
+        outcomes: list[FinalDeliveryOutcome] = []
+        started = asyncio.Event()
+
+        async def finalize_after_cancellation() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                outcomes.append(
+                    await gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
+                            stream_transport_outcome=_stream_outcome(
+                                "$thinking",
+                                "Thinking...",
+                                terminal_status="cancelled",
+                                visible_body_state="placeholder_only",
+                                failure_reason="interrupted",
+                            ),
+                            initial_delivery_kind="edited",
+                            identity=ResponseIdentity(
+                                response_kind="ai",
+                                response_envelope=response_envelope,
+                                correlation_id="corr-process-shutdown-placeholder",
+                            ),
+                            tool_trace=None,
+                            extra_content=None,
+                            existing_event_id="$thinking",
+                            existing_event_is_placeholder=True,
+                        ),
+                    ),
+                )
+                raise
+
+        task = bot._response_runner.track_inbox_response(
+            finalize_after_cancellation(),
+            name="test_process_shutdown_placeholder",
+            recovery_proof_ready=lambda: False,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        assert (
+            await bot._response_runner.drain_inbox_responses(
+                cancel_after_seconds=0.1,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            )
+            is False
+        )
+        assert task.cancelled()
+        assert outcomes[0].terminal_status == "cancelled"
+        assert outcomes[0].event_id == "$thinking"
+        assert outcomes[0].mark_handled is False
+        gateway.deps.redact_message_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_finalize_streamed_response_placeholder_cleanup_failure_is_unhandled(
