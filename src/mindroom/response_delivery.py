@@ -118,6 +118,7 @@ class ResponseDelivery:
     # apart leaves a delivered answer whose record cannot be edited.
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
+    process_shutdown_requested: Callable[[], bool] = lambda: False
     turn_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -191,6 +192,11 @@ class ResponseDelivery:
     ) -> _FlushOutcome:
         """Finish a delivery whose durable handoff may already have committed."""
         completed: _FlushOutcome | None = None
+        process_shutdown_requested = False
+
+        def note_cancellation() -> None:
+            nonlocal process_shutdown_requested
+            process_shutdown_requested |= self.process_shutdown_requested()
 
         async def finish() -> _FlushOutcome:
             nonlocal completed
@@ -211,7 +217,15 @@ class ResponseDelivery:
                 return completed
             if handoff is not None:
                 handoff.released(handed_over)
-            outcome = await self._flush(turn_id=turn_id, stage=stage)
+            if process_shutdown_requested:
+                completed = _FlushOutcome(event_id=None)
+                return completed
+            outcome = await self._flush(
+                turn_id=turn_id,
+                stage=stage,
+                process_shutdown_requested=lambda: process_shutdown_requested,
+                on_cancelled=note_cancellation,
+            )
             if stage is DeliveryStage.FINAL and outcome.retry_required:
                 # A prior process may have attempted the placeholder without
                 # recording whether Matrix accepted it. FINAL is durably
@@ -219,13 +233,29 @@ class ResponseDelivery:
                 # delivery failure would run terminal cancellation hooks even
                 # though recovery later shows the answer. Resolve INITIAL,
                 # then retry FINAL before returning a lifecycle-visible result.
-                await self._flush(turn_id=turn_id, stage=DeliveryStage.INITIAL)
-                outcome = await self._flush(turn_id=turn_id, stage=DeliveryStage.FINAL)
+                await self._flush(
+                    turn_id=turn_id,
+                    stage=DeliveryStage.INITIAL,
+                    process_shutdown_requested=lambda: process_shutdown_requested,
+                    on_cancelled=note_cancellation,
+                )
+                if process_shutdown_requested:
+                    completed = _FlushOutcome(event_id=None)
+                    return completed
+                outcome = await self._flush(
+                    turn_id=turn_id,
+                    stage=DeliveryStage.FINAL,
+                    process_shutdown_requested=lambda: process_shutdown_requested,
+                    on_cancelled=note_cancellation,
+                )
             completed = outcome
             return completed
 
         try:
-            return await run_coroutine_until_complete(finish())
+            return await run_coroutine_until_complete(
+                finish(),
+                on_cancelled=note_cancellation,
+            )
         except asyncio.CancelledError as cancellation:
             if completed is None:
                 raise
@@ -289,11 +319,29 @@ class ResponseDelivery:
         asked directly, and an answer already there is adopted instead of sent
         again.
         """
+        process_shutdown_requested = False
+
+        def note_cancellation() -> None:
+            nonlocal process_shutdown_requested
+            process_shutdown_requested |= self.process_shutdown_requested()
+
         async with self._turn_lock(turn_id):
-            outcome = await self._flush(turn_id=turn_id, stage=stage)
+            outcome = await self._flush(
+                turn_id=turn_id,
+                stage=stage,
+                process_shutdown_requested=lambda: process_shutdown_requested,
+                on_cancelled=note_cancellation,
+            )
         return await self._finish_flush(turn_id, outcome)
 
-    async def _flush(self, *, turn_id: str, stage: DeliveryStage) -> _FlushOutcome:
+    async def _flush(
+        self,
+        *,
+        turn_id: str,
+        stage: DeliveryStage,
+        process_shutdown_requested: Callable[[], bool] | None = None,
+        on_cancelled: Callable[[], None] | None = None,
+    ) -> _FlushOutcome:
         """Send one delivery while holding its turn's visible-delivery lock."""
         claimed = await self.store.claim_delivery(turn_id=turn_id, stage=stage)
         if claimed is None:
@@ -313,6 +361,8 @@ class ResponseDelivery:
             return _FlushOutcome(event_id=None, retry_required=blocked_final)
         if claimed.acknowledged_event_id is not None:
             return _FlushOutcome(event_id=claimed.acknowledged_event_id)
+        if process_shutdown_requested is not None and process_shutdown_requested():
+            return _FlushOutcome(event_id=None)
         if not self._transaction_id_still_deduplicates(claimed):
             already_delivered = await self._delivered_before_device_changed(claimed)
             if already_delivered is not None:
@@ -322,19 +372,35 @@ class ResponseDelivery:
         # that raises would leave the row unacknowledged but stamped with this
         # device, and the next pass would see its own marker, skip the lookup
         # and post the answer twice.
-        return await self._complete_send_across_cancellation(claimed)
+        return await self._complete_send_across_cancellation(
+            claimed,
+            process_shutdown_requested=process_shutdown_requested,
+            on_cancelled=on_cancelled,
+        )
 
-    async def _complete_send_across_cancellation(self, claimed: OutboxDelivery) -> _FlushOutcome:
+    async def _complete_send_across_cancellation(
+        self,
+        claimed: OutboxDelivery,
+        *,
+        process_shutdown_requested: Callable[[], bool] | None = None,
+        on_cancelled: Callable[[], None] | None = None,
+    ) -> _FlushOutcome:
         """Retain a completed outcome while delaying cancellation until post-lock work."""
         completed: _FlushOutcome | None = None
 
         async def finish() -> _FlushOutcome:
             nonlocal completed
-            completed = await self._send_and_acknowledge(claimed)
+            completed = await self._send_and_acknowledge(
+                claimed,
+                process_shutdown_requested=process_shutdown_requested,
+            )
             return completed
 
         try:
-            return await run_coroutine_until_complete(finish())
+            return await run_coroutine_until_complete(
+                finish(),
+                on_cancelled=on_cancelled,
+            )
         except asyncio.CancelledError as cancellation:
             if completed is None:
                 raise
@@ -345,13 +411,20 @@ class ResponseDelivery:
                 propagate_cancellation=cancellation,
             )
 
-    async def _send_and_acknowledge(self, claimed: OutboxDelivery) -> _FlushOutcome:
+    async def _send_and_acknowledge(
+        self,
+        claimed: OutboxDelivery,
+        *,
+        process_shutdown_requested: Callable[[], bool] | None = None,
+    ) -> _FlushOutcome:
         """Finish an accepted Matrix attempt before propagating local cancellation."""
         await self.store.record_sending_device(
             turn_id=claimed.turn_id,
             stage=claimed.stage,
             device_id=self.sending_device_id,
         )
+        if process_shutdown_requested is not None and process_shutdown_requested():
+            return _FlushOutcome(event_id=None)
         event_id = await self.send(claimed)
         return await self._acknowledge(claimed.turn_id, claimed.stage, event_id)
 
@@ -475,6 +548,12 @@ class ResponseDelivery:
         not send is not a pass that finished, and the rows it left behind are
         answers a user is waiting for.
         """
+        process_shutdown_requested = False
+
+        def note_cancellation() -> None:
+            nonlocal process_shutdown_requested
+            process_shutdown_requested |= self.process_shutdown_requested()
+
         recovered = 0
         failed = 0
         # A failure leaves the row unacknowledged, so it stays in the query's
@@ -490,7 +569,12 @@ class ResponseDelivery:
             for delivery in batch:
                 try:
                     async with self._turn_lock(delivery.turn_id):
-                        outcome = await self._flush(turn_id=delivery.turn_id, stage=delivery.stage)
+                        outcome = await self._flush(
+                            turn_id=delivery.turn_id,
+                            stage=delivery.stage,
+                            process_shutdown_requested=lambda: process_shutdown_requested,
+                            on_cancelled=note_cancellation,
+                        )
                     sent = await self._finish_flush(delivery.turn_id, outcome)
                 except Exception:
                     logger.exception(

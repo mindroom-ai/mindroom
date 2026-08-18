@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import (
@@ -738,6 +739,71 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outbox.rows["$cause", "initial"].acknowledged_event_id == "$placeholder"
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
+        terminal_committed.assert_awaited_once_with("$cause", "$answer")
+
+    async def test_process_shutdown_finishes_started_initial_without_starting_final(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown acknowledges an in-flight placeholder and leaves FINAL for recovery."""
+        outbox = FakeOutbox()
+        terminal_committed = AsyncMock()
+        gateway = _gateway(
+            tmp_path,
+            outbox,
+            terminal_turn_committed=terminal_committed,
+        )
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        placeholder = SimpleNamespace(event_id="$placeholder", content_sent={"body": PROGRESS_PLACEHOLDER})
+        answer = SimpleNamespace(event_id="$answer", content_sent={"body": "the answer"})
+        initial_retry_started = asyncio.Event()
+        release_initial_retry = asyncio.Event()
+        sent_bodies: list[object] = []
+
+        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=None)):
+            await gateway.send_text(
+                SendTextRequest(
+                    target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+                    response_text=PROGRESS_PLACEHOLDER,
+                    delivery_turn_id="$cause",
+                    delivery_stage=DeliveryStage.INITIAL,
+                ),
+            )
+
+        async def send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> SimpleNamespace:
+            sent_bodies.append(content.get("body"))
+            if content.get("body") == PROGRESS_PLACEHOLDER:
+                initial_retry_started.set()
+                await release_initial_retry.wait()
+                return placeholder
+            return answer
+
+        with patch("mindroom.delivery_gateway.send_message_result", side_effect=send):
+            delivery = asyncio.create_task(gateway.deliver_final(self._final_request("the answer")))
+            await asyncio.wait_for(initial_retry_started.wait(), timeout=5)
+            request_task_cancel(delivery, process_shutdown=True)
+            release_initial_retry.set()
+            with pytest.raises(asyncio.CancelledError):
+                await delivery
+
+        assert outbox.rows["$cause", "initial"].acknowledged_event_id == "$placeholder"
+        assert outbox.rows["$cause", "final"].acknowledged_event_id is None
+        assert sent_bodies == [PROGRESS_PLACEHOLDER]
+        terminal_committed.assert_not_awaited()
+
+        async def recover_send(_delivery: OutboxDelivery) -> str:
+            return "$answer"
+
+        recovery = gateway._response_delivery(
+            recover_send,
+            handoff=None,
+        )
+        assert await recovery.recover() == RecoveryOutcome(recovered=1, failed=0)
         terminal_committed.assert_awaited_once_with("$cause", "$answer")
 
     async def test_live_final_ignores_its_inline_initial_result_when_another_process_wins(
@@ -1661,6 +1727,178 @@ class TestTurnDeliverySerialization:
         assert sent == [DeliveryStage.FINAL]
         assert await delivery.recover() == RecoveryOutcome(recovered=0, failed=0)
 
+    async def test_process_shutdown_after_user_cancel_leaves_enqueued_send_for_recovery(
+        self,
+    ) -> None:
+        """Process stop supersedes an earlier user cancel before a committed send."""
+        outbox = FakeOutbox()
+        enqueue_committed = asyncio.Event()
+        return_from_enqueue = asyncio.Event()
+        first_cancellation_observed = asyncio.Event()
+        original_enqueue = outbox.enqueue_delivery
+        sent: list[DeliveryStage] = []
+
+        def process_shutdown_requested() -> bool:
+            first_cancellation_observed.set()
+            return current_task_is_process_shutdown()
+
+        async def enqueue_then_wait(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            room_id: str,
+            thread_id: str | None,
+            payload: Mapping[str, object],
+            edits_event_id: str | None = None,
+            settle_source_event_ids: tuple[str, ...] = (),
+        ) -> str | None:
+            transaction_id = await original_enqueue(
+                turn_id=turn_id,
+                stage=stage,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                edits_event_id=edits_event_id,
+                settle_source_event_ids=settle_source_event_ids,
+            )
+            enqueue_committed.set()
+            await return_from_enqueue.wait()
+            return transaction_id
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(
+            store=outbox,
+            send=send,
+            process_shutdown_requested=process_shutdown_requested,
+        )
+        with patch.object(outbox, "enqueue_delivery", side_effect=enqueue_then_wait):
+            final = asyncio.create_task(
+                delivery.deliver(
+                    turn_id="turn-1",
+                    stage=DeliveryStage.FINAL,
+                    room_id=_ROOM_ID,
+                    thread_id=None,
+                    payload={"msgtype": "m.text", "body": "final"},
+                ),
+            )
+            await enqueue_committed.wait()
+            request_task_cancel(final, cancel_source="user_stop")
+            await asyncio.wait_for(first_cancellation_observed.wait(), timeout=5)
+            request_task_cancel(final, process_shutdown=True)
+            return_from_enqueue.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await final
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id is None
+        assert sent == []
+        assert await delivery.recover() == RecoveryOutcome(recovered=1, failed=0)
+        assert sent == [DeliveryStage.FINAL]
+
+    async def test_process_shutdown_during_recovery_marker_write_defers_matrix_send(
+        self,
+    ) -> None:
+        """Recovery completes its device marker but starts no new Matrix request."""
+        outbox = FakeOutbox()
+        await outbox.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "final"},
+        )
+        device_write_started = asyncio.Event()
+        finish_device_write = asyncio.Event()
+        original_record_sending_device = outbox.record_sending_device
+        sent: list[DeliveryStage] = []
+
+        async def record_device_then_wait(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            device_id: str | None,
+        ) -> None:
+            device_write_started.set()
+            await finish_device_write.wait()
+            await original_record_sending_device(
+                turn_id=turn_id,
+                stage=stage,
+                device_id=device_id,
+            )
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(
+            store=outbox,
+            send=send,
+            sending_device_id="DEVICE1",
+            process_shutdown_requested=current_task_is_process_shutdown,
+        )
+        with patch.object(outbox, "record_sending_device", side_effect=record_device_then_wait):
+            recovery = asyncio.create_task(delivery.recover())
+            await device_write_started.wait()
+            request_task_cancel(recovery, process_shutdown=True)
+            finish_device_write.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await recovery
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.sending_device_id == "DEVICE1"
+        assert stored.acknowledged_event_id is None
+        assert sent == []
+        assert await delivery.recover() == RecoveryOutcome(recovered=1, failed=0)
+        assert sent == [DeliveryStage.FINAL]
+
+    async def test_process_shutdown_after_recovery_send_starts_finishes_acknowledgement(
+        self,
+    ) -> None:
+        """A Matrix request that already started remains indivisible from its ack."""
+        outbox = FakeOutbox()
+        await outbox.enqueue_delivery(
+            turn_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "final"},
+        )
+        send_started = asyncio.Event()
+        finish_send = asyncio.Event()
+        sent: list[DeliveryStage] = []
+
+        async def send(delivery: OutboxDelivery) -> str:
+            send_started.set()
+            await finish_send.wait()
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(
+            store=outbox,
+            send=send,
+            process_shutdown_requested=current_task_is_process_shutdown,
+        )
+        recovery = asyncio.create_task(delivery.recover())
+        await send_started.wait()
+        request_task_cancel(recovery, process_shutdown=True)
+        finish_send.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await recovery
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$final"
+        assert sent == [DeliveryStage.FINAL]
+        assert await delivery.recover() == RecoveryOutcome(recovered=0, failed=0)
+
     async def test_cancelled_final_finishes_after_claiming_starts(
         self,
     ) -> None:
@@ -1703,6 +1941,113 @@ class TestTurnDeliverySerialization:
         assert stored.acknowledged_event_id == "$final"
         assert sent == [DeliveryStage.FINAL]
         assert await delivery.recover() == RecoveryOutcome(recovered=0, failed=0)
+
+    async def test_process_shutdown_after_claim_starts_leaves_send_for_recovery(
+        self,
+    ) -> None:
+        """A process stop after claim must leave the unsent row for startup recovery."""
+        outbox = FakeOutbox()
+        claim_started = asyncio.Event()
+        finish_claim = asyncio.Event()
+        original_claim = outbox.claim_delivery
+        sent: list[DeliveryStage] = []
+
+        async def claim_then_wait(*, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+            claim_started.set()
+            await finish_claim.wait()
+            return await original_claim(turn_id=turn_id, stage=stage)
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(
+            store=outbox,
+            send=send,
+            process_shutdown_requested=current_task_is_process_shutdown,
+        )
+        with patch.object(outbox, "claim_delivery", side_effect=claim_then_wait):
+            final = asyncio.create_task(
+                delivery.deliver(
+                    turn_id="turn-1",
+                    stage=DeliveryStage.FINAL,
+                    room_id=_ROOM_ID,
+                    thread_id=None,
+                    payload={"msgtype": "m.text", "body": "final"},
+                ),
+            )
+            await claim_started.wait()
+            request_task_cancel(final, process_shutdown=True)
+            finish_claim.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await final
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id is None
+        assert sent == []
+        assert await delivery.recover() == RecoveryOutcome(recovered=1, failed=0)
+        assert sent == [DeliveryStage.FINAL]
+
+    async def test_process_shutdown_before_matrix_send_leaves_marked_row_for_recovery(
+        self,
+    ) -> None:
+        """A committed device marker is recoverable when shutdown precedes the send."""
+        outbox = FakeOutbox()
+        device_write_started = asyncio.Event()
+        finish_device_write = asyncio.Event()
+        original_record_sending_device = outbox.record_sending_device
+        sent: list[DeliveryStage] = []
+
+        async def record_device_then_wait(
+            *,
+            turn_id: str,
+            stage: DeliveryStage,
+            device_id: str | None,
+        ) -> None:
+            device_write_started.set()
+            await finish_device_write.wait()
+            await original_record_sending_device(
+                turn_id=turn_id,
+                stage=stage,
+                device_id=device_id,
+            )
+
+        async def send(delivery: OutboxDelivery) -> str:
+            sent.append(delivery.stage)
+            return "$final"
+
+        delivery = ResponseDelivery(
+            store=outbox,
+            send=send,
+            sending_device_id="DEVICE1",
+            process_shutdown_requested=current_task_is_process_shutdown,
+        )
+        with patch.object(outbox, "record_sending_device", side_effect=record_device_then_wait):
+            final = asyncio.create_task(
+                delivery.deliver(
+                    turn_id="turn-1",
+                    stage=DeliveryStage.FINAL,
+                    room_id=_ROOM_ID,
+                    thread_id=None,
+                    payload={"msgtype": "m.text", "body": "final"},
+                ),
+            )
+            await device_write_started.wait()
+            request_task_cancel(final, process_shutdown=True)
+            finish_device_write.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await final
+
+        stored = await outbox.load_delivery(turn_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id is None
+        assert stored.sending_device_id == "DEVICE1"
+        assert sent == []
+        assert await delivery.recover() == RecoveryOutcome(recovered=1, failed=0)
+        assert sent == [DeliveryStage.FINAL]
 
     async def test_terminal_callback_can_reenter_the_same_turn(
         self,

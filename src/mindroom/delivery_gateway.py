@@ -639,6 +639,7 @@ class DeliveryGateway:
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
             terminal_turn_committed=self.deps.terminal_turn_committed,
+            process_shutdown_requested=current_task_is_process_shutdown,
             turn_locks=self._delivery_turn_locks,
         )
 

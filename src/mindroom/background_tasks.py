@@ -21,19 +21,29 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 _background_task_owners: dict[asyncio.Task[Any], object] = {}
 
 
+def _notify_cancelled(on_cancelled: Callable[[], None] | None) -> None:
+    """Report one cancellation observation when a caller asked for it."""
+    if on_cancelled is not None:
+        on_cancelled()
+
+
 async def run_coroutine_until_complete[Result](
     coroutine: Coroutine[Any, Any, Result],
+    *,
+    on_cancelled: Callable[[], None] | None = None,
 ) -> Result:
     """Finish one accepted coroutine before propagating cancellation."""
     worker_task = asyncio.create_task(coroutine)
     try:
         return await asyncio.shield(worker_task)
     except asyncio.CancelledError as cancellation:
+        _notify_cancelled(on_cancelled)
         worker_error: BaseException | None = None
         while not worker_task.done():
             try:
                 await asyncio.shield(worker_task)
             except asyncio.CancelledError:
+                _notify_cancelled(on_cancelled)
                 continue
             except Exception as exc:
                 worker_error = exc
@@ -129,7 +139,11 @@ async def _cancel_and_drain_background_tasks(
         if not pending_tasks:
             return
         for task in pending_tasks:
-            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
+            request_task_cancel(
+                task,
+                cancel_source=shutdown_intent.cancel_source,
+                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+            )
         done, _pending = await asyncio.wait(
             pending_tasks,
             timeout=_BACKGROUND_TASK_CANCEL_ROUND_TIMEOUT_SECONDS,

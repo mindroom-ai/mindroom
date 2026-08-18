@@ -17,9 +17,9 @@ import nio
 import pytest
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _make_client_mock,
@@ -280,3 +280,30 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         assert completed is False
         assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
+
+    @pytest.mark.asyncio
+    async def test_orderly_background_task_drain_marks_process_shutdown(self) -> None:
+        """Owned recovery tasks must see process shutdown before their cancellation."""
+        owner = object()
+        task_started = asyncio.Event()
+        process_shutdown_markers: list[bool] = []
+
+        async def never_finishes() -> None:
+            task_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                process_shutdown_markers.append(current_task_is_process_shutdown())
+                raise
+
+        create_background_task(never_finishes(), name="orderly_cancelled_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        completed = await wait_for_background_tasks(
+            timeout=0.0,
+            owner=owner,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
+        assert completed is False
+        assert process_shutdown_markers == [True]
