@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -144,6 +145,19 @@ def _consume_submission_result(task: asyncio.Task[ScriptCallReceipt]) -> None:
         task.exception()
 
 
+def _pending_receipt(payload: ScriptToolCallRequestModel) -> ScriptCallReceipt:
+    """Return a bounded-wait acknowledgement while retained submission continues."""
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return ScriptCallReceipt(
+        run_id=payload.run_id,
+        call_id=payload.call_id,
+        grant=ScriptToolGrant(payload.toolkit_name, payload.function_name),
+        state=ScriptCallState.PENDING,
+        created_at=now,
+        updated_at=now,
+    )
+
+
 @router.post("/calls", response_model=ScriptCallReceiptResponse)
 async def submit_script_call(
     request: Request,
@@ -162,10 +176,7 @@ async def submit_script_call(
     try:
         receipt = await asyncio.wait_for(asyncio.shield(task), timeout=_INITIAL_WAIT_SECONDS)
     except TimeoutError:
-        try:
-            receipt = broker.get_authenticated(payload.run_id, payload.call_id, authorization)
-        except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError, ScriptCapabilityError) as exc:
-            raise _unavailable() from exc
+        receipt = _pending_receipt(payload)
         response.status_code = 202
     except (ScriptBrokerAuthenticationError, ScriptCapabilityError) as exc:
         raise _unavailable() from exc
@@ -184,7 +195,7 @@ async def get_script_call(
     """Authenticate and return the current stable receipt for one logical call."""
     broker = _app_script_tool_broker(request.app)
     try:
-        receipt = broker.get_authenticated(run_id, call_id, authorization)
+        receipt = await asyncio.to_thread(broker.get_authenticated, run_id, call_id, authorization)
     except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError) as exc:
         raise _unavailable() from exc
     return ScriptCallReceiptResponse.from_domain(receipt)

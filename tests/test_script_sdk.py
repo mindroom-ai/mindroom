@@ -150,3 +150,26 @@ def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch
     assert exc_info.value.kind == "capability_revoked"
     assert exc_info.value.retryable is False
     assert exc_info.value.call_id == "stable-call"
+
+
+def test_script_sdk_returns_ordinary_completed_decline_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary approval denial is a tool result, not an SDK exception."""
+    _configure(monkeypatch, tmp_path)
+    declined = (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: read_url\n"
+        "Reason: Not this time.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(_receipt("completed", result=declined))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    assert MindRoomTools(poll_interval_seconds=0).call("website", "read_url") == declined

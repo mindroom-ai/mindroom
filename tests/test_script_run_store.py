@@ -261,3 +261,24 @@ def test_run_store_publishes_one_bounded_terminal_receipt(runtime_paths: Runtime
     assert published.state is ScriptCallState.COMPLETED
     assert published.result == {"body": "ok"}
     assert published.error is None
+
+
+@pytest.mark.parametrize("result", [float("nan"), float("inf"), float("-inf")])
+def test_run_store_rejects_nonfinite_terminal_receipt(runtime_paths: RuntimePaths, result: float) -> None:
+    """Durable receipts must always remain readable by strict JSON consumers."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.claim_call(
+        run_id="run-1",
+        call_id="call-1",
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest="digest-a",
+    )
+
+    with pytest.raises(ScriptRunStoreError, match="JSON serializable"):
+        store.publish_call_result(
+            run_id="run-1",
+            call_id="call-1",
+            state=ScriptCallState.COMPLETED,
+            result=result,
+        )

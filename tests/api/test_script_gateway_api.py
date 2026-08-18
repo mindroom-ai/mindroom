@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,8 +15,14 @@ from httpx import ASGITransport, AsyncClient
 
 from mindroom.api import script_gateway
 from mindroom.api.script_gateway import bind_script_tool_broker, router
-from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptCallReceipt
-from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
+from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptCallReceipt, ScriptToolBroker
+from mindroom.script_runs.models import (
+    ScriptCallClaim,
+    ScriptCallRecord,
+    ScriptCallState,
+    ScriptRunRecord,
+    ScriptToolGrant,
+)
 from mindroom.script_runs.store import ScriptCapabilityError
 
 if TYPE_CHECKING:
@@ -131,6 +140,65 @@ async def test_script_gateway_returns_pending_after_bounded_initial_wait(monkeyp
         gate.set()
         await asyncio.sleep(0)
 
+    assert response.status_code == 202
+    assert response.json()["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_bound_survives_blocking_durable_broker_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synchronous capability and claim work cannot hostage the API event loop."""
+    grant = ScriptToolGrant("website", "read_url")
+    run = ScriptRunRecord(
+        run_id="run-1",
+        agent_name="watcher",
+        owner_user_id="@alice:example.test",
+        room_id="!room:example.test",
+        source_digest="source",
+        grants=(grant,),
+        token_hash=hashlib.sha256(b"secret-token").hexdigest(),
+    )
+    call = ScriptCallRecord(
+        run_id="run-1",
+        call_id="call-1",
+        grant=grant,
+        arguments_digest="digest",
+        state=ScriptCallState.COMPLETED,
+        created_at="2026-08-18T00:00:00Z",
+        updated_at="2026-08-18T00:00:01Z",
+        result="later",
+    )
+
+    class BlockingStore:
+        def get_run(self, run_id: str) -> ScriptRunRecord:
+            assert run_id == "run-1"
+            return run
+
+        def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:
+            assert (run_id, token) == ("run-1", "secret-token")
+            time.sleep(0.1)
+            return run
+
+        def claim_call(self, **_kwargs: object) -> ScriptCallClaim:
+            return ScriptCallClaim(call=call, created=False)
+
+        def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
+            assert (run_id, call_id) == ("run-1", "call-1")
+            return call
+
+    broker = ScriptToolBroker(store=BlockingStore(), runtime_resolver=SimpleNamespace())  # type: ignore[arg-type]
+    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.01)
+    started = time.monotonic()
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json=_payload(),
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert time.monotonic() - started < 0.07
     assert response.status_code == 202
     assert response.json()["state"] == "pending"
 

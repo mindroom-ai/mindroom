@@ -571,12 +571,14 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
         wire_value = json.loads(
             json.dumps(
                 {"result": result, "error": error},
+                allow_nan=False,
                 separators=(",", ":"),
                 ensure_ascii=False,
             ),
         )
         serialized = json.dumps(
             wire_value,
+            allow_nan=False,
             separators=(",", ":"),
             ensure_ascii=False,
             sort_keys=True,
