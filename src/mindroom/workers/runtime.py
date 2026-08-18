@@ -28,8 +28,8 @@ if TYPE_CHECKING:
 __all__ = [
     "PrimaryWorkerManagerLease",
     "clear_worker_validation_snapshot_cache",
-    "configured_primary_worker_manager",
     "get_primary_worker_manager",
+    "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
     "primary_worker_backend_available",
     "primary_worker_backend_is_dedicated",
@@ -231,12 +231,12 @@ def primary_worker_backend_available(
     return True
 
 
-def configured_primary_worker_manager(
+def lease_configured_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
     runtime_config: Config | None,
-) -> WorkerBackend | None:
-    """Return the config-aware primary manager shared by runtime maintenance."""
+) -> PrimaryWorkerManagerLease | None:
+    """Lease the config-aware primary manager shared by runtime maintenance."""
     from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
 
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -260,7 +260,7 @@ def configured_primary_worker_manager(
                 runtime_config=runtime_config,
             )
             kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
-    return get_primary_worker_manager(
+    return lease_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,

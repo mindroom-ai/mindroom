@@ -60,6 +60,7 @@ class ScriptRunRecord:
     worker_key: str | None = None
     worker_id: str | None = None
     supervisor_handle: str | None = None
+    snapshot_locator: str | None = None
     name: str | None = None
     local_unsafe: bool = False
     max_tool_calls_per_minute: int = 30

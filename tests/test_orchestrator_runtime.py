@@ -6,6 +6,7 @@ import asyncio
 import os
 import signal
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -301,9 +302,11 @@ class TestAgentBot(AgentBotTestBase):
             del receive
             del send
 
+        started: list[tuple[str, int]] = []
         server = _SignalAwareUvicornServer(
             uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off", ws="websockets-sansio"),  # noqa: S104
             asyncio.Event(),
+            on_started=lambda host, port: started.append((host, port)),
         )
         server.config.load()
         server.lifespan = server.config.lifespan_class(server.config)
@@ -321,6 +324,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             bound_port = bound_address[1]
             assert address.base_url == f"http://127.0.0.1:{bound_port}"
+            assert started == [(bound_address[0], bound_port)]
         finally:
             await server.shutdown()
             reset_runtime_state()
@@ -333,8 +337,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = False
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], None] | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
@@ -374,17 +384,26 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = True
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], None] | None = None,
+            ) -> None:
+                self.on_started = on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
+                assert callable(self.on_started)
+                self.on_started("127.0.0.1", 43210)
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
         script_runtime = SimpleNamespace(
             broker=MagicMock(),
             bind_api=MagicMock(),
+            unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
         )
 
@@ -393,6 +412,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
             patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
+            patch("mindroom.api.main.unbind_script_runtime") as unbind_script_runtime,
         ):
             await _run_api_server(
                 "127.0.0.1",
@@ -408,7 +428,9 @@ class TestAgentBot(AgentBotTestBase):
             broker=script_runtime.broker,
             touch_live_workers=script_runtime.touch_live_workers,
         )
-        script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:8765/api/script-gateway")
+        script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
+        script_runtime.unbind_api.assert_awaited_once_with()
+        unbind_script_runtime.assert_called_once_with(ANY)
 
     @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
@@ -418,8 +440,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = True
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: object | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
@@ -453,8 +481,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = False
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: object | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 raise SystemExit(1)

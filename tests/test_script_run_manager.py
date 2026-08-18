@@ -274,9 +274,10 @@ def _manager(tmp_path: Path, *, mode: str | None = "all") -> tuple[ScriptRunMana
 async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_path: Path) -> None:
     """Worker allocation sees durable intent, then the launch sees private snapshotted files."""
     manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
 
     run = await manager.run(
-        _context(tmp_path),
+        context,
         source="print('ok')\n",
         limits=ScriptRunLimits(max_concurrent_runs=2, max_tool_calls_per_minute=4, max_runtime_hours=1),
     )
@@ -288,6 +289,8 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
     assert run.supervisor_handle == client.requested_handles[0]
     assert run.max_tool_calls_per_minute == 4
     assert run.max_runtime_seconds == 3600
+    assert run.snapshot_locator is not None
+    assert (context.runtime_paths.storage_root / run.snapshot_locator / "source.py").is_file()
     assert client.launch_paths[run.run_id][0].is_file()
 
 
@@ -764,6 +767,19 @@ async def test_cancel_revokes_before_signal_and_removes_force_kill_token(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_revoke_is_durable_and_cancels_broker_without_live_context(tmp_path: Path) -> None:
+    """Lifecycle revocation needs no bot and closes broker ownership immediately."""
+    manager, _backend, _client = _manager(tmp_path)
+    run = await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    revoked = await manager.revoke(run.run_id, reason="Owning agent was removed.")
+
+    assert revoked.cancel_requested_at is not None
+    assert revoked.cancellation_reason == "Owning agent was removed."
+    assert manager.broker.cancelled_runs[-1] == run.run_id
+
+
+@pytest.mark.asyncio
 async def test_graceful_cancel_escalates_and_confirms_exit_before_terminal_state(tmp_path: Path) -> None:
     """A process still running after SIGTERM receives SIGKILL before CANCELLED is durable."""
     manager, _backend, client = _manager(tmp_path)
@@ -890,7 +906,10 @@ def test_token_cleanup_does_not_follow_parent_swap(
     monkeypatch.setattr(Path, "is_symlink", swap_after_path_check)
     monkeypatch.setattr(manager_module.os, "stat", swap_before_descriptor_stat)
 
-    manager_module._remove_snapshot_token(workspace, "run-race")
+    manager_module._remove_snapshot_token(
+        tmp_path,
+        "workspace/.mindroom/script-runs/run-race",
+    )
 
     assert swapped is True
     assert outside_token.read_text(encoding="utf-8") == "outside"
@@ -904,8 +923,14 @@ def test_token_cleanup_ignores_directory_and_partial_snapshot(tmp_path: Path) ->
     partial_run = workspace / ".mindroom" / "script-runs" / "run-partial"
     partial_run.mkdir()
 
-    manager_module._remove_snapshot_token(workspace, "run-directory")
-    manager_module._remove_snapshot_token(workspace, "run-partial")
+    manager_module._remove_snapshot_token(
+        tmp_path,
+        "workspace/.mindroom/script-runs/run-directory",
+    )
+    manager_module._remove_snapshot_token(
+        tmp_path,
+        "workspace/.mindroom/script-runs/run-partial",
+    )
 
     assert directory_token.is_dir()
 
@@ -928,7 +953,10 @@ def test_token_cleanup_ignores_descriptor_close_failure(
 
     monkeypatch.setattr(manager_module.os, "close", close_then_fail)
 
-    manager_module._remove_snapshot_token(workspace, "run-close")
+    manager_module._remove_snapshot_token(
+        tmp_path,
+        "workspace/.mindroom/script-runs/run-close",
+    )
 
     assert not token.exists()
 
@@ -1042,6 +1070,24 @@ async def test_reconcile_records_exit_and_removes_raw_token(tmp_path: Path) -> N
     assert manager.broker.cancelled_runs == [run.run_id]
     assert manager.broker.cancelled_states == [ScriptRunState.EXITED]
     assert not client.launch_paths[run.run_id][1].exists()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_uses_backend_generation_that_owns_assigned_worker(tmp_path: Path) -> None:
+    """A live run stays routed to its leased backend after configuration replacement."""
+    manager, original, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    replacement = _WorkerBackend(store=manager.store, runtime_paths=context.runtime_paths)
+    manager.worker_backend = replacement
+    manager.worker_backend_resolver = lambda candidate: original if candidate is not None else replacement
+    client.next_status = WorkerScriptStatus(state="exited", exit_code=0)
+
+    reconciled = await manager.reconcile(context, run_id=run.run_id)
+
+    assert reconciled.state is ScriptRunState.EXITED
+    assert original.list_worker_thread_ids
+    assert replacement.list_worker_thread_ids == []
 
 
 @pytest.mark.asyncio

@@ -891,6 +891,36 @@ class PrincipalStore:
             ),
         )
 
+    async def resolve_background_approval_call(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        requested_status: Literal["denied", "expired"],
+        reason: str,
+    ) -> RecordedApprovalDecision:
+        """Resolve one exact background target through the shared card transaction."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_background_call(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                call_id=call_id,
+                requested_status=requested_status,
+                reason=reason,
+            ),
+        )
+
+    async def prune_background_approvals(self, *, run_id: str) -> bool:
+        """Prune settled background targets after their cards have retired."""
+        return await self._backend.write(
+            lambda transaction: approvals.prune_background_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+            ),
+        )
+
     async def resolve_continuation_approval_card(
         self,
         *,

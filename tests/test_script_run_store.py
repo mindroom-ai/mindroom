@@ -81,6 +81,21 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert authenticated.call_count == 1
 
 
+def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths: RuntimePaths) -> None:
+    """Launch snapshot ownership is a storage-relative, containment-checked fact."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+
+    updated = store.record_snapshot_locator(
+        run.run_id,
+        "workers/worker-1/workspace/.mindroom/script-runs/run-1",
+    )
+
+    assert store.get_run(run.run_id).snapshot_locator == updated.snapshot_locator
+    with pytest.raises(ScriptRunStoreError, match="snapshot locator"):
+        store.record_snapshot_locator(run.run_id, "../outside/run-1")
+
+
 def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_paths: RuntimePaths) -> None:
     """Concurrent new claims share one durable quota while an identical retry remains free."""
     store = ScriptRunStore(runtime_paths)

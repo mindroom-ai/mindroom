@@ -466,6 +466,42 @@ def resolve_card(
     )
 
 
+def resolve_background_call(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    run_id: str,
+    call_id: str,
+    requested_status: Literal["denied", "expired"],
+    reason: str,
+) -> RecordedApprovalDecision:
+    """Resolve one trusted exact background target through the shared card path."""
+    row = transaction.fetchone(
+        """
+        SELECT background.delivery_id, initial.acknowledged_event_id
+        FROM background_approval_calls AS background
+        JOIN matrix_delivery_outbox AS initial
+          ON initial.principal_id = background.principal_id
+         AND initial.delivery_id = background.delivery_id
+         AND initial.stage = 'initial'
+        WHERE background.principal_id = ? AND background.run_id = ? AND background.call_id = ?
+        """,
+        (principal_id, run_id, call_id),
+    )
+    if row is None:
+        return RecordedApprovalDecision(resolution=None, recorded=False)
+    card_event_id = cast("str | None", row["acknowledged_event_id"])
+    return _resolve_background(
+        transaction,
+        principal_id,
+        card_event_id=card_event_id,
+        delivery_id=None if card_event_id is not None else str(row["delivery_id"]),
+        requested_status=requested_status,
+        reason=reason,
+        resolution=None,
+    )
+
+
 def _resolve_continuation(
     transaction: Transaction,
     principal_id: str,
@@ -672,9 +708,12 @@ def _stored_card_resolution(
 ) -> dict[str, Any]:
     """Build one terminal payload for either durable approval target."""
     if resolution is None:
+        if decision == "approved":
+            msg = "An approved card requires its authenticated terminal payload."
+            raise ValueError(msg)
         return _terminal_content(
             _object_json(row["payload_json"], description=description),
-            status="expired",
+            status=decision,
             reason=reason or _TIMEOUT_REASON,
         )
     return _resolved_continuation_content(
@@ -1168,6 +1207,30 @@ def background_decision(
         status=cast('Literal["approved", "denied", "expired"]', str(row["decision"])),
         reason=cast("str | None", row["reason"]),
     )
+
+
+def prune_background_calls(transaction: Transaction, principal_id: str, *, run_id: str) -> bool:
+    """Delete settled background targets only after their shared cards retire."""
+    blocked = transaction.fetchone(
+        """
+        SELECT 1 AS present
+        FROM background_approval_calls AS background
+        LEFT JOIN approval_cards AS cards
+          ON cards.principal_id = background.principal_id
+         AND cards.delivery_id = background.delivery_id
+        WHERE background.principal_id = ? AND background.run_id = ?
+          AND (background.decision IS NULL OR cards.delivery_id IS NOT NULL)
+        LIMIT 1
+        """,
+        (principal_id, run_id),
+    )
+    if blocked is not None:
+        return False
+    transaction.execute(
+        "DELETE FROM background_approval_calls WHERE principal_id = ? AND run_id = ?",
+        (principal_id, run_id),
+    )
+    return True
 
 
 def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, ...]:

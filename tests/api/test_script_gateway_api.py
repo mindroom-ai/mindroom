@@ -64,7 +64,7 @@ class _GatewayBroker:
         self.authorization = authorization
         return self.submit_receipt
 
-    def get_authenticated(
+    async def get_authenticated(
         self,
         run_id: str,
         call_id: str,

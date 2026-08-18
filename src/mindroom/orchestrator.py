@@ -91,7 +91,7 @@ from mindroom.tool_system.plugins import (
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
-    configured_primary_worker_manager,
+    lease_configured_primary_worker_manager,
     shutdown_primary_worker_manager,
 )
 
@@ -195,9 +195,16 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
 class _SignalAwareUvicornServer(uvicorn.Server):
     """Uvicorn server that marks the shared shutdown event on signal exit."""
 
-    def __init__(self, config: uvicorn.Config, shutdown_requested: asyncio.Event | None) -> None:
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        shutdown_requested: asyncio.Event | None,
+        *,
+        on_started: Callable[[str, int], None] | None = None,
+    ) -> None:
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
+        self._on_started = on_started
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         """Publish the API address only after Uvicorn successfully binds it."""
@@ -213,6 +220,8 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         bound_host = bound_address[0]
         bound_port = bound_address[1]
         set_api_server_address(bound_host, bound_port)
+        if self._on_started is not None:
+            self._on_started(bound_host, bound_port)
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
@@ -305,7 +314,7 @@ class _MultiAgentOrchestrator:
             self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
-            worker_backend_provider=lambda: configured_primary_worker_manager(
+            worker_lease_provider=lambda: lease_configured_primary_worker_manager(
                 self.runtime_paths,
                 runtime_config=self.config,
             ),
@@ -2280,7 +2289,6 @@ async def _run_api_server(
             broker=script_runtime.broker,
             touch_live_workers=script_runtime.touch_live_workers,
         )
-        script_runtime.bind_api(script_gateway_url(runtime_paths, host=host, port=port))
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(
@@ -2290,7 +2298,12 @@ async def _run_api_server(
         log_level=log_level.lower(),
         ws="websockets-sansio",
     )
-    server = _SignalAwareUvicornServer(config, shutdown_requested)
+
+    def on_started(bound_host: str, bound_port: int) -> None:
+        if script_runtime is not None:
+            script_runtime.bind_api(script_gateway_url(runtime_paths, host=bound_host, port=bound_port))
+
+    server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
@@ -2298,6 +2311,9 @@ async def _run_api_server(
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
+        if script_runtime is not None:
+            await script_runtime.unbind_api()
+            api_main.unbind_script_runtime(api_main.app)
         clear_api_server_address()
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(

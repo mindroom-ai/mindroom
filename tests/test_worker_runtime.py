@@ -279,7 +279,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_plu
     assert calls == 2
 
 
-def test_configured_primary_worker_manager_uses_one_committed_config_snapshot(
+def test_configured_primary_worker_manager_lease_uses_one_committed_config_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -292,16 +292,17 @@ def test_configured_primary_worker_manager_uses_one_committed_config_snapshot(
         lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
     )
     monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    get_manager = MagicMock(return_value=expected)
-    monkeypatch.setattr(workers_runtime_module, "get_primary_worker_manager", get_manager)
+    expected_lease = MagicMock(manager=expected)
+    lease_manager = MagicMock(return_value=expected_lease)
+    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
 
-    resolved = workers_runtime_module.configured_primary_worker_manager(
+    resolved = workers_runtime_module.lease_configured_primary_worker_manager(
         runtime_paths,
         runtime_config=runtime_config,
     )
 
-    assert resolved is expected
-    assert get_manager.call_args.kwargs["storage_root"] == runtime_paths.storage_root
-    assert get_manager.call_args.kwargs["worker_grantable_credentials"] == (
+    assert resolved is expected_lease
+    assert lease_manager.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    assert lease_manager.call_args.kwargs["worker_grantable_credentials"] == (
         runtime_config.get_worker_grantable_credentials()
     )

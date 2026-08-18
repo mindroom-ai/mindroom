@@ -255,41 +255,22 @@ class _ApprovalManager:
         thread_id: str | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one exact frozen payload without creating delivery debt."""
-        if self.prepare_event is None:
-            return None
-        requested_at = _utcnow()
-        expires_at = datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC)
-        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
-        full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
-        )
-        content = self._pending_event_content(
+        return await self._prepare_approval_card(
             approval_id=approval_id,
+            tool_call_id=tool_call_id,
             tool_name=tool_name,
-            arguments=event_arguments,
-            arguments_truncated=arguments_truncated,
-            full_arguments=full_arguments,
+            raw_arguments=arguments,
             agent_name=agent_name,
+            room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
-            requested_at=requested_at,
-            expires_at=expires_at,
-            status="pending",
-        )
-        content.update(
-            continuation_id=continuation_id,
-            continuation_generation=continuation_generation,
-            tool_call_id=tool_call_id,
-        )
-        prepared = await self.prepare_event(room_id, thread_id, content)
-        if prepared is None:
-            return None
-        return ApprovalCardReservation(
-            delivery_id=approval_id,
-            tool_call_id=tool_call_id,
-            event_type=_EVENT_TYPE,
-            payload=prepared,
+            expires_at_ns=expires_at_ns,
+            target_fields={
+                "continuation_id": continuation_id,
+                "continuation_generation": continuation_generation,
+                "tool_call_id": tool_call_id,
+            },
         )
 
     async def request_background_approval(
@@ -311,40 +292,25 @@ class _ApprovalManager:
             return BackgroundApprovalDecision(status="denied", reason="Tool approval runtime is not ready.")
         delivery_id = f"script-approval:{origin.run_id}:{origin.call_id}"
         expires_at_ns = time.time_ns() + max(0, round(timeout_seconds * 1_000_000_000))
-        requested_at = _utcnow()
-        expires_at = datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC)
-        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
-        full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
-        )
-        content = self._pending_event_content(
+        reservation = await self._prepare_approval_card(
             approval_id=delivery_id,
+            tool_call_id=origin.call_id,
             tool_name=tool_name,
-            arguments=event_arguments,
-            arguments_truncated=arguments_truncated,
-            full_arguments=full_arguments,
+            raw_arguments=arguments,
             agent_name=agent_name,
+            room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
-            requested_at=requested_at,
-            expires_at=expires_at,
-            status="pending",
+            expires_at_ns=expires_at_ns,
+            target_fields={
+                "approval_target": "background_script",
+                "background_run_id": origin.run_id,
+                "background_call_id": origin.call_id,
+            },
         )
-        content.update(
-            approval_target="background_script",
-            background_run_id=origin.run_id,
-            background_call_id=origin.call_id,
-        )
-        prepared = await self.prepare_event(room_id, thread_id, content)
-        if prepared is None:
+        if reservation is None:
             return BackgroundApprovalDecision(status="denied", reason="Tool approval card could not be prepared.")
-        reservation = ApprovalCardReservation(
-            delivery_id=delivery_id,
-            tool_call_id=origin.call_id,
-            event_type=_EVENT_TYPE,
-            payload=prepared,
-        )
         reserved = await cards.reserve_background_approval_card(
             room_id=room_id,
             thread_id=thread_id,
@@ -376,6 +342,79 @@ class _ApprovalManager:
                     return decision
                 return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
             await asyncio.sleep(min(0.1, remaining))
+
+    async def _prepare_approval_card(
+        self,
+        *,
+        approval_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        raw_arguments: dict[str, Any],
+        agent_name: str | None,
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str,
+        approver_user_id: str,
+        expires_at_ns: int,
+        target_fields: dict[str, object],
+    ) -> ApprovalCardReservation | None:
+        """Prepare one shared pending-card payload for a typed exact-call target."""
+        if self.prepare_event is None:
+            return None
+        event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
+        )
+        content = self._pending_event_content(
+            approval_id=approval_id,
+            tool_name=tool_name,
+            arguments=event_arguments,
+            arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            requested_at=_utcnow(),
+            expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
+            status="pending",
+        )
+        content.update(target_fields)
+        prepared = await self.prepare_event(room_id, thread_id, content)
+        if prepared is None:
+            return None
+        return ApprovalCardReservation(
+            delivery_id=approval_id,
+            tool_call_id=tool_call_id,
+            event_type=_EVENT_TYPE,
+            payload=prepared,
+        )
+
+    async def settle_background_approval(
+        self,
+        origin: BackgroundScriptToolOrigin,
+        *,
+        reason: str,
+    ) -> bool:
+        """Deny one cancelled exact call and drive its shared terminal delivery."""
+        if self.cards is None or self.send_delivery is None:
+            return False
+        recorded = await self.cards.resolve_background_approval_call(
+            run_id=origin.run_id,
+            call_id=origin.call_id,
+            requested_status="denied",
+            reason=reason,
+        )
+        if recorded.resolution is None:
+            return False
+        await self.recover_cards_on_startup()
+        return recorded.recorded
+
+    async def prune_background_approvals(self, run_id: str) -> bool:
+        """Prune settled background targets only after terminal card retirement."""
+        if self.cards is None:
+            return False
+        return await self.cards.prune_background_approvals(run_id=run_id)
 
     async def reserve_and_publish(
         self,

@@ -124,6 +124,10 @@ class ScriptRuntimeResolver(Protocol):
         """Await the bound requester's normal approval decision."""
         ...
 
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        """Settle an exact approval whose broker ownership ended indeterminately."""
+        ...
+
 
 class _BackgroundApprovalGate(Protocol):
     async def __call__(
@@ -229,6 +233,16 @@ def _receipt_from_record(record: ScriptCallRecord) -> ScriptCallReceipt:
         updated_at=record.updated_at,
         result=record.result,
         error=record.error,
+    )
+
+
+def _background_origin(run: ScriptRunRecord, call: ScriptCallRecord) -> BackgroundScriptToolOrigin:
+    return BackgroundScriptToolOrigin(
+        run_id=run.run_id,
+        call_id=call.call_id,
+        requester_id=run.owner_user_id,
+        toolkit_name=call.grant.toolkit_name,
+        function_name=call.grant.function_name,
     )
 
 
@@ -396,6 +410,30 @@ class ScriptToolBroker:
                     state=ScriptCallState.INDETERMINATE,
                     error=_INDETERMINATE_ERROR,
                 )
+        pending = await asyncio.to_thread(self.store.pending_calls, run_id)
+        for record in pending:
+            await asyncio.to_thread(
+                self.store.publish_call_result,
+                run_id=run_id,
+                call_id=record.call_id,
+                state=ScriptCallState.INDETERMINATE,
+                error=_INDETERMINATE_ERROR,
+            )
+        calls = await asyncio.to_thread(self.store.calls_for_run, run_id)
+        if calls:
+            run = await asyncio.to_thread(self.store.get_run, run_id)
+            settlements = await asyncio.gather(
+                *(
+                    self.runtime_resolver.settle_approval(
+                        _background_origin(run, call),
+                        reason="Background script ownership was cancelled.",
+                    )
+                    for call in calls
+                ),
+                return_exceptions=True,
+            )
+            if error := next((result for result in settlements if isinstance(result, BaseException)), None):
+                raise error
 
     async def accept_authenticated(
         self,
@@ -406,15 +444,25 @@ class ScriptToolBroker:
         accepted = await self._accept_prepared_call(request, authorization=authorization)
         return accepted.receipt
 
-    def get_authenticated(
+    async def get_authenticated(
         self,
         run_id: str,
         call_id: str,
         authorization: str | None,
     ) -> ScriptCallReceipt:
-        """Authenticate and retrieve one gateway receipt."""
+        """Authenticate a receipt and settle approval debt discovered as orphaned."""
         self.authenticate(run_id, authorization)
-        return self.get_call(run_id, call_id)
+        receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
+        if receipt.state is ScriptCallState.INDETERMINATE:
+            run, call = await asyncio.gather(
+                asyncio.to_thread(self.store.get_run, run_id),
+                asyncio.to_thread(self.store.get_call, run_id, call_id),
+            )
+            await self.runtime_resolver.settle_approval(
+                _background_origin(run, call),
+                reason="Background script call ownership was orphaned after restart.",
+            )
+        return receipt
 
     async def _execute_claimed_call(
         self,
@@ -440,13 +488,7 @@ class ScriptToolBroker:
         call: ScriptCallRecord,
         arguments: dict[str, object],
     ) -> ScriptCallReceipt:
-        origin = BackgroundScriptToolOrigin(
-            run_id=run.run_id,
-            call_id=call.call_id,
-            requester_id=run.owner_user_id,
-            toolkit_name=call.grant.toolkit_name,
-            function_name=call.grant.function_name,
-        )
+        origin = _background_origin(run, call)
         correlation_id = f"background-script:{run.run_id}:{call.call_id}"
         execution_started = False
         try:

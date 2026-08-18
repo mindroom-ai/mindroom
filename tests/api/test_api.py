@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -542,6 +543,24 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
+def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
+    """An API app cannot retain script capabilities from another runtime root."""
+    fresh_app = FastAPI()
+    initial_runtime = _runtime_paths(tmp_path / "first")
+    refreshed_runtime = _runtime_paths(tmp_path / "second")
+    main.initialize_api_app(fresh_app, initial_runtime)
+    main.bind_script_runtime(
+        fresh_app,
+        broker=MagicMock(),
+        touch_live_workers=MagicMock(),
+    )
+
+    main.initialize_api_app(fresh_app, refreshed_runtime)
+
+    assert fresh_app.state.script_tool_broker is None
+    assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
+
+
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
     """Swapping an app to a different config file should drop the previous cached payload."""
     first_dir = tmp_path / "first"
@@ -892,7 +911,11 @@ def test_worker_cleanup_touches_live_script_workers_before_maintenance(
     actions: list[str] = []
     worker_manager = MagicMock()
     worker_manager.backend_name = "test"
-    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
     monkeypatch.setattr(
         main,
         "maintain_workers",
@@ -1136,7 +1159,7 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
@@ -1145,7 +1168,7 @@ def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kubernetes cleanup should skip the cycle when no committed runtime config is available."""
-    monkeypatch.setattr(main, "configured_primary_worker_manager", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
@@ -1177,8 +1200,8 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
         main,
-        "configured_primary_worker_manager",
-        lambda *_args, **_kwargs: worker_manager,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
     runtime_paths = main._app_runtime_paths(main.app)
@@ -1204,8 +1227,8 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
     worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
         main,
-        "configured_primary_worker_manager",
-        lambda *_args, **_kwargs: worker_manager,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)

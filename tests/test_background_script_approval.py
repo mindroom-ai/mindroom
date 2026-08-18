@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 
 from mindroom.approval_manager import _ApprovalManager
-from mindroom.event_journal import DeliveryStage, EventJournalStore, MatrixDelivery
+from mindroom.event_journal import DeliveryStage, EventJournalStore, MatrixDelivery, StoredApprovalCard
 from mindroom.tool_approval import BackgroundScriptToolOrigin
 from tests.conftest import test_runtime_paths
 
@@ -63,6 +63,20 @@ async def _approval_manager(
     return manager, journal, initial_sent
 
 
+async def _wait_for_pending_card(journal: EventJournalStore) -> StoredApprovalCard:
+    cards = journal.principal("router@shared")
+    for _attempt in range(1000):
+        stored = await cards.pending_approval_card(
+            room_id="!room:localhost",
+            card_event_id="$approval",
+        )
+        if stored is not None:
+            return stored
+        await asyncio.sleep(0.001)
+    message = "Approval delivery was not durably acknowledged."
+    raise AssertionError(message)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status",
@@ -89,14 +103,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
     )
     try:
         await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
-        await asyncio.sleep(0.01)
-        stored = await journal.principal("router@shared").pending_approval_card(
-            room_id="!room:localhost",
-            card_event_id="$approval",
-        )
-        assert stored is not None, await journal.principal("router@shared").pending_approval_cards(
-            room_id="!room:localhost",
-        )
+        stored = await _wait_for_pending_card(journal)
         assert stored.target_kind == "background_script"
         wrong_actor = await manager.handle_card_response(
             room_id="!room:localhost",
@@ -207,3 +214,52 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
     finally:
         await recovered.shutdown()
         await recovered_journal.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(tmp_path: Path) -> None:
+    """Broker cancellation closes the exact card through shared resolution and recovery."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+
+        settled = await manager.settle_background_approval(
+            _origin(),
+            reason="Background script ownership was cancelled.",
+        )
+        decision = await asyncio.wait_for(decision_task, timeout=1.0)
+
+        assert settled is True
+        assert decision.status == "denied"
+        assert decision.reason == "Background script ownership was cancelled."
+        assert await journal.principal("router@shared").is_terminal_approval_card(
+            room_id="!room:localhost",
+            card_event_id="$approval",
+        )
+        assert await manager.prune_background_approvals("run-1") is True
+        assert (
+            await journal.principal("router@shared").background_approval_decision(
+                run_id="run-1",
+                call_id="call-1",
+            )
+            is None
+        )
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()

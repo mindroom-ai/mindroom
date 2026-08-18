@@ -10,6 +10,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 from mindroom.script_runs.models import (
@@ -120,6 +121,7 @@ class ScriptRunStore:
         if control_root is None:
             raise ScriptRunStoreError(_CONTROL_STATE_UNAVAILABLE)
         self.database_path = control_root / "script_runs" / "script_runs.sqlite3"
+        self.storage_root = runtime_paths.storage_root.expanduser().resolve()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_database()
 
@@ -141,11 +143,11 @@ class ScriptRunStore:
                     INSERT INTO script_runs (
                         run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash,
-                        worker_key, worker_id, supervisor_handle, name, local_unsafe,
+                        worker_key, worker_id, supervisor_handle, snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
                         cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -302,6 +304,24 @@ class ScriptRunStore:
             raise ScriptCallNotFoundError(call_id)
         return _call_from_row(row)
 
+    def pending_calls(self, run_id: str) -> list[ScriptCallRecord]:
+        """Return pending receipts that still need broker ownership settlement."""
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM script_calls WHERE run_id = ? AND state = ? ORDER BY call_id",
+                (run_id, ScriptCallState.PENDING.value),
+            ).fetchall()
+        return [_call_from_row(row) for row in rows]
+
+    def calls_for_run(self, run_id: str) -> list[ScriptCallRecord]:
+        """Return all exact calls whose approval settlement may need retrying."""
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM script_calls WHERE run_id = ? ORDER BY call_id",
+                (run_id,),
+            ).fetchall()
+        return [_call_from_row(row) for row in rows]
+
     def publish_call_result(  # noqa: Vulture
         self,
         *,
@@ -360,6 +380,28 @@ class ScriptRunStore:
                 (now, reason, run_id),
             )
         return replace(run, cancel_requested_at=now, cancellation_reason=reason)
+
+    def record_snapshot_locator(self, run_id: str, locator: str) -> ScriptRunRecord:
+        """Persist the containment-checked storage-relative directory for one launch snapshot."""
+        normalized = _validated_snapshot_locator(run_id, locator)
+        with self._write_transaction() as connection:
+            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ScriptRunNotFoundError(run_id)
+            run = _run_from_row(row)
+            if run.snapshot_locator is not None:
+                if run.snapshot_locator == normalized:
+                    return run
+                msg = f"Script run '{run_id}' already owns a different snapshot locator."
+                raise ScriptRunStoreError(msg)
+            if run.state in _TERMINAL_RUN_STATES:
+                msg = f"Terminal script run '{run_id}' cannot record a snapshot locator."
+                raise ScriptRunStoreError(msg)
+            connection.execute(
+                "UPDATE script_runs SET snapshot_locator = ? WHERE run_id = ?",
+                (normalized, run_id),
+            )
+        return replace(run, snapshot_locator=normalized)
 
     def transition_run(  # noqa: Vulture
         self,
@@ -447,6 +489,9 @@ class ScriptRunStore:
         with self._write_transaction() as connection:
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(script_runs)")}
+            if "snapshot_locator" not in columns:
+                connection.execute("ALTER TABLE script_runs ADD COLUMN snapshot_locator TEXT")
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -487,6 +532,7 @@ _SCHEMA_STATEMENTS = (
                     worker_key TEXT,
                     worker_id TEXT,
                     supervisor_handle TEXT,
+                    snapshot_locator TEXT,
                     name TEXT,
                     local_unsafe INTEGER NOT NULL,
                     max_tool_calls_per_minute INTEGER NOT NULL,
@@ -555,6 +601,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         run.worker_key,
         run.worker_id,
         run.supervisor_handle,
+        run.snapshot_locator,
         run.name,
         int(run.local_unsafe),
         run.max_tool_calls_per_minute,
@@ -587,6 +634,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         worker_key=_nullable_string(row["worker_key"]),
         worker_id=_nullable_string(row["worker_id"]),
         supervisor_handle=_nullable_string(row["supervisor_handle"]),
+        snapshot_locator=_nullable_string(row["snapshot_locator"]),
         name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),
         max_tool_calls_per_minute=int(row["max_tool_calls_per_minute"]),
@@ -660,6 +708,20 @@ def _validate_run_error(error: str | None) -> None:
     if error is not None and len(error.encode("utf-8")) > _MAX_RUN_ERROR_BYTES:
         msg = f"Script run error exceeds the {_MAX_RUN_ERROR_BYTES}-byte limit."
         raise ScriptRunStoreError(msg)
+
+
+def _validated_snapshot_locator(run_id: str, locator: str) -> str:
+    path = PurePosixPath(locator)
+    if (
+        not locator
+        or "\\" in locator
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.parts[-3:] != (".mindroom", "script-runs", run_id)
+    ):
+        msg = "Background script snapshot locator must identify its storage-contained run directory."
+        raise ScriptRunStoreError(msg)
+    return path.as_posix()
 
 
 def _nullable_string(value: object) -> str | None:

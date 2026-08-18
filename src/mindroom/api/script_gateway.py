@@ -40,7 +40,7 @@ class _ScriptGatewayBroker(Protocol):
         """Authenticate and durably claim one stable call."""
         ...
 
-    def get_authenticated(
+    async def get_authenticated(
         self,
         run_id: str,
         call_id: str,
@@ -107,7 +107,7 @@ router = APIRouter(prefix="/api/script-gateway", tags=["script-gateway"])
 
 def bind_script_tool_broker(
     app: FastAPI,
-    broker: _ScriptGatewayBroker,
+    broker: _ScriptGatewayBroker | None,
 ) -> None:
     """Bind the lifecycle-owned broker to one primary API app."""
     app.state.script_tool_broker = broker
@@ -213,7 +213,7 @@ async def get_script_call(
     """Authenticate and return the current stable receipt for one logical call."""
     broker = _app_script_tool_broker(request.app)
     try:
-        receipt = await asyncio.to_thread(broker.get_authenticated, run_id, call_id, authorization)
+        receipt = await broker.get_authenticated(run_id, call_id, authorization)
     except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError) as exc:
         raise _unavailable() from exc
     except ScriptCallPreparationPendingError as exc:

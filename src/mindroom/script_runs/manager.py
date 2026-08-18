@@ -135,6 +135,7 @@ class ScriptRunManager:
     worker_client: ScriptWorkerClient
     worker_backend: WorkerBackend | None
     gateway_url: str
+    worker_backend_resolver: Callable[[ScriptRunRecord | None], WorkerBackend | None] | None = None
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
@@ -162,7 +163,9 @@ class ScriptRunManager:
             runtime_paths=context.runtime_paths,
         )
         execution_mode = sandbox_proxy_config(context.runtime_paths).execution_mode
-        if execution_mode in _WORKER_EXECUTION_MODES or (execution_mode is None and self.worker_backend is not None):
+        if execution_mode in _WORKER_EXECUTION_MODES or (
+            execution_mode is None and self._worker_backend_for(None) is not None
+        ):
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
@@ -241,7 +244,7 @@ class ScriptRunManager:
             try:
                 created = await asyncio.to_thread(self.store.get_run, run.run_id)
                 if created.cancel_requested_at is not None:
-                    return await self._complete_cancel_before_spawn(context, created)
+                    return await self._complete_cancel_before_spawn(created)
                 if run.local_unsafe:
                     return await self._launch_local(context, run=run, source=source, token=token)
                 return await self._launch_worker(
@@ -252,14 +255,14 @@ class ScriptRunManager:
                     worker_spec=_require_worker_spec(worker_spec),
                 )
             except _AmbiguousLaunchError as exc:
-                await self._cleanup_token(context, run)
+                await self._cleanup_token(run)
                 raise exc.cause from None
             except BaseException as exc:
                 durable: ScriptRunRecord | None = None
                 with suppress(Exception):
                     durable = await asyncio.to_thread(self.store.get_run, run.run_id)
                 if durable is not None and durable.cancel_requested_at is not None:
-                    await self._cleanup_token(context, durable)
+                    await self._cleanup_token(durable)
                     raise
                 if isinstance(exc, asyncio.CancelledError):
                     failure_state = ScriptRunState.INTERRUPTED
@@ -274,12 +277,11 @@ class ScriptRunManager:
                 try:
                     await self.broker.cancel_run(run.run_id)
                 finally:
-                    await self._cleanup_token(context, run)
+                    await self._cleanup_token(durable or run)
                 raise
 
     async def _complete_cancel_before_spawn(
         self,
-        context: ToolRuntimeContext,
         run: ScriptRunRecord,
     ) -> ScriptRunRecord:
         broker_error: BaseException | None = None
@@ -288,7 +290,7 @@ class ScriptRunManager:
         except BaseException as exc:
             broker_error = exc
         finally:
-            await self._cleanup_token(context, run)
+            await self._cleanup_token(run)
         cancelled = await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
@@ -310,7 +312,7 @@ class ScriptRunManager:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                await self._cleanup_token(context, run)
+                await self._cleanup_token(run)
             return ScriptRunStatus(run=run)
         if run.cancel_requested_at is not None:
             reconciled = await self.cancel(
@@ -323,7 +325,7 @@ class ScriptRunManager:
             reconciled = await self.reconcile(context, run_id=run.run_id)
             return ScriptRunStatus(run=reconciled)
         status = await self._process_status(run)
-        reconciled = await self._apply_process_status(context, run, status)
+        reconciled = await self._apply_process_status(run, status)
         return ScriptRunStatus(run=reconciled, output=status.output)
 
     async def cancel(
@@ -342,6 +344,20 @@ class ScriptRunManager:
             reason=reason,
             terminal_state=ScriptRunState.CANCELLED,
         )
+
+    async def revoke(self, run_id: str, *, reason: str) -> ScriptRunRecord:
+        """Persist lifecycle revocation and cancel broker ownership without a live bot."""
+        run = await asyncio.to_thread(self.store.get_run, run_id)
+        if run.state in _TERMINAL_STATES:
+            await self.broker.cancel_run(run_id)
+            return run
+        revoked = await asyncio.to_thread(self.request_revocation, run.run_id, reason=reason)
+        await self.broker.cancel_run(run_id)
+        return revoked
+
+    def request_revocation(self, run_id: str, *, reason: str) -> ScriptRunRecord:
+        """Persist lifecycle desired state before any broker or supervisor work."""
+        return self.store.request_cancel(run_id, reason=reason)
 
     async def interrupt(
         self,
@@ -370,18 +386,33 @@ class ScriptRunManager:
     ) -> ScriptRunRecord:
         """Revoke, signal, and publish one confirmed terminal process outcome."""
         run = self._owned_run(context, run_id)
+        return await self._terminate_durable_run(
+            run,
+            force=force,
+            reason=reason,
+            terminal_state=terminal_state,
+        )
+
+    async def _terminate_durable_run(
+        self,
+        run: ScriptRunRecord,
+        *,
+        force: bool,
+        reason: str,
+        terminal_state: ScriptRunState,
+    ) -> ScriptRunRecord:
         if run.state in _TERMINAL_STATES:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                await self._cleanup_token(context, run)
+                await self._cleanup_token(run)
             return run
-        revoked = await asyncio.to_thread(self.store.request_cancel, run_id, reason=reason)
+        revoked = await asyncio.to_thread(self.store.request_cancel, run.run_id, reason=reason)
         broker_error: BaseException | None = None
         process_error: BaseException | None = None
         process_status: WorkerScriptStatus | None = None
         try:
-            await self.broker.cancel_run(run_id)
+            await self.broker.cancel_run(run.run_id)
         except BaseException as exc:
             broker_error = exc
         try:
@@ -389,7 +420,7 @@ class ScriptRunManager:
         except BaseException as exc:
             process_error = exc
         finally:
-            await self._cleanup_token(context, revoked)
+            await self._cleanup_token(revoked)
         if broker_error is not None:
             raise broker_error
         if process_error is not None:
@@ -399,7 +430,7 @@ class ScriptRunManager:
             raise ScriptRunManagerError(msg)
         return await asyncio.to_thread(
             self.store.transition_run,
-            run_id,
+            run.run_id,
             state=terminal_state,
             exit_code=process_status.exit_code,
         )
@@ -426,11 +457,19 @@ class ScriptRunManager:
     ) -> ScriptRunRecord:
         """Reconcile one owned durable run with its current process fact."""
         run = self._owned_run(context, run_id)
+        return await self._reconcile_durable_run(run)
+
+    async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
+        """Reconcile process truth for one trusted durable lifecycle record."""
+        run = await asyncio.to_thread(self.store.get_run, run_id)
+        return await self._reconcile_durable_run(run)
+
+    async def _reconcile_durable_run(self, run: ScriptRunRecord) -> ScriptRunRecord:
         if run.state in _TERMINAL_STATES:
             try:
                 await self.broker.cancel_run(run.run_id)
             finally:
-                await self._cleanup_token(context, run)
+                await self._cleanup_token(run)
             return run
         if run.cancel_requested_at is not None:
             terminal_state = (
@@ -438,21 +477,21 @@ class ScriptRunManager:
                 if run.cancellation_reason == _ISOLATION_INTERRUPTION_REASON
                 else ScriptRunState.CANCELLED
             )
-            return await self._terminate_run(
-                context,
-                run_id=run.run_id,
+            return await self._terminate_durable_run(
+                run,
                 force=False,
                 reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
                 terminal_state=terminal_state,
             )
         if _runtime_expired(run):
-            return await self.cancel(
-                context,
-                run_id=run.run_id,
+            return await self._terminate_durable_run(
+                run,
+                force=False,
                 reason="Background script maximum runtime exceeded.",
+                terminal_state=ScriptRunState.CANCELLED,
             )
         status = await self._process_status(run)
-        return await self._apply_process_status(context, run, status)
+        return await self._apply_process_status(run, status)
 
     async def _launch_worker(
         self,
@@ -463,10 +502,11 @@ class ScriptRunManager:
         token: str,
         worker_spec: WorkerSpec,
     ) -> ScriptRunRecord:
-        if self.worker_backend is None:
+        backend = self._worker_backend_for(None)
+        if backend is None:
             msg = "Background script worker backend is unavailable."
             raise ScriptRunManagerError(msg)
-        worker = await asyncio.to_thread(self.worker_backend.ensure_worker, worker_spec)
+        worker = await asyncio.to_thread(backend.ensure_worker, worker_spec)
         await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
@@ -475,12 +515,13 @@ class ScriptRunManager:
         )
         assigned = await asyncio.to_thread(self.store.get_run, run.run_id)
         if assigned.cancel_requested_at is not None:
-            return await self._complete_cancel_before_spawn(context, assigned)
+            return await self._complete_cancel_before_spawn(assigned)
         workspace = _worker_workspace(context, worker)
+        await self._record_snapshot_locator(run, workspace)
         source_path, token_path = _write_snapshot(workspace, run.run_id, source=source, token=token)
         ready = await asyncio.to_thread(self.store.get_run, run.run_id)
         if ready.cancel_requested_at is not None:
-            return await self._complete_cancel_before_spawn(context, ready)
+            return await self._complete_cancel_before_spawn(ready)
         supervisor_handle = _require_supervisor_handle(run.supervisor_handle)
         try:
             receipt = await self.worker_client.launch(
@@ -544,10 +585,11 @@ class ScriptRunManager:
         token: str,
     ) -> ScriptRunRecord:
         workspace = _agent_workspace(context)
+        await self._record_snapshot_locator(run, workspace)
         source_path, token_path = _write_snapshot(workspace, run.run_id, source=source, token=token)
         ready = await asyncio.to_thread(self.store.get_run, run.run_id)
         if ready.cancel_requested_at is not None:
-            return await self._complete_cancel_before_spawn(context, ready)
+            return await self._complete_cancel_before_spawn(ready)
         socket_path = ensure_shell_supervisor()
         environment = dict(os.environ)
         environment.update(context.runtime_paths.process_env)
@@ -657,13 +699,13 @@ class ScriptRunManager:
 
     async def _apply_process_status(
         self,
-        context: ToolRuntimeContext,
         run: ScriptRunRecord,
         status: WorkerScriptStatus,
     ) -> ScriptRunRecord:
         if status.state == "running":
-            if run.worker_key is not None and self.worker_backend is not None:
-                await asyncio.to_thread(self.worker_backend.touch_worker, run.worker_key)
+            backend = self._worker_backend_for(run)
+            if run.worker_key is not None and backend is not None:
+                await asyncio.to_thread(backend.touch_worker, run.worker_key)
             return run
         if status.state == "unknown":
             state = ScriptRunState.INTERRUPTED
@@ -684,7 +726,7 @@ class ScriptRunManager:
         try:
             await self.broker.cancel_run(run.run_id)
         finally:
-            await self._cleanup_token(context, terminal)
+            await self._cleanup_token(terminal)
         return terminal
 
     async def _terminate_and_confirm(
@@ -763,45 +805,37 @@ class ScriptRunManager:
         )
 
     async def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
-        if self.worker_backend is None or run.worker_id is None or run.worker_key is None:
+        backend = self._worker_backend_for(run)
+        if backend is None or run.worker_id is None or run.worker_key is None:
             return None
-        workers = await asyncio.to_thread(self.worker_backend.list_workers, include_idle=True)
+        workers = await asyncio.to_thread(backend.list_workers, include_idle=True)
         return next(
             (worker for worker in workers if worker.worker_id == run.worker_id and worker.worker_key == run.worker_key),
             None,
         )
 
-    async def _cleanup_token(self, context: ToolRuntimeContext, run: ScriptRunRecord) -> None:
+    def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
+        if self.worker_backend_resolver is not None:
+            return self.worker_backend_resolver(run)
+        return self.worker_backend
+
+    async def _record_snapshot_locator(self, run: ScriptRunRecord, workspace: Path) -> ScriptRunRecord:
+        locator = _snapshot_locator(self.store.storage_root, workspace, run.run_id)
+        return await asyncio.to_thread(self.store.record_snapshot_locator, run.run_id, locator)
+
+    async def _cleanup_token(self, run: ScriptRunRecord) -> None:
         try:
-            workspace: Path | None
-            if run.local_unsafe:
-                workspace = _agent_workspace(context)
-            else:
-                worker = await self._worker_handle(run)
-                workspace = (
-                    _worker_workspace(context, worker)
-                    if worker is not None
-                    else _worker_workspace_from_run(context, run)
-                )
-            if workspace is None:
+            if run.snapshot_locator is None:
                 return
-            await asyncio.to_thread(_remove_snapshot_token, workspace, run.run_id)
+            await asyncio.to_thread(_remove_snapshot_token, self.store.storage_root, run.snapshot_locator)
         except Exception:
             logger.warning("script_capability_cleanup_failed", run_id=run.run_id, exc_info=True)
 
-    async def cleanup_snapshot(self, context: ToolRuntimeContext, run: ScriptRunRecord) -> bool:
+    async def cleanup_snapshot(self, run: ScriptRunRecord) -> bool:
         """Remove one terminal run's bounded source snapshot before record pruning."""
-        workspace: Path | None
-        if run.local_unsafe:
-            workspace = _agent_workspace(context)
-        else:
-            worker = await self._worker_handle(run)
-            workspace = (
-                _worker_workspace(context, worker) if worker is not None else _worker_workspace_from_run(context, run)
-            )
-        if workspace is None:
+        if run.snapshot_locator is None:
             return True
-        return await asyncio.to_thread(_remove_snapshot, workspace, run.run_id)
+        return await asyncio.to_thread(_remove_snapshot, self.store.storage_root, run.snapshot_locator)
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
@@ -844,15 +878,17 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
     return resolved_workspace
 
 
-def _worker_workspace_from_run(context: ToolRuntimeContext, run: ScriptRunRecord) -> Path | None:
-    if run.worker_key is None:
-        return None
-    workspace = worker_root_path(context.runtime_paths.storage_root, run.worker_key) / "workspace"
-    return workspace if workspace.exists() else None
-
-
 def _snapshot_relative_dir(run_id: str) -> Path:
     return Path(".mindroom") / "script-runs" / run_id
+
+
+def _snapshot_locator(storage_root: Path, workspace: Path, run_id: str) -> str:
+    run_dir = (workspace / _snapshot_relative_dir(run_id)).resolve()
+    try:
+        return run_dir.relative_to(storage_root).as_posix()
+    except ValueError as exc:
+        msg = "Background script snapshot must stay inside primary storage."
+        raise ScriptRunManagerError(msg) from exc
 
 
 def _write_snapshot(workspace: Path, run_id: str, *, source: bytes, token: str) -> tuple[Path, Path]:
@@ -882,13 +918,13 @@ def _write_private_file(path: Path, content: bytes) -> None:
     path.chmod(0o600)
 
 
-def _remove_snapshot_token(workspace: Path, run_id: str) -> None:
+def _remove_snapshot_token(storage_root: Path, locator: str) -> None:
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     descriptors: list[int] = []
     try:
-        current_descriptor = os.open(workspace, directory_flags)
+        current_descriptor = os.open(storage_root, directory_flags)
         descriptors.append(current_descriptor)
-        for part in _snapshot_relative_dir(run_id).parts:
+        for part in Path(locator).parts:
             current_descriptor = os.open(part, directory_flags, dir_fd=current_descriptor)
             descriptors.append(current_descriptor)
         try:
@@ -906,14 +942,15 @@ def _remove_snapshot_token(workspace: Path, run_id: str) -> None:
                 os.close(descriptor)
 
 
-def _remove_snapshot(workspace: Path, run_id: str) -> bool:
+def _remove_snapshot(storage_root: Path, locator: str) -> bool:
     """Remove only the two known files and empty directory for one run snapshot."""
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     descriptors: list[int] = []
     try:
-        current_descriptor = os.open(workspace, directory_flags)
+        current_descriptor = os.open(storage_root, directory_flags)
         descriptors.append(current_descriptor)
-        for part in _snapshot_relative_dir(run_id).parts:
+        parts = Path(locator).parts
+        for part in parts:
             current_descriptor = os.open(part, directory_flags, dir_fd=current_descriptor)
             descriptors.append(current_descriptor)
         for filename in ("capability", "source.py"):
@@ -923,7 +960,7 @@ def _remove_snapshot(workspace: Path, run_id: str) -> bool:
                 continue
             if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 os.unlink(filename, dir_fd=current_descriptor)
-        os.rmdir(run_id, dir_fd=descriptors[-2])
+        os.rmdir(parts[-1], dir_fd=descriptors[-2])
     except FileNotFoundError:
         return True
     except OSError:

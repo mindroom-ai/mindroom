@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -25,6 +26,8 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
+from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.runtime import primary_worker_backend_is_dedicated
 
 from .runtime import cancel_task, create_logged_task
 
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _REMOVED_AGENT_REASON = "Owning agent was removed by configuration reload."
+_ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -66,6 +70,22 @@ class _BackgroundApprovalManager(Protocol):
         timeout_seconds: float,
     ) -> BackgroundApprovalDecision: ...
 
+    async def settle_background_approval(
+        self,
+        origin: BackgroundScriptToolOrigin,
+        *,
+        reason: str,
+    ) -> bool: ...
+
+    async def prune_background_approvals(self, run_id: str) -> bool: ...
+
+
+class _WorkerManagerLease(Protocol):
+    @property
+    def manager(self) -> WorkerBackend: ...
+
+    def release(self) -> None: ...
+
 
 @dataclass(slots=True)
 class _LiveScriptRuntimeResolver:
@@ -73,7 +93,7 @@ class _LiveScriptRuntimeResolver:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], AgentBot | None]
-    worker_backend_provider: Callable[[], WorkerBackend | None]
+    worker_backend_provider: Callable[[ScriptRunRecord | None], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
@@ -126,7 +146,7 @@ class _LiveScriptRuntimeResolver:
         """Resolve process presence and current configured tool routing independently."""
         worker_id: str | None = None
         if not run.local_unsafe:
-            backend = self.worker_backend_provider()
+            backend = self.worker_backend_provider(run)
             if backend is not None and run.worker_key is not None:
                 worker = next(
                     (candidate for candidate in backend.list_workers() if candidate.worker_key == run.worker_key),
@@ -191,6 +211,21 @@ class _LiveScriptRuntimeResolver:
             reason=None if decision.status == "approved" else decision.reason,
         )
 
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        """Retire an exact card when broker ownership becomes indeterminate."""
+        approvals = self.approval_provider()
+        if approvals is None:
+            msg = "Tool approval runtime is not ready."
+            raise _ScriptRuntimeUnavailableError(msg)
+        await approvals.settle_background_approval(origin, reason=reason)
+
+    async def prune_approvals(self, run_id: str) -> bool:
+        """Prune settled exact-call targets alongside their retained run."""
+        approvals = self.approval_provider()
+        if approvals is None:
+            return False
+        return await approvals.prune_background_approvals(run_id)
+
 
 @dataclass(slots=True)
 class ScriptRuntimeLifecycle:
@@ -202,14 +237,21 @@ class ScriptRuntimeLifecycle:
     manager: ScriptRunManager
     resolver: _LiveScriptRuntimeResolver
     config_provider: Callable[[], Config | None]
-    worker_backend_provider: Callable[[], WorkerBackend | None]
+    worker_lease_provider: Callable[[], _WorkerManagerLease | None]
     api_enabled: bool = True
     retention_seconds: float = _DEFAULT_SCRIPT_RETENTION_SECONDS
+    pass_timeout_seconds: float = 30.0
+    pass_concurrency: int = 4
+    reconcile_interval_seconds: float = 30.0
     _api_ready: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
+    _activated_once: bool = field(default=False, init=False, repr=False)
     _start_requested: bool = field(default=False, init=False, repr=False)
     _activation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _startup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _worker_leases: list[_WorkerManagerLease] = field(default_factory=list, init=False, repr=False)
+    _current_worker_lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -241,13 +283,94 @@ class ScriptRuntimeLifecycle:
             self._refresh_worker_backend()
             bind_script_run_manager(self.manager)
             self._started = True
+            self._activated_once = True
+            await self.reconcile_once()
+            await self.prune_once()
+            self._maintenance_task = create_logged_task(
+                self._maintenance_loop(),
+                name="script_runtime_maintenance",
+                failure_message="Background script runtime maintenance failed",
+            )
+
+    async def unbind_api(self) -> None:
+        """Withdraw gateway readiness without replacing lifecycle-owned services."""
+        self._api_ready.clear()
+        self.manager.gateway_url = ""
+        startup_task, self._startup_task = self._startup_task, None
+        await cancel_task(startup_task)
+        maintenance_task, self._maintenance_task = self._maintenance_task, None
+        await cancel_task(maintenance_task)
+        if self._started:
+            bind_script_run_manager(None)
+            self._started = False
+
+    async def _maintenance_loop(self) -> None:
+        while self._started:
+            await asyncio.sleep(self.reconcile_interval_seconds)
+            if not self._started:
+                return
             await self.reconcile_once()
             await self.prune_once()
 
     def _refresh_worker_backend(self) -> WorkerBackend | None:
-        backend = self.worker_backend_provider()
+        lease = self.worker_lease_provider()
+        if lease is None:
+            self._current_worker_lease = None
+            self.manager.worker_backend = None
+            return None
+        existing = next((candidate for candidate in self._worker_leases if candidate.manager is lease.manager), None)
+        if existing is not None:
+            if lease is not existing:
+                lease.release()
+            self._current_worker_lease = existing
+            self.manager.worker_backend = existing.manager
+            return existing.manager
+        self._worker_leases.append(lease)
+        self._current_worker_lease = lease
+        backend = lease.manager
         self.manager.worker_backend = backend
         return backend
+
+    def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
+        """Return the leased backend generation that owns one durable worker."""
+        current = self._current_worker_lease
+        if run is None or run.worker_id is None or run.worker_key is None:
+            return None if current is None else current.manager
+        first_error: WorkerBackendError | None = None
+        for lease in reversed(self._worker_leases):
+            try:
+                workers = lease.manager.list_workers(include_idle=True)
+            except WorkerBackendError as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if any(worker.worker_id == run.worker_id and worker.worker_key == run.worker_key for worker in workers):
+                return lease.manager
+        if first_error is not None:
+            raise first_error
+        return None
+
+    def _release_unused_worker_leases(self, runs: list[ScriptRunRecord]) -> None:
+        current = self._current_worker_lease
+        retained: list[_WorkerManagerLease] = []
+        unresolved_assignment = any(
+            not run.local_unsafe and run.worker_key is not None and run.worker_id is None for run in runs
+        )
+        live_identities = {(run.worker_id, run.worker_key) for run in runs if run.worker_id is not None}
+        for lease in self._worker_leases:
+            if lease is current or unresolved_assignment:
+                retained.append(lease)
+                continue
+            try:
+                workers = lease.manager.list_workers(include_idle=True)
+            except WorkerBackendError:
+                retained.append(lease)
+                continue
+            if any((worker.worker_id, worker.worker_key) in live_identities for worker in workers):
+                retained.append(lease)
+                continue
+            lease.release()
+        self._worker_leases = retained
 
     async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
@@ -263,48 +386,120 @@ class ScriptRuntimeLifecycle:
         if not removed_agents and not isolation_changes:
             return
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        for run in runs:
-            if run.agent_name not in removed_agents | isolation_changes:
-                continue
-            try:
-                context = self.resolver.resolve(run, correlation_id=f"background-script:{run.run_id}:lifecycle")
-                if run.agent_name in removed_agents:
-                    await self.manager.cancel(context, run_id=run.run_id, reason=_REMOVED_AGENT_REASON)
-                else:
-                    await self.manager.interrupt(context, run_id=run.run_id)
-            except (ScriptRunManagerError, ScriptWorkerError, _ScriptRuntimeUnavailableError):
-                logger.warning(
-                    "script_reload_reconciliation_pending",
-                    run_id=run.run_id,
-                    agent_name=run.agent_name,
-                    exc_info=True,
-                )
+        affected = [run for run in runs if run.agent_name in removed_agents | isolation_changes]
+        for run in affected:
+            reason = _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
+            await asyncio.to_thread(self.manager.request_revocation, run_id=run.run_id, reason=reason)
+
+        semaphore = asyncio.Semaphore(self.pass_concurrency)
+
+        async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
+            async with semaphore:
+                reason = _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
+                try:
+                    await self.manager.revoke(run.run_id, reason=reason)
+                except (
+                    ScriptRunManagerError,
+                    ScriptWorkerError,
+                    WorkerBackendError,
+                    _ScriptRuntimeUnavailableError,
+                ):
+                    logger.warning(
+                        "script_reload_broker_revocation_pending",
+                        run_id=run.run_id,
+                        agent_name=run.agent_name,
+                        exc_info=True,
+                    )
+                    return False
+                return True
+
+        async def reconcile_run(run: ScriptRunRecord) -> None:
+            async with semaphore:
+                try:
+                    await self.manager.reconcile_durable(run_id=run.run_id)
+                except (
+                    ScriptRunManagerError,
+                    ScriptWorkerError,
+                    WorkerBackendError,
+                    _ScriptRuntimeUnavailableError,
+                ):
+                    logger.warning(
+                        "script_reload_reconciliation_pending",
+                        run_id=run.run_id,
+                        agent_name=run.agent_name,
+                        exc_info=True,
+                    )
+
+        async def revoke_then_reconcile() -> None:
+            revoked = await asyncio.gather(*(revoke_broker_ownership(run) for run in affected))
+            await asyncio.gather(
+                *(reconcile_run(run) for run, broker_revoked in zip(affected, revoked, strict=True) if broker_revoked),
+            )
+
+        try:
+            await asyncio.wait_for(revoke_then_reconcile(), timeout=self.pass_timeout_seconds)
+        except TimeoutError:
+            logger.warning("script_reload_reconciliation_timeout", timeout_seconds=self.pass_timeout_seconds)
+        self._release_unused_worker_leases(runs)
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
-        """Touch live workers first, then reconcile every resolvable unfinished run."""
-        backend = self._refresh_worker_backend()
+        """Run one bounded touch-first reconciliation pass."""
+        try:
+            await asyncio.wait_for(self._reconcile_pass(), timeout=self.pass_timeout_seconds)
+        except TimeoutError:
+            logger.warning("script_reconciliation_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
+
+    async def _reconcile_pass(self) -> None:
+        try:
+            backend = self._refresh_worker_backend()
+        except WorkerBackendError:
+            logger.warning("script_worker_backend_refresh_pending", exc_info=True)
+            current = self._current_worker_lease
+            backend = None if current is None else current.manager
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         if backend is not None:
-            for worker_key in sorted({run.worker_key for run in runs if run.worker_key is not None}):
-                await asyncio.to_thread(backend.touch_worker, worker_key)
-        for run in runs:
-            try:
-                context = self.resolver.resolve(run, correlation_id=f"background-script:{run.run_id}:reconcile")
-                await self.manager.reconcile(context, run_id=run.run_id)
-            except (ScriptRunManagerError, ScriptWorkerError, _ScriptRuntimeUnavailableError):
-                logger.warning(
-                    "script_run_reconciliation_pending",
-                    run_id=run.run_id,
-                    agent_name=run.agent_name,
-                    exc_info=True,
-                )
+            await asyncio.gather(
+                *(
+                    self._touch_worker(backend, worker_key)
+                    for worker_key in sorted({run.worker_key for run in runs if run.worker_key is not None})
+                ),
+            )
+        semaphore = asyncio.Semaphore(self.pass_concurrency)
+
+        async def reconcile_run(run: ScriptRunRecord) -> None:
+            async with semaphore:
+                try:
+                    await self.manager.reconcile_durable(run_id=run.run_id)
+                except (ScriptRunManagerError, ScriptWorkerError, WorkerBackendError):
+                    logger.warning(
+                        "script_run_reconciliation_pending",
+                        run_id=run.run_id,
+                        agent_name=run.agent_name,
+                        exc_info=True,
+                    )
+
+        await asyncio.gather(*(reconcile_run(run) for run in runs))
+        self._release_unused_worker_leases(runs)
+
+    async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
+        try:
+            await asyncio.to_thread(backend.touch_worker, worker_key)
+        except WorkerBackendError:
+            logger.warning("script_worker_touch_pending", worker_key=worker_key, exc_info=True)
 
     def touch_live_workers(self, backend: WorkerBackend) -> None:
         """Refresh active-run worker leases immediately before idle cleanup."""
         for worker_key in sorted(
             {run.worker_key for run in self.store.list_runs(include_finished=False) if run.worker_key is not None},
         ):
-            backend.touch_worker(worker_key)
+            try:
+                backend.touch_worker(worker_key)
+            except WorkerBackendError:
+                logger.warning(
+                    "script_worker_touch_pending",
+                    worker_key=worker_key,
+                    exc_info=True,
+                )
 
     async def prune_once(  # privata: ignore -- deterministic retention sweep API.
         self,
@@ -330,8 +525,10 @@ class ScriptRuntimeLifecycle:
             if run.finished_at > finished_before:
                 continue
             try:
-                context = self.resolver.resolve(run, correlation_id=f"background-script:{run.run_id}:retention")
-                cleaned = await self.manager.cleanup_snapshot(context, run)
+                approvals_pruned = await self.resolver.prune_approvals(run.run_id)
+                if not approvals_pruned:
+                    continue
+                cleaned = await self.manager.cleanup_snapshot(run)
                 if cleaned is False:
                     continue
                 await asyncio.to_thread(
@@ -352,7 +549,9 @@ class ScriptRuntimeLifecycle:
         self._start_requested = False
         startup_task, self._startup_task = self._startup_task, None
         await cancel_task(startup_task)
-        if not self._started:
+        maintenance_task, self._maintenance_task = self._maintenance_task, None
+        await cancel_task(maintenance_task)
+        if not self._activated_once:
             return
 
         async def _cleanup() -> None:
@@ -366,6 +565,12 @@ class ScriptRuntimeLifecycle:
         finally:
             bind_script_run_manager(None)
             self._started = False
+            self._activated_once = False
+            for lease in self._worker_leases:
+                lease.release()
+            self._worker_leases.clear()
+            self._current_worker_lease = None
+            self.manager.worker_backend = None
 
 
 def build_script_runtime(
@@ -373,7 +578,7 @@ def build_script_runtime(
     *,
     config_provider: Callable[[], Config | None],
     bot_provider: Callable[[str], AgentBot | None],
-    worker_backend_provider: Callable[[], WorkerBackend | None],
+    worker_lease_provider: Callable[[], _WorkerManagerLease | None],
     api_enabled: bool,
 ) -> ScriptRuntimeLifecycle:
     """Construct the one process-local script store, resolver, broker, and manager."""
@@ -381,7 +586,7 @@ def build_script_runtime(
     resolver = _LiveScriptRuntimeResolver(
         runtime_paths=runtime_paths,
         bot_provider=bot_provider,
-        worker_backend_provider=worker_backend_provider,
+        worker_backend_provider=lambda _run: None,
     )
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
     manager = ScriptRunManager(
@@ -392,17 +597,20 @@ def build_script_runtime(
         gateway_url="",
     )
     retention_seconds = _script_retention_seconds(runtime_paths)
-    return ScriptRuntimeLifecycle(
+    lifecycle = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
         broker=broker,
         manager=manager,
         resolver=resolver,
         config_provider=config_provider,
-        worker_backend_provider=worker_backend_provider,
+        worker_lease_provider=worker_lease_provider,
         api_enabled=api_enabled,
         retention_seconds=retention_seconds,
     )
+    resolver.worker_backend_provider = lifecycle._worker_backend_for
+    manager.worker_backend_resolver = lifecycle._worker_backend_for
+    return lifecycle
 
 
 def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool:
@@ -423,7 +631,7 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
     except ValueError:
         msg = f"{_SCRIPT_RETENTION_SECONDS_ENV} must be a positive number"
         raise ValueError(msg) from None
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         msg = f"{_SCRIPT_RETENTION_SECONDS_ENV} must be a positive number"
         raise ValueError(msg)
     return value
@@ -437,5 +645,8 @@ def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> 
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
     if public_url:
         return f"{public_url.rstrip('/')}/api/script-gateway"
+    if primary_worker_backend_is_dedicated(runtime_paths):
+        msg = "Dedicated background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
+        raise ValueError(msg)
     gateway_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
     return f"http://{gateway_host}:{port}/api/script-gateway"

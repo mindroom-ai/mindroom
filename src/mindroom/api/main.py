@@ -48,7 +48,7 @@ from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.backend import maintain_workers
-from mindroom.workers.runtime import configured_primary_worker_manager
+from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -197,15 +197,16 @@ def _cleanup_workers_once(
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    worker_manager = configured_primary_worker_manager(
+    worker_lease = lease_configured_primary_worker_manager(
         runtime_paths,
         runtime_config=runtime_config,
     )
-    if worker_manager is None:
+    if worker_lease is None:
         return 0
-    if touch_live_workers is not None:
-        touch_live_workers(worker_manager)
-    maintenance = maintain_workers(worker_manager)
+    with worker_lease as worker_manager:
+        if touch_live_workers is not None:
+            touch_live_workers(worker_manager)
+        maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
@@ -279,6 +280,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.external_trigger_runtime = None
+        app_state.script_worker_keepalive = None
+        bind_script_tool_broker(api_app, None)
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -307,6 +310,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.external_trigger_runtime = None
+            app_state.script_worker_keepalive = None
+            bind_script_tool_broker(api_app, None)
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -329,6 +334,12 @@ def bind_script_runtime(
     """Bind the lifecycle-owned broker and worker keepalive to the primary API."""
     bind_script_tool_broker(api_app, broker)
     config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = touch_live_workers
+
+
+def unbind_script_runtime(api_app: FastAPI) -> None:
+    """Clear script capabilities and keepalive when an API runtime is replaced."""
+    bind_script_tool_broker(api_app, None)
+    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = None
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:

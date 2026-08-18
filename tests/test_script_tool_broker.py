@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from agno.tools import Toolkit
@@ -157,6 +157,9 @@ class _RuntimeResolver:
         self.worker_id = worker_id
         self.private_agent_names = private_agent_names
         self.local_unsafe = local_unsafe
+        self.approval_wait: asyncio.Event | None = None
+        self.approval_started: asyncio.Event | None = None
+        self.settled_approvals: list[tuple[BackgroundScriptToolOrigin, str]] = []
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         assert run.agent_name == "watcher"
@@ -196,7 +199,14 @@ class _RuntimeResolver:
         assert timeout_seconds > 0
         if self.approval_events is not None:
             self.approval_events.append(f"approval:{origin.run_id}:{origin.call_id}")
+        if self.approval_started is not None:
+            self.approval_started.set()
+        if self.approval_wait is not None:
+            await self.approval_wait.wait()
         return self.approval_decision
+
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        self.settled_approvals.append((origin, reason))
 
 
 def _broker(
@@ -284,7 +294,7 @@ async def _call_through_gateway(
     receipt = await broker.accept_authenticated(request_without_token, authorization)
     while receipt.state is ScriptCallState.PENDING:
         await asyncio.sleep(0)
-        receipt = broker.get_authenticated(request.run_id, request.call_id, authorization)
+        receipt = await broker.get_authenticated(request.run_id, request.call_id, authorization)
     return receipt
 
 
@@ -400,6 +410,52 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
         "approval:run-1:approval-call",
         "tool:after_call",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None:
+    """Cancelling broker ownership also makes its durable approval non-actionable."""
+    events: list[str] = []
+    broker, token = _broker(tmp_path, events=events, require_approval=True)
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    resolver.approval_wait = asyncio.Event()
+    resolver.approval_started = asyncio.Event()
+    request = _request(token, call_id="cancelled-approval")
+    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    await resolver.approval_started.wait()
+    broker.store.request_cancel(request.run_id, reason="run cancelled")
+
+    await broker.cancel_run(request.run_id)
+
+    receipt = broker.get_call(request.run_id, request.call_id)
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    [(origin, reason)] = resolver.settled_approvals
+    assert (origin.run_id, origin.call_id) == (request.run_id, request.call_id)
+    assert reason == "Background script ownership was cancelled."
+
+
+@pytest.mark.asyncio
+async def test_orphaned_pending_receipt_settles_exact_approval(tmp_path: Path) -> None:
+    """Restart orphan detection closes the approval paired with its indeterminate receipt."""
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(token, call_id="orphaned-approval")
+    broker.store.claim_call(
+        run_id=request.run_id,
+        call_id=request.call_id,
+        grant=request.grant,
+        arguments_digest=request.arguments_digest,
+    )
+
+    receipt = await broker.get_authenticated(
+        request.run_id,
+        request.call_id,
+        f"Bearer {token}",
+    )
+
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    assert resolver.settled_approvals[0][0].call_id == request.call_id
 
 
 @pytest.mark.asyncio
@@ -970,8 +1026,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
     assert await asyncio.to_thread(preparation_started.wait, 1)
 
     with pytest.raises(ScriptCallPreparationPendingError):
-        await asyncio.to_thread(
-            broker.get_authenticated,
+        await broker.get_authenticated(
             "run-1",
             "preclaim-poll",
             f"Bearer {token}",
