@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import pytest
 from agno.tools import Toolkit
 
 import mindroom.tools  # noqa: F401
@@ -106,10 +107,36 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
 
     assert grants == (
         ScriptToolGrant("matrix_message", "matrix_message"),
-        ScriptToolGrant("attachments", "get_attachment"),
         ScriptToolGrant("calculator", "add"),
+        ScriptToolGrant("attachments", "get_attachment"),
     )
     assert all(grant.toolkit_name != "dynamic_workflow" for grant in grants)
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [{"shell": {"enable_run_shell_command": False}}, "openclaw_compat"],
+        ["openclaw_compat", {"shell": {"enable_run_shell_command": False}}],
+    ],
+)
+def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
+    tmp_path: Path,
+    tools: list[object],
+) -> None:
+    """A directly authored concrete toolkit owns its preset-expanded child in either order."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=tools)},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert all(grant.toolkit_name != "shell" for grant in grants)
 
 
 def test_current_grants_use_live_config_and_agent_removal_revokes_surface(tmp_path: Path) -> None:

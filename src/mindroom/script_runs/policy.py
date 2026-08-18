@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
 if TYPE_CHECKING:
@@ -54,12 +55,18 @@ def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple
 
     ensure_tool_registry_loaded(context.runtime_paths, config)
     entity_view = config.resolve_entity(context.agent_name)
-    tool_configs = {
-        entry.name: entry
-        for entry in entity_view.tool_configs
+    all_deferred_tools = [entry.name for entry in entity_view.authored_deferred_tool_configs]
+    tool_configs = tuple(
+        entry
+        for entry in visible_tool_surface(
+            agent_name=context.agent_name,
+            config=config,
+            loaded_tools=all_deferred_tools,
+            enable_dynamic_tools_manager=False,
+        ).runtime_tool_configs
         if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
-    }
-    tool_names = list(tool_configs)
+    )
+    tool_names = [entry.name for entry in tool_configs]
 
     # Imported lazily to keep script-run state imports independent of the agent/model graph.
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
@@ -81,7 +88,8 @@ def _resolve_script_grants(context: ToolRuntimeContext, config: Config) -> tuple
         tool_registry_preloaded=True,
     )
     toolkits: list[tuple[str, Toolkit]] = []
-    for toolkit_name, tool_entry in tool_configs.items():
+    for tool_entry in tool_configs:
+        toolkit_name = tool_entry.name
         toolkit = build_agent_toolkit(
             toolkit_name,
             agent_name=context.agent_name,
