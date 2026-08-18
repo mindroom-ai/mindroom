@@ -23,6 +23,7 @@ from mindroom.shell_supervisor import (
     check_command_via_supervisor,
     ensure_shell_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
 
@@ -41,7 +42,6 @@ _RUN_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
 _HANDLE_PATTERN = r"shell:[0-9a-f]{32}"
 _HANDLE_RE = re.compile(r"^" + _HANDLE_PATTERN + r"$")
 _LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{32})$", re.MULTILINE)
-_FINISHED_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+),")
 
 __all__ = [
     "SandboxScriptCancelResponse",
@@ -279,19 +279,19 @@ def _parse_launch_message(message: str) -> SandboxScriptRunResponse:
 
 
 def _parse_status_message(message: str) -> SandboxScriptStatusResponse:
-    if message.startswith("Status: RUNNING"):
-        return SandboxScriptStatusResponse(ok=True, state="running", output=message)
-    finished_match = _FINISHED_RE.match(message)
-    if finished_match is not None:
+    status = parse_shell_supervisor_status(message)
+    if status.state == "running":
+        return SandboxScriptStatusResponse(ok=True, state="running", output=status.output)
+    if status.state == "exited":
         return SandboxScriptStatusResponse(
             ok=True,
             state="exited",
-            output=message,
-            exit_code=int(finished_match.group(1)),
+            output=status.output,
+            exit_code=status.exit_code,
         )
-    if message.startswith("Error: Unknown handle"):
+    if status.state == "unknown":
         return SandboxScriptStatusResponse(ok=True, state="unknown")
-    return SandboxScriptStatusResponse(ok=False, state="unknown", error=message, failure_kind="worker")
+    return SandboxScriptStatusResponse(ok=False, state="unknown", error=status.output, failure_kind="worker")
 
 
 def _parse_cancel_message(message: str) -> SandboxScriptCancelResponse:

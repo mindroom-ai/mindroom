@@ -160,6 +160,7 @@ class _RuntimeResolver:
         self.approval_wait: asyncio.Event | None = None
         self.approval_started: asyncio.Event | None = None
         self.settled_approvals: list[tuple[BackgroundScriptToolOrigin, str]] = []
+        self.settled_runs: list[tuple[str, str]] = []
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         assert run.agent_name == "watcher"
@@ -207,6 +208,9 @@ class _RuntimeResolver:
 
     async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
         self.settled_approvals.append((origin, reason))
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        self.settled_runs.append((run_id, reason))
 
 
 def _broker(
@@ -275,23 +279,22 @@ def _broker(
     )
 
 
-def _request(token: str, *, call_id: str = "call-1", b: int = 2) -> ScriptToolCallRequest:
+def _request(*, call_id: str = "call-1", b: int = 2) -> ScriptToolCallRequest:
     return ScriptToolCallRequest(
         run_id="run-1",
         call_id=call_id,
         grant=ScriptToolGrant("calculator", "add"),
         arguments={"a": 1, "b": b},
-        token=token,
     )
 
 
 async def _call_through_gateway(
     broker: ScriptToolBroker,
     request: ScriptToolCallRequest,
+    token: str,
 ) -> ScriptCallReceipt:
-    authorization = f"Bearer {request.token}"
-    request_without_token = replace(request, token="")
-    receipt = await broker.accept_authenticated(request_without_token, authorization)
+    authorization = f"Bearer {token}"
+    receipt = await broker.accept_authenticated(request, authorization)
     while receipt.state is ScriptCallState.PENDING:
         await asyncio.sleep(0)
         receipt = await broker.get_authenticated(request.run_id, request.call_id, authorization)
@@ -318,7 +321,7 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events)
 
-    receipt = await _call_through_gateway(broker, _request(token))
+    receipt = await _call_through_gateway(broker, _request(), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
@@ -342,7 +345,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
         live_worker_id="script-process-worker",
     )
 
-    receipt = await _call_through_gateway(broker, _request(token))
+    receipt = await _call_through_gateway(broker, _request(), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
@@ -366,7 +369,7 @@ async def test_script_broker_builds_the_selected_live_toolkit_once(
     monkeypatch.setattr(agents_module, "build_agent_toolkit", counting_build)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="single-build"))
+    receipt = await _call_through_gateway(broker, _request(call_id="single-build"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert builds == 1
@@ -396,7 +399,7 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
         approval_decision=ToolApprovalDecision(approved=False, reason="Not this time."),
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="approval-call"))
+    receipt = await _call_through_gateway(broker, _request(call_id="approval-call"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -420,18 +423,19 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
     resolver = cast("_RuntimeResolver", broker.runtime_resolver)
     resolver.approval_wait = asyncio.Event()
     resolver.approval_started = asyncio.Event()
-    request = _request(token, call_id="cancelled-approval")
-    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    request = _request(call_id="cancelled-approval")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
     await resolver.approval_started.wait()
     broker.store.request_cancel(request.run_id, reason="run cancelled")
 
-    await broker.cancel_run(request.run_id)
+    await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=1.0)
 
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
-    [(origin, reason)] = resolver.settled_approvals
-    assert (origin.run_id, origin.call_id) == (request.run_id, request.call_id)
+    assert broker._cleanup_tasks == set()
+    [(run_id, reason)] = resolver.settled_runs
+    assert run_id == request.run_id
     assert reason == "Background script ownership was cancelled."
 
 
@@ -439,7 +443,7 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
 async def test_orphaned_pending_receipt_settles_exact_approval(tmp_path: Path) -> None:
     """Restart orphan detection closes the approval paired with its indeterminate receipt."""
     broker, token = _broker(tmp_path, events=[])
-    request = _request(token, call_id="orphaned-approval")
+    request = _request(call_id="orphaned-approval")
     broker.store.claim_call(
         run_id=request.run_id,
         call_id=request.call_id,
@@ -488,7 +492,7 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
         preapprove_script_tool=True,
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="authored-confirmation"))
+    receipt = await _call_through_gateway(broker, _request(call_id="authored-confirmation"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -545,7 +549,7 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
         preapprove_script_tool=True,
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="cached-confirmation"))
+    receipt = await _call_through_gateway(broker, _request(call_id="cached-confirmation"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == (
@@ -566,10 +570,10 @@ async def test_script_broker_returns_existing_receipt_without_reexecution(tmp_pa
     """A duplicate stable call ID must not invoke the registered tool a second time."""
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events)
-    request = _request(token, call_id="stable-call")
+    request = _request(call_id="stable-call")
 
-    first = await _call_through_gateway(broker, request)
-    second = await _call_through_gateway(broker, request)
+    first = await _call_through_gateway(broker, request, token)
+    second = await _call_through_gateway(broker, request, token)
 
     assert second == first
     assert events == ["tool:before_call", "tool:after_call"]
@@ -580,7 +584,7 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
     """The ordinary audit log must correlate a script call without exposing its capability token."""
     broker, token = _broker(tmp_path, events=[], log_tool_calls=True)
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="audited-call"))
+    receipt = await _call_through_gateway(broker, _request(call_id="audited-call"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     [record] = [
@@ -631,7 +635,7 @@ async def test_script_broker_keeps_toolkit_connected_while_materializing_generat
     _replace_calculator_toolkit(monkeypatch, ConnectedToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="stream-call"))
+    receipt = await _call_through_gateway(broker, _request(call_id="stream-call"), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == [1, 2]
@@ -694,7 +698,7 @@ async def test_script_broker_enforces_exact_stream_json_byte_boundary(
     monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", maximum_bytes)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id=f"stream-bytes-{maximum_bytes}"))
+    receipt = await _call_through_gateway(broker, _request(call_id=f"stream-bytes-{maximum_bytes}"), token)
 
     assert receipt.state is expected_state
     if expected_error_kind is None:
@@ -722,7 +726,7 @@ async def test_script_broker_rejects_nonfinite_stream_item(
     _replace_calculator_toolkit(monkeypatch, NonFiniteStreamToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="nonfinite-stream"))
+    receipt = await _call_through_gateway(broker, _request(call_id="nonfinite-stream"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert isinstance(receipt.error, dict)
@@ -754,7 +758,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
     _replace_calculator_toolkit(monkeypatch, BlockingConnectToolkit)
     broker, token = _broker(tmp_path, events=[])
     started = time.monotonic()
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="blocking-connect")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="blocking-connect"), token))
 
     await asyncio.sleep(0.01)
 
@@ -787,7 +791,7 @@ async def test_script_broker_offloads_blocking_sync_toolkit_close(
     _replace_calculator_toolkit(monkeypatch, BlockingCloseToolkit)
     broker, token = _broker(tmp_path, events=[])
     started = time.monotonic()
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="blocking-close")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="blocking-close"), token))
 
     await asyncio.sleep(0.01)
 
@@ -815,7 +819,7 @@ async def test_script_broker_forgets_retained_execution_after_submitter_cancella
 
     _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="cancelled-waiter")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="cancelled-waiter"), token))
     await entered.wait()
     submission.cancel()
 
@@ -851,8 +855,8 @@ async def test_script_broker_cancel_run_closes_accepted_receipt_as_indeterminate
 
     _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
-    request = _request(token, call_id="cancelled-run-call")
-    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    request = _request(call_id="cancelled-run-call")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
     await entered.wait()
     broker.store.request_cancel(request.run_id)
@@ -862,6 +866,66 @@ async def test_script_broker_cancel_run_closes_accepted_receipt_as_indeterminate
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert broker._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation returns promptly while the detached sync body still owns its toolkit."""
+    body_entered = threading.Event()
+    release_body = threading.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+
+    class BlockingSyncToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            close_started.set()
+            release_close.wait()
+            close_finished.set()
+
+        def add(self, a: int, b: int) -> int:
+            body_entered.set()
+            release_body.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-sync-call")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    assert close_started.is_set() is False
+    broker.store.request_cancel(request.run_id)
+
+    cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
+    await asyncio.sleep(0.05)
+    cancelled_promptly = cancellation.done()
+    close_started_before_body_returned = close_started.is_set()
+    release_body.set()
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+    close_finished_before_release = close_finished.is_set()
+    release_close.set()
+    await asyncio.wait_for(cancellation, timeout=1.0)
+    assert await asyncio.to_thread(close_finished.wait, 1.0)
+    await asyncio.sleep(0)
+
+    assert cancelled_promptly is True
+    assert close_started_before_body_returned is False
+    assert close_finished_before_release is False
+    receipt = broker.get_call(request.run_id, request.call_id)
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    assert broker._cleanup_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -888,11 +952,11 @@ async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
 
     _replace_calculator_toolkit(monkeypatch, SerialToolkit)
     broker, token = _broker(tmp_path, events=[])
-    first_request = _request(token, call_id="first", b=2)
-    second_request = _request(token, call_id="queued", b=3)
-    await broker.accept_authenticated(replace(first_request, token=""), f"Bearer {token}")
+    first_request = _request(call_id="first", b=2)
+    second_request = _request(call_id="queued", b=3)
+    await broker.accept_authenticated(first_request, f"Bearer {token}")
     await first_entered.wait()
-    await broker.accept_authenticated(replace(second_request, token=""), f"Bearer {token}")
+    await broker.accept_authenticated(second_request, f"Bearer {token}")
     broker.store.request_cancel(first_request.run_id)
     release_first.set()
 
@@ -915,9 +979,9 @@ async def test_queued_starting_call_dispatches_with_fresh_durable_worker_identit
     broker, token = _broker(tmp_path, events=[], live_worker_id="worker-after-launch")
     run_lock = broker._run_locks.setdefault("run-1", asyncio.Lock())
     await run_lock.acquire()
-    request = _request(token, call_id="accepted-while-starting")
+    request = _request(call_id="accepted-while-starting")
 
-    accepted = await broker.accept_authenticated(replace(request, token=""), f"Bearer {token}")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
     assert accepted.state is ScriptCallState.PENDING
     broker.store.transition_run(
         request.run_id,
@@ -937,7 +1001,7 @@ async def test_queued_starting_call_dispatches_with_fresh_durable_worker_identit
 async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path: Path) -> None:
     """A pending claim left by an unknown executor must never be resubmitted after ambiguity."""
     broker, token = _broker(tmp_path, events=[])
-    request = _request(token, call_id="accepted-before-restart")
+    request = _request(call_id="accepted-before-restart")
     broker.store.claim_call(
         run_id=request.run_id,
         call_id=request.call_id,
@@ -945,7 +1009,7 @@ async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path:
         arguments_digest=request.arguments_digest,
     )
 
-    receipt = await _call_through_gateway(broker, request)
+    receipt = await _call_through_gateway(broker, request, token)
 
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert receipt.error == {
@@ -957,8 +1021,8 @@ async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path:
 
 def test_script_broker_get_marks_unowned_pending_claim_indeterminate(tmp_path: Path) -> None:
     """GET polling must resolve an accepted claim whose in-process owner disappeared."""
-    broker, token = _broker(tmp_path, events=[])
-    request = _request(token, call_id="orphaned-before-get")
+    broker, _token = _broker(tmp_path, events=[])
+    request = _request(call_id="orphaned-before-get")
     broker.store.claim_call(
         run_id=request.run_id,
         call_id=request.call_id,
@@ -991,7 +1055,7 @@ async def test_script_broker_get_keeps_owned_execution_pending(
 
     _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
     broker, token = _broker(tmp_path, events=[])
-    submission = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="owned-call")))
+    submission = asyncio.create_task(_call_through_gateway(broker, _request(call_id="owned-call"), token))
     await entered.wait()
 
     assert broker.get_call("run-1", "owned-call").state is ScriptCallState.PENDING
@@ -1019,7 +1083,7 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
     monkeypatch.setattr(broker.store, "require_active_capability", blocking_require)
     acceptance = asyncio.create_task(
         broker.accept_authenticated(
-            replace(_request(token, call_id="preclaim-poll"), token=""),
+            _request(call_id="preclaim-poll"),
             f"Bearer {token}",
         ),
     )
@@ -1066,7 +1130,7 @@ async def test_script_broker_rejects_durable_execution_identity_mismatch_before_
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events, execution_identity=identity)
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id=f"bad-{field_name}"))
+    receipt = await _call_through_gateway(broker, _request(call_id=f"bad-{field_name}"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1087,7 +1151,7 @@ async def test_script_broker_rejects_live_thread_when_durable_thread_is_none(tmp
         thread_root_event_id=None,
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="threadless"))
+    receipt = await _call_through_gateway(broker, _request(call_id="threadless"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1104,7 +1168,7 @@ async def test_script_broker_rejects_durable_live_worker_mismatch_before_dispatc
         live_worker_id="worker-b",
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-worker"))
+    receipt = await _call_through_gateway(broker, _request(call_id="wrong-worker"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1120,7 +1184,7 @@ async def test_script_broker_rejects_durable_worker_key_mismatch_before_dispatch
         durable_worker_key="v1:default:user_agent:mallory:watcher",
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-worker-key"))
+    receipt = await _call_through_gateway(broker, _request(call_id="wrong-worker-key"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1136,7 +1200,7 @@ async def test_script_broker_rejects_live_private_scope_mismatch_before_dispatch
         live_private_agent_names=frozenset({"watcher"}),
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-private-scope"))
+    receipt = await _call_through_gateway(broker, _request(call_id="wrong-private-scope"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1153,7 +1217,7 @@ async def test_script_broker_rejects_durable_live_local_execution_mismatch(tmp_p
         live_local_unsafe=False,
     )
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id="wrong-local-mode"))
+    receipt = await _call_through_gateway(broker, _request(call_id="wrong-local-mode"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert events == []
@@ -1183,9 +1247,9 @@ async def test_script_broker_serializes_distinct_calls_within_one_run(
 
     _replace_calculator_toolkit(monkeypatch, SerialToolkit)
     broker, token = _broker(tmp_path, events=[])
-    first = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="serial-1", b=2)))
+    first = asyncio.create_task(_call_through_gateway(broker, _request(call_id="serial-1", b=2), token))
     await first_entered.wait()
-    second = asyncio.create_task(_call_through_gateway(broker, _request(token, call_id="serial-2", b=3)))
+    second = asyncio.create_task(_call_through_gateway(broker, _request(call_id="serial-2", b=3), token))
     await asyncio.sleep(0.02)
 
     assert not second_entered.is_set()
@@ -1217,7 +1281,7 @@ async def test_script_broker_never_publishes_nonfinite_completed_receipt(
     _replace_calculator_toolkit(monkeypatch, NonFiniteToolkit)
     broker, token = _broker(tmp_path, events=[])
 
-    receipt = await _call_through_gateway(broker, _request(token, call_id=f"nonfinite-{result!s}"))
+    receipt = await _call_through_gateway(broker, _request(call_id=f"nonfinite-{result!s}"), token)
 
     assert receipt.state is ScriptCallState.FAILED
     json.dumps(receipt.result, allow_nan=False)
@@ -1235,7 +1299,7 @@ async def test_script_broker_rechecks_current_grants_before_execution(tmp_path: 
         config_provider=lambda: removed,
     )
 
-    receipt = await _call_through_gateway(broker, _request(token))
+    receipt = await _call_through_gateway(broker, _request(), token)
 
     assert receipt.state is ScriptCallState.FAILED
     assert receipt.error == {

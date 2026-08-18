@@ -130,9 +130,6 @@ class ScriptRunStore:
         if run.state is not ScriptRunState.STARTING:
             msg = "A new script run must begin in the starting state."
             raise ScriptRunStoreError(msg)
-        if run.entity_kind is not ScriptRunEntityKind.AGENT:
-            msg = "Background script runs must be agent-owned."
-            raise ScriptRunStoreError(msg)
         if run.max_tool_calls_per_minute <= 0 or run.max_runtime_seconds <= 0:
             msg = "Background script limits must be positive."
             raise ScriptRunStoreError(msg)
@@ -311,15 +308,6 @@ class ScriptRunStore:
             rows = connection.execute(
                 "SELECT * FROM script_calls WHERE run_id = ? AND state = ? ORDER BY call_id",
                 (run_id, ScriptCallState.PENDING.value),
-            ).fetchall()
-        return [_call_from_row(row) for row in rows]
-
-    def calls_for_run(self, run_id: str) -> list[ScriptCallRecord]:
-        """Return all exact calls whose approval settlement may need retrying."""
-        with self._read_connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM script_calls WHERE run_id = ? ORDER BY call_id",
-                (run_id,),
             ).fetchall()
         return [_call_from_row(row) for row in rows]
 

@@ -502,6 +502,36 @@ def resolve_background_call(
     )
 
 
+def resolve_pending_background_calls(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    run_id: str,
+    reason: str,
+) -> int:
+    """Deny every currently pending target for one run in one transaction."""
+    rows = transaction.fetchall(
+        """
+        SELECT call_id FROM background_approval_calls
+        WHERE principal_id = ? AND run_id = ? AND decision IS NULL
+        ORDER BY call_id
+        """,
+        (principal_id, run_id),
+    )
+    recorded = 0
+    for row in rows:
+        decision = resolve_background_call(
+            transaction,
+            principal_id,
+            run_id=run_id,
+            call_id=str(row["call_id"]),
+            requested_status="denied",
+            reason=reason,
+        )
+        recorded += int(decision.recorded)
+    return recorded
+
+
 def _resolve_continuation(
     transaction: Transaction,
     principal_id: str,

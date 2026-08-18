@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import math
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 from mindroom import approval_manager
 from mindroom.custom_tools.script import bind_script_run_manager
@@ -18,6 +20,7 @@ from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
     ScriptWorkerBackendBinding,
+    script_execution_uses_worker,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
@@ -81,6 +84,8 @@ class _BackgroundApprovalManager(Protocol):
         *,
         reason: str,
     ) -> bool: ...
+
+    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int: ...
 
     async def prune_background_approvals(self, run_id: str) -> bool: ...
 
@@ -283,6 +288,14 @@ class _LiveScriptRuntimeResolver:
             msg = "Tool approval runtime is not ready."
             raise _ScriptRuntimeUnavailableError(msg)
         await approvals.settle_background_approval(origin, reason=reason)
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        """Retire every pending approval whose broker run ownership ended."""
+        approvals = self.approval_provider()
+        if approvals is None:
+            msg = "Tool approval runtime is not ready."
+            raise _ScriptRuntimeUnavailableError(msg)
+        await approvals.settle_pending_background_approvals(run_id, reason=reason)
 
     async def prune_approvals(self, run_id: str) -> bool:
         """Prune settled exact-call targets alongside their retained run."""
@@ -863,14 +876,34 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
 
 def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
     """Return the gateway URL injected into isolated script processes."""
+    worker_process_enabled = script_execution_uses_worker(runtime_paths) or primary_worker_backend_is_dedicated(
+        runtime_paths,
+    )
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:
-        return explicit_url.rstrip("/")
+        gateway_url = explicit_url.rstrip("/")
+        _reject_worker_loopback_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        return gateway_url
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
     if public_url:
-        return f"{public_url.rstrip('/')}/api/script-gateway"
-    if primary_worker_backend_is_dedicated(runtime_paths):
-        msg = "Dedicated background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
+        gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
+        _reject_worker_loopback_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        return gateway_url
+    if worker_process_enabled:
+        msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
         raise ValueError(msg)
     gateway_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
     return f"http://{gateway_host}:{port}/api/script-gateway"
+
+
+def _reject_worker_loopback_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
+    if not worker_process_enabled:
+        return
+    hostname = (urlsplit(gateway_url).hostname or "").lower()
+    try:
+        loopback = ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        loopback = hostname == "localhost" or hostname.endswith(".localhost")
+    if loopback:
+        msg = "Background-script workers require a non-loopback gateway URL."
+        raise ValueError(msg)

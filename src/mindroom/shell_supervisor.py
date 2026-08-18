@@ -28,6 +28,7 @@ import asyncio
 import atexit
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -40,6 +41,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.shell_execution import (
@@ -63,10 +65,32 @@ _SUPERVISOR_TERMINATE_WAIT_SECONDS = 5.0
 _SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 _RUN_RESPONSE_GRACE_SECONDS = 30.0
 _STDERR_TAIL_BYTES = 4096
+_FINISHED_STATUS_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+)(?:,|\))")
 
 
 class ShellSupervisorStartupError(RuntimeError):
     """The shell supervisor process failed to start or become ready."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellSupervisorStatus:
+    """Canonical interpretation of one shell-supervisor status reply."""
+
+    state: Literal["running", "exited", "unknown", "error"]
+    output: str
+    exit_code: int | None = None
+
+
+def parse_shell_supervisor_status(message: str) -> _ShellSupervisorStatus:
+    """Parse one supervisor status reply identically in every adapter."""
+    if message.startswith("Status: RUNNING"):
+        return _ShellSupervisorStatus(state="running", output=message)
+    finished = _FINISHED_STATUS_RE.match(message)
+    if finished is not None:
+        return _ShellSupervisorStatus(state="exited", output=message, exit_code=int(finished.group(1)))
+    if message.startswith("Error: Unknown handle"):
+        return _ShellSupervisorStatus(state="unknown", output=message)
+    return _ShellSupervisorStatus(state="error", output=message)
 
 
 # ---------------------------------------------------------------------------

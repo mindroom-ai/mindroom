@@ -27,6 +27,7 @@ from mindroom.shell_supervisor import (
     check_command_via_supervisor,
     ensure_shell_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -35,7 +36,6 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
-    worker_root_path,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     import builtins
     from collections.abc import Callable
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workers.backend import WorkerBackend
 
@@ -53,6 +54,7 @@ __all__ = [
     "ScriptRunManagerError",
     "ScriptRunStatus",
     "ScriptWorkerBackendBinding",
+    "script_execution_uses_worker",
 ]
 
 logger = get_logger(__name__)
@@ -61,7 +63,6 @@ _MAX_SOURCE_BYTES = 128 * 1024
 _LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 _WORKER_EXECUTION_MODES = frozenset({"all", "sandbox_all", "selective", "sandbox_selective"})
 _HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
-_FINISHED_RE = re.compile(r"Status: FINISHED \(exit code (-?\d+)\)")
 _TERMINAL_STATES = frozenset(
     {
         ScriptRunState.EXITED,
@@ -88,6 +89,14 @@ class _AmbiguousLaunchError(Exception):
 class _ScriptBroker(Protocol):
     async def cancel_run(self, run_id: str) -> None:
         """Cancel in-process broker executions for one revoked run."""
+
+
+def script_execution_uses_worker(runtime_paths: RuntimePaths) -> bool:
+    """Return whether configured script execution leaves the primary process."""
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    return proxy_config.execution_mode not in _LOCAL_EXECUTION_MODES and (
+        proxy_config.execution_mode is not None or proxy_config.proxy_url is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,22 +382,6 @@ class ScriptRunManager:
     def request_revocation(self, run_id: str, *, reason: str) -> ScriptRunRecord:
         """Persist lifecycle desired state before any broker or supervisor work."""
         return self.store.request_cancel(run_id, reason=reason)
-
-    async def interrupt(
-        self,
-        context: ToolRuntimeContext,
-        *,
-        run_id: str,
-        force: bool = False,
-    ) -> ScriptRunRecord:
-        """Revoke and stop one run whose process isolation is no longer valid."""
-        return await self._terminate_run(
-            context,
-            run_id=run_id,
-            force=force,
-            reason=_ISOLATION_INTERRUPTION_REASON,
-            terminal_state=ScriptRunState.INTERRUPTED,
-        )
 
     async def _terminate_run(
         self,
@@ -908,7 +901,8 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
     elif (state_subpath := worker.debug_metadata.get("state_subpath")) is not None:
         root = context.runtime_paths.storage_root / state_subpath
     else:
-        root = worker_root_path(context.runtime_paths.storage_root, worker.worker_key)
+        msg = "Background script worker must expose a primary-visible state root or subpath."
+        raise ScriptRunManagerError(msg)
     resolved_storage_root = context.runtime_paths.storage_root.expanduser().resolve()
     resolved_root = root.expanduser().resolve()
     if not resolved_root.is_relative_to(resolved_storage_root):
@@ -1018,12 +1012,14 @@ def _remove_snapshot(storage_root: Path, locator: str) -> bool:
 
 
 def _parse_local_status(message: str) -> WorkerScriptStatus:
-    if message.startswith("Status: RUNNING"):
-        return WorkerScriptStatus(state="running", output=message)
-    finished = _FINISHED_RE.match(message)
-    if finished is not None:
-        return WorkerScriptStatus(state="exited", output=message, exit_code=int(finished.group(1)))
-    return WorkerScriptStatus.unknown_handle()
+    status = parse_shell_supervisor_status(message)
+    if status.state == "error":
+        raise ScriptRunManagerError(status.output)
+    return WorkerScriptStatus(
+        state=status.state,
+        output=status.output,
+        exit_code=status.exit_code,
+    )
 
 
 def _validate_local_launch_message(message: str, *, expected_handle: str) -> None:

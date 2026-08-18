@@ -410,6 +410,18 @@ class _ApprovalManager:
         await self.recover_cards_on_startup()
         return recorded.recorded
 
+    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
+        """Deny only the still-pending approval targets owned by one run."""
+        if self.cards is None or self.send_delivery is None:
+            return 0
+        recorded = await self.cards.resolve_pending_background_approval_calls(
+            run_id=run_id,
+            reason=reason,
+        )
+        if recorded:
+            await self.recover_cards_on_startup()
+        return recorded
+
     async def prune_background_approvals(self, run_id: str) -> bool:
         """Prune settled background targets only after terminal card retirement."""
         if self.cards is None:

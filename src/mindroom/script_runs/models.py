@@ -31,8 +31,6 @@ class ScriptRunEntityKind(StrEnum):
     """Kinds of runtime entity that may request a background script run."""
 
     AGENT = "agent"
-    TEAM = "team"
-    ROUTER = "router"  # noqa: Vulture
 
 
 @dataclass(frozen=True, slots=True)

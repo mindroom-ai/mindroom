@@ -426,6 +426,13 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         reason: str,
     ) -> RecordedApprovalDecision: ...
 
+    async def resolve_pending_background_approval_calls(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int: ...
+
     async def prune_background_approvals(self, *, run_id: str) -> bool: ...  # noqa: D102
 
     async def resolve_continuation_approval_card(  # noqa: D102

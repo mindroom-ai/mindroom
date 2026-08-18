@@ -911,6 +911,22 @@ class PrincipalStore:
             ),
         )
 
+    async def resolve_pending_background_approval_calls(
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int:
+        """Resolve every pending background target for one run atomically."""
+        return await self._backend.write(
+            lambda transaction: approvals.resolve_pending_background_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                reason=reason,
+            ),
+        )
+
     async def prune_background_approvals(self, *, run_id: str) -> bool:
         """Prune settled background targets after their cards have retired."""
         return await self._backend.write(

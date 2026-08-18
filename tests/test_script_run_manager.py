@@ -302,6 +302,58 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_worker_launch_requires_primary_visible_state_before_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote handle without shared-state proof cannot receive primary-only paths."""
+    manager, backend, _client = _manager(tmp_path)
+    snapshot_writes: list[str] = []
+
+    def ensure_worker_without_visible_state(
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: object | None = None,
+    ) -> WorkerHandle:
+        del now, progress_sink
+        return WorkerHandle(
+            worker_id="static-worker",
+            worker_key=spec.worker_key,
+            endpoint="http://worker.test/api/sandbox-runner/execute",
+            auth_token="worker-token",  # noqa: S106
+            status="ready",
+            backend_name="static_sandbox_runner",
+            last_used_at=1.0,
+            created_at=1.0,
+            debug_metadata={"api_root": "http://worker.test/api/sandbox-runner"},
+        )
+
+    def record_snapshot_write(
+        _workspace: Path,
+        run_id: str,
+        *,
+        source: bytes,
+        token: str,
+    ) -> tuple[Path, Path]:
+        del source, token
+        snapshot_writes.append(run_id)
+        message = "snapshot creation must not be reached"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(backend, "ensure_worker", ensure_worker_without_visible_state)
+    monkeypatch.setattr(manager_module, "_write_snapshot", record_snapshot_write)
+
+    with pytest.raises(ScriptRunManagerError, match="visible state root or subpath"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    assert snapshot_writes == []
+    [failed] = manager.store.list_runs()
+    assert failed.state is ScriptRunState.FAILED
+    assert failed.snapshot_locator is None
+
+
+@pytest.mark.asyncio
 async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path: Path) -> None:
     """The authored allowlist can only narrow the agent's resolved launch surface."""
     manager, _backend, _client = _manager(tmp_path)
@@ -1154,23 +1206,6 @@ async def test_process_only_reconciliation_does_not_rescan_broker_after_trusted_
 
     assert reconciled.state is ScriptRunState.CANCELLED
     assert manager.broker.cancelled_runs == [run.run_id]
-
-
-@pytest.mark.asyncio
-async def test_isolation_interruption_remains_retryable_until_supervisor_truth(tmp_path: Path) -> None:
-    """An ambiguous isolation stop retains its interrupted terminal intent."""
-    manager, _backend, client = _manager(tmp_path)
-    context = _context(tmp_path)
-    run = await manager.run(context, source="print('ok')\n")
-    client.next_status = WorkerScriptStatus.unknown_handle()
-
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.interrupt(context, run_id=run.run_id, force=True)
-
-    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
-    reconciled = await manager.reconcile(context, run_id=run.run_id)
-
-    assert reconciled.state is ScriptRunState.INTERRUPTED
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ from mindroom.shell_supervisor import (
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -41,6 +42,28 @@ if TYPE_CHECKING:
     from mindroom.shell_execution import ProcessRecord
 
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+
+
+@pytest.mark.parametrize(
+    ("message", "state", "exit_code"),
+    [
+        ("Status: RUNNING (PID 123, elapsed 1.0s)", "running", None),
+        ("Status: FINISHED (exit code -9, ran for 1.0s)", "exited", -9),
+        ("Error: Unknown handle shell:missing", "unknown", None),
+        ("unexpected supervisor reply", "error", None),
+    ],
+)
+def test_supervisor_status_parser_is_canonical(
+    message: str,
+    state: str,
+    exit_code: int | None,
+) -> None:
+    """Local and worker adapters share one fail-closed status interpretation."""
+    status = parse_shell_supervisor_status(message)
+
+    assert status.state == state
+    assert status.output == message
+    assert status.exit_code == exit_code
 
 
 @contextlib.asynccontextmanager

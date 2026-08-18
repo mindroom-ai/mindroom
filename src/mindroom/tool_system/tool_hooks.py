@@ -6,10 +6,11 @@ import asyncio
 import inspect
 import threading
 import time
-from contextvars import copy_context
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass
-from functools import wraps
+from dataclasses import dataclass, field
+from functools import reduce, wraps
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
@@ -39,7 +40,7 @@ from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure,
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator
 
     from agno.tools import Toolkit
     from agno.tools.function import Function
@@ -86,6 +87,60 @@ _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_ch
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
 _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class SyncToolCompletionTracker:
+    """Expose one context-bound synchronous leaf task to its resource owner."""
+
+    task: asyncio.Task[_ToolHookResult] | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
+    _cancelled_before_start: bool = field(default=False, init=False, repr=False)
+
+    def track(self, task: asyncio.Task[_ToolHookResult]) -> None:
+        """Record the one real synchronous entrypoint started in this call."""
+        if self.task is not None:
+            msg = "A tool call cannot start more than one synchronous entrypoint."
+            raise RuntimeError(msg)
+        self.task = task
+
+    def _claim_start(self) -> bool:
+        """Atomically claim actual entrypoint start against request cancellation."""
+        with self._lock:
+            if self._cancelled_before_start:
+                return False
+            self._started = True
+            return True
+
+    def _cancel_before_start(self) -> bool:
+        """Return whether cancellation won before the entrypoint began."""
+        with self._lock:
+            if self._started:
+                return False
+            self._cancelled_before_start = True
+            return True
+
+    def started_task(self) -> asyncio.Task[_ToolHookResult] | None:
+        """Return the completion task only after the real entrypoint has begun."""
+        with self._lock:
+            return self.task if self._started else None
+
+
+_SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = ContextVar(
+    "mindroom_sync_tool_completion_tracker",
+    default=None,
+)
+
+
+@contextmanager
+def track_sync_tool_completion(tracker: SyncToolCompletionTracker) -> Iterator[None]:
+    """Bind synchronous leaf completion ownership to one tool call."""
+    token = _SYNC_TOOL_COMPLETION_TRACKER.set(tracker)
+    try:
+        yield
+    finally:
+        _SYNC_TOOL_COMPLETION_TRACKER.reset(token)
 
 
 @dataclass(slots=True)
@@ -382,6 +437,49 @@ def _patch_agno_sync_tool_hook_chain() -> None:
     _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = True
 
 
+def _build_sync_async_execution_chain(
+    function_call: FunctionCall,
+    entrypoint: Callable[..., _ToolHookResult],
+    entrypoint_args: dict[str, Any],
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Build Agno's async hook chain around one offloaded synchronous leaf."""
+
+    async def execute_sync_entrypoint(
+        _name: str,
+        _func: Callable[..., Any],
+        _args: dict[str, Any],
+    ) -> _ToolHookResult:
+        arguments = entrypoint_args.copy()
+        if function_call.arguments is not None:
+            arguments.update(function_call.arguments)
+        return await _run_sync_tool_entrypoint(entrypoint, arguments)
+
+    def create_hook_wrapper(
+        inner_func: Callable[..., Awaitable[_ToolHookResult]],
+        hook: Callable[..., Any],
+    ) -> Callable[..., Awaitable[_ToolHookResult]]:
+        async def wrapper(
+            name: str,
+            func: Callable[..., Any],
+            args: dict[str, Any],
+        ) -> _ToolHookResult:
+            async def next_func(**kwargs: object) -> _ToolHookResult:
+                return await inner_func(name, func, kwargs)
+
+            hook_args = function_call._build_hook_args(hook, name, next_func, args)
+            if inspect.iscoroutinefunction(hook):
+                return await function_call._safe_hook_call_async(hook, hook_args)
+            return function_call._safe_hook_call(hook, hook_args)
+
+        return wrapper
+
+    return reduce(
+        create_hook_wrapper,
+        reversed(function_call.function.tool_hooks or []),
+        execute_sync_entrypoint,
+    )
+
+
 def _patch_agno_async_tool_hook_chain() -> None:
     """Teach Agno's async tool hook chain to unwrap deferred sync-hook awaitables."""
     global _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED
@@ -394,7 +492,16 @@ def _patch_agno_async_tool_hook_chain() -> None:
         self: FunctionCall,
         entrypoint_args: dict[str, Any],
     ) -> Callable[..., Awaitable[_ToolHookResult]]:
-        execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
+        entrypoint = self.function.entrypoint
+        if (
+            entrypoint is None
+            or inspect.iscoroutinefunction(entrypoint)
+            or inspect.isasyncgenfunction(entrypoint)
+            or inspect.isgeneratorfunction(entrypoint)
+        ):
+            execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
+        else:
+            execution_chain = _build_sync_async_execution_chain(self, entrypoint, entrypoint_args)
 
         async def _wrapped_execution_chain(
             name: str,
@@ -412,6 +519,32 @@ def _patch_agno_async_tool_hook_chain() -> None:
 
 _patch_agno_sync_tool_hook_chain()
 _patch_agno_async_tool_hook_chain()
+
+
+async def _run_sync_tool_entrypoint(
+    entrypoint: Callable[..., _ToolHookResult],
+    arguments: dict[str, Any],
+) -> _ToolHookResult:
+    tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+
+    def invoke() -> _ToolHookResult:
+        if tracker is not None and not tracker._claim_start():
+            raise asyncio.CancelledError
+        return entrypoint(**arguments)
+
+    task = asyncio.create_task(
+        asyncio.to_thread(invoke),
+        name="sync-tool-entrypoint",
+    )
+    if tracker is None:
+        return await task
+    tracker.track(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if tracker._cancel_before_start():
+            task.cancel()
+        raise
 
 
 async def _call_tool(
@@ -432,7 +565,7 @@ async def _call_tool(
     if async_entrypoint:
         result = await func(**args)
     else:
-        result = await asyncio.to_thread(func, **args)
+        result = await _run_sync_tool_entrypoint(func, args)
     if inspect.isawaitable(result):
         return await result
     return result

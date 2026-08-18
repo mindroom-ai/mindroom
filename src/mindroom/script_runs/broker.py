@@ -41,7 +41,12 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    track_sync_tool_completion,
+)
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -128,6 +133,10 @@ class ScriptRuntimeResolver(Protocol):
         """Settle an exact approval whose broker ownership ended indeterminately."""
         ...
 
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        """Settle only pending approvals after the run's broker ownership ends."""
+        ...
+
 
 class _BackgroundApprovalGate(Protocol):
     async def __call__(
@@ -180,13 +189,12 @@ class _InvalidToolResultError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ScriptToolCallRequest:
-    """One capability-bearing request for a stable logical tool call."""
+    """One token-free request for a stable logical tool call."""
 
     run_id: str
     call_id: str
     grant: ScriptToolGrant
     arguments: dict[str, object]
-    token: str = ""
 
     @property
     def arguments_digest(self) -> str:
@@ -256,9 +264,10 @@ class ScriptToolBroker:
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
-    def _prepare_call(self, request: ScriptToolCallRequest) -> _PreparedScriptCall:
-        run = self.store.require_active_capability(request.run_id, request.token)
+    def _prepare_call(self, request: ScriptToolCallRequest, token: str) -> _PreparedScriptCall:
+        run = self.store.require_active_capability(request.run_id, token)
         claim = self.store.claim_call(
             run_id=run.run_id,
             call_id=request.call_id,
@@ -278,7 +287,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> _PreparedScriptCall:
         token = self.authenticate(request.run_id, authorization)
-        return self._prepare_call(replace(request, token=token))
+        return self._prepare_call(request, token)
 
     async def _accept_prepared_call(
         self,
@@ -419,21 +428,10 @@ class ScriptToolBroker:
                 state=ScriptCallState.INDETERMINATE,
                 error=_INDETERMINATE_ERROR,
             )
-        calls = await asyncio.to_thread(self.store.calls_for_run, run_id)
-        if calls:
-            run = await asyncio.to_thread(self.store.get_run, run_id)
-            settlements = await asyncio.gather(
-                *(
-                    self.runtime_resolver.settle_approval(
-                        _background_origin(run, call),
-                        reason="Background script ownership was cancelled.",
-                    )
-                    for call in calls
-                ),
-                return_exceptions=True,
-            )
-            if error := next((result for result in settlements if isinstance(result, BaseException)), None):
-                raise error
+        await self.runtime_resolver.settle_run_approvals(
+            run_id,
+            reason="Background script ownership was cancelled.",
+        )
 
     async def accept_authenticated(
         self,
@@ -498,63 +496,16 @@ class ScriptToolBroker:
                 call,
                 correlation_id,
             )
-            context = prepared.context
             toolkit = prepared.toolkit
-            function = prepared.function
-            materialized: object = None
             await _connect_toolkit(toolkit)
-            try:
-                execution_started = True
-
-                async def execute_function() -> tuple[FunctionExecutionResult, object]:
-                    with tool_runtime_context(context):
-                        authored_decision = await _request_authored_confirmation(
-                            runtime_resolver=self.runtime_resolver,
-                            origin=origin,
-                            context=context,
-                            run=run,
-                            call=call,
-                            arguments=arguments,
-                            approval_config=prepared.approval_config,
-                            required=function.requires_confirmation is True,
-                        )
-                        approval_gate = _build_background_approval_gate(
-                            runtime_resolver=self.runtime_resolver,
-                            context=context,
-                            run=run,
-                            call=call,
-                            approval_config=prepared.approval_config,
-                            authored_decision=authored_decision,
-                        )
-                        bridge = build_tool_hook_bridge(
-                            context.hook_registry,
-                            agent_name=run.agent_name,
-                            dispatch_context=LiveToolDispatchContext(
-                                execution_identity=prepared.execution_identity,
-                                runtime_context=context,
-                            ),
-                            config=prepared.approval_config,
-                            runtime_paths=context.runtime_paths,
-                            origin=origin,
-                            approval_gate=approval_gate,
-                        )
-                        prepend_tool_hook_bridge(toolkit, bridge)
-                        if authored_decision is not None:
-                            function.cache_results = function.cache_results and authored_decision.approved
-                        execution_result = await FunctionCall(
-                            function=function,
-                            arguments=arguments,
-                            call_id=call.call_id,
-                        ).aexecute()
-                        materialized_result = await _materialize_successful_result(execution_result)
-                    return execution_result, materialized_result
-
-                execution, materialized = await run_with_tool_execution_identity(
-                    prepared.execution_identity,
-                    operation=execute_function,
-                )
-            finally:
-                await _close_toolkit(toolkit)
+            execution_started = True
+            execution, materialized = await self._run_prepared_execution(
+                prepared,
+                run=run,
+                call=call,
+                origin=origin,
+                arguments=arguments,
+            )
 
             if execution.status != "success":
                 return await self._publish_async(
@@ -589,6 +540,100 @@ class ScriptToolBroker:
                 else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
             )
             return await self._publish_async(call, state=state, error=error)
+
+    async def _run_prepared_execution(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        origin: BackgroundScriptToolOrigin,
+        arguments: dict[str, object],
+    ) -> tuple[FunctionExecutionResult, object]:
+        context = prepared.context
+        toolkit = prepared.toolkit
+        function = prepared.function
+        completion_tracker = SyncToolCompletionTracker()
+        cleanup_transferred = False
+
+        async def execute_function() -> tuple[FunctionExecutionResult, object]:
+            with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
+                authored_decision = await _request_authored_confirmation(
+                    runtime_resolver=self.runtime_resolver,
+                    origin=origin,
+                    context=context,
+                    run=run,
+                    call=call,
+                    arguments=arguments,
+                    approval_config=prepared.approval_config,
+                    required=function.requires_confirmation is True,
+                )
+                approval_gate = _build_background_approval_gate(
+                    runtime_resolver=self.runtime_resolver,
+                    context=context,
+                    run=run,
+                    call=call,
+                    approval_config=prepared.approval_config,
+                    authored_decision=authored_decision,
+                )
+                bridge = build_tool_hook_bridge(
+                    context.hook_registry,
+                    agent_name=run.agent_name,
+                    dispatch_context=LiveToolDispatchContext(
+                        execution_identity=prepared.execution_identity,
+                        runtime_context=context,
+                    ),
+                    config=prepared.approval_config,
+                    runtime_paths=context.runtime_paths,
+                    origin=origin,
+                    approval_gate=approval_gate,
+                )
+                prepend_tool_hook_bridge(toolkit, bridge)
+                if authored_decision is not None:
+                    function.cache_results = function.cache_results and authored_decision.approved
+                execution_result = await FunctionCall(
+                    function=function,
+                    arguments=arguments,
+                    call_id=call.call_id,
+                ).aexecute()
+                materialized_result = await _materialize_successful_result(execution_result)
+            return execution_result, materialized_result
+
+        try:
+            return await run_with_tool_execution_identity(
+                prepared.execution_identity,
+                operation=execute_function,
+            )
+        except asyncio.CancelledError:
+            completion_task = completion_tracker.started_task()
+            if completion_task is not None and not completion_task.done():
+                self._retain_toolkit_cleanup(completion_task, toolkit)
+                cleanup_transferred = True
+            raise
+        finally:
+            if not cleanup_transferred:
+                await _close_toolkit(toolkit)
+
+    def _retain_toolkit_cleanup(
+        self,
+        completion_task: asyncio.Task[object],
+        toolkit: Toolkit,
+    ) -> None:
+        async def cleanup() -> None:
+            try:
+                await completion_task
+            finally:
+                await _close_toolkit(toolkit)
+
+        cleanup_task = asyncio.create_task(cleanup(), name="script-toolkit-cleanup")
+        self._cleanup_tasks.add(cleanup_task)
+
+        def forget_cleanup_task(completed: asyncio.Task[None]) -> None:
+            self._cleanup_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        cleanup_task.add_done_callback(forget_cleanup_task)
 
     def _prepare_execution(
         self,

@@ -200,7 +200,7 @@ async def test_script_gateway_passes_bearer_only_to_broker_and_returns_wire_rece
     }
     assert broker.authorization == "Bearer secret-token"
     assert broker.submitted is not None
-    assert broker.submitted.token == ""
+    assert broker.submitted.run_id == "run-1"
 
 
 @pytest.mark.asyncio

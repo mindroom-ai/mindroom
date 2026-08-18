@@ -204,6 +204,48 @@ def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path: Path)
         script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
+def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
+    """A separate static runner must not receive the primary process's loopback URL."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+        },
+    )
+
+    with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
+        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "configured_url"),
+    [
+        ("MINDROOM_SCRIPT_GATEWAY_URL", "http://127.0.0.1:8765/api/script-gateway"),
+        ("MINDROOM_PUBLIC_URL", "http://localhost:8765"),
+    ],
+)
+def test_worker_gateway_rejects_explicit_loopback_urls(
+    tmp_path: Path,
+    environment_name: str,
+    configured_url: str,
+) -> None:
+    """An explicit callback URL must still be reachable outside the primary process."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            environment_name: configured_url,
+        },
+    )
+
+    with pytest.raises(ValueError, match="non-loopback"):
+        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(tmp_path: Path) -> None:
     """Activation waits for both composition roots and shutdown clears the binding."""

@@ -12,7 +12,6 @@ from mindroom.constants import RuntimePaths
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallState,
-    ScriptRunEntityKind,
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
@@ -172,19 +171,6 @@ def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths:
             grant=ScriptToolGrant("website", "read_url"),
             arguments_digest="digest-b",
         )
-
-
-@pytest.mark.parametrize("entity_kind", [ScriptRunEntityKind.TEAM, ScriptRunEntityKind.ROUTER])
-def test_run_store_rejects_non_agent_owned_run(
-    runtime_paths: RuntimePaths,
-    entity_kind: ScriptRunEntityKind,
-) -> None:
-    """Team and router records cannot enter the agent-only durable store."""
-    store = ScriptRunStore(runtime_paths)
-    non_agent_run = replace(_new_run(), entity_kind=entity_kind)
-
-    with pytest.raises(ScriptRunStoreError, match="agent-owned"):
-        store.create_run(non_agent_run)
 
 
 def test_run_store_rejects_call_grant_outside_launch_snapshot(runtime_paths: RuntimePaths) -> None:
