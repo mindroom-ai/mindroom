@@ -277,7 +277,8 @@ class ApprovalResponseCoordinator:
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
         approval_pending = plan.waiting_text is not None
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
-        visible_text = paused.response_text or plan.waiting_text or pending_text
+        delivery_text = paused.response_text or plan.waiting_text or pending_text
+        visible_text = paused.visible_response_text if paused.response_text else delivery_text
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         publishing = await self.store.advance_approval_continuation(
             current.approval_id,
@@ -286,6 +287,7 @@ class ApprovalResponseCoordinator:
             session_id=paused.session_id,
             calls=plan.calls,
             response_text=paused.response_text,
+            visible_response_text=visible_text,
             response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
             response_presentation_state=paused.response_presentation_state,
         )
@@ -298,7 +300,7 @@ class ApprovalResponseCoordinator:
                 EditTextRequest(
                     target=target,
                     event_id=current.response_event_id,
-                    new_text=visible_text,
+                    new_text=delivery_text,
                     extra_content={STREAM_STATUS_KEY: stream_status},
                     tool_trace=list(visible_tool_trace) or None,
                 ),

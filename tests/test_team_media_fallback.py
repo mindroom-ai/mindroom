@@ -79,8 +79,10 @@ from mindroom.team_exact_members import (
 )
 from mindroom.teams import (
     TeamMode,
+    _collect_team_continuation,
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
+    _reconcile_decided_team_tools,
     _team_response_stream_raw,
     _TeamStreamPresentation,
     build_materialized_team_instance,
@@ -180,6 +182,59 @@ def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -
     assert "🔧" not in restored.render_body()
     assert restored.tool_trace[0].tool_call_id == "call-1"
     assert restored.tool_trace[0].type == "tool_call_completed"
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_appends_ordered_terminal_content_after_prior_presentation() -> None:
+    """The terminal stream event extends durable team state without consulting the final object body."""
+    presentation = _TeamStreamPresentation.new(["GeneralAgent"], show_tool_calls=True)
+    presentation.append_consensus("Before. ")
+
+    async def events() -> AsyncIterator[object]:
+        yield TeamRunCompletedEvent(content="After.")
+        yield TeamRunOutput(content="wrong final-object body", status=RunStatus.completed)
+
+    await _collect_team_continuation(events(), presentation)
+
+    body = presentation.render_body()
+    assert body.index("Before.") < body.index("After.")
+    assert "wrong final-object body" not in body
+
+
+@pytest.mark.asyncio
+async def test_team_continuation_does_not_reconstruct_member_tool_from_final_run() -> None:
+    """A terminal aggregate cannot relocate a member tool completion into a guessed scope."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done")
+    presentation = _TeamStreamPresentation.new(["GeneralAgent"], show_tool_calls=True)
+    presentation.start_member_tool("GeneralAgent", tool)
+
+    async def events() -> AsyncIterator[object]:
+        yield TeamRunOutput(tools=[tool], status=RunStatus.completed)
+
+    await _collect_team_continuation(events(), presentation)
+
+    assert presentation.tool_trace[0].type == "tool_call_started"
+    assert "🔧 `inspect` [1] ⏳" in presentation.render_body()
+
+
+def test_denied_member_tool_completes_from_exact_requirement_without_terminal_aggregate() -> None:
+    """A denial owns its exact member marker even when Agno emits no completion event or member output."""
+    started = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    denied = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={},
+        confirmed=False,
+        confirmation_note="denied",
+    )
+    presentation = _TeamStreamPresentation.new(["GeneralAgent"], show_tool_calls=True)
+    presentation.start_member_tool("GeneralAgent", started)
+
+    _reconcile_decided_team_tools(presentation, [RunRequirement(tool_execution=denied)])
+
+    assert presentation.tool_trace[0].type == "tool_call_completed"
+    assert "🔧 `inspect` [1] ⏳" not in presentation.render_body()
+    assert "🔧 `inspect` [1]" in presentation.render_body()
 
 
 def _make_test_agent(name: str) -> AgnoAgent:

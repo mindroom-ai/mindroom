@@ -1011,6 +1011,7 @@ class PrincipalStore:
         session_id: str,
         calls: tuple[ApprovalCall, ...],
         response_text: str | None = None,
+        visible_response_text: str | None = None,
         response_tool_trace: tuple[dict[str, object], ...] | None = None,
         response_presentation_state: dict[str, object] | None = None,
     ) -> ApprovalContinuation | None:
@@ -1025,6 +1026,7 @@ class PrincipalStore:
                 session_id=session_id,
                 calls=calls,
                 response_text=response_text,
+                visible_response_text=visible_response_text,
                 response_tool_trace=response_tool_trace,
                 response_presentation_state=response_presentation_state,
             ),

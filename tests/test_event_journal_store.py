@@ -469,6 +469,8 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     ]
     assert continuation.state == "ready"
     assert continuation.runtime_generation is None
+    assert continuation.presentation_version is None
+    assert continuation.show_tool_calls is False
 
 
 async def _assert_legacy_unavailable_notices_migrated(store: EventJournalStore) -> None:
@@ -5776,6 +5778,7 @@ class TestApprovalContinuations:
         continuation = replace(
             self.continuation(),
             response_text="Before.\n\n🔧 `inspect` [1] ⏳",
+            visible_response_text="Visible before approval.",
             response_tool_trace=(
                 {
                     "type": "tool_call_started",
@@ -5796,6 +5799,8 @@ class TestApprovalContinuations:
             "kind": "team",
             "members": {"GeneralAgent": "Before."},
         }
+        assert restored.visible_response_text == "Visible before approval."
+        assert restored.presentation_version == 1
         assert restored.show_tool_calls is False
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:

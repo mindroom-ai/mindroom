@@ -71,10 +71,26 @@ async def _collect_agent_continuation(
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
-    for tool in response.tools or ():
-        if not tool.is_paused:
-            presentation.complete_tool(tool)
     return response
+
+
+def _reconcile_decided_agent_tools(
+    presentation: CollectedStreamPresentation,
+    requirements: list[RunRequirement],
+) -> None:
+    """Complete explicit denials and require every decided durable call to settle exactly once."""
+    decided_ids: set[str] = set()
+    for requirement in requirements:
+        tool = requirement.tool_execution
+        if tool is None or not isinstance(tool.tool_call_id, str) or not tool.tool_call_id.strip():
+            continue
+        decided_ids.add(tool.tool_call_id)
+        if tool.confirmed is False:
+            presentation.complete_tool(tool)
+    unresolved = decided_ids & presentation.tool_tracker.pending_tool_call_ids()
+    if unresolved:
+        msg = f"Approval continuation omitted completion events for decided tools: {sorted(unresolved)!r}"
+        raise RuntimeError(msg)
 
 
 async def _continue_persisted_agent(
@@ -97,10 +113,11 @@ async def _continue_persisted_agent(
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
         response_text=continuation.response_text,
-        tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+        tool_trace=deserialize_tool_trace(continuation.response_tool_trace, strict=True),
         track_hidden_tools=True,
     )
     response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
+    _reconcile_decided_agent_tools(presentation, requirements)
     return response, presentation
 
 
@@ -228,7 +245,7 @@ class AgentApprovalExecution:
             tool_trace_collector.extend(presentation.tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(
-            response_text=presentation.final_text() or str(response.content or "Tool approval continuation completed"),
+            response_text=presentation.final_text() or "Tool approval continuation completed",
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

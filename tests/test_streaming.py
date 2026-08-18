@@ -194,13 +194,49 @@ async def test_lifecycle_suspension_captures_last_committed_presentation(config:
 
     assert raised.value is suspension
     assert raised.value.presentation is not None
-    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳"
+    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳\n\n"
+    assert raised.value.presentation.visible_response_text == gateway.ops[-1].display_text
     assert len(raised.value.presentation.tool_trace) == 1
     trace = raised.value.presentation.tool_trace[0]
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "inspect"
     assert trace.args_preview == "path=report.txt"
     assert trace.tool_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_lifecycle_suspension_separates_raw_renderer_state_from_exact_visible_body(config: Config) -> None:
+    """Resume state stays lossless even when Matrix received an interactive transform."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+    raw = """Please choose.
+
+```interactive
+{
+    "question": "Which option?",
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```  """
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content=raw)
+        await gateway.wait_for_ops(1)
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_stream(config, suspended_stream())
+
+    assert raised.value.presentation is not None
+    assert raised.value.presentation.response_text == raw
+    assert raised.value.presentation.visible_response_text == gateway.ops[-1].display_text
+    assert raised.value.presentation.visible_response_text != raw
 
 
 @pytest.mark.asyncio

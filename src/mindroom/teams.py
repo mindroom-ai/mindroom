@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.models.message import Message
+from agno.run.agent import RunCompletedEvent as AgentRunCompletedEvent
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
@@ -113,7 +114,9 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
+    deserialize_tool_trace,
     format_tool_completed_event,
+    serialize_tool_trace,
 )
 
 if TYPE_CHECKING:
@@ -123,6 +126,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
+    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -2089,20 +2093,54 @@ def build_materialized_team_instance(
     )
 
 
-def _apply_team_continuation_event(event: object, presentation: _TeamStreamPresentation) -> None:
-    """Apply one Agno team event to the shared ordered presentation."""
-    if isinstance(event, AgentRunContentEvent) and event.agent_name:
-        presentation.append_member(event.agent_name, event.content)
-    elif isinstance(event, AgentToolCallStartedEvent) and event.agent_name:
-        presentation.start_member_tool(event.agent_name, event.tool)
-    elif isinstance(event, AgentToolCallCompletedEvent) and event.agent_name:
-        presentation.complete_member_tool(event.agent_name, event.tool)
-    elif isinstance(event, TeamRunContentEvent):
-        presentation.append_consensus(event.content)
-    elif isinstance(event, TeamToolCallStartedEvent):
-        presentation.start_tool("team", event.tool)
-    elif isinstance(event, TeamToolCallCompletedEvent):
-        presentation.complete_tool("team", event.tool)
+@dataclass
+class _TeamContinuationEventState:
+    """Apply only ordered continuation events to one durable team presentation."""
+
+    presentation: _TeamStreamPresentation
+    member_content_seen: set[str] = field(default_factory=set)
+    team_content_seen: bool = False
+
+    def apply(self, event: object) -> None:
+        """Apply one event, using terminal content only when no delta preceded it in that scope."""
+        if self._apply_member_event(event):
+            return
+        self._apply_team_event(event)
+
+    def _apply_member_event(self, event: object) -> bool:
+        """Apply one member-scoped event and report whether it was recognized."""
+        if isinstance(event, AgentRunContentEvent) and event.agent_name:
+            if event.content:
+                self.member_content_seen.add(event.agent_name)
+            self.presentation.append_member(event.agent_name, event.content)
+            return True
+        if isinstance(event, AgentRunCompletedEvent) and event.agent_name:
+            if event.agent_name not in self.member_content_seen:
+                self.presentation.append_member(event.agent_name, event.content)
+                self.member_content_seen.add(event.agent_name)
+            return True
+        if isinstance(event, AgentToolCallStartedEvent) and event.agent_name:
+            self.presentation.start_member_tool(event.agent_name, event.tool)
+            return True
+        if isinstance(event, AgentToolCallCompletedEvent) and event.agent_name:
+            self.presentation.complete_member_tool(event.agent_name, event.tool)
+            return True
+        return False
+
+    def _apply_team_event(self, event: object) -> None:
+        """Apply one coordinator-scoped event when recognized."""
+        if isinstance(event, TeamRunContentEvent):
+            if event.content:
+                self.team_content_seen = True
+            self.presentation.append_consensus(event.content)
+        elif isinstance(event, TeamRunCompletedEvent):
+            if not self.team_content_seen:
+                self.presentation.append_consensus(event.content)
+                self.team_content_seen = True
+        elif isinstance(event, TeamToolCallStartedEvent):
+            self.presentation.start_tool("team", event.tool)
+        elif isinstance(event, TeamToolCallCompletedEvent):
+            self.presentation.complete_tool("team", event.tool)
 
 
 async def _collect_team_continuation(
@@ -2111,18 +2149,35 @@ async def _collect_team_continuation(
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
+    event_state = _TeamContinuationEventState(presentation)
     async for event in events:
         if isinstance(event, TeamRunOutput):
             response = event
         else:
-            _apply_team_continuation_event(event, presentation)
+            event_state.apply(event)
     if response is None:
         msg = "Team continuation returned an unexpected result"
         raise TypeError(msg)
-    for tool in _collect_team_tool_executions(response):
-        if not tool.is_paused:
-            presentation.complete_tool("team", tool)
     return response
+
+
+def _reconcile_decided_team_tools(
+    presentation: _TeamStreamPresentation,
+    requirements: Sequence[RunRequirement],
+) -> None:
+    """Complete explicit denials and reject missing events for every other decided tool."""
+    decided_ids: set[str] = set()
+    for requirement in requirements:
+        tool = requirement.tool_execution
+        if tool is None or not isinstance(tool.tool_call_id, str) or not tool.tool_call_id.strip():
+            continue
+        decided_ids.add(tool.tool_call_id)
+        if tool.confirmed is False:
+            presentation.complete_tool("team", tool)
+    unresolved = decided_ids & presentation.tool_tracker.pending_tool_call_ids()
+    if unresolved:
+        msg = f"Team approval continuation omitted completion events for decided tools: {sorted(unresolved)!r}"
+        raise RuntimeError(msg)
 
 
 async def continue_paused_team_run(
@@ -2205,11 +2260,15 @@ async def continue_paused_team_run(
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
+        validated_prior_tool_trace = deserialize_tool_trace(
+            serialize_tool_trace(prior_tool_trace, include_internal=True),
+            strict=True,
+        )
         presentation = _TeamStreamPresentation.restore(
             display_names=members.display_names,
             show_tool_calls=show_tool_calls,
             state=prior_presentation_state,
-            tool_trace=prior_tool_trace,
+            tool_trace=validated_prior_tool_trace,
             prior_response_text=prior_response_text,
         )
         continuation_stream = team.acontinue_run(
@@ -2226,6 +2285,7 @@ async def continue_paused_team_run(
             cast("AsyncIterator[object]", continuation_stream),
             presentation,
         )
+        _reconcile_decided_team_tools(presentation, requirements)
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
@@ -2244,7 +2304,7 @@ async def continue_paused_team_run(
             tool_trace_collector.extend(presentation.tool_trace)
         response_text = presentation.render_body()
         if not response_text:
-            response_text = _format_terminal_team_response(continued, team_display_names=members.display_names)
+            response_text = "Tool approval continuation completed"
         return CompletedApprovalRun(
             response_text=response_text,
             metadata_content=build_ai_run_metadata_content(

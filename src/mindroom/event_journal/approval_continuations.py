@@ -143,7 +143,9 @@ class ApprovalContinuation:
     source_event_ids: tuple[str, ...]
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
+    presentation_version: int | None = 1
     response_text: str = ""
+    visible_response_text: str = ""
     response_tool_trace: tuple[dict[str, object], ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
     show_tool_calls: bool = True
@@ -181,7 +183,9 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
         "response_event_id": continuation.response_event_id,
+        "response_presentation_version": continuation.presentation_version,
         "response_text": continuation.response_text,
+        "visible_response_text": continuation.visible_response_text,
         "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "response_presentation_state": continuation.response_presentation_state,
         "show_tool_calls": continuation.show_tool_calls,
@@ -263,6 +267,12 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
+    stored_presentation_version = stored.get("response_presentation_version")
+    presentation_version = (
+        stored_presentation_version
+        if isinstance(stored_presentation_version, int) and not isinstance(stored_presentation_version, bool)
+        else None
+    )
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -290,7 +300,9 @@ def _from_rows(
         source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
+        presentation_version=presentation_version,
         response_text=cast("str", stored.get("response_text", "")),
+        visible_response_text=cast("str", stored.get("visible_response_text", "")),
         response_tool_trace=tuple(
             dict(event) for event in cast("list[dict[str, object]]", stored.get("response_tool_trace", []))
         ),
@@ -298,7 +310,7 @@ def _from_rows(
             "dict[str, object]",
             stored.get("response_presentation_state", {}),
         ),
-        show_tool_calls=stored.get("show_tool_calls", True) is not False,
+        show_tool_calls=stored.get("show_tool_calls") is True,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -570,6 +582,7 @@ def advance(
     session_id: str,
     calls: tuple[ApprovalCall, ...],
     response_text: str | None = None,
+    visible_response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
 ) -> ApprovalContinuation | None:
@@ -578,14 +591,17 @@ def advance(
     if current is None:
         return None
     next_generation = claimant_generation + 1
-    state: ApprovalContinuationState = "ready" if all(call.decision is not None for call in calls) else "waiting"
-    publication_owner = None if state == "ready" else current.runtime_generation
+    state: ApprovalContinuationState = "waiting"
+    publication_owner = current.runtime_generation
     advanced = replace(
         current,
         run_id=run_id,
         session_id=session_id,
         calls=calls,
         response_text=current.response_text if response_text is None else response_text,
+        visible_response_text=(
+            current.visible_response_text if visible_response_text is None else visible_response_text
+        ),
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(
             current.response_presentation_state if response_presentation_state is None else response_presentation_state

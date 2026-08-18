@@ -647,6 +647,41 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].scope_key == "member:GeneralAgent"
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(({"type": "unknown", "tool_name": "inspect"},), id="malformed-event"),
+        pytest.param(({"type": "tool_call_started", "tool_name": "inspect"},), id="missing-start-id"),
+        pytest.param(
+            (
+                {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": "call-1"},
+                {"type": "tool_call_completed", "tool_name": "inspect", "tool_call_id": "call-1"},
+            ),
+            id="duplicate-id",
+        ),
+    ],
+)
+def test_strict_durable_tool_trace_rejects_ambiguous_continuation_identity(
+    stored: tuple[dict[str, object], ...],
+) -> None:
+    """A continuation cannot safely guess which durable pending slot an event owns."""
+    with pytest.raises(RuntimeError, match="durable tool trace"):
+        deserialize_tool_trace(stored, strict=True)
+
+
+def test_tool_tracker_ignores_replayed_start_after_exact_completion() -> None:
+    """Provider event replay cannot turn a completed call back into a pending marker."""
+    tracker = StreamingToolTracker()
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+
+    assert tracker.start(tool, tool_index=1)[1] is not None
+    assert tracker.complete(tool) is not None
+    assert tracker.start(tool, tool_index=2) == ("", None)
+    assert tracker.complete(tool) is None
+    assert tracker.pending_tools == []
+    assert len(tracker.completed_tools) == 1
+
+
 # --- markdown_to_html: v2 plain markers + unsupported tag escaping ---
 
 

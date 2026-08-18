@@ -185,6 +185,7 @@ def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> Pau
     return replace(
         error.paused,
         response_text=error.presentation.response_text,
+        visible_response_text=error.presentation.visible_response_text,
         tool_trace=error.presentation.tool_trace,
         response_presentation_state=error.presentation.state or {},
     )
@@ -843,7 +844,9 @@ class ResponseRunner:
             show_tool_calls = self._show_tool_calls()
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
-            visible_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
+            snapshot_visible_text = paused.visible_response_text if snapshot_text else ""
+            delivery_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
+            visible_text = snapshot_visible_text or delivery_text
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery_kind: Literal["sent", "edited"] | None = None
             final_visible_body: str | None = None
@@ -851,7 +854,7 @@ class ResponseRunner:
                 response_event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
                         target=target,
-                        response_text=visible_text,
+                        response_text=delivery_text,
                         extra_content={STREAM_STATUS_KEY: stream_status},
                         tool_trace=list(visible_tool_trace) or None,
                         delivery_turn_id=request.response_envelope.source_event_id,
@@ -864,7 +867,7 @@ class ResponseRunner:
                 EditTextRequest(
                     target=target,
                     event_id=response_event_id,
-                    new_text=visible_text,
+                    new_text=delivery_text,
                     extra_content={STREAM_STATUS_KEY: stream_status},
                     tool_trace=list(visible_tool_trace) or None,
                 ),
@@ -895,6 +898,7 @@ class ResponseRunner:
                     calls=plan.calls,
                     state=continuation_state,
                     response_text=snapshot_text,
+                    visible_response_text=visible_text,
                     response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
                     response_presentation_state=paused.response_presentation_state,
                     show_tool_calls=show_tool_calls,
@@ -1403,6 +1407,9 @@ class ResponseRunner:
         target: MessageTarget,
         tool_trace_collector: list[ToolTraceEntry],
     ) -> CompletedApprovalRun | PausedAttempt:
+        if continuation.presentation_version != 1:
+            msg = "Approval continuation has no supported presentation version"
+            raise RuntimeError(msg)
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
@@ -1453,7 +1460,10 @@ class ResponseRunner:
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         history_scope=continuation.history_scope,
                         prior_response_text=continuation.response_text,
-                        prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
+                        prior_tool_trace=deserialize_tool_trace(
+                            continuation.response_tool_trace,
+                            strict=True,
+                        ),
                         prior_presentation_state=continuation.response_presentation_state or None,
                         show_tool_calls=continuation.show_tool_calls,
                         tool_trace_collector=tool_trace_collector,

@@ -97,6 +97,7 @@ class StreamingPresentation:
     """Ordered response state known to have reached Matrix before suspension."""
 
     response_text: str
+    visible_response_text: str = ""
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     state: dict[str, object] | None = None
 
@@ -1137,7 +1138,8 @@ class StreamingResponse:
     def committed_presentation(self) -> StreamingPresentation:
         """Return the text and trace carried by the latest successful update."""
         return StreamingPresentation(
-            response_text=_normalize_stream_accumulated_text(self._last_delivered_text).rstrip(),
+            response_text=_normalize_stream_accumulated_text(self._last_delivered_text),
+            visible_response_text=self._last_committed_rendered_body or "",
             tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
             state=deepcopy(self._last_delivered_presentation_state),
         )
