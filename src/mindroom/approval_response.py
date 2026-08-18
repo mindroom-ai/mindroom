@@ -6,7 +6,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.constants import (
@@ -69,17 +69,38 @@ class _ApprovalPausePresentation:
     approval_pending: bool
 
 
+def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str]:
+    """Read the frozen provider-to-config identity map from a team presentation."""
+    stored_members = state.get("members") if state.get("kind") == "team_stream" else None
+    if not isinstance(stored_members, list):
+        return {}
+    config_names_by_provider_id: dict[str, str] = {}
+    for member in stored_members:
+        if not isinstance(member, dict):
+            continue
+        stored_member = cast("dict[str, object]", member)
+        provider_id = stored_member.get("id")
+        config_name = stored_member.get("config_name")
+        if isinstance(provider_id, str) and provider_id and isinstance(config_name, str) and config_name:
+            config_names_by_provider_id[provider_id] = config_name
+    return config_names_by_provider_id
+
+
 def identify_approval_tools(
     paused: PausedAttempt,
     *,
     default_agent_name: str,
 ) -> tuple[tuple[ToolExecution, str, str, str], ...]:
     """Resolve exact paused call IDs, names, and invoking member ownership."""
+    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: requirement.member_agent_id
+        requirement.tool_execution.tool_call_id: config_names_by_provider_id.get(requirement.member_agent_id)
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.member_agent_id
     }
+    if any(owner is None for owner in owners.values()):
+        msg = "Paused approval tool has no frozen member config identity"
+        raise RuntimeError(msg)
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
         if not tool.tool_call_id or not tool.tool_name:
@@ -90,7 +111,7 @@ def identify_approval_tools(
                 tool,
                 tool.tool_call_id,
                 tool.tool_name,
-                owners.get(tool.tool_call_id, default_agent_name),
+                owners.get(tool.tool_call_id) or default_agent_name,
             ),
         )
     return tuple(identified)

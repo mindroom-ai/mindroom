@@ -43,6 +43,7 @@ from mindroom.ai_runtime import (
     queued_message_signal_context,
 )
 from mindroom.approval_receipt import approval_receipt_context
+from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -115,7 +116,7 @@ _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_t
 def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slots() -> None:
     """Stable member IDs keep equal rendering labels from sharing content or tools."""
     presentation = _TeamStreamPresentation.new(
-        member_ids=["member-a", "member-b"],
+        config_names=["member-a", "member-b"],
         display_names=["Same", "Same"],
         show_tool_calls=True,
     )
@@ -145,7 +146,7 @@ def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -
     )
 
     restored = _TeamStreamPresentation.restore(
-        member_ids=["general"],
+        config_names=["general"],
         show_tool_calls=False,
         state=presentation.to_state(),
         tool_trace=presentation.tool_trace,
@@ -286,13 +287,13 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
             requirements=(requirement,),
         ),
         response=response,
-        member_ids=["general"],
+        config_names=["general"],
         display_names=["GeneralAgent"],
         show_tool_calls=True,
     )
 
     restored = _TeamStreamPresentation.restore(
-        member_ids=["general"],
+        config_names=["general"],
         show_tool_calls=True,
         state=paused.response_presentation_state,
         tool_trace=paused.tool_trace,
@@ -302,6 +303,65 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
     assert "🔧 `inspect` [1] ⏳" in restored.per_member["general"]
     assert restored.consensus == "Consensus before approval."
     assert restored.tool_trace[0].tool_call_id == "call-1"
+
+
+def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line() -> None:
+    """A member label must not consume the standalone marker line used for ordering."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "general"
+    requirement.member_agent_name = "GeneralAgent"
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+        ),
+        response=TeamRunOutput(tools=[tool], status=RunStatus.paused),
+        config_names=["general"],
+        display_names=["GeneralAgent"],
+        show_tool_calls=True,
+    )
+
+    assert "**GeneralAgent**:\n\n🔧 `inspect` [1] ⏳" in paused.response_text
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
+def test_blocking_team_pause_maps_provider_member_id_to_raw_config_name() -> None:
+    """Agno's URL-safe requirement identity must retain the authored approval owner."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "code-review"
+    requirement.member_agent_name = "Code Review"
+
+    paused = _attach_team_pause_presentation(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+        ),
+        response=TeamRunOutput(
+            tools=[tool],
+            member_responses=[RunOutput(agent_id="Code_Review", agent_name="Code Review")],
+            status=RunStatus.paused,
+        ),
+        config_names=["Code_Review"],
+        display_names=["Code Review"],
+        show_tool_calls=True,
+    )
+
+    assert paused.tool_trace[0].scope_key == "agent:code-review"
+    assert paused.response_presentation_state["members"] == [
+        {
+            "id": "code-review",
+            "config_name": "Code_Review",
+            "display_name": "Code Review",
+            "content": "\n\n🔧 `inspect` [1] ⏳\n\n",
+        },
+    ]
 
 
 def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> None:
@@ -332,13 +392,13 @@ def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> Non
             requirements=(requirement,),
         ),
         response=response,
-        member_ids=["first", "second"],
+        config_names=["first", "second"],
         display_names=["FirstAgent", "SecondAgent"],
         show_tool_calls=True,
     )
 
     restored = _TeamStreamPresentation.restore(
-        member_ids=["first", "second"],
+        config_names=["first", "second"],
         show_tool_calls=True,
         state=paused.response_presentation_state,
         tool_trace=paused.tool_trace,

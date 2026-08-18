@@ -28,7 +28,7 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
-from mindroom import approval_receipt, response_runner
+from mindroom import approval_receipt, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
 from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.background_tasks import wait_for_background_tasks
@@ -1662,6 +1662,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
     assert await runner.deps.approval_store.approval_continuation("approval-cancel") is None
@@ -1708,6 +1709,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
             execution_identity=identity,
             entity_kind="team",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
             team_member_names=("general",),
             team_mode="coordinate",
         )
@@ -2303,6 +2305,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
     edit_request = edit_text.await_args.args[0]
@@ -2355,6 +2358,7 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
     send_request = send_text.await_args.args[0]
@@ -2367,9 +2371,17 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
+@pytest.mark.parametrize(
+    ("turn_visibility", "reloaded_visibility"),
+    [(False, True), (True, False)],
+)
 @pytest.mark.asyncio
-async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_path: Path) -> None:
-    """Approval publication edits metadata/status without replacing visible work by waiting text."""
+async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
+    tmp_path: Path,
+    turn_visibility: bool,
+    reloaded_visibility: bool,
+) -> None:
+    """Approval publication cannot reinterpret a committed stream after config reload."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     await _admit_approval_source(runner.deps.approval_store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
@@ -2382,7 +2394,7 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
         session_id="session-1",
         run_id="run-1",
         tools=(ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),),
-        response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
+        response_text=("Before approval.\n\n🔧 `inspect` [1] ⏳" if turn_visibility else "Before approval."),
         tool_trace=(trace,),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -2390,6 +2402,7 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
         user_id=request.user_id,
     )
     edit_text = AsyncMock(return_value=True)
+    runner.deps.runtime.config.agents[runner.deps.agent_name].show_tool_calls = reloaded_visibility
 
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
@@ -2408,6 +2421,7 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=turn_visibility,
         )
 
     continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
@@ -2420,12 +2434,79 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
             "tool_call_id": "call-1",
         },
     )
-    assert continuation.show_tool_calls is True
+    assert continuation.show_tool_calls is turn_visibility
     edit_request = edit_text.await_args.args[0]
     assert edit_request.new_text == paused.response_text
-    assert edit_request.tool_trace == [trace]
+    assert edit_request.tool_trace == ([trace] if turn_visibility else None)
     assert outcome.final_visible_body == paused.response_text
-    assert outcome.tool_trace == (trace,)
+    assert outcome.tool_trace == ((trace,) if turn_visibility else ())
+
+
+@pytest.mark.asyncio
+async def test_pause_republishes_the_acknowledged_interactive_body_but_persists_source(
+    tmp_path: Path,
+) -> None:
+    """Suspension must not replace a rendered question with its canonical fenced JSON."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    raw_interactive = (
+        '```interactive\n{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
+    )
+    rendered_interactive = interactive.parse_and_format_interactive(
+        raw_interactive,
+        extract_mapping=True,
+    ).formatted_text
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
+    marker = "\n\n🔧 `inspect` [1] ⏳"
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            response_text=f"{raw_interactive}{marker}",
+            tool_trace=(trace,),
+        ),
+    )
+    error.capture_presentation(
+        StreamingPresentation(
+            response_text=f"{raw_interactive}{marker}",
+            rendered_response_text=f"{rendered_interactive}{marker}",
+            tool_trace=(trace,),
+        ),
+    )
+    paused = response_runner._paused_with_committed_presentation(error, show_tool_calls=True)
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+    edit_text = AsyncMock(return_value=True)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(True, 60.0)),
+        ),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(tracked_event_id="$stream"),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.response_text == f"{raw_interactive}{marker}"
+    assert edit_text.await_args.args[0].new_text == f"{rendered_interactive}{marker}"
 
 
 @pytest.mark.asyncio
@@ -2475,6 +2556,7 @@ async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
     continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
@@ -2538,6 +2620,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
             execution_identity=identity,
             entity_kind="team",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
             team_member_names=("member-a",),
             team_mode="coordinate",
         )
@@ -2642,7 +2725,14 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
     state = {
         "kind": "team_stream",
         "version": 2,
-        "members": [{"id": "member-a", "display_name": "Member A", "content": ""}],
+        "members": [
+            {
+                "id": "member-a",
+                "config_name": "member-a",
+                "display_name": "Member A",
+                "content": "",
+            },
+        ],
         "consensus": "",
     }
     error = ResponsePausedForApproval(
@@ -2662,7 +2752,7 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
     assert paused.tool_trace == (trace,)
     assert paused.response_presentation_state == state
     restored = _TeamStreamPresentation.restore(
-        member_ids=["member-a"],
+        config_names=["member-a"],
         show_tool_calls=False,
         state=paused.response_presentation_state,
         tool_trace=paused.tool_trace,
@@ -2767,6 +2857,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
     continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
@@ -3736,6 +3827,7 @@ async def test_suspension_rejects_missing_requester_before_persistence(tmp_path:
             execution_identity=identity,
             entity_kind="agent",
             history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
         )
 
 
@@ -4949,6 +5041,76 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         post_effects.assert_awaited_once()
     assert request.source_handoff is not None
     assert request.source_handoff.is_set() is hands_off
+
+
+@pytest.mark.parametrize(
+    ("turn_visibility", "reloaded_visibility"),
+    [(False, True), (True, False)],
+)
+@pytest.mark.asyncio
+async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
+    tmp_path: Path,
+    turn_visibility: bool,
+    reloaded_visibility: bool,
+) -> None:
+    """A config reload after generation cannot reinterpret the committed pause snapshot."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    request = _plain_request(_target(thread_id="$thread"))
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect")
+    trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
+    marker = "\n\n🔧 `inspect` [1] ⏳"
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            response_text=f"Before.{marker}" if turn_visibility else "Before.",
+            tool_trace=(trace,),
+        ),
+    )
+    error.capture_presentation(
+        StreamingPresentation(
+            response_text=f"Before.{marker}" if turn_visibility else "Before.",
+            tool_trace=(trace,) if turn_visibility else (),
+        ),
+    )
+    handed_off: list[PausedAttempt] = []
+
+    async def pause_after_reload(**_kwargs: object) -> None:
+        coordinator.deps.runtime.config.agents[coordinator.deps.agent_name].show_tool_calls = reloaded_visibility
+        raise error
+
+    async def suspend(paused: PausedAttempt) -> FinalDeliveryOutcome:
+        handed_off.append(paused)
+        return FinalDeliveryOutcome(
+            terminal_status="suspended",
+            event_id="$response",
+            is_visible_response=True,
+        )
+
+    progress = response_runner._DeliveryProgress()
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    with patch.object(coordinator, "_run_cancellable_response", new=pause_after_reload):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            approval_suspension_handler=suspend,
+            show_tool_calls=turn_visibility,
+        )
+
+    assert len(handed_off) == 1
+    assert handed_off[0].response_text == (f"Before.{marker}" if turn_visibility else "Before.")
+    assert handed_off[0].tool_trace == (trace,)
 
 
 @pytest.mark.asyncio

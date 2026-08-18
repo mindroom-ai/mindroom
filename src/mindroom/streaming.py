@@ -44,6 +44,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     complete_pending_tool_block,
+    is_visible_tool_marker_line,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
@@ -97,6 +98,7 @@ class StreamingPresentation:
     """Ordered response state known to have reached Matrix before suspension."""
 
     response_text: str
+    rendered_response_text: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     state: dict[str, object] | None = None
 
@@ -120,7 +122,6 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
@@ -145,14 +146,14 @@ class _StreamDeliveryShutdownTimeoutError(TimeoutError):
 def strip_visible_tool_markers(text: str) -> str:
     """Remove display-only tool marker lines before text re-enters model context."""
     lines = text.splitlines()
-    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
+    if not any(is_visible_tool_marker_line(line) for line in lines):
         return text
 
     filtered_lines: list[str] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+        if not is_visible_tool_marker_line(line):
             filtered_lines.append(line)
             index += 1
             continue
@@ -1180,8 +1181,10 @@ class StreamingResponse:
 
     def committed_presentation(self) -> StreamingPresentation:
         """Return the text and trace carried by the latest successful update."""
+        response_text = _normalize_stream_accumulated_text(self._last_delivered_text).rstrip()
         return StreamingPresentation(
-            response_text=_normalize_stream_accumulated_text(self._last_delivered_text).rstrip(),
+            response_text=response_text,
+            rendered_response_text=self._last_committed_rendered_body if response_text else None,
             tool_trace=tuple(deepcopy(self._last_delivered_tool_trace)),
             state=deepcopy(self._last_delivered_presentation_state),
         )

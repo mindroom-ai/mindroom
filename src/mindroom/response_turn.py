@@ -363,6 +363,7 @@ class PausedAttempt:
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
     response_text: str = ""
+    acknowledged_response_text: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
 

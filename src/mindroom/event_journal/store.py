@@ -991,6 +991,7 @@ class PrincipalStore:
         approval_id: str,
         *,
         runtime_generation: str,
+        legacy_show_tool_calls: bool | None = None,
     ) -> ApprovalContinuation | None:
         """Claim one ready paused run for exactly one response lifecycle."""
         return await self._backend.write(
@@ -999,6 +1000,7 @@ class PrincipalStore:
                 self._principal_id,
                 approval_id=approval_id,
                 runtime_generation=runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
             ),
         )
 

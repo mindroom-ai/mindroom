@@ -493,7 +493,7 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
     return f"{_TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
 
 
-def _is_visible_tool_marker_line(line: str) -> bool:
+def is_visible_tool_marker_line(line: str) -> bool:
     """Return whether one plain-text line is a Matrix-visible tool marker."""
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
 
@@ -516,7 +516,7 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     for index, line in enumerate(lines):
         spaced_lines.append(line)
         line_text = line.rstrip("\r\n")
-        if not _is_visible_tool_marker_line(line_text):
+        if not is_visible_tool_marker_line(line_text):
             continue
         next_line = lines[index + 1] if index + 1 < len(lines) else None
         if next_line is not None and next_line.strip():
@@ -530,13 +530,13 @@ def append_stream_text(existing_text: str, content: object | None) -> str:
         return existing_text
     delta = str(content)
     last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
-    separator = "\n\n" if not delta.startswith(("\n", "\r")) and _is_visible_tool_marker_line(last_line) else ""
+    separator = "\n\n" if not delta.startswith(("\n", "\r")) and is_visible_tool_marker_line(last_line) else ""
     return f"{existing_text}{separator}{delta}"
 
 
 def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
     """Return whether visible marker lines exactly match the ordered trace slots."""
-    visible_markers = tuple(line.strip() for line in text.splitlines() if _is_visible_tool_marker_line(line))
+    visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
     expected_markers = tuple(
         _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
         for index, entry in enumerate(tool_trace, start=1)

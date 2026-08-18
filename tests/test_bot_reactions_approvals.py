@@ -1596,6 +1596,7 @@ class TestAgentBot(AgentBotTestBase):
                 execution_identity=identity,
                 entity_kind="agent",
                 history_scope=first._response_runner.deps.state_writer.history_scope(),
+                show_tool_calls=True,
             )
 
         assert suspended.terminal_status == "suspended"

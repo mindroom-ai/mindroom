@@ -29,6 +29,7 @@ from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.session.team import TeamSession
 from agno.team import Team
+from agno.utils.string import url_safe_string
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime, model_loading
@@ -115,6 +116,7 @@ from mindroom.tool_system.events import (
     append_stream_text,
     complete_pending_tool_block,
     format_tool_completed_event,
+    is_visible_tool_marker_line,
 )
 
 if TYPE_CHECKING:
@@ -253,7 +255,9 @@ def _format_member_contribution(agent_name: str, content: str, indent: int = 0) 
 
     """
     indent_str = "  " * indent
-    return f"{indent_str}**{agent_name}**: {content}"
+    first_line = content.lstrip().splitlines()[0] if content.strip() else ""
+    separator = "\n\n" if is_visible_tool_marker_line(first_line) else " "
+    return f"{indent_str}**{agent_name}**:{separator}{content}"
 
 
 def _format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
@@ -314,6 +318,7 @@ class _TeamStreamPresentation:
     """Structured team document that survives an approval continuation."""
 
     member_ids: list[str]
+    config_names_by_id: dict[str, str]
     display_names_by_id: dict[str, str]
     show_tool_calls: bool
     per_member: dict[str, str]
@@ -333,19 +338,26 @@ class _TeamStreamPresentation:
     @classmethod
     def new(
         cls,
-        member_ids: Sequence[str],
+        config_names: Sequence[str],
         display_names: Sequence[str],
         *,
         show_tool_calls: bool,
     ) -> _TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
-        ids = list(member_ids)
+        frozen_config_names = list(config_names)
+        ids = [url_safe_string(config_name) for config_name in frozen_config_names]
         names = list(display_names)
-        if len(ids) != len(names) or len(ids) != len(set(ids)) or any(not member_id for member_id in ids):
+        if (
+            len(ids) != len(names)
+            or len(ids) != len(frozen_config_names)
+            or len(ids) != len(set(ids))
+            or any(not member_id for member_id in ids)
+        ):
             msg = "Team presentation member identities are invalid"
             raise RuntimeError(msg)
         return cls(
             member_ids=ids,
+            config_names_by_id=dict(zip(ids, frozen_config_names, strict=True)),
             display_names_by_id=dict(zip(ids, names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
@@ -355,7 +367,7 @@ class _TeamStreamPresentation:
     def restore(
         cls,
         *,
-        member_ids: Sequence[str],
+        config_names: Sequence[str],
         show_tool_calls: bool,
         state: Mapping[str, object] | None,
         tool_trace: Sequence[ToolTraceEntry],
@@ -370,6 +382,7 @@ class _TeamStreamPresentation:
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)  # noqa: TRY004
         restored_ids: list[str] = []
+        config_names_by_id: dict[str, str] = {}
         display_names_by_id: dict[str, str] = {}
         per_member: dict[str, str] = {}
         for member in stored_members:
@@ -378,22 +391,31 @@ class _TeamStreamPresentation:
                 raise RuntimeError(msg)  # noqa: TRY004
             stored_member = cast("dict[str, object]", member)
             member_id = stored_member.get("id")
+            config_name = stored_member.get("config_name")
             display_name = stored_member.get("display_name")
             content = stored_member.get("content")
             if (
                 not isinstance(member_id, str)
                 or not member_id
                 or member_id in per_member
+                or not isinstance(config_name, str)
+                or not config_name
                 or not isinstance(display_name, str)
                 or not isinstance(content, str)
             ):
                 msg = "Team continuation presentation snapshot is invalid"
                 raise RuntimeError(msg)
             restored_ids.append(member_id)
+            config_names_by_id[member_id] = config_name
             display_names_by_id[member_id] = display_name
             per_member[member_id] = content
-        expected_ids = list(member_ids)
-        if restored_ids != expected_ids or len(expected_ids) != len(set(expected_ids)):
+        expected_config_names = list(config_names)
+        expected_ids = [url_safe_string(config_name) for config_name in expected_config_names]
+        if (
+            restored_ids != expected_ids
+            or len(expected_ids) != len(set(expected_ids))
+            or [config_names_by_id[member_id] for member_id in restored_ids] != expected_config_names
+        ):
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)
         valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
@@ -406,6 +428,7 @@ class _TeamStreamPresentation:
             raise RuntimeError(msg)  # noqa: TRY004
         restored = cls(
             member_ids=restored_ids,
+            config_names_by_id=config_names_by_id,
             display_names_by_id=display_names_by_id,
             show_tool_calls=show_tool_calls,
             per_member=per_member,
@@ -425,6 +448,7 @@ class _TeamStreamPresentation:
             "members": [
                 {
                     "id": member_id,
+                    "config_name": self.config_names_by_id[member_id],
                     "display_name": self.display_names_by_id[member_id],
                     "content": self.per_member[member_id],
                 }
@@ -437,6 +461,10 @@ class _TeamStreamPresentation:
         """Resolve an event only through its stable member identity."""
         if isinstance(agent_id, str) and agent_id in self.per_member:
             return agent_id
+        if isinstance(agent_id, str):
+            for member_id, config_name in self.config_names_by_id.items():
+                if agent_id == config_name:
+                    return member_id
         msg = f"Team event has no frozen member slot for {reported_name or agent_id!r}"
         raise RuntimeError(msg)
 
@@ -531,10 +559,7 @@ def _blocking_team_member_scope(
     member_name: str | None,
 ) -> str:
     """Resolve aggregate member identity to one frozen presentation slot."""
-    if isinstance(member_id, str) and member_id in presentation.per_member:
-        return f"agent:{member_id}"
-    msg = f"Blocking team output has no frozen member slot for {member_name or member_id!r}"
-    raise RuntimeError(msg)
+    return f"agent:{presentation.resolve_member_id(member_id, member_name)}"
 
 
 def _merge_blocking_team_tool(
@@ -647,12 +672,12 @@ def _attach_team_pause_presentation(
     paused: PausedAttempt,
     *,
     response: TeamRunOutput | RunOutput,
-    member_ids: Sequence[str],
+    config_names: Sequence[str],
     display_names: Sequence[str],
     show_tool_calls: bool,
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
-    presentation = _TeamStreamPresentation.new(member_ids, display_names, show_tool_calls=show_tool_calls)
+    presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
     scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
     _collect_blocking_team_tools(presentation, response, scoped_tools)
@@ -2458,7 +2483,7 @@ async def continue_paused_team_run(
             denial_reasons=denial_reasons,
         )
         presentation = _TeamStreamPresentation.restore(
-            member_ids=member_names,
+            config_names=member_names,
             show_tool_calls=show_tool_calls,
             state=prior_presentation_state,
             tool_trace=prior_tool_trace,
@@ -2903,7 +2928,7 @@ async def team_response(  # noqa: C901, PLR0915
                     _attach_team_pause_presentation(
                         paused_attempt,
                         response=response,
-                        member_ids=attempt_members.requested_agent_names,
+                        config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
                     ),

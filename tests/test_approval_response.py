@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def test_identify_approval_tools_keeps_team_member_owner() -> None:
-    """Approval policy and cards must use stable identity, not a duplicate display label."""
+    """Approval policy uses the raw config identity behind Agno's provider member ID."""
     tool = ToolExecution(
         tool_call_id="call-1",
         tool_name="dangerous",
@@ -36,11 +36,24 @@ def test_identify_approval_tools_keeps_team_member_owner() -> None:
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            response_presentation_state={
+                "kind": "team_stream",
+                "version": 2,
+                "members": [
+                    {
+                        "id": "researcher-a",
+                        "config_name": "Researcher_A",
+                        "display_name": "Researcher",
+                        "content": "",
+                    },
+                ],
+                "consensus": "",
+            },
         ),
         default_agent_name="research-team",
     )
 
-    assert identified == ((tool, "call-1", "dangerous", "researcher-a"),)
+    assert identified == ((tool, "call-1", "dangerous", "Researcher_A"),)
 
 
 @pytest.mark.asyncio

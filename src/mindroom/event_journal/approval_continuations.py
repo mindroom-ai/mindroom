@@ -147,6 +147,7 @@ class ApprovalContinuation:
     response_tool_trace: tuple[dict[str, object], ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
     show_tool_calls: bool = True
+    show_tool_calls_is_frozen: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
@@ -299,6 +300,7 @@ def _from_rows(
             stored.get("response_presentation_state", {}),
         ),
         show_tool_calls=stored.get("show_tool_calls", True) is not False,
+        show_tool_calls_is_frozen="show_tool_calls" in stored,
         execution_identity=cast("dict[str, object]", stored.get("execution_identity", {})),
         runtime_model_name=cast("str | None", stored.get("runtime_model_name")),
         team_member_names=tuple(cast("list[str]", stored.get("team_member_names", []))),
@@ -546,16 +548,37 @@ def claim(
     *,
     approval_id: str,
     runtime_generation: str,
+    legacy_show_tool_calls: bool | None = None,
 ) -> ApprovalContinuation | None:
     """Move one ready paused run into its single execution attempt."""
+    current = get(transaction, principal_id, approval_id=approval_id)
+    if current is None or current.state != "ready":
+        return None
+    if not current.show_tool_calls_is_frozen and legacy_show_tool_calls is None:
+        msg = "Legacy approval continuation visibility must be resolved before claim"
+        raise RuntimeError(msg)
+    claimed_continuation = replace(
+        current,
+        state="claimed",
+        runtime_generation=runtime_generation,
+        show_tool_calls=(
+            current.show_tool_calls if current.show_tool_calls_is_frozen else bool(legacy_show_tool_calls)
+        ),
+        show_tool_calls_is_frozen=True,
+    )
     claimed = transaction.fetchone(
         """
         UPDATE approval_continuations
-        SET state = 'claimed', runtime_generation = ?
+        SET state = 'claimed', runtime_generation = ?, context_json = ?
         WHERE principal_id = ? AND approval_id = ? AND state = 'ready'
         RETURNING approval_id
         """,
-        (runtime_generation, principal_id, approval_id),
+        (
+            runtime_generation,
+            _json(_context(claimed_continuation)),
+            principal_id,
+            approval_id,
+        ),
     )
     return None if claimed is None else get(transaction, principal_id, approval_id=approval_id)
 
