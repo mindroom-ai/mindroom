@@ -3980,10 +3980,23 @@ async def test_team_response_stream_keys_canonical_text_by_provider_member_id() 
         materialized_agent_names={"Code_Review"},
         failed_agent_names=[],
     )
+    tool = ToolExecution(
+        tool_call_id="call-normalized",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(tool)
+    requirement.member_agent_id = "code-review"
+    requirement.member_agent_name = "Code Review"
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield AgentRunContentEvent(agent_id="code-review", agent_name="Code Review", content="Member answer.")
-        yield TeamRunContentEvent(content="Consensus answer.")
+        yield TeamRunPausedEvent(
+            run_id="run-normalized",
+            session_id="session-team-stream",
+            tools=[tool],
+            requirements=[requirement],
+        )
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -4002,24 +4015,29 @@ async def test_team_response_stream_keys_canonical_text_by_provider_member_id() 
             new=AsyncMock(return_value=_prepared_team_execution_context(final_prompt="Review this.")),
         ),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        pytest.raises(ResponsePausedForApproval) as raised,
     ):
-        chunks = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=team_agent_ids,
-                message="Review this.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-team-stream", run_id="run-normalized"),
-                mode=TeamMode.COORDINATE,
-                show_tool_calls=False,
-            )
-        ]
+        async for _chunk in team_response_stream(
+            agent_ids=team_agent_ids,
+            message="Review this.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id="session-team-stream", run_id="run-normalized"),
+            mode=TeamMode.COORDINATE,
+            show_tool_calls=False,
+        ):
+            pass
 
-    rendered_chunks = [chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks]
-    assert "**Code Review**: Member answer." in recorder.assistant_text
-    assert any("Consensus answer." in chunk for chunk in rendered_chunks)
+    assert "**Code Review**: Member answer." in raised.value.paused.response_text
+    assert raised.value.paused.response_presentation_state["members"] == [
+        {
+            "id": "code-review",
+            "config_name": "Code_Review",
+            "display_name": "Code Review",
+            "content": "Member answer.",
+        },
+    ]
 
 
 @pytest.mark.asyncio

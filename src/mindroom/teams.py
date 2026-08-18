@@ -3400,7 +3400,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             canonical_per_member = dict.fromkeys(attempt_member_ids, "")
             canonical_consensus = ""
             presentation = _TeamStreamPresentation.new(
-                attempt_member_ids,
+                attempt_config_names,
                 attempt_display_names,
                 show_tool_calls=show_tool_calls,
             )
