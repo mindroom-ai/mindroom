@@ -322,6 +322,8 @@ _.chat  # LiveKit LLM adapter override (src/mindroom/matrix_rtc/voice_agent.py)
 _.asearch  # agno Agent knowledge retrieval calls it dynamically (src/mindroom/strict_knowledge.py)
 INITIAL  # unused variable (src/mindroom/event_journal/models.py)
 FINAL  # unused variable (src/mindroom/event_journal/models.py)
+_.reconcile_once  # explicit background-script lifecycle sweep API used by tests
+_.prune_once  # explicit background-script retention sweep API used by tests
 
 # Named only inside a `cast("_RoomIdEvent", event)` string literal, which
 # vulture does not resolve.

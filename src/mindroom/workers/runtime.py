@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import TYPE_CHECKING, cast
 
@@ -54,6 +54,11 @@ class _WorkerManagerEntry:
     manager: WorkerBackend
     config_signature: tuple[str, ...]
     active_leases: int = 0
+    shutdown_requested: bool = False
+    generation_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.generation_id = _stable_json_digest(self.config_signature)
 
 
 @dataclass(slots=True)
@@ -67,6 +72,11 @@ class PrimaryWorkerManagerLease:
     def manager(self) -> WorkerBackend:
         """Return the leased worker manager."""
         return self._entry.manager
+
+    @property
+    def generation_id(self) -> str:
+        """Return the stable opaque identity of this manager's configuration."""
+        return self._entry.generation_id
 
     def __enter__(self) -> WorkerBackend:
         """Enter the lease context and return the borrowed manager."""
@@ -91,7 +101,7 @@ _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
 
 
 def _stable_json_digest(payload: object) -> str:
-    """Return a stable in-memory identity for JSON-like config payloads."""
+    """Return a stable opaque identity for JSON-like config payloads."""
     serialized = json.dumps(payload, default=repr, separators=(",", ":"), sort_keys=True)
     return sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -431,7 +441,7 @@ def _drain_retired_entries_locked() -> list[WorkerBackend]:
     ready_managers: list[WorkerBackend] = []
     pending_entries: list[_WorkerManagerEntry] = []
     for entry in _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
-        if entry.active_leases == 0:
+        if entry.shutdown_requested and entry.active_leases == 0:
             ready_managers.append(entry.manager)
         else:
             pending_entries.append(entry)
@@ -549,11 +559,7 @@ def get_primary_worker_manager(
         worker_grantable_credentials=worker_grantable_credentials,
     )
     if discarded_manager is not None:
-        _shutdown_worker_manager_now(
-            discarded_manager,
-            suppress_errors=True,
-            log_message="Failed to shut down discarded duplicate primary worker manager",
-        )
+        del discarded_manager
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(
             manager,
@@ -585,11 +591,7 @@ def lease_primary_worker_manager(
         worker_grantable_credentials=worker_grantable_credentials,
     )
     if discarded_manager is not None:
-        _shutdown_worker_manager_now(
-            discarded_manager,
-            suppress_errors=True,
-            log_message="Failed to shut down discarded duplicate primary worker manager",
-        )
+        del discarded_manager
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(
             manager,
@@ -615,6 +617,9 @@ def shutdown_primary_worker_manager(
             if active_entry is not None:
                 _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(active_entry)
                 _PRIMARY_WORKER_MANAGER_ENTRY = None
+
+            for entry in _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
+                entry.shutdown_requested = True
 
             managers_to_shutdown = _drain_retired_entries_locked()
             if not managers_to_shutdown:

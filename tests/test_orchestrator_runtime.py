@@ -3389,6 +3389,11 @@ class TestMultiAgentOrchestrator:
             removed_entities=set(),
             only_support_service_changes=True,
         )
+        generation_refreshes: list[Config] = []
+
+        async def install_committed_worker_generation(_runtime: object) -> None:
+            assert orchestrator.config is new_config
+            generation_refreshes.append(new_config)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
@@ -3399,6 +3404,12 @@ class TestMultiAgentOrchestrator:
             ) as mock_build_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
+            patch.object(
+                type(orchestrator.script_runtime),
+                "install_committed_worker_generation",
+                new=install_committed_worker_generation,
+                create=True,
+            ),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -3410,6 +3421,7 @@ class TestMultiAgentOrchestrator:
         # without the planner or the support sync ever being reached.
         mock_build_plan.assert_called_once()
         mock_sync_support.assert_awaited_once()
+        assert generation_refreshes == [new_config]
 
     @pytest.mark.asyncio
     async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(

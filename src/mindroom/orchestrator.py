@@ -1813,6 +1813,7 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
+            await self._script_runtime.install_committed_worker_generation()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",

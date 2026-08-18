@@ -47,7 +47,13 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workers.backend import WorkerBackend
 
-__all__ = ["ScriptRunLimits", "ScriptRunManager", "ScriptRunManagerError", "ScriptRunStatus"]
+__all__ = [
+    "ScriptRunLimits",
+    "ScriptRunManager",
+    "ScriptRunManagerError",
+    "ScriptRunStatus",
+    "ScriptWorkerBackendBinding",
+]
 
 logger = get_logger(__name__)
 
@@ -126,6 +132,14 @@ class ScriptRunStatus:  # privata: ignore -- Task 6 lifecycle consumes this stat
     output: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ScriptWorkerBackendBinding:
+    """One worker backend paired with its stable configuration generation."""
+
+    backend: WorkerBackend
+    generation_id: str
+
+
 @dataclass(slots=True)
 class ScriptRunManager:
     """Own durable script intent while existing supervisors own process signals."""
@@ -135,7 +149,8 @@ class ScriptRunManager:
     worker_client: ScriptWorkerClient
     worker_backend: WorkerBackend | None
     gateway_url: str
-    worker_backend_resolver: Callable[[ScriptRunRecord | None], WorkerBackend | None] | None = None
+    worker_backend_generation: str | None = None
+    worker_backend_resolver: Callable[[ScriptRunRecord | None], ScriptWorkerBackendBinding | None] | None = None
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
@@ -400,10 +415,12 @@ class ScriptRunManager:
         force: bool,
         reason: str,
         terminal_state: ScriptRunState,
+        broker_revoked: bool = False,
     ) -> ScriptRunRecord:
         if run.state in _TERMINAL_STATES:
             try:
-                await self.broker.cancel_run(run.run_id)
+                if not broker_revoked:
+                    await self.broker.cancel_run(run.run_id)
             finally:
                 await self._cleanup_token(run)
             return run
@@ -411,10 +428,11 @@ class ScriptRunManager:
         broker_error: BaseException | None = None
         process_error: BaseException | None = None
         process_status: WorkerScriptStatus | None = None
-        try:
-            await self.broker.cancel_run(run.run_id)
-        except BaseException as exc:
-            broker_error = exc
+        if not broker_revoked:
+            try:
+                await self.broker.cancel_run(run.run_id)
+            except BaseException as exc:
+                broker_error = exc
         try:
             process_status = await self._terminate_and_confirm(revoked, force=force)
         except BaseException as exc:
@@ -459,15 +477,26 @@ class ScriptRunManager:
         run = self._owned_run(context, run_id)
         return await self._reconcile_durable_run(run)
 
-    async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
+    async def reconcile_durable(
+        self,
+        *,
+        run_id: str,
+        broker_revoked: bool = False,
+    ) -> ScriptRunRecord:
         """Reconcile process truth for one trusted durable lifecycle record."""
         run = await asyncio.to_thread(self.store.get_run, run_id)
-        return await self._reconcile_durable_run(run)
+        return await self._reconcile_durable_run(run, broker_revoked=broker_revoked)
 
-    async def _reconcile_durable_run(self, run: ScriptRunRecord) -> ScriptRunRecord:
+    async def _reconcile_durable_run(
+        self,
+        run: ScriptRunRecord,
+        *,
+        broker_revoked: bool = False,
+    ) -> ScriptRunRecord:
         if run.state in _TERMINAL_STATES:
             try:
-                await self.broker.cancel_run(run.run_id)
+                if not broker_revoked:
+                    await self.broker.cancel_run(run.run_id)
             finally:
                 await self._cleanup_token(run)
             return run
@@ -482,6 +511,7 @@ class ScriptRunManager:
                 force=False,
                 reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
                 terminal_state=terminal_state,
+                broker_revoked=broker_revoked,
             )
         if _runtime_expired(run):
             return await self._terminate_durable_run(
@@ -502,16 +532,18 @@ class ScriptRunManager:
         token: str,
         worker_spec: WorkerSpec,
     ) -> ScriptRunRecord:
-        backend = self._worker_backend_for(None)
-        if backend is None:
+        binding = self._worker_backend_binding(None)
+        if binding is None:
             msg = "Background script worker backend is unavailable."
             raise ScriptRunManagerError(msg)
+        backend = binding.backend
         worker = await asyncio.to_thread(backend.ensure_worker, worker_spec)
         await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
             state=ScriptRunState.STARTING,
             worker_id=worker.worker_id,
+            worker_backend_generation=binding.generation_id,
         )
         assigned = await asyncio.to_thread(self.store.get_run, run.run_id)
         if assigned.cancel_requested_at is not None:
@@ -551,6 +583,7 @@ class ScriptRunManager:
                 run.run_id,
                 state=ScriptRunState.RUNNING,
                 worker_id=worker.worker_id,
+                worker_backend_generation=binding.generation_id,
                 supervisor_handle=receipt.supervisor_handle,
             )
         except BaseException as exc:
@@ -806,6 +839,9 @@ class ScriptRunManager:
 
     async def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
         backend = self._worker_backend_for(run)
+        if backend is None and not run.local_unsafe and run.worker_id is not None:
+            msg = "Background script worker backend generation is unavailable; retry reconciliation."
+            raise ScriptRunManagerError(msg)
         if backend is None or run.worker_id is None or run.worker_key is None:
             return None
         workers = await asyncio.to_thread(backend.list_workers, include_idle=True)
@@ -815,9 +851,18 @@ class ScriptRunManager:
         )
 
     def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
+        binding = self._worker_backend_binding(run)
+        return None if binding is None else binding.backend
+
+    def _worker_backend_binding(self, run: ScriptRunRecord | None) -> ScriptWorkerBackendBinding | None:
         if self.worker_backend_resolver is not None:
             return self.worker_backend_resolver(run)
-        return self.worker_backend
+        if self.worker_backend is None or self.worker_backend_generation is None:
+            return None
+        return ScriptWorkerBackendBinding(
+            backend=self.worker_backend,
+            generation_id=self.worker_backend_generation,
+        )
 
     async def _record_snapshot_locator(self, run: ScriptRunRecord, workspace: Path) -> ScriptRunRecord:
         locator = _snapshot_locator(self.store.storage_root, workspace, run.run_id)

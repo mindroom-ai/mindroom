@@ -13,9 +13,13 @@ from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
-from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
+from mindroom.script_runs.manager import (
+    ScriptRunManager,
+    ScriptRunManagerError,
+    ScriptWorkerBackendBinding,
+)
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
-from mindroom.script_runs.store import ScriptRunStore
+from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
     BackgroundScriptToolOrigin,
@@ -83,6 +87,9 @@ class _BackgroundApprovalManager(Protocol):
 class _WorkerManagerLease(Protocol):
     @property
     def manager(self) -> WorkerBackend: ...
+
+    @property
+    def generation_id(self) -> str: ...
 
     def release(self) -> None: ...
 
@@ -248,10 +255,18 @@ class ScriptRuntimeLifecycle:
     _activated_once: bool = field(default=False, init=False, repr=False)
     _start_requested: bool = field(default=False, init=False, repr=False)
     _activation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _worker_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _startup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _worker_leases: list[_WorkerManagerLease] = field(default_factory=list, init=False, repr=False)
     _current_worker_lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
+    _worker_config_epoch: int = field(default=0, init=False, repr=False)
+    _pending_worker_lease_task: asyncio.Task[_WorkerManagerLease | None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -280,12 +295,10 @@ class ScriptRuntimeLifecycle:
                 return
             if not self._start_requested or not self._api_ready.is_set():
                 return
-            self._refresh_worker_backend()
             bind_script_run_manager(self.manager)
             self._started = True
             self._activated_once = True
-            await self.reconcile_once()
-            await self.prune_once()
+            await self._run_complete_pass(timeout_event="script_startup_pass_timeout")
             self._maintenance_task = create_logged_task(
                 self._maintenance_loop(),
                 name="script_runtime_maintenance",
@@ -309,68 +322,122 @@ class ScriptRuntimeLifecycle:
             await asyncio.sleep(self.reconcile_interval_seconds)
             if not self._started:
                 return
-            await self.reconcile_once()
-            await self.prune_once()
+            try:
+                await self._run_complete_pass(timeout_event="script_maintenance_pass_timeout")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("script_maintenance_cycle_failed")
 
-    def _refresh_worker_backend(self) -> WorkerBackend | None:
-        lease = self.worker_lease_provider()
+    async def _refresh_worker_backend(self) -> WorkerBackend | None:
+        async with self._worker_refresh_lock:
+            return await self._refresh_worker_backend_locked()
+
+    async def _refresh_worker_backend_locked(self) -> WorkerBackend | None:
+        lease = await self._acquire_current_worker_lease()
         if lease is None:
             self._current_worker_lease = None
             self.manager.worker_backend = None
+            self.manager.worker_backend_generation = None
             return None
         existing = next((candidate for candidate in self._worker_leases if candidate.manager is lease.manager), None)
         if existing is not None:
             if lease is not existing:
-                lease.release()
+                await asyncio.to_thread(lease.release)
             self._current_worker_lease = existing
             self.manager.worker_backend = existing.manager
+            self.manager.worker_backend_generation = existing.generation_id
             return existing.manager
         self._worker_leases.append(lease)
         self._current_worker_lease = lease
         backend = lease.manager
         self.manager.worker_backend = backend
+        self.manager.worker_backend_generation = lease.generation_id
         return backend
 
-    def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
-        """Return the leased backend generation that owns one durable worker."""
-        current = self._current_worker_lease
-        if run is None or run.worker_id is None or run.worker_key is None:
-            return None if current is None else current.manager
-        first_error: WorkerBackendError | None = None
-        for lease in reversed(self._worker_leases):
+    async def _acquire_current_worker_lease(self) -> _WorkerManagerLease | None:
+        while True:
+            task = self._pending_worker_lease_task
+            if task is None:
+                self._pending_worker_lease_epoch = self._worker_config_epoch
+                task = asyncio.create_task(
+                    asyncio.to_thread(self.worker_lease_provider),
+                    name="script_worker_backend_acquire",
+                )
+                self._pending_worker_lease_task = task
+            task_epoch = self._pending_worker_lease_epoch
             try:
-                workers = lease.manager.list_workers(include_idle=True)
-            except WorkerBackendError as exc:
-                if first_error is None:
-                    first_error = exc
-                continue
-            if any(worker.worker_id == run.worker_id and worker.worker_key == run.worker_key for worker in workers):
-                return lease.manager
-        if first_error is not None:
-            raise first_error
+                lease = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._pending_worker_lease_task is task:
+                    self._pending_worker_lease_task = None
+                    self._pending_worker_lease_epoch = -1
+                raise
+            if self._pending_worker_lease_task is task:
+                self._pending_worker_lease_task = None
+                self._pending_worker_lease_epoch = -1
+            if task_epoch == self._worker_config_epoch:
+                return lease
+            if lease is not None:
+                await asyncio.to_thread(lease.release)
+
+    async def install_committed_worker_generation(self) -> None:
+        """Install the committed worker configuration for subsequent launches."""
+        self._worker_config_epoch += 1
+        try:
+            await asyncio.wait_for(self._refresh_worker_backend(), timeout=self.pass_timeout_seconds)
+        except TimeoutError:
+            self._clear_current_worker_backend()
+            logger.warning(
+                "script_worker_backend_commit_refresh_timeout",
+                timeout_seconds=self.pass_timeout_seconds,
+            )
+        except WorkerBackendError:
+            self._clear_current_worker_backend()
+            logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
+
+    def _clear_current_worker_backend(self) -> None:
+        self._current_worker_lease = None
+        self.manager.worker_backend = None
+        self.manager.worker_backend_generation = None
+
+    def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
+        binding = self._worker_backend_binding_for(run)
+        return None if binding is None else binding.backend
+
+    def _worker_backend_binding_for(self, run: ScriptRunRecord | None) -> ScriptWorkerBackendBinding | None:
+        """Return the exact leased backend generation assigned to one durable run."""
+        current = self._current_worker_lease
+        if run is None:
+            if current is None:
+                return None
+            return ScriptWorkerBackendBinding(current.manager, current.generation_id)
+        generation_id = run.worker_backend_generation
+        if generation_id is None:
+            return None
+        for lease in self._worker_leases:
+            if lease.generation_id == generation_id:
+                return ScriptWorkerBackendBinding(lease.manager, lease.generation_id)
         return None
 
-    def _release_unused_worker_leases(self, runs: list[ScriptRunRecord]) -> None:
+    async def _release_unused_worker_leases(self, runs: list[ScriptRunRecord]) -> None:
         current = self._current_worker_lease
         retained: list[_WorkerManagerLease] = []
-        unresolved_assignment = any(
-            not run.local_unsafe and run.worker_key is not None and run.worker_id is None for run in runs
-        )
-        live_identities = {(run.worker_id, run.worker_key) for run in runs if run.worker_id is not None}
+        unresolved_assignment = any(not run.local_unsafe and run.worker_backend_generation is None for run in runs)
+        live_generations = {run.worker_backend_generation for run in runs if run.worker_backend_generation is not None}
+        released: list[_WorkerManagerLease] = []
         for lease in self._worker_leases:
             if lease is current or unresolved_assignment:
                 retained.append(lease)
                 continue
-            try:
-                workers = lease.manager.list_workers(include_idle=True)
-            except WorkerBackendError:
+            if lease.generation_id in live_generations:
                 retained.append(lease)
                 continue
-            if any((worker.worker_id, worker.worker_key) in live_identities for worker in workers):
-                retained.append(lease)
-                continue
-            lease.release()
+            released.append(lease)
         self._worker_leases = retained
+        await asyncio.gather(*(asyncio.to_thread(lease.release) for lease in released))
 
     async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
@@ -385,19 +452,55 @@ class ScriptRuntimeLifecycle:
         }
         if not removed_agents and not isolation_changes:
             return
+        try:
+            await asyncio.wait_for(
+                self._apply_update_pass(
+                    removed_agents=removed_agents,
+                    isolation_changes=isolation_changes,
+                ),
+                timeout=self.pass_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning("script_reload_reconciliation_timeout", timeout_seconds=self.pass_timeout_seconds)
+
+    async def _apply_update_pass(
+        self,
+        *,
+        removed_agents: set[str],
+        isolation_changes: set[str],
+    ) -> None:
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         affected = [run for run in runs if run.agent_name in removed_agents | isolation_changes]
-        for run in affected:
-            reason = _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
-            await asyncio.to_thread(self.manager.request_revocation, run_id=run.run_id, reason=reason)
-
         semaphore = asyncio.Semaphore(self.pass_concurrency)
+
+        def reason_for(run: ScriptRunRecord) -> str:
+            return _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
+
+        async def persist_revocation(run: ScriptRunRecord) -> bool:
+            async with semaphore:
+                try:
+                    await asyncio.to_thread(
+                        self.manager.request_revocation,
+                        run_id=run.run_id,
+                        reason=reason_for(run),
+                    )
+                except (ScriptRunManagerError, ScriptRunStoreError):
+                    logger.warning(
+                        "script_reload_durable_revocation_pending",
+                        run_id=run.run_id,
+                        agent_name=run.agent_name,
+                        exc_info=True,
+                    )
+                    return False
+                return True
+
+        durable_results = await asyncio.gather(*(persist_revocation(run) for run in affected))
+        durably_revoked = [run for run, persisted in zip(affected, durable_results, strict=True) if persisted]
 
         async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
             async with semaphore:
-                reason = _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
                 try:
-                    await self.manager.revoke(run.run_id, reason=reason)
+                    await self.manager.revoke(run.run_id, reason=reason_for(run))
                 except (
                     ScriptRunManagerError,
                     ScriptWorkerError,
@@ -413,10 +516,15 @@ class ScriptRuntimeLifecycle:
                     return False
                 return True
 
+        broker_results = await asyncio.gather(
+            *(revoke_broker_ownership(run) for run in durably_revoked),
+        )
+        broker_revoked = [run for run, revoked in zip(durably_revoked, broker_results, strict=True) if revoked]
+
         async def reconcile_run(run: ScriptRunRecord) -> None:
             async with semaphore:
                 try:
-                    await self.manager.reconcile_durable(run_id=run.run_id)
+                    await self.manager.reconcile_durable(run_id=run.run_id, broker_revoked=True)
                 except (
                     ScriptRunManagerError,
                     ScriptWorkerError,
@@ -430,17 +538,9 @@ class ScriptRuntimeLifecycle:
                         exc_info=True,
                     )
 
-        async def revoke_then_reconcile() -> None:
-            revoked = await asyncio.gather(*(revoke_broker_ownership(run) for run in affected))
-            await asyncio.gather(
-                *(reconcile_run(run) for run, broker_revoked in zip(affected, revoked, strict=True) if broker_revoked),
-            )
-
-        try:
-            await asyncio.wait_for(revoke_then_reconcile(), timeout=self.pass_timeout_seconds)
-        except TimeoutError:
-            logger.warning("script_reload_reconciliation_timeout", timeout_seconds=self.pass_timeout_seconds)
-        self._release_unused_worker_leases(runs)
+        await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
+        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        await self._release_unused_worker_leases(unfinished)
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
         """Run one bounded touch-first reconciliation pass."""
@@ -451,19 +551,18 @@ class ScriptRuntimeLifecycle:
 
     async def _reconcile_pass(self) -> None:
         try:
-            backend = self._refresh_worker_backend()
+            await self._refresh_worker_backend()
         except WorkerBackendError:
             logger.warning("script_worker_backend_refresh_pending", exc_info=True)
-            current = self._current_worker_lease
-            backend = None if current is None else current.manager
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        if backend is not None:
-            await asyncio.gather(
-                *(
-                    self._touch_worker(backend, worker_key)
-                    for worker_key in sorted({run.worker_key for run in runs if run.worker_key is not None})
-                ),
-            )
+        touch_targets: dict[tuple[int, str], tuple[WorkerBackend, str]] = {}
+        for run in runs:
+            run_backend = self._worker_backend_for(run)
+            if run_backend is not None and run.worker_key is not None:
+                touch_targets[(id(run_backend), run.worker_key)] = (run_backend, run.worker_key)
+        await asyncio.gather(
+            *(self._touch_worker(run_backend, worker_key) for run_backend, worker_key in touch_targets.values()),
+        )
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         async def reconcile_run(run: ScriptRunRecord) -> None:
@@ -479,7 +578,8 @@ class ScriptRuntimeLifecycle:
                     )
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
-        self._release_unused_worker_leases(runs)
+        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        await self._release_unused_worker_leases(unfinished)
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
         try:
@@ -507,6 +607,12 @@ class ScriptRuntimeLifecycle:
         now: datetime | None = None,
     ) -> None:
         """Prune terminal snapshots, receipts, and run rows after retention."""
+        try:
+            await asyncio.wait_for(self._prune_pass(now=now), timeout=self.pass_timeout_seconds)
+        except TimeoutError:
+            logger.warning("script_retention_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
+
+    async def _prune_pass(self, *, now: datetime | None = None) -> None:
         cutoff = (now or datetime.now(UTC)) - timedelta(seconds=self.retention_seconds)
         finished_before = cutoff.isoformat().replace("+00:00", "Z")
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=True)
@@ -544,6 +650,16 @@ class ScriptRuntimeLifecycle:
                     exc_info=True,
                 )
 
+    async def _complete_pass(self) -> None:
+        await self._reconcile_pass()
+        await self._prune_pass()
+
+    async def _run_complete_pass(self, *, timeout_event: str) -> None:
+        try:
+            await asyncio.wait_for(self._complete_pass(), timeout=self.pass_timeout_seconds)
+        except TimeoutError:
+            logger.warning(timeout_event, timeout_seconds=self.pass_timeout_seconds)
+
     async def shutdown(self, *, timeout_seconds: float = 5.0) -> None:
         """Run bounded final reconciliation, then clear the process-local tool binding."""
         self._start_requested = False
@@ -555,8 +671,7 @@ class ScriptRuntimeLifecycle:
             return
 
         async def _cleanup() -> None:
-            await self.reconcile_once()
-            await self.prune_once()
+            await self._complete_pass()
 
         try:
             await asyncio.wait_for(_cleanup(), timeout=timeout_seconds)
@@ -566,11 +681,49 @@ class ScriptRuntimeLifecycle:
             bind_script_run_manager(None)
             self._started = False
             self._activated_once = False
-            for lease in self._worker_leases:
-                lease.release()
+            leases = list(self._worker_leases)
+            pending_lease_task = self._pending_worker_lease_task
+            if pending_lease_task is not None:
+                if pending_lease_task.done():
+                    try:
+                        pending_lease = pending_lease_task.result()
+                    except Exception:
+                        logger.warning("script_worker_backend_pending_acquire_failed", exc_info=True)
+                    else:
+                        if pending_lease is not None:
+                            leases.append(pending_lease)
+                else:
+                    pending_lease_task.add_done_callback(_release_pending_worker_lease)
+            self._pending_worker_lease_task = None
+            self._pending_worker_lease_epoch = -1
             self._worker_leases.clear()
             self._current_worker_lease = None
             self.manager.worker_backend = None
+            self.manager.worker_backend_generation = None
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(asyncio.to_thread(lease.release) for lease in leases)),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning("script_worker_backend_release_timeout", timeout_seconds=timeout_seconds)
+
+
+def _release_pending_worker_lease(task: asyncio.Task[_WorkerManagerLease | None]) -> None:
+    """Release an acquisition that completed after lifecycle shutdown stopped waiting."""
+    try:
+        lease = task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.warning("script_worker_backend_pending_acquire_failed", exc_info=True)
+        return
+    if lease is not None:
+        create_logged_task(
+            asyncio.to_thread(lease.release),
+            name="script_worker_backend_late_release",
+            failure_message="Late background script worker lease release failed",
+        )
 
 
 def build_script_runtime(
@@ -609,7 +762,7 @@ def build_script_runtime(
         retention_seconds=retention_seconds,
     )
     resolver.worker_backend_provider = lifecycle._worker_backend_for
-    manager.worker_backend_resolver = lifecycle._worker_backend_for
+    manager.worker_backend_resolver = lifecycle._worker_backend_binding_for
     return lifecycle
 
 

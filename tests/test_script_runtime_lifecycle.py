@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -105,6 +107,7 @@ def _run(
         token_hash="capability",  # noqa: S106
         worker_key=target.worker_key,
         worker_id="worker-1",
+        worker_backend_generation="backend-generation-a",
         supervisor_handle="shell:0123456789abcdef0123456789abcdef",
         state=state,
     )
@@ -128,6 +131,7 @@ class _Backend:
 @dataclass
 class _Lease:
     manager: _Backend
+    generation_id: str = "backend-generation-a"
     released: bool = False
 
     def release(self) -> None:
@@ -308,7 +312,7 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
         run_id="run-1",
         reason="Agent isolation changed during configuration reload.",
     )
-    manager.reconcile_durable.assert_awaited_once_with(run_id="run-1")
+    manager.reconcile_durable.assert_awaited_once_with(run_id="run-1", broker_revoked=True)
     manager.revoke.assert_awaited_once_with(
         run.run_id,
         reason="Agent isolation changed during configuration reload.",
@@ -379,8 +383,8 @@ async def test_backend_generation_lease_is_held_until_its_live_run_finishes(tmp_
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
-    first = _Lease(_Backend([_worker(run)]))
-    second = _Lease(_Backend([]))
+    first = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-a")
+    second = _Lease(_Backend([]), generation_id="backend-generation-b")
     leases = iter((first, second, second))
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -402,6 +406,113 @@ async def test_backend_generation_lease_is_held_until_its_live_run_finishes(tmp_
     await runtime.reconcile_once()
 
     assert first.released is True
+
+
+@pytest.mark.asyncio
+async def test_backend_generation_routing_never_cross_adopts_shared_worker_metadata(tmp_path: Path) -> None:
+    """A newer manager seeing the same worker cannot claim a run launched by the old generation."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    shared_handle = _worker(run)
+    first = _Lease(_Backend([shared_handle]), generation_id="backend-generation-a")
+    second = _Lease(_Backend([shared_handle]), generation_id="backend-generation-b")
+    leases = iter((first, second))
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=lambda: next(leases),
+    )
+
+    await runtime.reconcile_once()
+    await runtime.reconcile_once()
+
+    assert runtime._worker_backend_for(run) is first.manager
+    assert runtime._worker_backend_for(None) is second.manager
+    assert first.manager.actions == [f"touch:{run.worker_key}", f"touch:{run.worker_key}"]
+    assert second.manager.actions == []
+
+
+@pytest.mark.asyncio
+async def test_committed_config_installs_new_launch_generation_without_orphaning_old_run(tmp_path: Path) -> None:
+    """Post-commit refresh routes new launches to new config while old runs retain exact authority."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    first = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-a")
+    second = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-b")
+    leases = iter((first, second))
+    manager = SimpleNamespace(
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=AsyncMock(return_value=run),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=lambda: next(leases),
+    )
+
+    await runtime.reconcile_once()
+    await runtime.install_committed_worker_generation()
+
+    assert runtime._worker_backend_for(run) is first.manager
+    assert runtime._worker_backend_for(None) is second.manager
+    assert manager.worker_backend_generation == "backend-generation-b"
+
+
+@pytest.mark.asyncio
+async def test_committed_generation_wins_over_an_inflight_precommit_refresh(tmp_path: Path) -> None:
+    """A slow old-config refresh cannot overwrite the generation installed after commit."""
+    runtime_paths = _runtime_paths(tmp_path)
+    first = _Lease(_Backend([]), generation_id="backend-generation-a")
+    second = _Lease(_Backend([]), generation_id="backend-generation-b")
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    calls = 0
+
+    def provider() -> _Lease:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            provider_entered.set()
+            assert release_provider.wait(timeout=5)
+            return first
+        return second
+
+    manager = SimpleNamespace(
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=AsyncMock(),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=provider,
+        pass_timeout_seconds=1,
+    )
+    old_refresh = asyncio.create_task(runtime.reconcile_once())
+    assert await asyncio.to_thread(provider_entered.wait, 1)
+    committed_refresh = asyncio.create_task(runtime.install_committed_worker_generation())
+    await asyncio.sleep(0)
+    release_provider.set()
+
+    await asyncio.gather(old_refresh, committed_refresh)
+
+    assert runtime._worker_backend_for(None) is second.manager
+    assert manager.worker_backend_generation == "backend-generation-b"
 
 
 @pytest.mark.asyncio
@@ -562,6 +673,106 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_deadline(tmp_path: Path) -> None:
+    """Potentially blocking backend construction is off-loop and bounded by the pass."""
+    heartbeat = asyncio.Event()
+
+    def slow_provider() -> None:
+        time.sleep(0.2)
+
+    async def beat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat.set()
+
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=_runtime_paths(tmp_path),
+        store=ScriptRunStore(_runtime_paths(tmp_path)),
+        broker=MagicMock(),
+        manager=SimpleNamespace(reconcile_durable=AsyncMock()),
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=slow_provider,
+        pass_timeout_seconds=0.02,
+    )
+    heartbeat_task = asyncio.create_task(beat())
+    started = asyncio.get_running_loop().time()
+
+    await runtime.reconcile_once()
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+    await asyncio.wait_for(heartbeat.wait(), timeout=0.05)
+    await heartbeat_task
+
+
+@pytest.mark.asyncio
+async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_lease(tmp_path: Path) -> None:
+    """A provider thread may finish after timeout, but its lease remains lifecycle-owned."""
+    runtime_paths = _runtime_paths(tmp_path)
+    release_provider = threading.Event()
+    lease = _Lease(_Backend([]))
+    calls = 0
+
+    def slow_provider() -> _Lease:
+        nonlocal calls
+        calls += 1
+        assert release_provider.wait(timeout=5)
+        return lease
+
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        manager=SimpleNamespace(reconcile_durable=AsyncMock()),
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=slow_provider,
+        pass_timeout_seconds=0.02,
+    )
+    await runtime.reconcile_once()
+    release_provider.set()
+    runtime.pass_timeout_seconds = 1
+
+    await runtime.reconcile_once()
+
+    assert calls == 1
+    assert runtime._worker_backend_for(None) is lease.manager
+
+
+@pytest.mark.asyncio
+async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_path: Path) -> None:
+    """Retired backend disposal remains off-loop and inside the reconciliation deadline."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    first = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-a")
+    second = _Lease(_Backend([]), generation_id="backend-generation-b")
+
+    def slow_release() -> None:
+        time.sleep(0.2)
+        first.released = True
+
+    first.release = slow_release  # type: ignore[method-assign]
+    leases = iter((first, second))
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=lambda: next(leases),
+        pass_timeout_seconds=0.02,
+    )
+    await runtime.reconcile_once()
+    store.transition_run(run.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    started = asyncio.get_running_loop().time()
+
+    await runtime.reconcile_once()
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
 async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp_path: Path) -> None:
     """One stuck signal path cannot prevent durable revocation of another removed-owner run."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -578,7 +789,8 @@ async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp
         broker_revocations.append(run_id)
         return store.request_cancel(run_id, reason=reason)
 
-    async def reconcile_durable(*, run_id: str) -> ScriptRunRecord:
+    async def reconcile_durable(*, run_id: str, broker_revoked: bool = False) -> ScriptRunRecord:
+        assert broker_revoked is True
         assert set(broker_revocations) == {first.run_id, second.run_id}
         if run_id == first.run_id:
             await never.wait()
@@ -597,7 +809,7 @@ async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp
         resolver=SimpleNamespace(resolve=MagicMock()),
         config_provider=lambda: current,
         worker_lease_provider=lambda: None,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=0.2,
     )
 
     await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
@@ -605,6 +817,165 @@ async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp
     assert store.get_run(first.run_id).cancel_requested_at is not None
     assert store.get_run(second.run_id).cancel_requested_at is not None
     assert set(broker_revocations) == {first.run_id, second.run_id}
+
+
+@pytest.mark.asyncio
+async def test_reload_durable_revocation_is_inside_the_overall_deadline(tmp_path: Path) -> None:
+    """Slow SQLite revocations do not escape the pass bound or permit early broker closure."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    _stored_run(store, runtime_paths)
+    broker_revocations: list[str] = []
+
+    def slow_request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        time.sleep(0.2)
+        return store.request_cancel(run_id, reason=reason)
+
+    async def revoke(run_id: str, *, reason: str) -> ScriptRunRecord:
+        del reason
+        broker_revocations.append(run_id)
+        return store.get_run(run_id)
+
+    current = _config()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(
+            request_revocation=slow_request_revocation,
+            revoke=revoke,
+            reconcile_durable=AsyncMock(),
+        ),
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: current,
+        worker_lease_provider=lambda: None,
+        pass_timeout_seconds=0.02,
+    )
+    started = asyncio.get_running_loop().time()
+
+    await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+    assert broker_revocations == []
+
+
+@pytest.mark.asyncio
+async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Path) -> None:
+    """Startup returns after one deadline even when retention cleanup is unavailable."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    running = _stored_run(store, runtime_paths)
+    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+    never = asyncio.Event()
+
+    async def prune_approvals(_run_id: str) -> bool:
+        await never.wait()
+        return False
+
+    manager = SimpleNamespace(
+        gateway_url="",
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=AsyncMock(),
+        cleanup_snapshot=AsyncMock(return_value=True),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=prune_approvals),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.001,
+        pass_timeout_seconds=0.02,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    started = asyncio.get_running_loop().time()
+
+    await runtime.start()
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+    await runtime.shutdown(timeout_seconds=0.02)
+
+
+@pytest.mark.asyncio
+async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
+    """A stuck approval cleanup cannot leave an explicit retention pass unbounded."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    running = _stored_run(store, runtime_paths)
+    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+    never = asyncio.Event()
+
+    async def prune_approvals(_run_id: str) -> bool:
+        await never.wait()
+        return False
+
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(cleanup_snapshot=AsyncMock(return_value=True)),
+        resolver=SimpleNamespace(prune_approvals=prune_approvals),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.001,
+        pass_timeout_seconds=0.02,
+    )
+    started = asyncio.get_running_loop().time()
+
+    await runtime.prune_once()
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_maintenance_retries_after_an_unexpected_cycle_failure(tmp_path: Path) -> None:
+    """One unexpected pass failure is logged and the next maintenance interval still runs."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    _stored_run(store, runtime_paths)
+    recovered = asyncio.Event()
+    calls = 0
+
+    async def reconcile_durable(*, run_id: str) -> ScriptRunRecord:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            message = "unexpected maintenance failure"
+            raise RuntimeError(message)
+        if calls >= 3:
+            recovered.set()
+        return store.get_run(run_id)
+
+    manager = SimpleNamespace(
+        gateway_url="",
+        worker_backend=None,
+        worker_backend_generation=None,
+        reconcile_durable=reconcile_durable,
+        cleanup_snapshot=AsyncMock(return_value=True),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        reconcile_interval_seconds=0.01,
+        pass_timeout_seconds=0.05,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+
+    await runtime.start()
+    await asyncio.wait_for(recovered.wait(), timeout=0.2)
+    await runtime.shutdown()
+
+    assert calls >= 3
 
 
 @pytest.mark.asyncio
