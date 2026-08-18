@@ -64,7 +64,9 @@ from mindroom.response_delivery import TurnHandoff
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
+    SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     RuntimeShutdownIntent,
+    ShutdownBudget,
     restart_reason_category_for,
 )
 from mindroom.stop import StopManager
@@ -311,6 +313,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _sync_shutting_down: bool
+    _sync_shutdown_budget: ShutdownBudget | None
     _matrix_ingestion_quiesce_requested: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
@@ -386,6 +389,7 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
+        self._sync_shutdown_budget = None
         self._matrix_ingestion_quiesce_requested = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
@@ -1190,6 +1194,7 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        self._sync_shutdown_budget = None
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1716,17 +1721,21 @@ class AgentBot:
         self._response_runner.refuse_pending_admissions()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
+        shutdown_budget = self._sync_shutdown_budget
+        if shutdown_budget is None:
+            shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
+            self._sync_shutdown_budget = shutdown_budget
         background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
+            timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
         )
         drain_result = await self._coalescing_gate.drain_all(
-            ready_timeout_seconds=5.0,
+            shutdown_budget=shutdown_budget,
             shutdown_intent=shutdown_intent,
         )
         responses_drained = await self._response_runner.drain_inbox_responses(
-            cancel_after_seconds=5.0,
+            cancel_after_seconds=shutdown_budget.per_window_seconds(windows=2),
             shutdown_intent=shutdown_intent,
         )
         pending_response_count = self._response_runner.pending_inbox_response_count
@@ -1740,7 +1749,7 @@ class AgentBot:
                 restart_reason_category=restart_reason_category_for(shutdown_intent),
             )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
+            timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
         )

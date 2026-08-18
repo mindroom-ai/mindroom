@@ -1377,6 +1377,47 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bounded_drain_shares_one_deadline_across_cancellation_resistant_lanes() -> None:
+    """Each stubborn lane consumes the same bounded-drain deadline."""
+    gate, _ = _gate(debounce_seconds=0.0)
+    release = asyncio.Event()
+    started = [asyncio.Event(), asyncio.Event()]
+    ready_tasks: list[asyncio.Task[ReadyPendingEvent | None]] = []
+
+    async def stubborn_ready(index: int) -> ReadyPendingEvent | None:
+        started[index].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            return None
+
+    for index in range(2):
+        sender_id = f"@user{index}:localhost"
+        slot = gate.enter_lane(room_id="!room:localhost", sender_id=sender_id)
+        ready_task = asyncio.create_task(stubborn_ready(index))
+        ready_tasks.append(ready_task)
+        gate.submit_lane_slot(
+            slot,
+            key=CoalescingKey("!room:localhost", "$thread", sender_id),
+            source_event_id=f"$stubborn{index}",
+            source_kind=VOICE_SOURCE_KIND,
+            ready_task=ready_task,
+        )
+
+    await asyncio.gather(*(event.wait() for event in started))
+    try:
+        async with asyncio.timeout(0.07):
+            result = await gate.drain_all(ready_timeout_seconds=0.03)
+    finally:
+        release.set()
+        await asyncio.gather(*ready_tasks, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> None:
     """A bounded runner drain cancels a stuck response, runs its cleanup once, and reports incomplete."""
     bot = _make_bot(tmp_path, debounce_ms=0)

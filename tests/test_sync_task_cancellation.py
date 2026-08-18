@@ -71,7 +71,9 @@ from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
+    SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     RuntimeShutdownIntent,
+    ShutdownBudget,
     shutdown_intent_for_entity,
 )
 from tests.conftest import (
@@ -1596,7 +1598,8 @@ async def test_sync_shutdown_cancels_the_owned_delivery_recovery(tmp_path: Path)
         owner: object | None = None,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> bool:
-        assert timeout == 5.0
+        assert timeout is not None
+        assert 0.0 < timeout <= SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
         return await wait_for_background_tasks(
             timeout=0,
             owner=owner,
@@ -1616,6 +1619,112 @@ async def test_sync_shutdown_cancels_the_owned_delivery_recovery(tmp_path: Path)
         await bot.prepare_for_sync_shutdown()
 
     assert recovery_cancelled.is_set()
+
+
+def test_shutdown_budget_shares_one_deadline_across_two_window_drain() -> None:
+    """Sequential shutdown stages consume one policy budget."""
+    with patch(
+        "mindroom.runtime_shutdown.time.monotonic",
+        side_effect=(100.0, 102.0, 104.0, 105.0),
+    ):
+        budget = ShutdownBudget.start(5.0)
+
+        assert budget.remaining_seconds() == 3.0
+        assert budget.per_window_seconds(windows=2) == 0.5
+        assert budget.remaining_seconds() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
+    """Busy cleanup stages and a later stop share one five-second deadline."""
+    now = [100.0]
+    background_timeouts: list[float | None] = []
+    coalescing_timeouts: list[float | None] = []
+    response_timeouts: list[float | None] = []
+
+    async def wait_for_background(
+        timeout: float | None = None,  # noqa: ASYNC109
+        **_kwargs: object,
+    ) -> bool:
+        background_timeouts.append(timeout)
+        if len(background_timeouts) == 1:
+            now[0] += 2.0
+            return True
+        return False
+
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+    )
+
+    async def drain_coalescing(
+        *,
+        shutdown_budget: ShutdownBudget,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        coalescing_timeouts.append(shutdown_budget.remaining_seconds())
+        if coalescing_timeouts[-1] > 0.0:
+            now[0] += 2.0
+        return drain_result
+
+    async def drain_responses(
+        *,
+        cancel_after_seconds: float | None,
+        **_kwargs: object,
+    ) -> bool:
+        response_timeouts.append(cancel_after_seconds)
+        assert cancel_after_seconds is not None
+        now[0] += cancel_after_seconds * 2
+        return False
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="budget",
+        user_id="@mindroom_budget:localhost",
+        display_name="Budget",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot.running = True
+    bot.last_sync_time = None
+    bot._last_sync_monotonic = None
+    bot._first_sync_done = True
+    bot._orchestrator_ready_handled = True
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = MagicMock(
+        refuse_pending_admissions=MagicMock(),
+        drain_inbox_responses=AsyncMock(side_effect=drain_responses),
+        pending_inbox_response_count=0,
+        incomplete_inbox_responses_recoverable=True,
+        in_flight_response_count=0,
+    )
+    bot._coalescing_gate = MagicMock(
+        drain_all=AsyncMock(side_effect=drain_coalescing),
+    )
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._ingestion_session = None
+    bot._own_journal = None
+    bot.logger = MagicMock()
+
+    with (
+        patch("mindroom.runtime_shutdown.time.monotonic", side_effect=lambda: now[0]),
+        patch("mindroom.bot.wait_for_background_tasks", side_effect=wait_for_background),
+    ):
+        await bot.prepare_for_sync_shutdown()
+        await bot.stop()
+
+    assert background_timeouts == [SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS, 0.0, 0.0, 0.0]
+    assert coalescing_timeouts == [3.0, 0.0]
+    assert response_timeouts == [0.5, 0.0]
 
 
 def test_matrix_sync_change_restarts_existing_entities() -> None:
