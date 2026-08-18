@@ -595,6 +595,127 @@ def test_team_continuation_does_not_repeat_skipped_consensus_fallback() -> None:
     assert presentation_tools == []
 
 
+def test_team_continuation_merges_idless_execution_with_stable_requirement() -> None:
+    """A team provider's identity loss cannot create duplicate presentation tools."""
+    provider_tool = ToolExecution(tool_name="inspect", result="details")
+    requirement_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
+                    },
+                ],
+            ),
+        ],
+        tools=[provider_tool],
+    )
+
+    response_text, response_trace, presentation_tools = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[requirement_tool],
+        paused=None,
+        prior_response_text="",
+        prior_tool_trace=[],
+        prior_message_ids=set(),
+        show_tool_calls=True,
+    )
+
+    assert response_text.count("🔧 `inspect` [1]") == 1
+    assert "🔧 `inspect` [2]" not in response_text
+    assert len(response_trace) == len(presentation_tools) == 1
+    assert response_trace[0].tool_call_id == presentation_tools[0].tool_call_id == "call-1"
+    assert response_trace[0].result_preview == presentation_tools[0].result == "details"
+
+
+@pytest.mark.asyncio
+async def test_completed_hidden_tool_only_team_continuation_has_neutral_text() -> None:
+    """A completed continuation remains deliverable when its only output is hidden."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    paused_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    requirement = RunRequirement(paused_tool)
+    persisted = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=[requirement],
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        tools=[ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")],
+    )
+    session = TeamSession(session_id="session-1", team_id="research", runs=[persisted])
+    team = MagicMock()
+    team.db = None
+    team.model = None
+    team.aget_session = AsyncMock(return_value=session)
+    team.acontinue_run = AsyncMock(return_value=continued)
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+    ):
+        result = await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={"call-1": True},
+            denial_reasons={"call-1": None},
+            refresh_scheduler=None,
+            show_tool_calls=False,
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == "Tool approval continuation completed"
+
+
 def test_team_continuation_omits_empty_replayed_nested_team_shell() -> None:
     """A replayed nested team with no new output must not append headings or consensus notes."""
     nested_member = RunOutput(

@@ -19,6 +19,7 @@ from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
+    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
     CompletedApprovalRun,
     PausedAttempt,
     apply_exact_approval_decisions,
@@ -29,7 +30,9 @@ from mindroom.response_turn import (
 )
 from mindroom.tool_system.events import (
     deserialize_tool_trace,
+    enrich_tool_executions_from_assistant_calls,
     format_assistant_tool_transcript,
+    merge_tool_executions_for_presentation,
     reconcile_tool_presentation,
 )
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
@@ -61,15 +64,11 @@ def _approval_response_presentation(
     show_tool_calls: bool,
 ) -> tuple[str, list[ToolTraceEntry], list[ToolExecution]]:
     """Reconcile one continued agent run with its durable visible snapshot."""
-    presentation_tools = list(response.tools or ())
-    seen_tool_call_ids = {tool.tool_call_id for tool in presentation_tools if tool.tool_call_id is not None}
-    additional_tools = [*requirement_tools, *(paused.tools if paused is not None else ())]
-    for tool in additional_tools:
-        if tool.tool_call_id is not None and tool.tool_call_id in seen_tool_call_ids:
-            continue
-        presentation_tools.append(tool)
-        if tool.tool_call_id is not None:
-            seen_tool_call_ids.add(tool.tool_call_id)
+    presentation_tools = merge_tool_executions_for_presentation(
+        enrich_tool_executions_from_assistant_calls(response.messages or (), response.tools or ()),
+        requirement_tools,
+        paused.tools if paused is not None else (),
+    )
     pending_tool_call_ids = (
         {tool.tool_call_id for tool in paused.tools if tool.tool_call_id} if paused is not None else set()
     )
@@ -241,7 +240,7 @@ class AgentApprovalExecution:
         tool_trace_collector.extend(response_tool_trace)
         model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
         return CompletedApprovalRun(
-            response_text=response_text or str(response.content or "Tool approval continuation completed"),
+            response_text=response_text or str(response.content or APPROVAL_CONTINUATION_COMPLETED_NOTICE),
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

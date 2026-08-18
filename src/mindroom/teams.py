@@ -81,6 +81,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
+    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
     AttemptResolved,
     BlockingAttemptResolution,
     BlockingTurnAdapter,
@@ -116,8 +117,10 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
+    enrich_tool_executions_from_assistant_calls,
     format_assistant_tool_transcript,
     format_tool_completed_event,
+    merge_tool_executions_for_presentation,
     partition_tools_by_trace,
     reconcile_tool_presentation,
     tools_not_represented_in_trace,
@@ -1554,16 +1557,13 @@ def _merge_approval_presentation_tools(
     *additional_groups: Sequence[ToolExecution],
 ) -> list[ToolExecution]:
     """Merge persisted and continued executions by stable call identity."""
-    tools = _collect_team_tool_executions(response)
-    seen_tool_call_ids = {tool.tool_call_id for tool in tools if tool.tool_call_id is not None}
-    for group in additional_groups:
-        for tool in group:
-            if tool.tool_call_id is not None and tool.tool_call_id in seen_tool_call_ids:
-                continue
-            tools.append(tool)
-            if tool.tool_call_id is not None:
-                seen_tool_call_ids.add(tool.tool_call_id)
-    return tools
+    primary_tools: list[ToolExecution] = []
+    if isinstance(response, TeamRunOutput):
+        for member_response in response.member_responses:
+            if isinstance(member_response, TeamRunOutput | RunOutput):
+                primary_tools.extend(_merge_approval_presentation_tools(member_response))
+    primary_tools.extend(enrich_tool_executions_from_assistant_calls(response.messages or (), response.tools or ()))
+    return merge_tool_executions_for_presentation(primary_tools, *additional_groups)
 
 
 def _continued_team_approval_presentation(
@@ -2393,7 +2393,7 @@ async def continue_paused_team_run(
         if tool_trace_collector is not None:
             tool_trace_collector.extend(response_tool_trace)
         return CompletedApprovalRun(
-            response_text=response_text,
+            response_text=response_text or APPROVAL_CONTINUATION_COMPLETED_NOTICE,
             metadata_content=build_ai_run_metadata_content(
                 config=config,
                 model_name=model_name,

@@ -75,7 +75,12 @@ from mindroom.response_terminal import (
     TerminalFailureStatus,
     build_terminal_stream_transport_outcome,
 )
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    APPROVAL_CONTINUATION_COMPLETED_NOTICE,
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+)
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -1140,7 +1145,7 @@ class ResponseRunner:
             interactive_metadata = InteractiveMetadata.from_metadata(stored_semantic.get("interactive"))
         body = semantic_body if isinstance(semantic_body, str) else visible.get("body")
         if not isinstance(body, str):
-            body = "Tool approval continuation completed"
+            body = APPROVAL_CONTINUATION_COMPLETED_NOTICE
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id=event_id,

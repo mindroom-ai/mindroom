@@ -2583,6 +2583,61 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
     assert presentation_tools == [completed_tool]
 
 
+def test_agent_approval_presentation_merges_idless_execution_with_stable_requirement() -> None:
+    """Provider identity loss must not duplicate one approved execution."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-mixed-identity",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+    )
+    provider_tool = ToolExecution(tool_name="inspect", result="details")
+    requirement_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        messages=[
+            Message(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": '{"path":"report.txt"}'},
+                    },
+                ],
+            ),
+        ],
+        tools=[provider_tool],
+    )
+
+    body, trace, presentation_tools = approval_execution._approval_response_presentation(
+        response,
+        None,
+        continuation=continuation,
+        requirement_tools=[requirement_tool],
+        show_tool_calls=True,
+    )
+
+    assert body == "🔧 `inspect` [1]"
+    assert len(trace) == len(presentation_tools) == 1
+    assert trace[0].tool_call_id == presentation_tools[0].tool_call_id == "call-1"
+    assert trace[0].result_preview == presentation_tools[0].result == "details"
+
+
 @pytest.mark.parametrize(
     ("terminal_content", "expected_body"),
     [

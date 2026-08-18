@@ -290,6 +290,74 @@ def test_format_assistant_tool_transcript_consumes_skipped_idless_calls() -> Non
     assert [entry.result_preview for entry in trace] == ["after result"]
 
 
+def test_format_assistant_tool_transcript_ignores_history_without_current_executions() -> None:
+    """Historical calls cannot consume executions owned by the continued run."""
+    messages = [
+        Message(
+            role="assistant",
+            from_history=True,
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": '{"path":"current.txt"}'},
+                },
+            ],
+        ),
+    ]
+    current = ToolExecution(tool_name="inspect", result="current result")
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, [current])
+
+    assert body == "🔧 `inspect` [1]"
+    assert [(entry.args_preview, entry.result_preview) for entry in trace] == [
+        ("path=current.txt", "current result"),
+    ]
+
+
+def test_format_assistant_tool_transcript_skips_duplicate_unmatched_calls() -> None:
+    """One execution cannot produce markers for repeated copies of its assistant call."""
+    raw_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "inspect", "arguments": "{}"},
+    }
+    messages = [
+        Message(role="assistant", tool_calls=[raw_call]),
+        Message(role="assistant", tool_calls=[raw_call]),
+    ]
+    completed = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, [completed])
+
+    assert body == "🔧 `inspect` [1]"
+    assert len(trace) == 1
+    assert trace[0].result_preview == "details"
+
+
+def test_format_assistant_tool_transcript_skips_unmatched_malformed_call() -> None:
+    """A call without an execution cannot become a synthetic completed marker."""
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "ghost", "arguments": "{}"}}],
+        ),
+        Message(
+            role="assistant",
+            tool_calls=[{"type": "function", "function": {"name": "inspect", "arguments": "{}"}}],
+        ),
+    ]
+    completed = ToolExecution(tool_name="inspect", result="details")
+
+    body, trace = tool_events.format_assistant_tool_transcript(messages, [completed])
+
+    assert body == "🔧 `inspect` [1]"
+    assert [(entry.tool_name, entry.result_preview) for entry in trace] == [("inspect", "details")]
+
+
 def test_format_assistant_tool_transcript_hides_tools_without_concatenating_messages() -> None:
     """Hidden anchors must still leave readable text, including multimodal text blocks."""
     messages = [
@@ -323,6 +391,16 @@ def test_format_assistant_tool_transcript_hides_tools_without_concatenating_mess
 
     assert body == "  First thought.\nSecond part.  \n\nSecond thought.\n\nFinished."
     assert trace == []
+
+
+def test_presentation_merge_does_not_guess_identity_from_name_alone() -> None:
+    """Distinct same-name calls remain distinct when no assistant call links them."""
+    provider_tool = ToolExecution(tool_name="inspect", result="current result")
+    requirement_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="prior result")
+
+    merged = tool_events.merge_tool_executions_for_presentation([provider_tool], [requirement_tool])
+
+    assert merged == [provider_tool, requirement_tool]
 
 
 def test_tool_trace_snapshot_round_trips_for_durable_continuations() -> None:
@@ -517,6 +595,48 @@ def test_reconcile_tool_presentation_consumes_idless_trace_matches() -> None:
     assert [entry.result_preview for entry in trace] == ["first result", "second result"]
 
 
+def test_reconcile_tool_presentation_preserves_sparse_idless_suffix_order() -> None:
+    """Sparse legacy anchors align with the latest executions without reversing them."""
+    tools = [
+        ToolExecution(tool_name="inspect", result="first result"),
+        ToolExecution(tool_name="inspect", result="second result"),
+        ToolExecution(tool_name="inspect", result="third result"),
+    ]
+    current_trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="second result"),
+        ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="third result"),
+    ]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="🔧 `inspect` [1]\n\n🔧 `inspect` [2]",
+        current_tool_trace=current_trace,
+        tools=tools,
+    )
+
+    assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]\n\n🔧 `inspect` [3]"
+    assert [entry.result_preview for entry in trace] == ["first result", "second result", "third result"]
+
+
+def test_reconcile_tool_presentation_prefers_new_idless_anchor_over_prior_snapshot() -> None:
+    """Current anchored evidence cannot overwrite an ambiguous durable legacy slot."""
+    prior_trace = [ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="old result")]
+    current_trace = [ToolTraceEntry(type="tool_call_completed", tool_name="inspect", result_preview="new result")]
+    current = ToolExecution(tool_name="inspect", result="new result")
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="🔧 `inspect` [1]",
+        prior_tool_trace=prior_trace,
+        current_text="🔧 `inspect` [2]",
+        current_tool_trace=current_trace,
+        tools=[current],
+    )
+
+    assert body == "🔧 `inspect` [1]\n\n🔧 `inspect` [2]"
+    assert [entry.result_preview for entry in trace] == ["old result", "new result"]
+
+
 def test_reconcile_tool_presentation_reserves_prior_exact_id_before_legacy_matching() -> None:
     """Legacy execution matching cannot overwrite a later exact stable trace."""
     prior_trace = [
@@ -561,6 +681,32 @@ def test_reconcile_tool_presentation_deduplicates_replayed_prior_marker() -> Non
     assert body == "🔧 `inspect` [1]\n\nAfter approval."
     assert len(trace) == 1
     assert trace[0].tool_call_id == "call-1"
+
+
+def test_reconcile_tool_presentation_keeps_durable_name_for_exact_completion() -> None:
+    """Stable identity completes the durable marker even if provider naming drifts."""
+    prior_trace = [
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1"),
+    ]
+    completed = ToolExecution(tool_call_id="call-1", tool_name="renamed_inspect", result="details")
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="🔧 `inspect` [1] ⏳",
+        prior_tool_trace=prior_trace,
+        current_text="",
+        current_tool_trace=[],
+        tools=[completed],
+    )
+
+    assert body == "🔧 `inspect` [1]"
+    assert trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
 
 
 def test_reconcile_tool_presentation_merges_recovery_tools_in_execution_order() -> None:

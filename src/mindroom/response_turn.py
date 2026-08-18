@@ -60,7 +60,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+APPROVAL_CONTINUATION_COMPLETED_NOTICE = "Tool approval continuation completed"
+
 __all__ = [
+    "APPROVAL_CONTINUATION_COMPLETED_NOTICE",
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
