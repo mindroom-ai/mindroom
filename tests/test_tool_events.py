@@ -245,6 +245,36 @@ def test_reconcile_tool_presentation_completes_durable_pending_marker_in_place()
     ]
 
 
+def test_reconcile_tool_presentation_preserves_durable_completed_result() -> None:
+    """A provider's result-less replay must not erase the persisted result preview."""
+    prior_trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="inspect",
+            args_preview="path=report.txt",
+            result_preview="details",
+            tool_call_id="call-1",
+        ),
+    ]
+    replayed = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        tool_args={"path": "report.txt"},
+        result=None,
+    )
+
+    _body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="🔧 `inspect` [1]",
+        prior_tool_trace=prior_trace,
+        current_text="After approval.",
+        current_tool_trace=[],
+        tools=[replayed],
+        fallback_text="After approval.",
+    )
+
+    assert trace[0].result_preview == "details"
+
+
 def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text() -> None:
     """A chained pause remains ordered when the provider omits its assistant tool call."""
     prior_text = "Before.\n\n🔧 `inspect` [1]"

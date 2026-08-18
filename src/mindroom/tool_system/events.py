@@ -709,6 +709,7 @@ def reconcile_tool_presentation(
         trace[prior_index] = replace(
             completed_entry,
             args_preview=completed_entry.args_preview or previous_entry.args_preview,
+            result_preview=completed_entry.result_preview or previous_entry.result_preview,
             truncated=completed_entry.truncated or previous_entry.truncated,
         )
 
