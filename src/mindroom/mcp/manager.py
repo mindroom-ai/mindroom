@@ -59,17 +59,12 @@ from mindroom.oauth.credential_lifecycle import (
     refresh_oauth_credentials_with_result,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.providers import (
-    OAuthConnectionRequired,
-    OAuthProviderError,
-    OAuthRefreshFailedError,
-    OAuthRefreshRejectedError,
-)
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
+    OAUTH_REFRESH_FAILED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     OAUTH_RESET_REQUIRED_REASON,
-    oauth_connect_url,
     oauth_connection_required,
 )
 
@@ -85,7 +80,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
-_SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 
 # The cap matches STARTUP_RETRY_MAX_DELAY_SECONDS so a recovered required server
 # unblocks its dependent agents no slower than the bot-start retry loop did.
@@ -737,16 +731,7 @@ class MCPServerManager:
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
             if isinstance(exc, OAuthRefreshRejectedError):
                 raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from exc
-            raise OAuthRefreshFailedError(
-                _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE,
-                provider_id=provider.id,
-                connect_url=oauth_connect_url(
-                    provider,
-                    self.runtime_paths,
-                    worker_target=context.worker_target,
-                ),
-                oauth_error=exc.oauth_error,
-            ) from None
+            raise oauth_connection_required(context, reason=OAUTH_REFRESH_FAILED_REASON) from None
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise oauth_connection_required(context)
         assert credentials is not None

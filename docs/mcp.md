@@ -221,8 +221,8 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 
 The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a catalog for the active credential scope.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-When token refresh fails without a terminal credential rejection, the bridge returns `oauth_refresh_failed: true` with the provider and a scoped `connect_url` instead of collapsing the failure into a bare error string.
-MindRoom retains the credential in that case, so callers can retry after a temporary provider failure or offer the link when reconnecting is appropriate.
+When token refresh fails without a terminal credential rejection, the bridge returns the standard `oauth_connection_required: true` payload with `reason: refresh_failed`, the provider, and a scoped `connect_url` instead of collapsing the failure into a bare error string.
+MindRoom retains the credential in that case, so callers should retry after a temporary provider failure before offering the link to reconnect.
 Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.

@@ -61,7 +61,6 @@ from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
     OAuthProviderError,
-    OAuthRefreshFailedError,
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
@@ -982,11 +981,11 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
+async def test_mcp_manager_returns_recovery_for_transient_refresh_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A provider outage must not claim the retained requester credential is disconnected."""
+    """A transient refresh failure must remain recoverable without discarding credentials."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target("@alice:example.test")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, "retained-token")
@@ -1006,15 +1005,16 @@ async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
 
     monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", fail_refresh)
 
-    with pytest.raises(OAuthRefreshFailedError) as exc_info:
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
         await manager._oauth_authorization_material(state, credential_context=credential_context)
 
-    assert str(exc_info.value) == "OAuth credential refresh failed"
+    payload = oauth_connection_required_payload(exc_info.value)
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "mcp_demo"
+    assert payload["reason"] == "refresh_failed"
+    assert str(payload["connect_url"]).startswith("http://localhost:8765/api/oauth/mcp_demo/authorize?")
+    assert payload["requires_host_browser"] is True
     assert leaked_detail not in str(exc_info.value)
-    assert exc_info.value.provider_id == "mcp_demo"
-    assert exc_info.value.connect_url.startswith(
-        "http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=",
-    )
     assert (await load_oauth_credentials_snapshot(credential_context)).credentials is not None
 
 
@@ -1023,12 +1023,12 @@ async def test_mcp_manager_keeps_transient_refresh_failure_retryable(
     "function_name",
     ["demo_connection_status", "demo_list_tools", "demo_call_tool"],
 )
-async def test_mcp_bridge_returns_structured_nonterminal_refresh_failure(
+async def test_mcp_bridge_returns_recovery_for_transient_refresh_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     function_name: str,
 ) -> None:
-    """Every MCP bridge entrypoint should preserve actionable refresh-failure metadata."""
+    """Every OAuth bridge entrypoint must preserve structured refresh recovery."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target("@alice:example.test")
     _save_expiring_mcp_oauth_credentials(
@@ -1076,14 +1076,14 @@ async def test_mcp_bridge_returns_structured_nonterminal_refresh_failure(
         await manager.shutdown()
 
     payload = json.loads(result)
-    assert payload["error"] == "OAuth credential refresh failed"
-    assert payload["oauth_refresh_failed"] is True
+    assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "mcp_demo"
+    assert payload["reason"] == "refresh_failed"
     assert payload["connect_url"].startswith(
         "http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=",
     )
     assert payload["requires_host_browser"] is True
-    assert "oauth_connection_required" not in payload
+    assert provider_detail not in payload["error"]
     assert retained_credentials is not None
     assert retained_credentials["token"] == "expired-access-token"  # noqa: S105
     assert retained_credentials["refresh_token"] == "retained-refresh-token"  # noqa: S105
