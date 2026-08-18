@@ -14,7 +14,13 @@ from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
+from mindroom.ai import (
+    ResponseTurnContext,
+    ai_response,
+    build_matrix_run_metadata,
+    materialize_agent_pause_presentation,
+    stream_agent_response,
+)
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
@@ -92,6 +98,7 @@ from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,
+    materialize_team_pause_presentation,
     resolve_team_turn_models,
     select_model_for_team,
     team_response,
@@ -196,6 +203,20 @@ def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> Pau
         tool_trace=error.presentation.tool_trace,
         response_presentation_state=presentation_state,
     )
+
+
+def _materialize_visible_pause_presentation(
+    paused: PausedAttempt,
+    *,
+    entity_kind: Literal["agent", "team"],
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Build exact missing tool anchors only at an approval publication boundary."""
+    if not show_tool_calls:
+        return paused
+    if entity_kind == "team":
+        return materialize_team_pause_presentation(paused)
+    return materialize_agent_pause_presentation(paused)
 
 
 def _split_delivery_tool_trace(
@@ -846,6 +867,15 @@ class ResponseRunner:
         )
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
+            published_paused = paused
+            show_tool_calls = self._show_tool_calls()
+            paused = _materialize_visible_pause_presentation(
+                paused,
+                entity_kind=entity_kind,
+                show_tool_calls=show_tool_calls,
+            )
+            if plan.waiting_text is not None:
+                published_paused = paused
             durable_tool_trace = durable_pause_tool_trace(
                 paused,
                 identified_tools,
@@ -853,12 +883,11 @@ class ResponseRunner:
             )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
-            show_tool_calls = self._show_tool_calls()
-            visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
+            visible_tool_trace = tuple(published_paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
             delivery = await self._approval_responses.publish_initial_pause(
-                paused,
+                published_paused,
                 plan,
                 target=target,
                 existing_event_id=response_event_id,
@@ -1001,6 +1030,11 @@ class ResponseRunner:
         presentation = await self._approval_responses.advance_pause(
             claimed,
             result,
+            materialize_presentation=lambda paused: _materialize_visible_pause_presentation(
+                paused,
+                entity_kind=claimed.entity_kind,
+                show_tool_calls=claimed.show_tool_calls,
+            ),
             target=target,
             pending_text=PROGRESS_PLACEHOLDER,
         )

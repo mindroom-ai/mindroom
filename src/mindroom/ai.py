@@ -128,6 +128,7 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
+    "materialize_agent_pause_presentation",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -661,6 +662,26 @@ def _attach_blocking_pause_presentation(
     return replace(
         paused,
         response_text=presentation.final_text(),
+        tool_trace=tuple(presentation.tool_trace),
+    )
+
+
+def materialize_agent_pause_presentation(paused: PausedAttempt) -> PausedAttempt:
+    """Anchor exact pending tools in the agent body before approval publication."""
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=True,
+        response_text=paused.response_text,
+        tool_trace=deepcopy(list(paused.tool_trace)),
+    )
+    prior_trace_len = len(presentation.tool_trace)
+    for tool in paused.tools:
+        presentation.start_tool(tool)
+    if len(presentation.tool_trace) == prior_trace_len:
+        return paused
+    return replace(
+        paused,
+        response_text=presentation.response_text,
+        visible_response_text="",
         tool_trace=tuple(presentation.tool_trace),
     )
 

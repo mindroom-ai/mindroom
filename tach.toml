@@ -4037,6 +4037,7 @@ expose = [
     "format_team_response",
     "is_cancelled_run_output",
     "is_errored_run_output",
+    "materialize_team_pause_presentation",
     "resolve_team_turn_models",
     "select_model_for_team",
     "team_response",
@@ -4079,6 +4080,7 @@ expose = [
     "AIStreamChunk",
     "ResponseTurnContext",
     "build_matrix_run_metadata",
+    "materialize_agent_pause_presentation",
     "ai_response",
     "stream_agent_response",
 ]

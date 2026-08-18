@@ -487,20 +487,25 @@ class ApprovalResponseCoordinator:
         current: ApprovalContinuation,
         paused: PausedAttempt,
         *,
+        materialize_presentation: Callable[[PausedAttempt], PausedAttempt],
         target: MessageTarget,
         pending_text: str,
     ) -> _ApprovalPausePresentation:
         """Replace one claim with Agno's next exact pause generation."""
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
         plan = await self.plan_pause(identified, requester_id=current.requester_id)
+        published_paused = paused
+        paused = materialize_presentation(paused)
+        if plan.waiting_text is not None:
+            published_paused = paused
         durable_tool_trace = durable_pause_tool_trace(
             paused,
             identified,
             entity_kind=current.entity_kind,
         )
         approval_pending = plan.waiting_text is not None
-        visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
-        delivery_text = _approval_pause_delivery_text(paused, plan.waiting_text or pending_text)
+        visible_tool_trace = tuple(published_paused.tool_trace) if current.show_tool_calls else ()
+        delivery_text = _approval_pause_delivery_text(published_paused, plan.waiting_text or pending_text)
         stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
         next_generation = current.generation + 1
         staged_presentation: dict[str, object] = {

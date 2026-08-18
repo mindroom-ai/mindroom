@@ -30,7 +30,7 @@ from agno.tools.toolkit import Toolkit
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, approval_response, response_runner
 from mindroom import background_tasks as background_tasks_module
-from mindroom.ai import _attach_blocking_pause_presentation
+from mindroom.ai import _attach_blocking_pause_presentation, materialize_agent_pause_presentation
 from mindroom.approval_execution import _collect_agent_continuation, _validate_decided_agent_tools
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
@@ -105,10 +105,16 @@ from mindroom.streaming import (
     StreamingResponse,
 )
 from mindroom.synthetic_model import SyntheticModel
+from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry, serialize_tool_trace
+from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
+    ToolTraceEntry,
+    deserialize_tool_trace,
+    serialize_tool_trace,
+)
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
@@ -1668,12 +1674,14 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(runner.deps.approval_store)
+    presentation = _TeamStreamPresentation.new(["general"], ["General"], show_tool_calls=True)
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-paused",
         tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
         runtime_model_name="large",
         team_member_model_names=(("general", "large"),),
+        response_presentation_state=presentation.to_state(),
     )
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2530,6 +2538,155 @@ async def test_pause_persists_and_keeps_the_committed_stream_presentation(tmp_pa
     assert outcome.tool_trace == (trace,)
 
 
+@pytest.mark.asyncio
+async def test_pause_publication_materializes_agent_marker_after_suspension_flush_failure(tmp_path: Path) -> None:
+    """A later successful approval edit must anchor a tool omitted by the failed stream flush."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    buffered = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval.")
+    buffered.start_tool(tool)
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            response_text=buffered.response_text,
+            tool_trace=tuple(buffered.tool_trace),
+        ),
+    )
+    error.capture_presentation(
+        StreamingPresentation(
+            response_text="Before approval.",
+            visible_response_text="Before approval.",
+        ),
+    )
+    handed_off = response_runner._paused_with_committed_presentation(error)
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+
+    async def acknowledge_edit(edit_request: EditTextRequest) -> TextDeliveryOutcome:
+        return TextDeliveryOutcome(event_id="$stream", visible_body=edit_request.new_text)
+
+    edit_text = AsyncMock(side_effect=acknowledge_edit)
+    with (
+        patch.object(DeliveryGateway, "edit_text_outcome", new=edit_text),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(True, 60.0)),
+        ),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        await runner._suspend_for_approval(
+            handed_off,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(tracked_event_id="$stream"),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.response_text == buffered.response_text
+    assert edit_text.await_args.args[0].new_text == continuation.response_text
+    trace = deserialize_tool_trace(continuation.response_tool_trace, strict=True)
+    assert [(entry.tool_call_id, entry.type) for entry in trace] == [("call-1", "tool_call_started")]
+
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=True,
+        response_text=continuation.response_text,
+        tool_trace=trace,
+    )
+    tool.result = "done"
+    presentation.complete_tool(tool)
+    assert presentation.response_text == buffered.response_text.replace(" ⏳", "")
+    assert presentation.tool_trace[0].type == "tool_call_completed"
+
+
+@pytest.mark.asyncio
+async def test_pause_publication_materializes_first_team_marker_after_suspension_flush_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed first team-tool flush must still publish a restorable anchored snapshot."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "member-a"
+    requirement.member_agent_name = "Member A"
+    buffered = _TeamStreamPresentation.new(["member-a"], ["Member A"], show_tool_calls=True)
+    buffered.start_member_tool("member-a", tool)
+    error = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-1",
+            tools=(tool,),
+            requirements=(requirement,),
+            response_text=buffered.render_body(),
+            tool_trace=tuple(buffered.tool_trace),
+            response_presentation_state=buffered.to_state(),
+        ),
+    )
+    error.capture_presentation(
+        StreamingPresentation(response_text="", visible_response_text="Thinking..."),
+    )
+    handed_off = response_runner._paused_with_committed_presentation(error)
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+
+    async def acknowledge_edit(edit_request: EditTextRequest) -> TextDeliveryOutcome:
+        return TextDeliveryOutcome(event_id="$stream", visible_body=edit_request.new_text)
+
+    edit_text = AsyncMock(side_effect=acknowledge_edit)
+    with (
+        patch.object(DeliveryGateway, "edit_text_outcome", new=edit_text),
+        patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch(
+            "mindroom.approval_response.evaluate_tool_approval",
+            new=AsyncMock(return_value=(True, 60.0)),
+        ),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        await runner._suspend_for_approval(
+            handed_off,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(tracked_event_id="$stream"),
+            execution_identity=identity,
+            entity_kind="team",
+            history_scope=runner.deps.state_writer.history_scope(),
+            team_member_names=("member-a",),
+            team_mode="coordinate",
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert "🔧 `inspect` [1] ⏳" in continuation.response_text
+    assert edit_text.await_args.args[0].new_text == continuation.response_text
+    trace = deserialize_tool_trace(continuation.response_tool_trace, strict=True)
+    presentation = _TeamStreamPresentation.restore(
+        member_ids=["member-a"],
+        show_tool_calls=True,
+        state=continuation.response_presentation_state,
+        tool_trace=trace,
+        prior_response_text=continuation.response_text,
+    )
+    tool.result = "done"
+    presentation.complete_member_tool("member-a", tool)
+    assert "🔧 `inspect` [1] ⏳" not in presentation.render_body()
+    assert "🔧 `inspect` [1]" in presentation.render_body()
+    assert presentation.tool_trace[0].type == "tool_call_completed"
+
+
 def test_streaming_pause_handoff_uses_only_transport_committed_presentation() -> None:
     """The lifecycle persists the body/trace acknowledged by Matrix, not buffered stream state."""
     buffered_trace = ToolTraceEntry(
@@ -2804,6 +2961,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         presentation = await runner._approval_responses.advance_pause(
             current,
             paused,
+            materialize_presentation=materialize_agent_pause_presentation,
             target=_target(thread_id="$thread"),
             pending_text="Thinking...",
         )
@@ -2812,15 +2970,24 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
-    assert persisted.response_text == paused.response_text
+    assert persisted.response_text.startswith(paused.response_text)
+    assert "🔧 `conditional_write` [2] ⏳" in persisted.response_text
+    durable_trace = deserialize_tool_trace(persisted.response_tool_trace, strict=True)
+    assert [(entry.tool_call_id, entry.type) for entry in durable_trace] == [
+        ("call-read", "tool_call_started"),
+        ("call-write", "tool_call_started"),
+    ]
     assert persisted.visible_response_text == acknowledged_body
     assert persisted.response_presentation_state == committed_state
     assert presentation.response_text == acknowledged_body
     assert presentation.approval_pending is (expected_text is not None)
-    assert presentation.tool_trace == (committed_trace,)
+    expected_visible_trace = tuple(durable_trace) if expected_text is not None else (committed_trace,)
+    assert presentation.tool_trace == expected_visible_trace
     edit_request = edit_text.await_args.args[0]
-    assert edit_request.new_text == paused.visible_response_text
-    assert edit_request.tool_trace == [committed_trace]
+    assert edit_request.new_text == (
+        persisted.response_text if expected_text is not None else paused.visible_response_text
+    )
+    assert edit_request.tool_trace == list(expected_visible_trace)
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
@@ -2894,6 +3061,7 @@ async def test_automatic_chained_pause_is_not_claimable_before_its_edit_commits(
             runner._approval_responses.advance_pause(
                 current,
                 paused,
+                materialize_presentation=materialize_agent_pause_presentation,
                 target=_target(thread_id="$thread"),
                 pending_text="Thinking...",
             ),
@@ -2921,7 +3089,7 @@ async def test_automatic_chained_pause_is_not_claimable_before_its_edit_commits(
     assert ready.state == "ready"
     assert ready.runtime_generation is None
     assert ready.presentation_generation == 1
-    assert ready.response_text == paused.response_text
+    assert "🔧 `automatic` [1] ⏳" in ready.response_text
 
 
 @pytest.mark.asyncio
@@ -2978,6 +3146,7 @@ async def test_chained_pause_recovers_acknowledged_edit_after_crash_before_prese
         await runner._approval_responses.advance_pause(
             current,
             paused,
+            materialize_presentation=materialize_agent_pause_presentation,
             target=_target(thread_id="$thread"),
             pending_text="Thinking...",
         )
@@ -3009,7 +3178,8 @@ async def test_chained_pause_recovers_acknowledged_edit_after_crash_before_prese
     assert ready.state == "ready"
     assert ready.presentation_generation == 1
     assert ready.visible_response_text == acknowledged_body
-    assert ready.response_text == paused.response_text
+    assert ready.response_text.startswith(paused.response_text)
+    assert "🔧 `automatic` [1] ⏳" in ready.response_text
     assert ready.staged_presentation is None
 
 

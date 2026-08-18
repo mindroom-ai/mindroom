@@ -535,35 +535,89 @@ class _TeamStreamPresentation:
         return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
 
 
+def _team_presentation_identity(
+    state: Mapping[str, object] | None,
+) -> tuple[list[str], list[str]]:
+    """Validate a team snapshot and return only its frozen slot identity."""
+    if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)
+    members = state.get("members")
+    if not isinstance(members, list) or not isinstance(state.get("consensus"), str):
+        msg = "Team continuation presentation snapshot is invalid"
+        raise RuntimeError(msg)  # noqa: TRY004
+    member_ids: list[str] = []
+    display_names: list[str] = []
+    for member in members:
+        if not isinstance(member, dict):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)  # noqa: TRY004
+        stored_member = cast("dict[str, object]", member)
+        member_id = stored_member.get("id")
+        display_name = stored_member.get("display_name")
+        if (
+            not isinstance(stored_member.get("content"), str)
+            or not isinstance(member_id, str)
+            or not member_id
+            or not isinstance(display_name, str)
+        ):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+        member_ids.append(member_id)
+        display_names.append(display_name)
+    return member_ids, display_names
+
+
 def validated_empty_team_presentation_shell(
     state: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
     """Return a canonical empty team snapshot containing only frozen slot identity."""
-    if state is None or state.get("kind") != "team_stream" or state.get("version") != 2:
-        return None
-    members = state.get("members")
-    if not isinstance(members, list) or state.get("consensus") != "":
-        return None
-    member_ids: list[str] = []
-    for member in members:
-        if not isinstance(member, dict):
-            return None
-        stored_member = cast("dict[str, object]", member)
-        member_id = stored_member.get("id")
-        if stored_member.get("content") != "" or not isinstance(member_id, str) or not member_id:
-            return None
-        member_ids.append(member_id)
     try:
-        presentation = _TeamStreamPresentation.restore(
-            member_ids=member_ids,
+        member_ids, display_names = _team_presentation_identity(state)
+        presentation = _TeamStreamPresentation.new(
+            member_ids,
+            display_names,
             show_tool_calls=False,
-            state=state,
-            tool_trace=(),
-            prior_response_text="",
         )
     except RuntimeError:
         return None
     return presentation.to_state()
+
+
+def materialize_team_pause_presentation(paused: PausedAttempt) -> PausedAttempt:
+    """Anchor exact pending tools in their frozen team slots before publication."""
+    state = paused.response_presentation_state
+    member_ids, _display_names = _team_presentation_identity(state)
+    presentation = _TeamStreamPresentation.restore(
+        member_ids=member_ids,
+        show_tool_calls=True,
+        state=state,
+        tool_trace=paused.tool_trace,
+        prior_response_text=paused.response_text,
+    )
+    requirements_by_call_id = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in paused.requirements
+        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+    }
+    prior_trace_len = len(presentation.tool_trace)
+    for tool in paused.tools:
+        tool_call_id = tool_execution_call_id(tool)
+        if tool_call_id is None:
+            msg = "Paused team approval tool is missing its exact identity"
+            raise RuntimeError(msg)
+        requirement = requirements_by_call_id.get(tool_call_id)
+        scope = _team_pause_requirement_scope(presentation, requirement) or "team"
+        presentation.start_tool(scope, tool)
+    if len(presentation.tool_trace) == prior_trace_len:
+        return paused
+    return replace(
+        paused,
+        response_text=presentation.render_body(),
+        visible_response_text="",
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+    )
 
 
 def _team_pause_requirement_scope(
@@ -3930,6 +3984,7 @@ __all__ = [
     "is_cancelled_run_output",
     "is_errored_run_output",
     "materialize_exact_team_members",
+    "materialize_team_pause_presentation",
     "prepare_materialized_team_execution",
     "resolve_configured_team",
     "resolve_live_shared_agent_names",
