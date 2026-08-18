@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
+import aiohttp
 import nio
 import pytest
 from nio.ingest.config import ClassicSourceConfig, IngestionConfig
@@ -181,6 +183,107 @@ def test_matrix_client_config_supports_application_owned_classic_sync() -> None:
     assert config.backfill_limited_timelines is True
     assert config.backfill_persist_recovery is False
     assert config.store_sync_tokens is False
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_transport_fence_stops_retry_before_session_recreation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active request cannot reopen Matrix transport after the shutdown fence."""
+    request_started = asyncio.Event()
+    close_released_request = asyncio.Event()
+    replacement_sessions: list[object] = []
+
+    class ActiveSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            request_started.set()
+            await close_released_request.wait()
+            message = "closed by orderly shutdown"
+            raise aiohttp.ClientConnectionError(message)
+
+        async def close(self) -> None:
+            close_released_request.set()
+
+    class ReplacementSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            replacement_sessions.append(self)
+            self.connector = SimpleNamespace(connect=lambda: None)
+
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "shutdown request reached a replacement session"
+            raise AssertionError(message)
+
+    monkeypatch.setattr("nio.client.async_client.ClientSession", ReplacementSession)
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
+    client.client_session = ActiveSession()  # type: ignore[assignment]
+    request = asyncio.create_task(
+        client._send(nio.WhoamiResponse, "GET", "/_matrix/client/v3/account/whoami"),
+    )
+    await asyncio.wait_for(request_started.wait(), timeout=1.0)
+
+    try:
+        await client.close_for_process_shutdown()
+        with pytest.raises(RuntimeError, match="transport is fenced for process shutdown"):
+            await asyncio.wait_for(request, timeout=1.0)
+    finally:
+        if not request.done():
+            request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+
+    assert replacement_sessions == []
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_transport_fence_stops_send_after_header_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Header renewal cannot resume into a new request after shutdown starts."""
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+    replacement_sessions: list[object] = []
+
+    class BlockingHeaders(Mapping[str, str]):
+        async def prepare(self) -> None:
+            prepare_started.set()
+            await release_prepare.wait()
+
+        def __getitem__(self, key: str) -> str:
+            if key != "X-Test":
+                raise KeyError(key)
+            return "value"
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(("X-Test",))
+
+        def __len__(self) -> int:
+            return 1
+
+    class ReplacementSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            replacement_sessions.append(self)
+            self.connector = SimpleNamespace(connect=lambda: None)
+
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "shutdown request started after header preparation"
+            raise AssertionError(message)
+
+    monkeypatch.setattr("nio.client.async_client.ClientSession", ReplacementSession)
+    client = MindRoomAsyncClient(
+        "https://example.org",
+        "@mindroom_agent:example.org",
+        config=matrix_client_config(http_headers=BlockingHeaders()),
+    )
+    request = asyncio.create_task(
+        client.send("GET", "/_matrix/client/v3/account/whoami"),
+    )
+    await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
+
+    await client.close_for_process_shutdown()
+    release_prepare.set()
+
+    with pytest.raises(RuntimeError, match="transport is fenced for process shutdown"):
+        await asyncio.wait_for(request, timeout=1.0)
+    assert replacement_sessions == []
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
     _track_matrix_sync_cache_write,
@@ -652,6 +653,67 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
 
     assert cancellation_seen_at_coalescing == [True]
     assert response_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_fences_matrix_transport_before_response_drain() -> None:
+    """Orderly owner drain cannot start another Matrix request."""
+    request_count = 0
+    session_closed = False
+
+    class ProbeSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal request_count
+            request_count += 1
+            return SimpleNamespace(status=200)
+
+        async def close(self) -> None:
+            nonlocal session_closed
+            session_closed = True
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_busy:example.org")
+    client.client_session = ProbeSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        with pytest.raises(
+            RuntimeError,
+            match="transport is fenced for process shutdown",
+        ):
+            await client.send("GET", "/_matrix/client/v3/account/whoami")
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    try:
+        with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+            await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+    finally:
+        await client.close()
+
+    assert session_closed is True
+    assert request_count == 0
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,13 @@ class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
+class _MatrixTransportShutdownError(RuntimeError):
+    """Raised when process shutdown has permanently fenced Matrix transport."""
+
+    def __init__(self) -> None:
+        super().__init__("Matrix transport is fenced for process shutdown")
+
+
 @dataclass(frozen=True, slots=True)
 class MatrixSyncStorage:
     """Select which sync state nio persists for one Matrix client."""
@@ -92,12 +99,23 @@ class _AsyncRequestHeaders(Protocol):
 class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
+    _process_shutdown_transport_fenced = False
+
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
+        if self._process_shutdown_transport_fenced:
+            raise _MatrixTransportShutdownError
         headers = self.config.custom_headers
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
+        if self._process_shutdown_transport_fenced:
+            raise _MatrixTransportShutdownError
         return await super().send(*args, **kwargs)
+
+    async def close_for_process_shutdown(self) -> None:
+        """Permanently fence retries before closing the active HTTP session."""
+        self._process_shutdown_transport_fenced = True
+        await super().close()
 
     def encrypt(
         self,
