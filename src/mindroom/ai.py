@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import EmptyRunDiscard, StandaloneReplaySnapshot, TurnRunState
+    from mindroom.response_turn import EmptyRunDiscard, PausedAttempt, StandaloneReplaySnapshot, TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -617,6 +617,46 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
         _, trace_entry = format_tool_combined(tool_name, tool_args, tool.result)
         trace.append(trace_entry)
     return trace
+
+
+def _attach_blocking_pause_presentation(
+    paused: PausedAttempt,
+    response: RunOutput,
+    *,
+    show_tool_calls: bool,
+) -> PausedAttempt:
+    """Render a blocking pause once, before it crosses the approval boundary."""
+    presentation = CollectedStreamPresentation(
+        show_tool_calls=show_tool_calls,
+        track_hidden_tools=True,
+    )
+    presentation.append_text(_extract_replayable_response_text(response))
+    pending_by_id: dict[str, ToolExecution] = {}
+    for tool in paused.tools:
+        call_id = tool_execution_call_id(tool)
+        if call_id is None or call_id in pending_by_id:
+            msg = "Paused approval tool is missing its exact identity"
+            raise RuntimeError(msg)
+        pending_by_id[call_id] = tool
+
+    seen_ids: set[str] = set()
+    for tool in (*tuple(response.tools or ()), *paused.tools):
+        call_id = tool_execution_call_id(tool)
+        if call_id is None:
+            msg = "Blocking approval output has a tool without stable identity"
+            raise RuntimeError(msg)
+        if call_id in seen_ids:
+            continue
+        seen_ids.add(call_id)
+        presentation.start_tool(tool)
+        if call_id not in pending_by_id:
+            presentation.complete_tool(tool)
+
+    return replace(
+        paused,
+        response_text=presentation.final_text(),
+        tool_trace=tuple(presentation.tool_trace),
+    )
 
 
 def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -1541,7 +1581,14 @@ async def ai_response(  # noqa: C901
                 fallback_run_id=attempt.attempt_run_id,
             )
             if paused_attempt is not None:
-                return replace(paused_attempt, runtime_model_name=prepared_run.runtime_model_name)
+                return replace(
+                    _attach_blocking_pause_presentation(
+                        paused_attempt,
+                        response,
+                        show_tool_calls=show_tool_calls,
+                    ),
+                    runtime_model_name=prepared_run.runtime_model_name,
+                )
             partial_text = _extract_interrupted_partial_text(
                 response.content,
                 messages=response.messages,

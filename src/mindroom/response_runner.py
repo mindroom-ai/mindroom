@@ -99,7 +99,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, format_tool_started_event, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
@@ -188,6 +188,37 @@ def _paused_with_committed_presentation(error: ResponsePausedForApproval) -> Pau
         tool_trace=error.presentation.tool_trace,
         response_presentation_state=error.presentation.state or {},
     )
+
+
+def _require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
+    """Reject a visible approval handoff whose pending tools have no ordered anchors."""
+    if not show_tool_calls:
+        return
+    requirements_by_call_id = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in paused.requirements
+        if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
+    }
+    for tool in paused.tools:
+        call_id = tool.tool_call_id
+        matches = [
+            (index, entry)
+            for index, entry in enumerate(paused.tool_trace, start=1)
+            if entry.type == "tool_call_started" and entry.tool_call_id == call_id
+        ]
+        if call_id is None or len(matches) != 1:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        index, entry = matches[0]
+        requirement = requirements_by_call_id.get(call_id)
+        member_id = requirement.member_agent_id if requirement is not None else None
+        if member_id is not None and entry.scope_key != f"agent:{member_id}":
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        marker, _trace = format_tool_started_event(tool, tool_index=index)
+        if marker.strip() not in paused.response_text:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
 
 
 def _split_delivery_tool_trace(
@@ -818,6 +849,8 @@ class ResponseRunner:
             paused,
             default_agent_name=self.deps.agent_name,
         )
+        show_tool_calls = self._show_tool_calls()
+        _require_ordered_pause_presentation(paused, show_tool_calls=show_tool_calls)
         approval_id = uuid4().hex
         raw_source_event_ids = (
             request.matrix_run_metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
@@ -840,7 +873,6 @@ class ResponseRunner:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
-            show_tool_calls = self._show_tool_calls()
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
             visible_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
@@ -3324,6 +3356,7 @@ class ResponseRunner:
                                     model_name=model_name,
                                     member_model_names=member_model_names,
                                     media=resolved_request.media,
+                                    show_tool_calls=show_tool_calls,
                                     run_id_callback=_note_attempt_run_id,
                                     user_id=requester_user_id,
                                     current_timestamp_ms=request.current_timestamp_ms,

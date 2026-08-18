@@ -20,6 +20,7 @@ from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom import approval_manager, approval_transport, interactive
+from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval_manager import (
     initialize_approval_store,
 )
@@ -1524,6 +1525,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert paused is not None
         paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
+        paused = _attach_blocking_pause_presentation(
+            paused,
+            paused_response,
+            show_tool_calls=True,
+        )
 
         first = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
