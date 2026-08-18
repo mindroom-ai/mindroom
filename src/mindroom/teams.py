@@ -125,6 +125,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
+    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -362,7 +363,12 @@ def _approval_member_content(
     ]
     if assistant_messages and all(message.id in skip_message_ids for message in assistant_messages):
         return ""
-    return _get_response_content(response)
+    return "" if response.status == RunStatus.paused else _get_response_content(response)
+
+
+def _approval_response_fallback_text(response: TeamRunOutput | RunOutput) -> str:
+    """Use aggregate run content only for terminal provider-gap recovery."""
+    return "" if response.status == RunStatus.paused else _get_response_content(response)
 
 
 def _format_approval_contributions_recursive(
@@ -425,7 +431,7 @@ def _format_approval_contributions_recursive(
                 show_tool_calls=show_tool_calls,
                 skip_message_ids=skip_message_ids,
             )
-            consensus = consensus or str(response.content or "")
+            consensus = consensus or _approval_response_fallback_text(response)
             if consensus.strip():
                 parts.extend(_format_team_consensus(consensus, indent))
             elif parts:
@@ -467,8 +473,8 @@ def _format_approval_team_response(
         include_consensus=True,
         skip_message_ids=skip_message_ids,
     )
-    body = "\n\n".join(parts) if parts else (_get_response_content(response) or "No team response generated.")
-    return _format_team_header(team_display_names) + body, trace
+    body = "\n\n".join(parts) if parts else _approval_response_fallback_text(response)
+    return (_format_team_header(team_display_names) + body if body else ""), trace
 
 
 def _register_team_notice_storage(
@@ -1383,6 +1389,71 @@ def _assistant_message_ids(response: TeamRunOutput | RunOutput) -> set[str]:
     return message_ids
 
 
+def _requirement_member_run_ids(requirements: Sequence[RunRequirement]) -> set[str]:
+    """Collect the persisted sibling runs referenced by member approval requirements."""
+    return {requirement.member_run_id for requirement in requirements if requirement.member_run_id is not None}
+
+
+def _team_session_member_runs(
+    session: TeamSession | None,
+    member_run_ids: set[str],
+) -> list[TeamRunOutput | RunOutput]:
+    """Load referenced member runs from Agno's canonical sibling-run storage."""
+    if session is None or not member_run_ids:
+        return []
+    return [
+        run for run in session.runs or () if run.run_id in member_run_ids and isinstance(run, TeamRunOutput | RunOutput)
+    ]
+
+
+def _with_approval_member_runs(
+    response: TeamRunOutput,
+    member_runs: Sequence[TeamRunOutput | RunOutput],
+) -> TeamRunOutput:
+    """Attach refreshed sibling runs to a presentation-only team response."""
+    merged = list(response.member_responses or ())
+    positions = {member_response.run_id: index for index, member_response in enumerate(merged)}
+    for member_run in member_runs:
+        position = positions.get(member_run.run_id)
+        if position is None:
+            positions[member_run.run_id] = len(merged)
+            merged.append(member_run)
+        else:
+            merged[position] = member_run
+    return replace(response, member_responses=merged)
+
+
+def _approval_prior_message_ids(
+    persisted: TeamRunOutput,
+    session: TeamSession | None,
+    member_run_ids: set[str],
+) -> set[str]:
+    """Collect the outer and sibling assistant messages already in the durable snapshot."""
+    message_ids = _assistant_message_ids(persisted)
+    for member_run in _team_session_member_runs(session, member_run_ids):
+        message_ids.update(_assistant_message_ids(member_run))
+    return message_ids
+
+
+async def _refreshed_approval_team_response(
+    team: Team,
+    response: TeamRunOutput,
+    *,
+    existing_member_run_ids: set[str],
+    session_id: str,
+    user_id: str,
+) -> TeamRunOutput:
+    """Rejoin referenced sibling runs after Agno persists a team continuation."""
+    member_run_ids = existing_member_run_ids | _requirement_member_run_ids(response.requirements or ())
+    if not member_run_ids:
+        return response
+    refreshed_session = await team.aget_session(session_id=session_id, user_id=user_id)
+    return _with_approval_member_runs(
+        response,
+        _team_session_member_runs(refreshed_session, member_run_ids),
+    )
+
+
 def _merge_approval_presentation_tools(
     response: TeamRunOutput | RunOutput,
     *additional_groups: Sequence[ToolExecution],
@@ -1431,7 +1502,7 @@ def _continued_team_approval_presentation(
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text=_team_response_text(continued).lstrip("\n"),
+        fallback_text=_approval_response_fallback_text(continued).lstrip("\n"),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )
@@ -2169,7 +2240,8 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
-        prior_message_ids = _assistant_message_ids(persisted)
+        member_run_ids = _requirement_member_run_ids(persisted.requirements or ())
+        prior_message_ids = _approval_prior_message_ids(persisted, session, member_run_ids)
         requirements = apply_exact_approval_decisions(
             persisted.requirements or (),
             decisions=decisions,
@@ -2189,13 +2261,20 @@ async def continue_paused_team_run(
         if not isinstance(continued, TeamRunOutput):
             msg = "Team continuation returned an unexpected result"
             raise TypeError(msg)
+        presentation_response = await _refreshed_approval_team_response(
+            team,
+            continued,
+            existing_member_run_ids=member_run_ids,
+            session_id=session_id,
+            user_id=user_id,
+        )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
             fallback_run_id=run_id,
         )
         response_text, response_tool_trace, presentation_tools = _continued_team_approval_presentation(
-            continued,
+            presentation_response,
             team_display_names=members.display_names,
             requirement_tools=tuple(
                 requirement.tool_execution for requirement in requirements if requirement.tool_execution is not None

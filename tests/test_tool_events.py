@@ -288,6 +288,55 @@ def test_reconcile_tool_presentation_appends_new_pending_tool_after_latest_text(
     ]
 
 
+def test_reconcile_tool_presentation_reindexes_repeated_markers_without_collisions() -> None:
+    """Shifting equal tool markers must preserve their original order and identity."""
+    bootstrap = ToolExecution(tool_call_id="call-1", tool_name="bootstrap", result="ready")
+    first_inspect = ToolExecution(
+        tool_call_id="call-2",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    second_inspect = ToolExecution(
+        tool_call_id="call-3",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    current_trace = [
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-2"),
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-3"),
+    ]
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="🔧 `inspect` [1] ⏳\n\n🔧 `inspect` [2] ⏳",
+        current_tool_trace=current_trace,
+        tools=[bootstrap, first_inspect, second_inspect],
+        fallback_text="",
+        pending_tool_call_ids={"call-2", "call-3"},
+    )
+
+    assert body == "🔧 `bootstrap` [1]\n\n🔧 `inspect` [2] ⏳\n\n🔧 `inspect` [3] ⏳"
+    assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2", "call-3"]
+
+
+def test_reconcile_tool_presentation_preserves_prose_when_only_recovery_tools_are_added() -> None:
+    """A missing provider tool message must not make marker reindexing touch plain prose."""
+    completed = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+
+    body, trace = tool_events.reconcile_tool_presentation(
+        prior_text="",
+        prior_tool_trace=[],
+        current_text="After approval.",
+        current_tool_trace=[],
+        tools=[completed],
+        fallback_text="After approval.",
+    )
+
+    assert body == "🔧 `inspect` [1]\n\nAfter approval."
+    assert [entry.tool_call_id for entry in trace] == ["call-1"]
+
+
 def test_reconcile_tool_presentation_keeps_repeated_new_prose() -> None:
     """A genuinely new assistant message is not deduplicated by matching its text."""
     body, trace = tool_events.reconcile_tool_presentation(

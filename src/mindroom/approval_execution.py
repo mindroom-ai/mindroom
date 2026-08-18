@@ -85,7 +85,7 @@ def _approval_response_presentation(
         current_text=current_text,
         current_tool_trace=current_tool_trace,
         tools=presentation_tools,
-        fallback_text=str(response.content or ""),
+        fallback_text="" if paused is not None else str(response.content or ""),
         pending_tool_call_ids=pending_tool_call_ids,
         show_tool_calls=show_tool_calls,
     )
@@ -224,7 +224,7 @@ class AgentApprovalExecution:
         if paused is not None:
             return replace(
                 paused,
-                response_text=response_text or str(response.content or ""),
+                response_text=response_text,
                 tool_trace=tuple(response_tool_trace),
             )
         if response.status != RunStatus.completed:

@@ -31,6 +31,7 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
+from agno.session.team import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
 from agno.tools.function import Function
@@ -70,7 +71,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -567,6 +568,243 @@ def test_team_continuation_reconciles_restart_snapshot_without_member_responses(
     ]
 
 
+@pytest.mark.asyncio
+async def test_team_continuation_reloads_chained_member_output_after_restart() -> None:
+    """A restarted member's newly persisted prose and second pause must rejoin the outer transcript."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    first_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    first_requirement = RunRequirement(first_tool)
+    first_requirement.member_agent_id = "general"
+    first_requirement.member_agent_name = "GeneralAgent"
+    first_requirement.member_run_id = "member-run-1"
+    persisted = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        content="Team run paused. Please resolve the member requirements to continue.",
+        requirements=[first_requirement],
+        member_responses=[],
+    )
+    prior_member = RunOutput(
+        run_id="member-run-1",
+        parent_run_id="run-1",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-1",
+        status=RunStatus.paused,
+        messages=[
+            Message(
+                id="member-message-before-pause",
+                role="assistant",
+                content="Prior analysis.",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[first_tool],
+        requirements=[first_requirement],
+    )
+    second_tool = ToolExecution(
+        tool_call_id="call-2",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    second_requirement = RunRequirement(second_tool)
+    second_requirement.member_agent_id = "general"
+    second_requirement.member_agent_name = "GeneralAgent"
+    second_requirement.member_run_id = "member-run-1"
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        content="Team run paused. Please resolve the member requirements to continue.",
+        requirements=[second_requirement],
+        member_responses=[],
+    )
+    completed_first_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="inspect",
+        confirmed=True,
+        result="details",
+    )
+    updated_member = RunOutput(
+        run_id="member-run-1",
+        parent_run_id="run-1",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-1",
+        status=RunStatus.paused,
+        messages=[
+            *prior_member.messages,
+            Message(
+                id="member-message-second-pause",
+                role="assistant",
+                content="New finding.",
+                tool_calls=[
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[completed_first_tool, second_tool],
+        requirements=[second_requirement],
+    )
+    initial_session = TeamSession(
+        session_id="session-1",
+        team_id="research",
+        runs=[persisted, prior_member],
+    )
+    refreshed_session = TeamSession(
+        session_id="session-1",
+        team_id="research",
+        runs=[continued, updated_member],
+    )
+    team = MagicMock()
+    team.db = None
+    team.model = None
+    team.aget_session = AsyncMock(side_effect=[initial_session, refreshed_session])
+    team.acontinue_run = AsyncMock(return_value=continued)
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        agents=[],
+        display_names=["GeneralAgent"],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="research",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    prior_text = "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Prior analysis.\n\n🔧 `inspect` [1] ⏳"
+    prior_trace = [
+        ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1"),
+    ]
+
+    with (
+        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
+        ),
+        patch("mindroom.teams.build_materialized_team_instance", return_value=team),
+        patch("mindroom.teams.close_team_runtime_state_dbs"),
+    ):
+        result = await continue_paused_team_run(
+            member_names=(),
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            session_id="session-1",
+            run_id="run-1",
+            user_id="@user:localhost",
+            configured_team_name="research",
+            model_name="default",
+            decisions={"call-1": True},
+            denial_reasons={"call-1": None},
+            refresh_scheduler=None,
+            prior_response_text=prior_text,
+            prior_tool_trace=prior_trace,
+        )
+
+    assert isinstance(result, PausedAttempt)
+    assert result.response_text.count("Prior analysis.") == 1
+    assert result.response_text.count("New finding.") == 1
+    assert result.response_text.count("🔧 `inspect` [1]") == 1
+    assert "🔧 `inspect` [1] ⏳" not in result.response_text
+    assert result.response_text.count("🔧 `inspect` [2] ⏳") == 1
+    assert result.response_text.index("Prior analysis.") < result.response_text.index("🔧 `inspect` [1]")
+    assert result.response_text.index("🔧 `inspect` [1]") < result.response_text.index("New finding.")
+    assert result.response_text.index("New finding.") < result.response_text.index("🔧 `inspect` [2] ⏳")
+    assert "Team run paused" not in result.response_text
+
+
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+def test_team_continuation_excludes_framework_pause_status(*, show_tool_calls: bool) -> None:
+    """A chained team tool-only pause must keep Agno's status summary out of the transcript."""
+    completed_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+    pending_tool = ToolExecution(
+        tool_call_id="call-2",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    continued = TeamRunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        content="Team run paused. Please resolve the member requirements to continue.",
+        messages=[
+            Message(
+                id="team-second-pause",
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[completed_tool, pending_tool],
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(pending_tool,),
+    )
+    prior_text = (
+        "🤝 **Team Response** (GeneralAgent):\n\nBefore approval.\n\n🔧 `inspect` [1] ⏳"
+        if show_tool_calls
+        else "🤝 **Team Response** (GeneralAgent):\n\nBefore approval."
+    )
+    prior_trace = (
+        [ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")]
+        if show_tool_calls
+        else []
+    )
+
+    response_text, response_trace, _ = _continued_team_approval_presentation(
+        continued,
+        team_display_names=["GeneralAgent"],
+        requirement_tools=[completed_tool],
+        paused=paused,
+        prior_response_text=prior_text,
+        prior_tool_trace=prior_trace,
+        prior_message_ids=frozenset(),
+        show_tool_calls=show_tool_calls,
+    )
+
+    assert "Team run paused" not in response_text
+    if show_tool_calls:
+        assert response_text.count("🔧 `inspect` [1]") == 1
+        assert "🔧 `inspect` [1] ⏳" not in response_text
+        assert "🔧 `inspect` [2] ⏳" in response_text
+        assert [entry.type for entry in response_trace] == ["tool_call_completed", "tool_call_started"]
+    else:
+        assert response_text == prior_text
+        assert response_trace == []
+
+
 @pytest.mark.parametrize(
     ("persisted_call_ids", "decision_call_ids"),
     [
@@ -745,8 +983,8 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
 
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 @pytest.mark.asyncio
-async def test_team_response_captures_blocking_approval_presentation(*, show_tool_calls: bool) -> None:
-    """A blocking team pause must carry its ordered transcript into suspension."""
+async def test_team_response_excludes_framework_status_from_tool_only_pause(*, show_tool_calls: bool) -> None:
+    """A blocking team tool-only pause exposes only canonical messages and tool metadata."""
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -763,12 +1001,12 @@ async def test_team_response_captures_blocking_approval_presentation(*, show_too
         run_id="run-paused",
         session_id="session-team",
         status=RunStatus.paused,
-        content="Approval required",
+        content="Team run paused. Please resolve the member requirements to continue.",
         messages=[
             Message(
                 id="team-before-approval",
                 role="assistant",
-                content="Approval required",
+                content="",
                 tool_calls=[
                     {
                         "id": "call-1",
@@ -803,12 +1041,9 @@ async def test_team_response_captures_blocking_approval_presentation(*, show_too
         )
 
     marker = "🔧 `dangerous` [1] ⏳"
-    assert "Approval required" in raised.value.paused.response_text
+    assert "Team run paused" not in raised.value.paused.response_text
     assert (marker in raised.value.paused.response_text) is show_tool_calls
     if show_tool_calls:
-        assert raised.value.paused.response_text.index("Approval required") < raised.value.paused.response_text.index(
-            marker,
-        )
         assert raised.value.paused.tool_trace == (
             ToolTraceEntry(
                 type="tool_call_started",
@@ -817,6 +1052,7 @@ async def test_team_response_captures_blocking_approval_presentation(*, show_too
             ),
         )
     else:
+        assert raised.value.paused.response_text == ""
         assert raised.value.paused.tool_trace == ()
 
 

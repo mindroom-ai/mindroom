@@ -656,14 +656,16 @@ def _reindex_tool_markers(
     new_start_index: int,
 ) -> str:
     """Shift marker indices when recovery-only tools precede ordered messages."""
-    if old_start_index == new_start_index:
+    if old_start_index == new_start_index or not trace:
         return text
+    replacements: dict[str, str] = {}
     for offset, entry in enumerate(trace):
         pending = entry.type == "tool_call_started"
         old_marker = _tool_marker_line(entry.tool_name, old_start_index + offset, pending=pending)
         new_marker = _tool_marker_line(entry.tool_name, new_start_index + offset, pending=pending)
-        text = text.replace(old_marker, new_marker, 1)
-    return text
+        replacements[old_marker] = new_marker
+    marker_pattern = re.compile("|".join(re.escape(marker) for marker in replacements))
+    return marker_pattern.sub(lambda match: replacements[match.group(0)], text)
 
 
 def reconcile_tool_presentation(

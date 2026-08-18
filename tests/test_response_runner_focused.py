@@ -2576,6 +2576,86 @@ def test_agent_approval_presentation_reconciles_provider_without_tool_messages()
     ]
 
 
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+def test_agent_approval_presentation_excludes_framework_pause_status(
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A chained tool-only pause must not turn Agno's status summary into assistant prose."""
+    continuation = ApprovalContinuation(
+        approval_id="approval-tool-only",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="claimed",
+        response_text="Before approval.\n\n🔧 `inspect` [1] ⏳" if show_tool_calls else "Before approval.",
+        response_tool_trace=(
+            {
+                "type": "tool_call_started",
+                "tool_name": "inspect",
+                "tool_call_id": "call-1",
+            },
+        )
+        if show_tool_calls
+        else (),
+    )
+    completed_tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", result="details")
+    pending_tool = ToolExecution(
+        tool_call_id="call-2",
+        tool_name="inspect",
+        requires_confirmation=True,
+    )
+    response = RunOutput(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        content="I have tools to execute, but I need confirmation.",
+        messages=[
+            Message(
+                id="assistant-second-pause",
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    },
+                ],
+            ),
+        ],
+        tools=[completed_tool, pending_tool],
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(pending_tool,),
+    )
+
+    body, trace = approval_execution._approval_response_presentation(
+        response,
+        paused,
+        continuation=continuation,
+        requirement_tools=[completed_tool],
+        show_tool_calls=show_tool_calls,
+    )
+
+    assert "I have tools to execute" not in body
+    if show_tool_calls:
+        assert body == "Before approval.\n\n🔧 `inspect` [1]\n\n🔧 `inspect` [2] ⏳"
+        assert [entry.type for entry in trace] == ["tool_call_completed", "tool_call_started"]
+    else:
+        assert body == "Before approval."
+        assert trace == []
+
+
 @pytest.mark.asyncio
 async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_path: Path) -> None:
     """Fail-closed automatic denial must not claim that a nonexistent recipient can approve it."""

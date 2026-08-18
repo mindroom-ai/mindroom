@@ -1202,12 +1202,15 @@ class TestUserIdPassthrough:
         assert persisted_run.messages is not None
         assert "turn paused before completion" in str(persisted_run.messages[-1].content)
 
+    @pytest.mark.parametrize("show_tool_calls", [True, False])
     @pytest.mark.asyncio
-    async def test_ai_response_surfaces_native_confirmation_pause_without_replay_settlement(
+    async def test_ai_response_excludes_framework_status_from_native_confirmation_pause(
         self,
         tmp_path: Path,
+        *,
+        show_tool_calls: bool,
     ) -> None:
-        """Converting a confirmation pause to text would keep approval inside the completed turn."""
+        """A tool-only confirmation pause exposes canonical tool data, not Agno's status summary."""
         storage = _SessionStorage()
         mock_agent = MagicMock()
         paused_tool = ToolExecution(
@@ -1220,12 +1223,12 @@ class TestUserIdPassthrough:
             run_id="run-paused",
             agent_id="general",
             session_id="session1",
-            content="Approval required",
+            content="I have tools to execute, but I need confirmation.",
             messages=[
                 Message(
                     id="assistant-before-approval",
                     role="assistant",
-                    content="Approval required",
+                    content="",
                     tool_calls=[
                         {
                             "id": "call-1",
@@ -1255,18 +1258,25 @@ class TestUserIdPassthrough:
                     prompt="Run the action",
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
+                    show_tool_calls=show_tool_calls,
                 )
 
         assert raised.value.paused.tools == (paused_tool,)
         marker = "🔧 `dangerous` [1] ⏳"
-        assert raised.value.paused.response_text == f"Approval required\n\n{marker}"
-        assert raised.value.paused.tool_trace == (
-            ToolTraceEntry(
-                type="tool_call_started",
-                tool_name="dangerous",
-                args_preview="value=1",
-            ),
-        )
+        assert "I have tools to execute" not in raised.value.paused.response_text
+        assert (marker in raised.value.paused.response_text) is show_tool_calls
+        if show_tool_calls:
+            assert raised.value.paused.response_text == marker
+            assert raised.value.paused.tool_trace == (
+                ToolTraceEntry(
+                    type="tool_call_started",
+                    tool_name="dangerous",
+                    args_preview="value=1",
+                ),
+            )
+        else:
+            assert raised.value.paused.response_text == ""
+            assert raised.value.paused.tool_trace == ()
         assert storage.session is None
 
     @pytest.mark.asyncio
