@@ -21,6 +21,7 @@ from mindroom.approval_receipt import approval_receipt_context, build_approval_r
 from mindroom.approval_response import (
     ApprovalResponseCoordinator,
     continuation_target,
+    durable_pause_tool_trace,
     identify_approval_tools,
 )
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
@@ -114,7 +115,6 @@ from .delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryStage,
-    EditTextRequest,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -839,46 +839,31 @@ class ResponseRunner:
         )
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
+            durable_tool_trace = durable_pause_tool_trace(
+                paused,
+                identified_tools,
+                entity_kind=entity_kind,
+                coordinator_name=self.deps.agent_name,
+            )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
             show_tool_calls = self._show_tool_calls()
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
             snapshot_text = paused.response_text
-            snapshot_visible_text = paused.visible_response_text if snapshot_text else ""
-            delivery_text = snapshot_text or plan.waiting_text or PROGRESS_PLACEHOLDER
-            visible_text = snapshot_visible_text or delivery_text
             stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-            delivery_kind: Literal["sent", "edited"] | None = None
-            final_visible_body: str | None = None
-            if response_event_id is None:
-                response_event_id = await self.deps.delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=delivery_text,
-                        extra_content={STREAM_STATUS_KEY: stream_status},
-                        tool_trace=list(visible_tool_trace) or None,
-                        delivery_turn_id=request.response_envelope.source_event_id,
-                        delivery_stage=DeliveryStage.INITIAL,
-                    ),
-                )
-                delivery_kind = "sent"
-                final_visible_body = visible_text
-            elif (approval_pending or bool(snapshot_text)) and not await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(
-                    target=target,
-                    event_id=response_event_id,
-                    new_text=delivery_text,
-                    extra_content={STREAM_STATUS_KEY: stream_status},
-                    tool_trace=list(visible_tool_trace) or None,
-                ),
-            ):
-                response_event_id = None
-            elif approval_pending or bool(snapshot_text):
-                delivery_kind = "edited"
-                final_visible_body = visible_text
-            if response_event_id is None:
-                msg = "Could not publish the suspended approval response"
-                raise RuntimeError(msg)  # noqa: TRY301
+            delivery = await self._approval_responses.publish_initial_pause(
+                paused,
+                plan,
+                target=target,
+                existing_event_id=response_event_id,
+                source_event_id=request.response_envelope.source_event_id,
+                show_tool_calls=show_tool_calls,
+                pending_text=PROGRESS_PLACEHOLDER,
+            )
+            response_event_id = delivery.event_id
+            acknowledged_body = delivery.visible_body
+            delivery_kind = delivery.delivery_kind
+            final_visible_body = acknowledged_body if delivery_kind is not None else None
 
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
@@ -897,9 +882,10 @@ class ResponseRunner:
                     source_event_ids=source_event_ids,
                     calls=plan.calls,
                     state=continuation_state,
+                    presentation_generation=0,
                     response_text=snapshot_text,
-                    visible_response_text=visible_text,
-                    response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
+                    visible_response_text=acknowledged_body,
+                    response_tool_trace=serialize_tool_trace(durable_tool_trace, include_internal=True),
                     response_presentation_state=paused.response_presentation_state,
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
@@ -1409,6 +1395,9 @@ class ResponseRunner:
     ) -> CompletedApprovalRun | PausedAttempt:
         if continuation.presentation_version != 1:
             msg = "Approval continuation has no supported presentation version"
+            raise RuntimeError(msg)
+        if continuation.presentation_generation != continuation.generation:
+            msg = "Approval continuation presentation was not acknowledged for its generation"
             raise RuntimeError(msg)
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,

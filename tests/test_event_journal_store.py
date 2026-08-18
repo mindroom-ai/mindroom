@@ -470,6 +470,7 @@ async def _assert_legacy_delivery_state_migrated(store: EventJournalStore) -> No
     assert continuation.state == "ready"
     assert continuation.runtime_generation is None
     assert continuation.presentation_version is None
+    assert continuation.presentation_generation is None
     assert continuation.show_tool_calls is False
 
 
@@ -5943,7 +5944,30 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+        )
+
+        assert stale is None
+        assert advanced is not None
+        assert advanced.state == "waiting"
+        assert advanced.generation == 1
+        assert advanced.presentation_generation == 0
+        assert advanced.run_id == "run-2"
+        assert advanced.runtime_generation == "runtime-a"
+        assert advanced.calls == calls
+        assert advanced.response_text == ""
+        assert (
+            await alice.activate_approval_continuation(
+                "approval-1",
+                expected_generation=1,
+            )
+            is None
+        )
+
+        committed = await alice.commit_approval_continuation_presentation(
+            "approval-1",
+            expected_generation=1,
             response_text="Before.\n\n🔧 `write_file` [2] ⏳",
+            visible_response_text="Visible before write.",
             response_tool_trace=(
                 {
                     "type": "tool_call_started",
@@ -5954,16 +5978,12 @@ class TestApprovalContinuations:
             response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
-        assert stale is None
-        assert advanced is not None
-        assert advanced.state == "waiting"
-        assert advanced.generation == 1
-        assert advanced.run_id == "run-2"
-        assert advanced.runtime_generation == "runtime-a"
-        assert advanced.calls == calls
-        assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
-        assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
-        assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
+        assert committed is not None
+        assert committed.presentation_generation == 1
+        assert committed.response_text.endswith("🔧 `write_file` [2] ⏳")
+        assert committed.visible_response_text == "Visible before write."
+        assert committed.response_tool_trace[-1]["tool_call_id"] == "call-2"
+        assert committed.response_presentation_state == {"kind": "team", "consensus": "Before."}
 
     async def test_every_card_is_reserved_before_publication_activates(
         self,

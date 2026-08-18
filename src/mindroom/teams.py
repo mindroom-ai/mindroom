@@ -373,9 +373,13 @@ class _TeamStreamPresentation:
                 {
                     name: content
                     for name, content in stored_members.items()
-                    if isinstance(name, str) and isinstance(content, str)
+                    if isinstance(name, str) and name in per_member and isinstance(content, str)
                 },
             )
+        valid_tool_scopes = {"team", *(f"agent:{name}" for name in names)}
+        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
+            msg = "Team continuation durable tool scope is not a frozen presentation slot"
+            raise RuntimeError(msg)
         consensus = state.get("consensus")
         restored = cls(
             display_names=names,
@@ -398,6 +402,13 @@ class _TeamStreamPresentation:
             "per_member": dict(self.per_member),
             "consensus": self.consensus,
         }
+
+    def member_display_names_by_id(self, member_ids: Sequence[str]) -> dict[str, str]:
+        """Bind stable member identities to the frozen presentation slots by team order."""
+        if len(member_ids) != len(self.display_names):
+            msg = "Team continuation member identities do not match its frozen presentation slots"
+            raise RuntimeError(msg)
+        return dict(zip(member_ids, self.display_names, strict=True))
 
     def append_member(self, member_name: str, content: object | None) -> None:
         """Append a member content delta to its stable document slot."""
@@ -2098,6 +2109,7 @@ class _TeamContinuationEventState:
     """Apply only ordered continuation events to one durable team presentation."""
 
     presentation: _TeamStreamPresentation
+    member_display_names_by_id: Mapping[str, str] = field(default_factory=dict)
     member_content_seen: set[str] = field(default_factory=set)
     team_content_seen: bool = False
 
@@ -2110,22 +2122,35 @@ class _TeamContinuationEventState:
     def _apply_member_event(self, event: object) -> bool:
         """Apply one member-scoped event and report whether it was recognized."""
         if isinstance(event, AgentRunContentEvent) and event.agent_name:
+            member_name = self._member_display_name(event.agent_id, event.agent_name)
             if event.content:
-                self.member_content_seen.add(event.agent_name)
-            self.presentation.append_member(event.agent_name, event.content)
+                self.member_content_seen.add(member_name)
+            self.presentation.append_member(member_name, event.content)
             return True
         if isinstance(event, AgentRunCompletedEvent) and event.agent_name:
-            if event.agent_name not in self.member_content_seen:
-                self.presentation.append_member(event.agent_name, event.content)
-                self.member_content_seen.add(event.agent_name)
+            member_name = self._member_display_name(event.agent_id, event.agent_name)
+            if member_name not in self.member_content_seen:
+                self.presentation.append_member(member_name, event.content)
+                self.member_content_seen.add(member_name)
             return True
         if isinstance(event, AgentToolCallStartedEvent) and event.agent_name:
-            self.presentation.start_member_tool(event.agent_name, event.tool)
+            member_name = self._member_display_name(event.agent_id, event.agent_name)
+            self.presentation.start_member_tool(member_name, event.tool)
             return True
         if isinstance(event, AgentToolCallCompletedEvent) and event.agent_name:
-            self.presentation.complete_member_tool(event.agent_name, event.tool)
+            member_name = self._member_display_name(event.agent_id, event.agent_name)
+            self.presentation.complete_member_tool(member_name, event.tool)
             return True
         return False
+
+    def _member_display_name(self, agent_id: str | None, reported_name: str) -> str:
+        """Resolve a continuation event into its frozen structured member slot."""
+        if agent_id is not None and agent_id in self.member_display_names_by_id:
+            return self.member_display_names_by_id[agent_id]
+        if reported_name in self.presentation.per_member:
+            return reported_name
+        msg = f"Team continuation event has no frozen member slot for {reported_name!r}"
+        raise RuntimeError(msg)
 
     def _apply_team_event(self, event: object) -> None:
         """Apply one coordinator-scoped event when recognized."""
@@ -2146,10 +2171,15 @@ class _TeamContinuationEventState:
 async def _collect_team_continuation(
     events: AsyncIterator[object],
     presentation: _TeamStreamPresentation,
+    *,
+    member_display_names_by_id: Mapping[str, str] | None = None,
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
-    event_state = _TeamContinuationEventState(presentation)
+    event_state = _TeamContinuationEventState(
+        presentation,
+        member_display_names_by_id=member_display_names_by_id or {},
+    )
     async for event in events:
         if isinstance(event, TeamRunOutput):
             response = event
@@ -2177,6 +2207,30 @@ def _reconcile_decided_team_tools(
     unresolved = decided_ids & presentation.tool_tracker.pending_tool_call_ids()
     if unresolved:
         msg = f"Team approval continuation omitted completion events for decided tools: {sorted(unresolved)!r}"
+        raise RuntimeError(msg)
+
+
+def _validate_decided_team_tools(
+    presentation: _TeamStreamPresentation,
+    requirements: Sequence[RunRequirement],
+) -> None:
+    """Require the persisted team pause to own exactly one scoped slot per decision."""
+    expected_ids = [
+        requirement.tool_execution.tool_call_id
+        for requirement in requirements
+        if requirement.tool_execution is not None
+        and isinstance(requirement.tool_execution.tool_call_id, str)
+        and requirement.tool_execution.tool_call_id.strip()
+    ]
+    expected = set(expected_ids)
+    pending = presentation.tool_tracker.pending_tool_call_ids()
+    if len(expected_ids) != len(requirements) or len(expected) != len(expected_ids) or pending != expected:
+        missing = sorted(expected - pending)
+        unexpected = sorted(pending - expected)
+        msg = (
+            "Team approval continuation has missing durable pending tools "
+            f"(missing={missing!r}, unexpected={unexpected!r})"
+        )
         raise RuntimeError(msg)
 
 
@@ -2271,6 +2325,8 @@ async def continue_paused_team_run(
             tool_trace=validated_prior_tool_trace,
             prior_response_text=prior_response_text,
         )
+        _validate_decided_team_tools(presentation, requirements)
+        member_display_names_by_id = presentation.member_display_names_by_id(member_names)
         continuation_stream = team.acontinue_run(
             run_response=persisted,
             requirements=requirements,
@@ -2284,6 +2340,7 @@ async def continue_paused_team_run(
         continued = await _collect_team_continuation(
             cast("AsyncIterator[object]", continuation_stream),
             presentation,
+            member_display_names_by_id=member_display_names_by_id,
         )
         _reconcile_decided_team_tools(presentation, requirements)
         paused = paused_attempt_from_response(

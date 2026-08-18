@@ -23,10 +23,12 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
+    TextDeliveryOutcome,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.bot_helpers import make_test_agent_bot
@@ -349,7 +351,7 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
         "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
     ):
-        event_id = await gateway.send_text(
+        outcome = await gateway.send_text_outcome(
             SendTextRequest(
                 target=target,
                 response_text="formatted response",
@@ -357,7 +359,7 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
         )
 
     payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
-    assert event_id == "$response"
+    assert outcome == TextDeliveryOutcome(event_id="$response", visible_body="formatted response")
     assert payload["event"] == "Sent response"
     assert payload["room_id"] == "!test:server"
     assert payload["thread_id"] == "$thread"
@@ -416,7 +418,7 @@ async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_
         "mindroom.delivery_gateway.edit_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit-event")),
     ) as edit:
-        edited = await gateway.edit_text(
+        outcome = await gateway.edit_text_outcome(
             EditTextRequest(
                 target=target,
                 event_id="$original",
@@ -425,12 +427,50 @@ async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_
             ),
         )
 
-    assert edited is True
+    assert outcome == TextDeliveryOutcome(event_id="$original", visible_body="updated response")
     assert edit.await_args.kwargs["retry_sync_recovery"] is True
     assert "m.relates_to" not in edit.await_args.args[3]
     # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
     # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
     gateway.deps.resolver.deps.conversation_reader.latest_thread_event_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_text_outcomes_report_the_exact_wire_visible_body(tmp_path: Path) -> None:
+    """Large-message preparation may replace the formatted body; callers must receive that replacement."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    target = MessageTarget.resolve("!test:server", None, None)
+    with (
+        patch(
+            "mindroom.delivery_gateway.send_message_outcome",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$sent",
+                    content_sent={"body": "wire send preview", "msgtype": "m.text"},
+                ),
+            ),
+        ),
+        patch(
+            "mindroom.delivery_gateway.edit_message_outcome",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$edit",
+                    content_sent={
+                        "body": "* wire edit preview",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "wire edit preview", "msgtype": "m.text"},
+                    },
+                ),
+            ),
+        ),
+    ):
+        sent = await gateway.send_text_outcome(SendTextRequest(target=target, response_text="source send body"))
+        edited = await gateway.edit_text_outcome(
+            EditTextRequest(target=target, event_id="$sent", new_text="source edit body"),
+        )
+
+    assert sent == TextDeliveryOutcome(event_id="$sent", visible_body="wire send preview")
+    assert edited == TextDeliveryOutcome(event_id="$sent", visible_body="wire edit preview")
 
 
 @pytest.mark.asyncio

@@ -84,6 +84,7 @@ from mindroom.teams import (
     _PreparedMaterializedTeamExecution,
     _reconcile_decided_team_tools,
     _team_response_stream_raw,
+    _TeamContinuationEventState,
     _TeamStreamPresentation,
     build_materialized_team_instance,
     continue_paused_team_run,
@@ -93,6 +94,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
@@ -182,6 +184,57 @@ def test_hidden_team_stream_presentation_retains_only_internal_tool_identity() -
     assert "🔧" not in restored.render_body()
     assert restored.tool_trace[0].tool_call_id == "call-1"
     assert restored.tool_trace[0].type == "tool_call_completed"
+
+
+@pytest.mark.parametrize("scope_key", [None, "agent:UnknownAgent", "member:GeneralAgent"])
+def test_team_stream_presentation_rejects_invalid_durable_tool_scope(scope_key: str | None) -> None:
+    """Every durable team tool must own one frozen coordinator or member slot."""
+    trace = [
+        ToolTraceEntry(
+            type="tool_call_started",
+            tool_name="inspect",
+            tool_call_id="call-1",
+            scope_key=scope_key,
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match="tool scope"):
+        _TeamStreamPresentation.restore(
+            display_names=["GeneralAgent"],
+            show_tool_calls=True,
+            state={
+                "kind": "team_stream",
+                "version": 1,
+                "display_names": ["GeneralAgent"],
+                "per_member": {"GeneralAgent": "Before.\n\n🔧 `inspect` [1] ⏳\n\n"},
+                "consensus": "",
+            },
+            tool_trace=trace,
+            prior_response_text=(
+                "🤝 **Team Response** (GeneralAgent):\n\n"
+                "**GeneralAgent**: Before.\n\n🔧 `inspect` [1] ⏳\n\n\n"
+                "*No team consensus - showing individual responses only*"
+            ),
+        )
+
+
+def test_team_continuation_maps_stable_member_id_to_frozen_display_slot() -> None:
+    """A display-name change during approval cannot split one member's structured response."""
+    presentation = _TeamStreamPresentation.new(["Original Name"], show_tool_calls=True)
+    event_state = _TeamContinuationEventState(
+        presentation,
+        member_display_names_by_id=presentation.member_display_names_by_id(["general"]),
+    )
+
+    event_state.apply(
+        AgentRunContentEvent(
+            agent_id="general",
+            agent_name="Renamed Agent",
+            content="Continued answer.",
+        ),
+    )
+
+    assert presentation.per_member == {"Original Name": "Continued answer."}
 
 
 @pytest.mark.asyncio

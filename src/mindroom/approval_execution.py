@@ -93,6 +93,29 @@ def _reconcile_decided_agent_tools(
         raise RuntimeError(msg)
 
 
+def _validate_decided_agent_tools(
+    presentation: CollectedStreamPresentation,
+    requirements: list[RunRequirement],
+) -> None:
+    """Require the persisted pause to own exactly one pending slot per decision."""
+    expected_ids = [
+        requirement.tool_execution.tool_call_id
+        for requirement in requirements
+        if requirement.tool_execution is not None
+        and isinstance(requirement.tool_execution.tool_call_id, str)
+        and requirement.tool_execution.tool_call_id.strip()
+    ]
+    expected = set(expected_ids)
+    pending = presentation.tool_tracker.pending_tool_call_ids()
+    if len(expected_ids) != len(requirements) or len(expected) != len(expected_ids) or pending != expected:
+        missing = sorted(expected - pending)
+        unexpected = sorted(pending - expected)
+        msg = (
+            f"Approval continuation has missing durable pending tools (missing={missing!r}, unexpected={unexpected!r})"
+        )
+        raise RuntimeError(msg)
+
+
 async def _continue_persisted_agent(
     agent: Agent,
     continuation: ApprovalContinuation,
@@ -116,6 +139,7 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace, strict=True),
         track_hidden_tools=True,
     )
+    _validate_decided_agent_tools(presentation, requirements)
     response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
     _reconcile_decided_agent_tools(presentation, requirements)
     return response, presentation

@@ -626,7 +626,7 @@ class StreamingResponse:
             self.stream_started_at = now
         delivery_matches_live_state = (
             _normalize_stream_accumulated_text(self.accumulated_text) == committed_state.accumulated_text
-            and self.tool_trace == committed_state.tool_trace
+            and _tool_traces_match(self.tool_trace, committed_state.tool_trace)
             and self.presentation_state == committed_state.presentation_state
         )
         if delivery_matches_live_state:
@@ -649,7 +649,7 @@ class StreamingResponse:
         if (
             _normalize_stream_accumulated_text(self.accumulated_text)
             == self._inflight_nonterminal_capture_state.accumulated_text
-            and self.tool_trace == self._inflight_nonterminal_capture_state.tool_trace
+            and _tool_traces_match(self.tool_trace, self._inflight_nonterminal_capture_state.tool_trace)
             and self.presentation_state == self._inflight_nonterminal_capture_state.presentation_state
         ):
             return self._inflight_nonterminal_capture
@@ -1321,11 +1321,31 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.last_delta_at = time.time()
 
 
+def _tool_trace_identity(entry: ToolTraceEntry) -> tuple[object, ...]:
+    """Return public presentation plus private continuation identity for lifecycle fencing."""
+    return (
+        entry.type,
+        entry.tool_name,
+        entry.args_preview,
+        entry.result_preview,
+        entry.truncated,
+        entry.tool_call_id,
+        entry.scope_key,
+    )
+
+
+def _tool_traces_match(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> bool:
+    """Compare trace snapshots using identity fields intentionally excluded from public equality."""
+    return len(first) == len(second) and all(
+        _tool_trace_identity(left) == _tool_trace_identity(right) for left, right in zip(first, second, strict=True)
+    )
+
+
 def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
     """Return the number of leading tool-trace entries shared by both lists."""
     max_len = min(len(first), len(second))
     index = 0
-    while index < max_len and first[index] == second[index]:
+    while index < max_len and _tool_trace_identity(first[index]) == _tool_trace_identity(second[index]):
         index += 1
     return index
 
@@ -1523,6 +1543,12 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 if chunk.tool is not None:
+                    _marker, trace_entry = tool_tracker.start(
+                        chunk.tool,
+                        tool_index=len(streaming.tool_trace) + 1,
+                    )
+                    if trace_entry is not None:
+                        streaming.tool_trace.append(trace_entry)
                     cleared_terminal_failures = any(
                         warmup.last_event.phase == "failed"
                         for warmup in streaming._warmup_state.active_warmups.values()
@@ -1562,6 +1588,11 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
             completion = tool_tracker.complete(chunk.tool)
             if completion is not None:
                 tool_name, result, pending_tool, completed_trace = completion
+                trace_updated = tool_tracker.update_visible_trace_entry(
+                    streaming.tool_trace,
+                    pending_tool,
+                    completed_trace,
+                )
                 if streaming.show_tool_calls:
                     if pending_tool is None or pending_tool.visible_tool_index is None:
                         logger.warning(
@@ -1582,7 +1613,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     text_changed = streaming.accumulated_text != previous_text
                     if text_changed:
                         streaming._mark_nonadditive_text_mutation()
-                    if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
+                    if not trace_updated:
                         logger.warning(
                             "Missing tool trace slot in streaming response for completion",
                             tool_name=tool_name,
