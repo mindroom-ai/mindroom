@@ -129,10 +129,38 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 
 
 class ResponseShutdownTimeoutError(RuntimeError):
     """Raised when a response still owns runtime resources after bounded cleanup."""
+
+
+async def _cancel_pending_responses(
+    pending: set[asyncio.Task[None]],
+    *,
+    timeout_seconds: float,
+    shutdown_intent: RuntimeShutdownIntent,
+) -> set[asyncio.Task[None]]:
+    """Cancel pending responses without extending the caller's cleanup window."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout_seconds)
+    while pending:
+        for task in pending:
+            request_task_cancel(
+                task,
+                cancel_source=shutdown_intent.cancel_source,
+                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+            )
+        remaining_seconds = max(0.0, deadline - loop.time())
+        window_expired = remaining_seconds == 0.0
+        wait_seconds = remaining_seconds
+        if shutdown_intent.stop_reason == "shutdown":
+            wait_seconds = min(wait_seconds, _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS)
+        _done, pending = await asyncio.wait(pending, timeout=wait_seconds)
+        if window_expired or shutdown_intent.stop_reason != "shutdown":
+            break
+    return pending
 
 
 def _merge_response_extra_content(
@@ -564,7 +592,7 @@ class ResponseRunner:
             self._process_shutdown_recovery_checks.setdefault(task, ownership.recovery_proof_ready)
             request_task_cancel(task, process_shutdown=True)
 
-    async def drain_inbox_responses(  # noqa: C901
+    async def drain_inbox_responses(
         self,
         *,
         cancel_after_seconds: float | None = None,
@@ -574,8 +602,10 @@ class ResponseRunner:
 
         Returns False when bounded grace had to cancel running work. The grace
         period uses two ``cancel_after_seconds`` windows: one waiting for
-        completion and one letting cancelled tasks run cleanup. A task that
-        remains live after that cleanup window fails the shutdown boundary;
+        completion and one letting cancelled tasks run cleanup. Orderly process
+        shutdown repeats its cancellation signal inside the same second window
+        so finite cancellation-resistant cleanup cannot strand ownership. A task
+        that remains live after that cleanup window fails the shutdown boundary;
         callers must not release resources it can still use.
         """
         tasks = list(
@@ -616,13 +646,11 @@ class ResponseRunner:
                 self._process_shutdown_recovery_checks.pop(task, None)
             return False
         cancelled_tasks = process_shutdown_tasks.union(pending)
-        for task in pending:
-            request_task_cancel(
-                task,
-                cancel_source=shutdown_intent.cancel_source,
-                process_shutdown=shutdown_intent.stop_reason == "shutdown",
-            )
-        _done, pending = await asyncio.wait(pending, timeout=cancel_after_seconds)
+        pending = await _cancel_pending_responses(
+            pending,
+            timeout_seconds=cancel_after_seconds,
+            shutdown_intent=shutdown_intent,
+        )
         cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in cancelled_tasks)
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         if pending:

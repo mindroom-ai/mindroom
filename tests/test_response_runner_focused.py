@@ -48,6 +48,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -167,6 +168,95 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
 
     assert await runner.drain_inbox_responses(cancel_after_seconds=0) is True
     assert runner.incomplete_inbox_responses_recoverable is False
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() -> None:
+    """Finite cancellation-resistant cleanup must not survive the shutdown budget."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    cancellation_count = 0
+
+    async def layered_cleanup() -> None:
+        nonlocal cancellation_count
+        response_started.set()
+        while cancellation_count < 5 and not release_response.is_set():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_count += 1
+
+    response_task = runner.track_inbox_response(
+        layered_cleanup(),
+        name="test_layered_process_shutdown_cleanup",
+        recovery_proof_ready=lambda: True,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    try:
+        assert (
+            await runner.drain_inbox_responses(
+                cancel_after_seconds=0.1,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            )
+            is False
+        )
+    finally:
+        release_response.set()
+        if not response_task.done():
+            response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)
+
+    assert cancellation_count == 5
+    assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_keeps_indefinitely_resistant_response_owned() -> None:
+    """Repeated process cancellation must remain bounded and fail closed."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    cancellation_count = 0
+
+    async def indefinitely_resistant_response() -> None:
+        nonlocal cancellation_count
+        response_started.set()
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_count += 1
+                if release_response.is_set():
+                    raise
+
+    response_task = runner.track_inbox_response(
+        indefinitely_resistant_response(),
+        name="test_indefinitely_resistant_process_response",
+        recovery_proof_ready=lambda: True,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+
+    try:
+        with pytest.raises(response_runner.ResponseShutdownTimeoutError):
+            await asyncio.wait_for(
+                runner.drain_inbox_responses(
+                    cancel_after_seconds=0.05,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                ),
+                timeout=0.2,
+            )
+        assert cancellation_count > 2
+        assert not response_task.done()
+        assert runner.pending_inbox_response_count == 1
+    finally:
+        release_response.set()
+        if not response_task.done():
+            response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
