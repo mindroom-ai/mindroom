@@ -52,6 +52,7 @@ from mindroom.response_delivery import (
     SendDelivery,
     TurnHandoff,
 )
+from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -976,7 +977,15 @@ class DeliveryGateway:
         )
         return False
 
-    async def deliver_final(  # noqa: C901, PLR0911, PLR0912
+    async def deliver_final(
+        self,
+        request: FinalDeliveryRequest,
+    ) -> FinalDeliveryOutcome:
+        """Run final delivery under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            return await self._deliver_final(request)
+
+    async def _deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
         request: FinalDeliveryRequest,
     ) -> FinalDeliveryOutcome:
@@ -1403,6 +1412,14 @@ class DeliveryGateway:
         self,
         request: StreamingDeliveryRequest,
     ) -> StreamTransportOutcome:
+        """Run streaming transport under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
+            return await self._deliver_stream(request)
+
+    async def _deliver_stream(
+        self,
+        request: StreamingDeliveryRequest,
+    ) -> StreamTransportOutcome:
         """Send one streaming Matrix response."""
         client = self._client()
         config = self.deps.runtime.config
@@ -1628,7 +1645,15 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def finalize_streamed_response(
+        self,
+        request: FinalizeStreamedResponseRequest,
+    ) -> FinalDeliveryOutcome:
+        """Run streamed finalization under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            return await self._finalize_streamed_response(request)
+
+    async def _finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:

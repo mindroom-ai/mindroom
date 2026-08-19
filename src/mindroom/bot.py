@@ -925,6 +925,11 @@ class AgentBot:
         return self._response_runner.pending_inbox_response_count
 
     @property
+    def pending_response_phase_counts(self) -> dict[str, int]:
+        """Return non-sensitive fixed-phase counts for retained response owners."""
+        return self._response_runner.pending_response_phase_counts
+
+    @property
     def deferred_stop_required(self) -> bool:
         """Return whether response ownership deferred this bot's releases."""
         return self._deferred_stop_required

@@ -12,6 +12,8 @@ import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.memory import MemoryPromptParts
 from mindroom.pre_model_preparation import prepare_prompt_branches
+from mindroom.response_runner import ResponseRunner
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 
 
 @pytest.mark.asyncio
@@ -249,3 +251,56 @@ async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa
     await asyncio.sleep(0)
     leaked_tasks = {task for task in asyncio.all_tasks() - baseline_tasks if not task.done()}
     assert leaked_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained response owner identifies its real blocked preparation phase."""
+    agent_started = threading.Event()
+    agent_release = threading.Event()
+    runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
+    built_agent = MagicMock()
+    runner = ResponseRunner(deps=MagicMock())
+
+    async def prepared_memory() -> MemoryPromptParts:
+        return MemoryPromptParts()
+
+    def blocked_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        if not agent_release.wait(5.0):
+            msg = "timed out waiting to release diagnostic agent construction"
+            raise TimeoutError(msg)
+        return runtime_model, built_agent
+
+    async def blocked_response() -> None:
+        await prepare_prompt_branches(
+            prepare_memory=prepared_memory,
+            build_agent=blocked_agent,
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        )
+
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", MagicMock())
+    response_task = runner.track_inbox_response(
+        blocked_response(),
+        name="test_blocked_agent_build_shutdown_phase",
+        recovery_proof_ready=lambda: True,
+    )
+    try:
+        assert await asyncio.to_thread(agent_started.wait, 1.0)
+        runner.begin_process_shutdown()
+        await asyncio.sleep(0)
+
+        assert not response_task.done()
+        assert runner.pending_response_phase_counts == {"agent_preparation": 1}
+    finally:
+        agent_release.set()
+
+    assert await runner.drain_inbox_responses(
+        cancel_after_seconds=0.1,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+    await asyncio.gather(response_task, return_exceptions=True)

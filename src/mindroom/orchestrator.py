@@ -138,6 +138,19 @@ if TYPE_CHECKING:
     from .orchestration.config_updates import ConfigUpdatePlan
 logger = get_logger(__name__)
 
+
+def _aggregate_response_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
+    """Sum fixed response phase counts across bots for one shutdown warning."""
+    aggregate: dict[str, int] = {}
+    for bot in bots:
+        phase_counts = bot.pending_response_phase_counts
+        if not isinstance(phase_counts, dict):
+            continue
+        for phase, count in phase_counts.items():
+            aggregate[phase] = aggregate.get(phase, 0) + count
+    return dict(sorted(aggregate.items()))
+
+
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
@@ -2082,6 +2095,7 @@ class _MultiAgentOrchestrator:
         pending_response_owner_count = sum(
             count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
         )
+        pending_response_phase_counts = _aggregate_response_phase_counts(self.agent_bots.values())
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         journal_failures: list[BaseException] = []
@@ -2098,6 +2112,7 @@ class _MultiAgentOrchestrator:
             logger.warning(
                 "orchestrator_shared_journal_close_deferred",
                 live_response_owner_count=pending_response_owner_count,
+                pending_response_phase_counts=pending_response_phase_counts,
             )
         finalized_response_timeout_bot_ids = {
             id(bot)

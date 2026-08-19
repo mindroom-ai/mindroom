@@ -491,7 +491,10 @@ async def test_process_shutdown_bounds_async_recovery_proof() -> None:
             )
         assert proof_started.is_set()
         await asyncio.wait_for(proof_cancelled.wait(), timeout=0.02)
+        await asyncio.sleep(0)
         assert response_task.done()
+        assert runner.pending_inbox_response_count == 1
+        assert runner.pending_response_phase_counts == {"recovery_proof": 1}
     finally:
         release_proof.set()
         await asyncio.gather(response_task, return_exceptions=True)
@@ -1577,6 +1580,58 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_final_delivery_exposes_fixed_shutdown_phase(tmp_path: Path) -> None:
+    """The real non-streaming gateway boundary is visible while it retains ownership."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    finalization_started = asyncio.Event()
+    finalization_cancelled = asyncio.Event()
+    release_finalization = asyncio.Event()
+
+    async def retained_before_response(**_kwargs: object) -> object:
+        finalization_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            finalization_cancelled.set()
+            await release_finalization.wait()
+            raise
+
+    coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
+        side_effect=retained_before_response,
+    )
+    with patch.object(
+        coordinator,
+        "generate_non_streaming_ai_response",
+        new=AsyncMock(
+            return_value=response_runner._NonStreamingGeneration(
+                response_text="final text",
+                tool_trace=[],
+                run_metadata_content={},
+            ),
+        ),
+    ):
+        response_task = coordinator.track_inbox_response(
+            coordinator._process_and_respond(_plain_request(_target())),
+            name="test_non_streaming_final_delivery_phase",
+            recovery_proof_ready=lambda: True,
+        )
+        await finalization_started.wait()
+        coordinator.begin_process_shutdown()
+        await finalization_cancelled.wait()
+
+        try:
+            assert coordinator.pending_response_phase_counts == {"final_delivery": 1}
+        finally:
+            release_finalization.set()
+
+        assert await coordinator.drain_inbox_responses(
+            cancel_after_seconds=0.1,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_skips_non_streaming_replay_persistence(
     tmp_path: Path,
 ) -> None:
@@ -1839,6 +1894,112 @@ async def test_process_shutdown_unwraps_streaming_cancellation_without_persisten
 
     persist.assert_not_awaited()
     finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_exposes_retained_streaming_response_phase(
+    tmp_path: Path,
+) -> None:
+    """A live streaming child remains distinguishable from generic response work."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    generation_started = asyncio.Event()
+    generation_cancelled = asyncio.Event()
+    release_generation = asyncio.Event()
+
+    async def retained_stream(
+        *_args: object,
+        **_kwargs: object,
+    ) -> StreamTransportOutcome:
+        generation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            generation_cancelled.set()
+            await release_generation.wait()
+            raise
+
+    with patch.object(
+        coordinator,
+        "generate_streaming_ai_response",
+        new=AsyncMock(side_effect=retained_stream),
+    ):
+        response_task = coordinator.track_inbox_response(
+            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            name="test_retained_streaming_response_phase",
+            recovery_proof_ready=lambda: True,
+        )
+        await generation_started.wait()
+        coordinator.begin_process_shutdown()
+        await generation_cancelled.wait()
+
+        try:
+            assert coordinator.pending_response_phase_counts == {"streaming_response": 1}
+        finally:
+            release_generation.set()
+
+        assert await coordinator.drain_inbox_responses(
+            cancel_after_seconds=0.1,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_exposes_retained_final_delivery_phase(
+    tmp_path: Path,
+) -> None:
+    """Terminal publication remains distinguishable after streaming has finished."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    finalization_started = asyncio.Event()
+    finalization_cancelled = asyncio.Event()
+    release_finalization = asyncio.Event()
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$stream",
+        terminal_status="completed",
+        rendered_body="streamed body",
+        visible_body_state="visible_body",
+    )
+
+    async def retained_finalization(_request: object) -> FinalDeliveryOutcome:
+        finalization_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            finalization_cancelled.set()
+            await release_finalization.wait()
+            raise
+
+    with (
+        patch.object(
+            coordinator,
+            "generate_streaming_ai_response",
+            new=AsyncMock(return_value=transport),
+        ),
+        patch.object(
+            DeliveryGateway,
+            "finalize_streamed_response",
+            new=AsyncMock(side_effect=retained_finalization),
+        ),
+    ):
+        response_task = coordinator.track_inbox_response(
+            coordinator._process_and_respond_streaming(_plain_request(_target())),
+            name="test_retained_final_delivery_phase",
+            recovery_proof_ready=lambda: True,
+        )
+        await finalization_started.wait()
+        coordinator.begin_process_shutdown()
+        await finalization_cancelled.wait()
+
+        try:
+            assert coordinator.pending_response_phase_counts == {"final_delivery": 1}
+        finally:
+            release_finalization.set()
+
+        assert await coordinator.drain_inbox_responses(
+            cancel_after_seconds=0.1,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

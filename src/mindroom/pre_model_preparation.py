@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
+from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -88,7 +89,7 @@ def _discard_unreturned_agent_result(
         _close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
 
 
-async def prepare_prompt_branches(
+async def _prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
     build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
@@ -163,3 +164,24 @@ async def prepare_prompt_branches(
         raise agent_result
     runtime_model, agent = agent_result
     return memory_result, runtime_model, agent
+
+
+async def prepare_prompt_branches(
+    *,
+    prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
+    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+    agent_name: str,
+    shared_scope_storage: BaseDb | None,
+    pipeline_timing: DispatchPipelineTiming | None,
+    caller_owned_agent: Agent | None = None,
+) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
+    """Overlap memory preparation with traced, cancellation-safe construction."""
+    with response_shutdown_phase(ResponseShutdownPhase.AGENT_PREPARATION):
+        return await _prepare_prompt_branches(
+            prepare_memory=prepare_memory,
+            build_agent=build_agent,
+            agent_name=agent_name,
+            shared_scope_storage=shared_scope_storage,
+            pipeline_timing=pipeline_timing,
+            caller_owned_agent=caller_owned_agent,
+        )

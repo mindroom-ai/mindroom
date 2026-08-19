@@ -52,6 +52,12 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_shutdown_diagnostics import (
+    ResponseShutdownPhase,
+    ResponseShutdownPhaseTrace,
+    context_with_response_shutdown_trace,
+    response_shutdown_phase,
+)
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
@@ -516,6 +522,7 @@ class _InboxResponseOwnership:
 
     recovery_proof_ready: Callable[[], bool | Awaitable[bool]]
     on_failure: Callable[[], None] | None
+    shutdown_phase_trace: ResponseShutdownPhaseTrace
 
 
 @dataclass
@@ -562,10 +569,16 @@ class ResponseRunner:
         if self._process_shutdown_started:
             response.close()
             raise ResponseAdmissionRefusedError
-        task = asyncio.create_task(response, name=name)
+        shutdown_phase_trace = ResponseShutdownPhaseTrace()
+        task = asyncio.create_task(
+            response,
+            name=name,
+            context=context_with_response_shutdown_trace(shutdown_phase_trace),
+        )
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
             on_failure=on_failure,
+            shutdown_phase_trace=shutdown_phase_trace,
         )
         if on_terminal is not None:
             task.add_done_callback(lambda _finished: on_terminal())
@@ -585,6 +598,28 @@ class ResponseRunner:
             if not proof.done() and response not in process_owned_responses
         }
         return len(process_owned_responses) + len(generic_response_owners) + len(orphan_proof_owners)
+
+    @property
+    def pending_response_phase_counts(self) -> dict[str, int]:
+        """Aggregate fixed phases for response and proof owners still retained."""
+        counts: dict[str, int] = {}
+        process_owned_responses = set(self._process_shutdown_recovery_checks)
+        for task, ownership in self._inbox_response_tasks.items():
+            if task.done():
+                continue
+            phase = ownership.shutdown_phase_trace.phase
+            counts[phase] = counts.get(phase, 0) + 1
+        terminal_process_owners = {task for task in process_owned_responses if task.done()}
+        proof_owners = {
+            proof
+            for response, proof in self._recovery_proof_tasks.items()
+            if not proof.done() and response not in process_owned_responses
+        }
+        recovery_owner_count = len(terminal_process_owners) + len(proof_owners)
+        if recovery_owner_count:
+            phase = ResponseShutdownPhase.RECOVERY_PROOF.value
+            counts[phase] = counts.get(phase, 0) + recovery_owner_count
+        return dict(sorted(counts.items()))
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
@@ -3061,18 +3096,19 @@ class ResponseRunner:
 
         try:
             try:
-                transport_outcome = await self.generate_streaming_ai_response(
-                    request,
-                    identity=response_identity,
-                    run_id=run_id,
-                    runtime=runtime,
-                    active_event_ids=active_event_ids,
-                    turn_recorder=turn_recorder,
-                    tool_trace=tool_trace,
-                    run_metadata_content=run_metadata_content,
-                    attempt_run_id_collector=attempt_run_ids,
-                    pipeline_timing=request.pipeline_timing,
-                )
+                with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
+                    transport_outcome = await self.generate_streaming_ai_response(
+                        request,
+                        identity=response_identity,
+                        run_id=run_id,
+                        runtime=runtime,
+                        active_event_ids=active_event_ids,
+                        turn_recorder=turn_recorder,
+                        tool_trace=tool_trace,
+                        run_metadata_content=run_metadata_content,
+                        attempt_run_id_collector=attempt_run_ids,
+                        pipeline_timing=request.pipeline_timing,
+                    )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
             _raise_if_process_shutdown()
@@ -3187,7 +3223,8 @@ class ResponseRunner:
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
         )
-        delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply(
                 "final",

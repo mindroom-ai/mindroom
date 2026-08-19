@@ -24,6 +24,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
 )
+from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import (
@@ -37,6 +38,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.response_runner import (
     ResponseRunner,
 )
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.ai_user_id_helpers import (
@@ -177,6 +179,97 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
             await task
 
     deliver_final.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("boundary", "expected_phase"),
+    [
+        ("stream", "streaming_response"),
+        ("final", "final_delivery"),
+    ],
+)
+async def test_team_delivery_exposes_fixed_shutdown_phase(
+    tmp_path: Path,
+    boundary: str,
+    expected_phase: str,
+) -> None:
+    """Real team streaming and final gateway boundaries retain fixed labels."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+    )
+    _install_inert_post_response_effects(coordinator)
+    boundary_started = asyncio.Event()
+    boundary_cancelled = asyncio.Event()
+    release_boundary = asyncio.Event()
+
+    async def retained_boundary(_request: object) -> StreamTransportOutcome | FinalDeliveryOutcome:
+        boundary_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            boundary_cancelled.set()
+            await release_boundary.wait()
+            raise
+
+    gateway = coordinator.deps.delivery_gateway
+    if boundary == "stream":
+        _set_gateway_method(
+            gateway,
+            "deliver_stream",
+            DeliveryGateway.deliver_stream.__get__(gateway, DeliveryGateway),
+        )
+        _set_gateway_method(gateway, "_deliver_stream", AsyncMock(side_effect=retained_boundary))
+    else:
+        _set_gateway_method(
+            gateway,
+            "deliver_stream",
+            AsyncMock(return_value=_stream_outcome("$team-stream", "Team answer")),
+        )
+        _set_gateway_method(gateway, "_finalize_streamed_response", AsyncMock(side_effect=retained_boundary))
+
+    async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Team answer"
+
+    async def team_response_owner() -> None:
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream", new=fake_team_response_stream),
+    ):
+        response_task = coordinator.track_inbox_response(
+            team_response_owner(),
+            name=f"test_team_{boundary}_shutdown_phase",
+            recovery_proof_ready=lambda: True,
+        )
+        await boundary_started.wait()
+        coordinator.begin_process_shutdown()
+        await boundary_cancelled.wait()
+
+        try:
+            assert coordinator.pending_response_phase_counts == {expected_phase: 1}
+        finally:
+            release_boundary.set()
+
+        assert await coordinator.drain_inbox_responses(
+            cancel_after_seconds=0.1,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+        await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

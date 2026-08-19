@@ -3249,13 +3249,17 @@ async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_
     bot.running = True
     bot._quiesce_matrix_ingestion = AsyncMock()
     bot.pending_response_owner_count = 1
+    bot.pending_response_phase_counts = {"recovery_proof": 1}
     bot.stop = AsyncMock(side_effect=response_failure)
     journal = AsyncMock()
     journal.close = AsyncMock()
 
-    with patch(
-        "mindroom.orchestrator.wait_for_background_tasks",
-        new=AsyncMock(),
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
     ):
         orchestrator = _MultiAgentOrchestrator(
             runtime_paths=orchestrator_runtime_paths(tmp_path),
@@ -3269,6 +3273,11 @@ async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_
     assert raised.value is response_failure
     journal.close.assert_not_awaited()
     assert orchestrator._open_journal is journal
+    log_warning.assert_any_call(
+        "orchestrator_shared_journal_close_deferred",
+        live_response_owner_count=1,
+        pending_response_phase_counts={"recovery_proof": 1},
+    )
 
 
 @pytest.mark.asyncio
