@@ -31,6 +31,7 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
+from structlog.testing import capture_logs
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
@@ -705,6 +706,55 @@ class TestUserIdPassthrough:
         assert prepared_history.replay_plan.mode == "configured"
         assert "runtime_paths" not in mock_create_agent.call_args.kwargs
         assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_logs_only_safe_metadata(self, tmp_path: Path) -> None:
+        """Routine preparation logs must not include prepared message contents."""
+        sensitive_marker = "sensitive prompt marker"
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
+        mock_agent = MagicMock()
+        prepared_execution = _PreparedExecutionContext(
+            messages=(
+                Message(role="system", content=sensitive_marker),
+                Message(role="user", content="current request"),
+            ),
+            unseen_event_ids=["event-one", "event-two"],
+            prepared_history=PreparedHistoryState(),
+        )
+
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ),
+            capture_logs() as logs,
+        ):
+            await _prepare_agent_and_prompt(
+                make_turn_context("general"),
+                prompt="current request",
+                runtime_paths=runtime_paths,
+                config=config,
+            )
+
+        preparation_logs = [log for log in logs if log.get("event") == "Preparing agent and prompt"]
+        assert preparation_logs == [
+            {
+                "agent": "general",
+                "event": "Preparing agent and prompt",
+                "log_level": "info",
+                "message_count": 2,
+                "unseen_event_count": 2,
+            },
+        ]
+        assert sensitive_marker not in repr(logs)
 
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(

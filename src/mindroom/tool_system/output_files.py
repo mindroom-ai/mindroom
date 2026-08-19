@@ -743,7 +743,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     if function.entrypoint is None or getattr(function.entrypoint, _WRAPPED_ATTR, False):
         return function
     if _has_output_path_argument(function):
-        logger.warning(
+        logger.debug(
             "tool_output_path_argument_collision",
             function_name=function.name,
             argument_name=OUTPUT_PATH_ARGUMENT,
