@@ -266,7 +266,7 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     )
 
 
-async def _resolve_room_encryption_outcome(
+async def resolve_room_encryption_outcome(
     client: nio.AsyncClient,
     room_id: str,
     *,
@@ -313,7 +313,7 @@ async def resolve_room_encryption_for_delivery(
     operation: str,
 ) -> bool | None:
     """Return authoritative room encryption state for safe outbound preparation."""
-    outcome = await _resolve_room_encryption_outcome(client, room_id, operation=operation)
+    outcome = await resolve_room_encryption_outcome(client, room_id, operation=operation)
     return outcome if isinstance(outcome, bool) else None
 
 
@@ -374,7 +374,7 @@ async def send_message_outcome(
     room_encryption_override: bool | None = None
     if isinstance(rooms, Mapping):
         room = rooms.get(room_id)
-        encryption_outcome = await _resolve_room_encryption_outcome(
+        encryption_outcome = await resolve_room_encryption_outcome(
             client,
             room_id,
             operation=operation,
@@ -855,6 +855,7 @@ __all__ = [
     "edit_message_outcome",
     "edit_message_result",
     "resolve_room_encryption_for_delivery",
+    "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",
     "send_message_outcome",

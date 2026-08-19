@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -52,6 +53,7 @@ from mindroom.matrix.client_delivery import (
     build_edit_event_content,
     edit_message_outcome,
     edit_message_result,
+    resolve_room_encryption_outcome,
     send_message_outcome,
     send_message_result,
 )
@@ -864,15 +866,15 @@ class DeliveryGateway:
         # homeserver had already accepted. An attempted row is already frozen,
         # so preparation is skipped and `enqueue` leaves that stored payload
         # untouched for the claimed send below.
-        try:
-            content = await self._prepared_for_the_wire(
-                room_id,
-                content,
-                turn_id=request.delivery_turn_id,
-                stage=request.delivery_stage,
-            )
-        except MatrixEventTooLargeError as error:
-            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+        prepared = await self._prepared_for_the_wire(
+            room_id,
+            content,
+            turn_id=request.delivery_turn_id,
+            stage=request.delivery_stage,
+        )
+        if isinstance(prepared, MatrixDeliveryFailure):
+            return prepared
+        content = prepared
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1008,15 +1010,15 @@ class DeliveryGateway:
         # upload again under a transaction ID already accepted. An attempted
         # row is already frozen, so preparation is skipped and
         # `enqueue` leaves that stored envelope untouched for the claimed send.
-        try:
-            envelope = await self._prepared_for_the_wire(
-                room_id,
-                envelope,
-                turn_id=request.delivery_turn_id,
-                stage=DeliveryStage.FINAL,
-            )
-        except MatrixEventTooLargeError as error:
-            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+        prepared = await self._prepared_for_the_wire(
+            room_id,
+            envelope,
+            turn_id=request.delivery_turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+        if isinstance(prepared, MatrixDeliveryFailure):
+            return prepared
+        envelope = prepared
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1655,7 +1657,7 @@ class DeliveryGateway:
         *,
         turn_id: str,
         stage: DeliveryStage,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | MatrixDeliveryFailure:
         """Prepare a payload for the wire, unless a frozen one already exists.
 
         Preparation can upload a sidecar, so it must not run for a turn whose
@@ -1667,13 +1669,32 @@ class DeliveryGateway:
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return content
+        client = self._client()
+        room_encrypted: bool | None = None
+        if isinstance(getattr(client, "rooms", None), Mapping):
+            encryption_outcome = await resolve_room_encryption_outcome(
+                client,
+                room_id,
+                operation="prepare_durable_delivery",
+            )
+            if isinstance(encryption_outcome, MatrixDeliveryFailure):
+                return encryption_outcome
+            room_encrypted = encryption_outcome
         wire_content = matrix_delivery_payload(
             self.deps.outbox.principal_id,
             turn_id,
             stage,
             content,
         )
-        return await prepare_large_message(self._client(), room_id, wire_content)
+        try:
+            return await prepare_large_message(
+                client,
+                room_id,
+                wire_content,
+                room_encrypted=room_encrypted,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
 
     def _final_text_transform(self, identity: ResponseIdentity) -> FinalTextTransform:
         """Return the hook that shapes the answer before its terminal payload is built.

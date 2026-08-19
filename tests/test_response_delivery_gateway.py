@@ -34,7 +34,11 @@ from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_event_size
+from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
+    _calculate_delivery_event_size,
+    _calculate_event_size,
+)
 from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -135,7 +139,10 @@ def _gateway(
     )
     client = AsyncMock()
     client.user_id = _AGENT_USER_ID
-
+    room = MagicMock()
+    room.encrypted = False
+    client.rooms = {_ROOM_ID: room}
+    client.olm = None
     client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
     return DeliveryGateway(
         DeliveryGatewayDeps(
@@ -758,6 +765,66 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         frozen = outbox.rows["$cause", "final"].payload
         assert _calculate_event_size(frozen) <= 64_000
         assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Remote encryption state must shape the payload before the outbox freezes it."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+        client.room_get_state_event.return_value = MagicMock(spec=nio.RoomGetStateEventResponse)
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/encrypted-sidecar"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "preview"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request("x" * 50_000))
+
+        assert outcome.event_id == "$sent"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["msgtype"] == "m.file"
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+        client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
+
+    async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An unknown encryption state must not leave an ambiguously sized outbox row."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        encryption_error = MagicMock(spec=nio.RoomGetStateEventError)
+        encryption_error.status_code = "M_FORBIDDEN"
+        client.room_get_state_event.return_value = encryption_error
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outbox.rows == {}
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
 
     async def test_an_unrepresentable_final_is_refused_before_enqueue_or_send(
         self,
