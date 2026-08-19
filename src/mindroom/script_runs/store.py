@@ -140,12 +140,12 @@ class ScriptRunStore:
                     INSERT INTO script_runs (
                         run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash, preapprove_launch_grants,
-                        worker_key, worker_id, worker_backend_generation, supervisor_handle,
+                        worker_key, worker_id, supervisor_handle,
                         snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
                         cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -441,7 +441,6 @@ class ScriptRunStore:
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        worker_backend_generation: str | None = None,
         supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
@@ -459,13 +458,6 @@ class ScriptRunStore:
             if state is not run.state and state not in _RUN_TRANSITIONS[run.state]:
                 msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
                 raise ScriptRunStoreError(msg)
-            if (
-                worker_backend_generation is not None
-                and run.worker_backend_generation is not None
-                and worker_backend_generation != run.worker_backend_generation
-            ):
-                msg = f"Script run '{run_id}' already belongs to a different worker backend generation."
-                raise ScriptRunStoreError(msg)
             now = _utc_now()
             started_at = run.started_at
             finished_at = run.finished_at
@@ -477,11 +469,6 @@ class ScriptRunStore:
                 run,
                 state=state,
                 worker_id=worker_id if worker_id is not None else run.worker_id,
-                worker_backend_generation=(
-                    worker_backend_generation
-                    if worker_backend_generation is not None
-                    else run.worker_backend_generation
-                ),
                 supervisor_handle=supervisor_handle if supervisor_handle is not None else run.supervisor_handle,
                 started_at=started_at,
                 finished_at=finished_at,
@@ -496,13 +483,12 @@ class ScriptRunStore:
             connection.execute(
                 """
                 UPDATE script_runs
-                SET worker_id = ?, worker_backend_generation = ?, supervisor_handle = ?, state = ?, started_at = ?,
+                SET worker_id = ?, supervisor_handle = ?, state = ?, started_at = ?,
                     finished_at = ?, exit_code = ?, error = ?
                 WHERE run_id = ?
                 """,
                 (
                     updated.worker_id,
-                    updated.worker_backend_generation,
                     updated.supervisor_handle,
                     updated.state.value,
                     updated.started_at,
@@ -538,8 +524,6 @@ class ScriptRunStore:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(script_runs)")}
             if "snapshot_locator" not in columns:
                 connection.execute("ALTER TABLE script_runs ADD COLUMN snapshot_locator TEXT")
-            if "worker_backend_generation" not in columns:
-                connection.execute("ALTER TABLE script_runs ADD COLUMN worker_backend_generation TEXT")
             if "preapprove_launch_grants" not in columns:
                 connection.execute(
                     "ALTER TABLE script_runs ADD COLUMN preapprove_launch_grants INTEGER NOT NULL DEFAULT 0",
@@ -584,7 +568,6 @@ _SCHEMA_STATEMENTS = (
                     preapprove_launch_grants INTEGER NOT NULL,
                     worker_key TEXT,
                     worker_id TEXT,
-                    worker_backend_generation TEXT,
                     supervisor_handle TEXT,
                     snapshot_locator TEXT,
                     name TEXT,
@@ -655,7 +638,6 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         int(run.preapprove_launch_grants),
         run.worker_key,
         run.worker_id,
-        run.worker_backend_generation,
         run.supervisor_handle,
         run.snapshot_locator,
         run.name,
@@ -693,7 +675,6 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         execution_identity=cast("dict[str, object]", execution_identity),
         worker_key=_nullable_string(row["worker_key"]),
         worker_id=_nullable_string(row["worker_id"]),
-        worker_backend_generation=_nullable_string(row["worker_backend_generation"]),
         supervisor_handle=_nullable_string(row["supervisor_handle"]),
         snapshot_locator=_nullable_string(row["snapshot_locator"]),
         name=_nullable_string(row["name"]),

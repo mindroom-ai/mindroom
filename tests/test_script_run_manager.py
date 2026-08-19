@@ -20,7 +20,6 @@ from mindroom.script_runs.manager import (
     ScriptRunLimits,
     ScriptRunManager,
     ScriptRunManagerError,
-    ScriptWorkerBackendBinding,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.store import ScriptRunStore
@@ -270,7 +269,6 @@ def _manager(tmp_path: Path, *, mode: str | None = "all") -> tuple[ScriptRunMana
         broker=_Broker(store),
         worker_client=client,
         worker_backend=backend,
-        worker_backend_generation="backend-generation-a",
         gateway_url="http://primary.test/api/script-gateway",
         grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
         cancellation_grace_seconds=0,
@@ -292,7 +290,6 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
     )
 
     assert backend.saw_starting is True
-    assert run.worker_backend_generation == "backend-generation-a"
     assert run.state is ScriptRunState.RUNNING
     assert run.worker_key is not None
     assert run.worker_id == "worker-1"
@@ -488,7 +485,6 @@ async def test_ambiguous_worker_running_persistence_remains_retryable(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        worker_backend_generation: str | None = None,
         supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
@@ -500,7 +496,6 @@ async def test_ambiguous_worker_running_persistence_remains_retryable(
             run_id,
             state=state,
             worker_id=worker_id,
-            worker_backend_generation=worker_backend_generation,
             supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
@@ -739,7 +734,6 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        worker_backend_generation: str | None = None,
         supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
@@ -748,7 +742,6 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
             run_id,
             state=state,
             worker_id=worker_id,
-            worker_backend_generation=worker_backend_generation,
             supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
@@ -790,7 +783,6 @@ async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        worker_backend_generation: str | None = None,
         supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
@@ -799,7 +791,6 @@ async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
             run_id,
             state=state,
             worker_id=worker_id,
-            worker_backend_generation=worker_backend_generation,
             supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
@@ -1288,40 +1279,6 @@ async def test_reconcile_records_exit_and_removes_raw_token(tmp_path: Path) -> N
     assert manager.broker.cancelled_runs == [run.run_id]
     assert manager.broker.cancelled_states == [ScriptRunState.EXITED]
     assert not client.launch_paths[run.run_id][1].exists()
-
-
-@pytest.mark.asyncio
-async def test_reconcile_uses_backend_generation_that_owns_assigned_worker(tmp_path: Path) -> None:
-    """A live run stays routed to its leased backend after configuration replacement."""
-    manager, original, client = _manager(tmp_path)
-    context = _context(tmp_path)
-    run = await manager.run(context, source="print('ok')\n")
-    replacement = _WorkerBackend(store=manager.store, runtime_paths=context.runtime_paths)
-    manager.worker_backend = replacement
-    manager.worker_backend_resolver = lambda candidate: ScriptWorkerBackendBinding(
-        original if candidate is not None else replacement,
-        "backend-generation-a" if candidate is not None else "backend-generation-b",
-    )
-    client.next_status = WorkerScriptStatus(state="exited", exit_code=0)
-
-    reconciled = await manager.reconcile(context, run_id=run.run_id)
-
-    assert reconciled.state is ScriptRunState.EXITED
-    assert original.list_worker_thread_ids
-    assert replacement.list_worker_thread_ids == []
-
-
-@pytest.mark.asyncio
-async def test_reconcile_keeps_run_retryable_when_exact_backend_generation_is_unavailable(tmp_path: Path) -> None:
-    """Restart cannot infer ownership from another generation's shared worker metadata."""
-    manager, _backend, _client = _manager(tmp_path)
-    run = await manager.run(_context(tmp_path), source="print('ok')\n")
-    manager.worker_backend_resolver = lambda _candidate: None
-
-    with pytest.raises(ScriptRunManagerError, match="generation is unavailable"):
-        await manager.reconcile_durable(run_id=run.run_id)
-
-    assert manager.store.get_run(run.run_id).state is ScriptRunState.RUNNING
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,6 @@ from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptTool
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
-    ScriptWorkerBackendBinding,
     script_execution_uses_worker,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
@@ -36,7 +35,10 @@ from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.runtime import primary_worker_backend_is_dedicated
+from mindroom.workers.runtime import (
+    configured_primary_worker_manager_identity,
+    primary_worker_backend_is_dedicated,
+)
 
 from .runtime import cancel_task, create_logged_task
 
@@ -57,6 +59,7 @@ logger = get_logger(__name__)
 _REMOVED_AGENT_REASON = "Owning agent was removed by configuration reload."
 _ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload."
 _SCRIPT_TOOL_REMOVED_REASON = "Background script tool was removed by configuration reload."
+_WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -309,7 +312,7 @@ class _LiveScriptRuntimeResolver:
 
 @dataclass(slots=True)
 class ScriptRuntimeLifecycle:
-    """Keep one broker/manager pair stable while runtime generations change."""
+    """Keep one broker/manager pair stable across runtime configuration updates."""
 
     runtime_paths: RuntimePaths
     store: ScriptRunStore
@@ -331,8 +334,8 @@ class ScriptRuntimeLifecycle:
     _worker_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _startup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _worker_leases: list[_WorkerManagerLease] = field(default_factory=list, init=False, repr=False)
     _current_worker_lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
+    _worker_replacement_pending: bool = field(default=False, init=False, repr=False)
     _worker_config_epoch: int = field(default=0, init=False, repr=False)
     _pending_worker_lease_task: asyncio.Task[_WorkerManagerLease | None] | None = field(
         default=None,
@@ -408,25 +411,17 @@ class ScriptRuntimeLifecycle:
             return await self._refresh_worker_backend_locked()
 
     async def _refresh_worker_backend_locked(self) -> WorkerBackend | None:
+        current = self._current_worker_lease
+        if current is not None:
+            self.manager.worker_backend = current.manager
+            return current.manager
         lease = await self._acquire_current_worker_lease()
         if lease is None:
-            self._current_worker_lease = None
-            self.manager.worker_backend = None
-            self.manager.worker_backend_generation = None
+            self._clear_current_worker_backend()
             return None
-        existing = next((candidate for candidate in self._worker_leases if candidate.manager is lease.manager), None)
-        if existing is not None:
-            if lease is not existing:
-                await asyncio.to_thread(lease.release)
-            self._current_worker_lease = existing
-            self.manager.worker_backend = existing.manager
-            self.manager.worker_backend_generation = existing.generation_id
-            return existing.manager
-        self._worker_leases.append(lease)
         self._current_worker_lease = lease
         backend = lease.manager
         self.manager.worker_backend = backend
-        self.manager.worker_backend_generation = lease.generation_id
         return backend
 
     async def _acquire_current_worker_lease(self) -> _WorkerManagerLease | None:
@@ -477,6 +472,13 @@ class ScriptRuntimeLifecycle:
 
     async def install_committed_worker_generation(self) -> None:
         """Install the committed worker configuration for subsequent launches."""
+        if self._worker_replacement_pending:
+            runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+            if any(not run.local_unsafe for run in runs):
+                logger.warning("script_worker_backend_replacement_pending")
+                return
+            await self._release_current_worker_lease()
+            self._worker_replacement_pending = False
         self._worker_config_epoch += 1
         try:
             await asyncio.wait_for(self._refresh_worker_backend(), timeout=self.pass_timeout_seconds)
@@ -493,49 +495,32 @@ class ScriptRuntimeLifecycle:
     def _clear_current_worker_backend(self) -> None:
         self._current_worker_lease = None
         self.manager.worker_backend = None
-        self.manager.worker_backend_generation = None
 
     def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
-        binding = self._worker_backend_binding_for(run)
-        return None if binding is None else binding.backend
-
-    def _worker_backend_binding_for(self, run: ScriptRunRecord | None) -> ScriptWorkerBackendBinding | None:
-        """Return the exact leased backend generation assigned to one durable run."""
+        """Resolve every active worker-backed run through the current lease."""
+        del run
         current = self._current_worker_lease
-        if run is None:
-            if current is None:
-                return None
-            return ScriptWorkerBackendBinding(current.manager, current.generation_id)
-        generation_id = run.worker_backend_generation
-        if generation_id is None:
-            return None
-        for lease in self._worker_leases:
-            if lease.generation_id == generation_id:
-                return ScriptWorkerBackendBinding(lease.manager, lease.generation_id)
-        return None
+        return None if current is None else current.manager
 
-    async def _release_unused_worker_leases(self, runs: list[ScriptRunRecord]) -> None:
-        current = self._current_worker_lease
-        retained: list[_WorkerManagerLease] = []
-        unresolved_assignment = any(not run.local_unsafe and run.worker_backend_generation is None for run in runs)
-        live_generations = {run.worker_backend_generation for run in runs if run.worker_backend_generation is not None}
-        released: list[_WorkerManagerLease] = []
-        for lease in self._worker_leases:
-            if lease is current or unresolved_assignment:
-                retained.append(lease)
-                continue
-            if lease.generation_id in live_generations:
-                retained.append(lease)
-                continue
-            released.append(lease)
-        self._worker_leases = retained
-        await asyncio.gather(*(asyncio.to_thread(lease.release) for lease in released))
+    async def _release_current_worker_lease(self) -> None:
+        lease = self._current_worker_lease
+        self._clear_current_worker_backend()
+        if lease is not None:
+            await asyncio.to_thread(lease.release)
+
+    async def _release_replaced_worker_lease_if_drained(self, runs: list[ScriptRunRecord]) -> None:
+        if self._worker_replacement_pending and not any(not run.local_unsafe for run in runs):
+            await self._release_current_worker_lease()
 
     async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
         current_config = self.config_provider()
         if current_config is None:
             return
+        worker_configuration_changed = (
+            configured_primary_worker_manager_identity(self.runtime_paths, current_config)
+            != configured_primary_worker_manager_identity(self.runtime_paths, plan.new_config)
+        )
         removed_agents = plan.removed_entities & set(current_config.agents)
         isolation_changes = {
             agent_name
@@ -548,14 +533,16 @@ class ScriptRuntimeLifecycle:
             if _agent_has_script_tool(current_config, agent_name)
             and not _agent_has_script_tool(plan.new_config, agent_name)
         }
-        if not removed_agents and not isolation_changes and not script_tool_removals:
+        if not removed_agents and not isolation_changes and not script_tool_removals and not worker_configuration_changed:
             return
+        self._worker_replacement_pending = self._worker_replacement_pending or worker_configuration_changed
         try:
             await asyncio.wait_for(
                 self._apply_update_pass(
                     removed_agents=removed_agents,
                     isolation_changes=isolation_changes,
                     script_tool_removals=script_tool_removals,
+                    worker_configuration_changed=worker_configuration_changed,
                 ),
                 timeout=self.pass_timeout_seconds,
             )
@@ -568,18 +555,16 @@ class ScriptRuntimeLifecycle:
         removed_agents: set[str],
         isolation_changes: set[str],
         script_tool_removals: set[str],
+        worker_configuration_changed: bool,
     ) -> None:
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         affected_agents = removed_agents | isolation_changes | script_tool_removals
-        affected = [run for run in runs if run.agent_name in affected_agents]
+        affected = [
+            run
+            for run in runs
+            if run.agent_name in affected_agents or (worker_configuration_changed and not run.local_unsafe)
+        ]
         semaphore = asyncio.Semaphore(self.pass_concurrency)
-
-        def reason_for(run: ScriptRunRecord) -> str:
-            if run.agent_name in removed_agents:
-                return _REMOVED_AGENT_REASON
-            if run.agent_name in isolation_changes:
-                return _ISOLATION_CHANGE_REASON
-            return _SCRIPT_TOOL_REMOVED_REASON
 
         async def persist_revocation(run: ScriptRunRecord) -> bool:
             async with semaphore:
@@ -587,7 +572,12 @@ class ScriptRuntimeLifecycle:
                     await asyncio.to_thread(
                         self.manager.request_revocation,
                         run_id=run.run_id,
-                        reason=reason_for(run),
+                        reason=_reload_reason_for(
+                            run,
+                            removed_agents=removed_agents,
+                            isolation_changes=isolation_changes,
+                            worker_configuration_changed=worker_configuration_changed,
+                        ),
                     )
                 except (ScriptRunManagerError, ScriptRunStoreError):
                     logger.warning(
@@ -605,7 +595,15 @@ class ScriptRuntimeLifecycle:
         async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
             async with semaphore:
                 try:
-                    await self.manager.revoke(run.run_id, reason=reason_for(run))
+                    await self.manager.revoke(
+                        run.run_id,
+                        reason=_reload_reason_for(
+                            run,
+                            removed_agents=removed_agents,
+                            isolation_changes=isolation_changes,
+                            worker_configuration_changed=worker_configuration_changed,
+                        ),
+                    )
                 except (
                     ScriptRunManagerError,
                     ScriptWorkerError,
@@ -645,7 +643,7 @@ class ScriptRuntimeLifecycle:
 
         await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        await self._release_unused_worker_leases(unfinished)
+        await self._release_replaced_worker_lease_if_drained(unfinished)
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
         """Run one bounded touch-first reconciliation pass."""
@@ -684,7 +682,7 @@ class ScriptRuntimeLifecycle:
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        await self._release_unused_worker_leases(unfinished)
+        await self._release_replaced_worker_lease_if_drained(unfinished)
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
         try:
@@ -798,7 +796,10 @@ class ScriptRuntimeLifecycle:
                 bind_script_run_manager(None)
             self._started = False
             self._activated_once = False
-            leases = list(self._worker_leases)
+            leases: list[_WorkerManagerLease] = []
+            current_lease = self._current_worker_lease
+            if current_lease is not None:
+                leases.append(current_lease)
             pending_lease_task = self._pending_worker_lease_task
             pending_delivery = self._pending_worker_lease_delivery
             if pending_delivery is not None:
@@ -815,10 +816,9 @@ class ScriptRuntimeLifecycle:
             self._pending_worker_lease_task = None
             self._pending_worker_lease_delivery = None
             self._pending_worker_lease_epoch = -1
-            self._worker_leases.clear()
             self._current_worker_lease = None
             self.manager.worker_backend = None
-            self.manager.worker_backend_generation = None
+            self._worker_replacement_pending = False
             await _release_worker_leases_before_deadline(
                 leases,
                 deadline=shutdown_deadline,
@@ -886,7 +886,6 @@ def build_script_runtime(
         retention_seconds=retention_seconds,
     )
     resolver.worker_backend_provider = lifecycle._worker_backend_for
-    manager.worker_backend_resolver = lifecycle._worker_backend_binding_for
     return lifecycle
 
 
@@ -898,6 +897,22 @@ def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool
 def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent's effective tool surface includes script controls."""
     return any(entry.name == "script" for entry in config.resolve_entity(agent_name).tool_configs)
+
+
+def _reload_reason_for(
+    run: ScriptRunRecord,
+    *,
+    removed_agents: set[str],
+    isolation_changes: set[str],
+    worker_configuration_changed: bool,
+) -> str:
+    if worker_configuration_changed and not run.local_unsafe:
+        return _WORKER_CONFIGURATION_INTERRUPTION_REASON
+    if run.agent_name in removed_agents:
+        return _REMOVED_AGENT_REASON
+    if run.agent_name in isolation_changes:
+        return _ISOLATION_CHANGE_REASON
+    return _SCRIPT_TOOL_REMOVED_REASON
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:

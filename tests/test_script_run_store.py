@@ -95,29 +95,6 @@ def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths:
         store.record_snapshot_locator(run.run_id, "../outside/run-1")
 
 
-def test_worker_assignment_persists_one_immutable_backend_generation(runtime_paths: RuntimePaths) -> None:
-    """A worker assignment cannot be adopted by a different backend generation."""
-    store = ScriptRunStore(runtime_paths)
-    run = store.create_run(_new_run())
-
-    assigned = store.transition_run(
-        run.run_id,
-        state=ScriptRunState.STARTING,
-        worker_id="worker-1",
-        worker_backend_generation="backend-generation-a",
-    )
-
-    assert store.get_run(run.run_id).worker_backend_generation == "backend-generation-a"
-    assert assigned.worker_backend_generation == "backend-generation-a"
-    with pytest.raises(ScriptRunStoreError, match="backend generation"):
-        store.transition_run(
-            run.run_id,
-            state=ScriptRunState.STARTING,
-            worker_id="worker-1",
-            worker_backend_generation="backend-generation-b",
-        )
-
-
 def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_paths: RuntimePaths) -> None:
     """Concurrent new claims share one durable quota while an identical retry remains free."""
     store = ScriptRunStore(runtime_paths)

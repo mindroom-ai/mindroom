@@ -54,7 +54,6 @@ __all__ = [
     "ScriptRunManager",
     "ScriptRunManagerError",
     "ScriptRunStatus",
-    "ScriptWorkerBackendBinding",
     "script_execution_uses_worker",
 ]
 
@@ -73,6 +72,13 @@ _TERMINAL_STATES = frozenset(
     },
 )
 _ISOLATION_INTERRUPTION_REASON = "Agent isolation changed during configuration reload."
+_WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
+_INTERRUPTION_REASONS = frozenset(
+    {
+        _ISOLATION_INTERRUPTION_REASON,
+        _WORKER_CONFIGURATION_INTERRUPTION_REASON,
+    },
+)
 
 
 class ScriptRunManagerError(ValueError):
@@ -142,14 +148,6 @@ class ScriptRunStatus:  # privata: ignore -- Task 6 lifecycle consumes this stat
     output: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class ScriptWorkerBackendBinding:
-    """One worker backend paired with its stable configuration generation."""
-
-    backend: WorkerBackend
-    generation_id: str
-
-
 @dataclass(slots=True)
 class ScriptRunManager:
     """Own durable script intent while existing supervisors own process signals."""
@@ -159,8 +157,6 @@ class ScriptRunManager:
     worker_client: ScriptWorkerClient
     worker_backend: WorkerBackend | None
     gateway_url: str
-    worker_backend_generation: str | None = None
-    worker_backend_resolver: Callable[[ScriptRunRecord | None], ScriptWorkerBackendBinding | None] | None = None
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
@@ -510,7 +506,7 @@ class ScriptRunManager:
         if run.cancel_requested_at is not None:
             terminal_state = (
                 ScriptRunState.INTERRUPTED
-                if run.cancellation_reason == _ISOLATION_INTERRUPTION_REASON
+                if run.cancellation_reason in _INTERRUPTION_REASONS
                 else ScriptRunState.CANCELLED
             )
             return await self._terminate_durable_run(
@@ -539,18 +535,16 @@ class ScriptRunManager:
         token: str,
         worker_spec: WorkerSpec,
     ) -> ScriptRunRecord:
-        binding = self._worker_backend_binding(None)
-        if binding is None:
+        backend = self.worker_backend
+        if backend is None:
             msg = "Background script worker backend is unavailable."
             raise ScriptRunManagerError(msg)
-        backend = binding.backend
         worker = await asyncio.to_thread(backend.ensure_worker, worker_spec)
         await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
             state=ScriptRunState.STARTING,
             worker_id=worker.worker_id,
-            worker_backend_generation=binding.generation_id,
         )
         assigned = await asyncio.to_thread(self.store.get_run, run.run_id)
         if assigned.cancel_requested_at is not None:
@@ -590,7 +584,6 @@ class ScriptRunManager:
                 run.run_id,
                 state=ScriptRunState.RUNNING,
                 worker_id=worker.worker_id,
-                worker_backend_generation=binding.generation_id,
                 supervisor_handle=receipt.supervisor_handle,
             )
         except BaseException as exc:
@@ -847,7 +840,7 @@ class ScriptRunManager:
     async def _worker_handle(self, run: ScriptRunRecord) -> WorkerHandle | None:
         backend = self._worker_backend_for(run)
         if backend is None and not run.local_unsafe and run.worker_id is not None:
-            msg = "Background script worker backend generation is unavailable; retry reconciliation."
+            msg = "Background script worker backend is unavailable; retry reconciliation."
             raise ScriptRunManagerError(msg)
         if backend is None or run.worker_id is None or run.worker_key is None:
             return None
@@ -858,18 +851,8 @@ class ScriptRunManager:
         )
 
     def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
-        binding = self._worker_backend_binding(run)
-        return None if binding is None else binding.backend
-
-    def _worker_backend_binding(self, run: ScriptRunRecord | None) -> ScriptWorkerBackendBinding | None:
-        if self.worker_backend_resolver is not None:
-            return self.worker_backend_resolver(run)
-        if self.worker_backend is None or self.worker_backend_generation is None:
-            return None
-        return ScriptWorkerBackendBinding(
-            backend=self.worker_backend,
-            generation_id=self.worker_backend_generation,
-        )
+        del run
+        return self.worker_backend
 
     async def _record_snapshot_locator(self, run: ScriptRunRecord, workspace: Path) -> ScriptRunRecord:
         locator = _snapshot_locator(self.store.storage_root, workspace, run.run_id)

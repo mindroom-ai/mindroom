@@ -27,9 +27,15 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
     script_gateway_url,
 )
+from mindroom.script_runs.broker import ScriptToolBroker
+from mindroom.script_runs.manager import ScriptRunManager
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore
-from mindroom.script_runs.worker_client import ScriptWorkerError
+from mindroom.script_runs.worker_client import (
+    ScriptWorkerError,
+    WorkerScriptCancel,
+    WorkerScriptStatus,
+)
 from mindroom.tool_approval import BackgroundScriptToolOrigin
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
@@ -40,6 +46,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -112,7 +119,6 @@ def _run(
         token_hash="capability",  # noqa: S106
         worker_key=target.worker_key,
         worker_id="worker-1",
-        worker_backend_generation="backend-generation-a",
         supervisor_handle="shell:0123456789abcdef0123456789abcdef",
         state=state,
     )
@@ -138,9 +144,54 @@ class _Lease:
     manager: _Backend
     generation_id: str = "backend-generation-a"
     released: bool = False
+    on_release: Callable[[], None] | None = None
 
     def release(self) -> None:
         self.released = True
+        if self.on_release is not None:
+            self.on_release()
+
+
+@dataclass
+class _TerminatingWorkerClient:
+    """Report one process as running until cancellation confirms its exit."""
+
+    exited: bool = False
+
+    async def status(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        supervisor_handle: str,
+    ) -> WorkerScriptStatus:
+        del run_id, supervisor_handle
+        if self.exited:
+            return WorkerScriptStatus(state="exited", exit_code=143)
+        return WorkerScriptStatus(state="running")
+
+    async def cancel(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        supervisor_handle: str,
+        force: bool = False,
+    ) -> WorkerScriptCancel:
+        del run_id, supervisor_handle, force
+        self.exited = True
+        return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
+
+
+@dataclass
+class _ApprovalSettlementResolver:
+    """Keep broker ownership settlement observable through its durable receipts."""
+
+    settled_runs: list[str] = field(default_factory=list)
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del reason
+        self.settled_runs.append(run_id)
 
 
 def _worker(run: ScriptRunRecord) -> WorkerHandle:
@@ -556,6 +607,85 @@ async def test_ordinary_agent_restart_keeps_running_script_retryable(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_generation_replacement_interrupts_active_worker_script_before_releasing_old_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing worker identity revokes, closes, and confirms a process before lease replacement."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    store.claim_call(
+        run_id=run.run_id,
+        call_id="call-1",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="arguments-digest",
+    )
+    termination_client = _TerminatingWorkerClient()
+    settlement_resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=settlement_resolver)
+    release_observations: list[ScriptRunRecord] = []
+    first = _Lease(
+        _Backend([_worker(run)]),
+        generation_id="backend-generation-a",
+        on_release=lambda: release_observations.append(store.get_run(run.run_id)),
+    )
+    second = _Lease(_Backend([]), generation_id="backend-generation-b")
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=termination_client,  # type: ignore[arg-type]
+        worker_backend=first.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
+        defaults={"tools": []},
+    )
+    identities: list[str | None] = []
+
+    def worker_identity(_paths: RuntimePaths, config: Config | None) -> str | None:
+        identity = "backend-generation-b" if config is new_config else "backend-generation-a"
+        identities.append(identity)
+        return identity
+
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        worker_identity,
+        raising=False,
+    )
+    leases = iter((first, second))
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: next(leases),
+    )
+
+    await runtime.reconcile_once()
+    await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.cancellation_reason == "Worker configuration changed during configuration reload."
+    assert durable.state is ScriptRunState.INTERRUPTED
+    assert durable.exit_code == 143
+    assert termination_client.exited is True
+    assert [call.state.value for call in store.pending_calls(run.run_id)] == []
+    assert settlement_resolver.settled_runs == [run.run_id]
+    assert release_observations == [durable]
+    assert first.released is True
+    assert runtime._current_worker_lease is None
+    assert identities == ["backend-generation-a", "backend-generation-b"]
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: Path) -> None:
     """Reconciliation refreshes worker leases before querying process truth."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -586,100 +716,8 @@ async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_backend_generation_lease_is_held_until_its_live_run_finishes(tmp_path: Path) -> None:
-    """A replacement backend cannot shut down the generation hosting a live run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
-    first = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-a")
-    second = _Lease(_Backend([]), generation_id="backend-generation-b")
-    leases = iter((first, second, second))
-    runtime = ScriptRuntimeLifecycle(
-        runtime_paths=runtime_paths,
-        store=store,
-        broker=MagicMock(),
-        manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
-        resolver=SimpleNamespace(resolve=MagicMock()),
-        config_provider=_config,
-        worker_lease_provider=lambda: next(leases),
-    )
-
-    await runtime.reconcile_once()
-    await runtime.reconcile_once()
-
-    assert first.released is False
-    assert runtime._worker_backend_for(run) is first.manager
-
-    store.transition_run(run.run_id, state=ScriptRunState.EXITED, exit_code=0)
-    await runtime.reconcile_once()
-
-    assert first.released is True
-
-
-@pytest.mark.asyncio
-async def test_backend_generation_routing_never_cross_adopts_shared_worker_metadata(tmp_path: Path) -> None:
-    """A newer manager seeing the same worker cannot claim a run launched by the old generation."""
-    runtime_paths = _runtime_paths(tmp_path)
-    store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
-    shared_handle = _worker(run)
-    first = _Lease(_Backend([shared_handle]), generation_id="backend-generation-a")
-    second = _Lease(_Backend([shared_handle]), generation_id="backend-generation-b")
-    leases = iter((first, second))
-    runtime = ScriptRuntimeLifecycle(
-        runtime_paths=runtime_paths,
-        store=store,
-        broker=MagicMock(),
-        manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
-        resolver=SimpleNamespace(resolve=MagicMock()),
-        config_provider=_config,
-        worker_lease_provider=lambda: next(leases),
-    )
-
-    await runtime.reconcile_once()
-    await runtime.reconcile_once()
-
-    assert runtime._worker_backend_for(run) is first.manager
-    assert runtime._worker_backend_for(None) is second.manager
-    assert first.manager.actions == [f"touch:{run.worker_key}", f"touch:{run.worker_key}"]
-    assert second.manager.actions == []
-
-
-@pytest.mark.asyncio
-async def test_committed_config_installs_new_launch_generation_without_orphaning_old_run(tmp_path: Path) -> None:
-    """Post-commit refresh routes new launches to new config while old runs retain exact authority."""
-    runtime_paths = _runtime_paths(tmp_path)
-    store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
-    first = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-a")
-    second = _Lease(_Backend([_worker(run)]), generation_id="backend-generation-b")
-    leases = iter((first, second))
-    manager = SimpleNamespace(
-        worker_backend=None,
-        worker_backend_generation=None,
-        reconcile_durable=AsyncMock(return_value=run),
-    )
-    runtime = ScriptRuntimeLifecycle(
-        runtime_paths=runtime_paths,
-        store=store,
-        broker=MagicMock(),
-        manager=manager,
-        resolver=SimpleNamespace(resolve=MagicMock()),
-        config_provider=_config,
-        worker_lease_provider=lambda: next(leases),
-    )
-
-    await runtime.reconcile_once()
-    await runtime.install_committed_worker_generation()
-
-    assert runtime._worker_backend_for(run) is first.manager
-    assert runtime._worker_backend_for(None) is second.manager
-    assert manager.worker_backend_generation == "backend-generation-b"
-
-
-@pytest.mark.asyncio
-async def test_committed_generation_wins_over_an_inflight_precommit_refresh(tmp_path: Path) -> None:
-    """A slow old-config refresh cannot overwrite the generation installed after commit."""
+async def test_committed_worker_lease_wins_over_an_inflight_precommit_refresh(tmp_path: Path) -> None:
+    """A slow pre-commit acquisition cannot overwrite the committed current lease."""
     runtime_paths = _runtime_paths(tmp_path)
     first = _Lease(_Backend([]), generation_id="backend-generation-a")
     second = _Lease(_Backend([]), generation_id="backend-generation-b")
@@ -698,7 +736,6 @@ async def test_committed_generation_wins_over_an_inflight_precommit_refresh(tmp_
 
     manager = SimpleNamespace(
         worker_backend=None,
-        worker_backend_generation=None,
         reconcile_durable=AsyncMock(),
     )
     runtime = ScriptRuntimeLifecycle(
@@ -720,7 +757,7 @@ async def test_committed_generation_wins_over_an_inflight_precommit_refresh(tmp_
     await asyncio.gather(old_refresh, committed_refresh)
 
     assert runtime._worker_backend_for(None) is second.manager
-    assert manager.worker_backend_generation == "backend-generation-b"
+    assert manager.worker_backend is second.manager
 
 
 @pytest.mark.asyncio
@@ -981,7 +1018,6 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     manager = SimpleNamespace(
         gateway_url="",
         worker_backend=None,
-        worker_backend_generation=None,
         reconcile_durable=AsyncMock(),
         cleanup_snapshot=AsyncMock(return_value=True),
     )
@@ -1079,7 +1115,6 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
     manager = SimpleNamespace(
         gateway_url="",
         worker_backend=None,
-        worker_backend_generation=None,
         reconcile_durable=AsyncMock(),
         cleanup_snapshot=AsyncMock(return_value=True),
     )
@@ -1152,13 +1187,13 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=SimpleNamespace(_cleanup_tasks=set()),
-        manager=SimpleNamespace(worker_backend=None, worker_backend_generation=None),
+        manager=SimpleNamespace(worker_backend=None),
         resolver=SimpleNamespace(),
         config_provider=_config,
         worker_lease_provider=lambda: None,
     )
     runtime._activated_once = True
-    runtime._worker_leases.append(lease)
+    runtime._current_worker_lease = lease
 
     reconciliation_started = asyncio.Event()
 
@@ -1188,21 +1223,18 @@ async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_pa
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=SimpleNamespace(_cleanup_tasks=set()),
-        manager=SimpleNamespace(worker_backend=lease.manager, worker_backend_generation=lease.generation_id),
+        manager=SimpleNamespace(worker_backend=lease.manager),
         resolver=SimpleNamespace(),
         config_provider=_config,
         worker_lease_provider=lambda: None,
     )
-    runtime._worker_leases.append(lease)
     runtime._current_worker_lease = lease
 
     await runtime.shutdown()
 
     assert lease.released is True
-    assert runtime._worker_leases == []
     assert runtime._current_worker_lease is None
     assert runtime.manager.worker_backend is None
-    assert runtime.manager.worker_backend_generation is None
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1403,6 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
     manager = SimpleNamespace(
         gateway_url="",
         worker_backend=None,
-        worker_backend_generation=None,
         reconcile_durable=AsyncMock(),
         cleanup_snapshot=AsyncMock(return_value=True),
     )
@@ -1449,7 +1480,6 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(tmp_path: P
     manager = SimpleNamespace(
         gateway_url="",
         worker_backend=None,
-        worker_backend_generation=None,
         reconcile_durable=reconcile_durable,
         cleanup_snapshot=AsyncMock(return_value=True),
     )

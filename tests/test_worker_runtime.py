@@ -308,6 +308,31 @@ def test_configured_primary_worker_manager_lease_uses_one_committed_config_snaps
     )
 
 
+def test_configured_primary_worker_manager_identity_uses_the_lease_signature_without_constructing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reload can compare one committed worker identity without publishing a manager."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config()
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
+    signature = MagicMock(return_value=("signature",))
+    monkeypatch.setattr(workers_runtime_module, "_primary_worker_backend_config_signature", signature)
+    build_manager = MagicMock()
+    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+
+    identity = workers_runtime_module.configured_primary_worker_manager_identity(runtime_paths, runtime_config)
+
+    assert identity == "645b967075b7e04dcf2484456e24e777ae602b20c0bf8b0414bd06d9aaffaed6"
+    assert signature.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    build_manager.assert_not_called()
+
+
 def test_configured_primary_worker_manager_lease_skips_kubernetes_without_runtime_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

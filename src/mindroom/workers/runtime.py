@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PrimaryWorkerManagerLease",
     "clear_worker_validation_snapshot_cache",
+    "configured_primary_worker_manager_identity",
     "get_primary_worker_manager",
     "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
@@ -282,6 +283,46 @@ def lease_configured_primary_worker_manager(
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
+
+
+def configured_primary_worker_manager_identity(
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+) -> str | None:
+    """Return the opaque identity of the currently configured primary worker manager."""
+    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
+
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    if not primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+    ):
+        return None
+    backend_name = primary_worker_backend_name(runtime_paths)
+    if runtime_config is None and backend_name == "kubernetes":
+        return None
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    kubernetes_config_snapshot: dict[str, object] | None = None
+    worker_grantable_credentials: frozenset[str] | None = None
+    if runtime_config is not None:
+        worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
+        if backend_name == "kubernetes":
+            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+                runtime_paths,
+                runtime_config=runtime_config,
+            )
+            kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
+    signature = _primary_worker_backend_config_signature(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=runtime_paths.storage_root,
+        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=kubernetes_config_snapshot,
+        worker_grantable_credentials=worker_grantable_credentials,
+    )
+    return _stable_json_digest(signature)
 
 
 def _require_kubernetes_tool_validation_snapshot(
