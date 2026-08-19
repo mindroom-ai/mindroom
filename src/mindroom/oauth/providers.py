@@ -53,16 +53,65 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
 _NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = (
-    "localhost",
+    "alt",
+    "arpa",
+    "example",
+    "example.com",
+    "example.net",
+    "example.org",
+    "internal",
+    "invalid",
     "local",
     "localdomain",
-    "internal",
-    "home.arpa",
-    "example",
-    "invalid",
-    "test",
+    "localhost",
     "onion",
-    "alt",
+    "test",
+)
+_NON_GLOBAL_OAUTH_IPV4_NETWORKS = (
+    ipaddress.IPv4Network("0.0.0.0/8"),
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("100.64.0.0/10"),
+    ipaddress.IPv4Network("127.0.0.0/8"),
+    ipaddress.IPv4Network("169.254.0.0/16"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.0.0.0/24"),
+    ipaddress.IPv4Network("192.0.2.0/24"),
+    ipaddress.IPv4Network("192.88.99.0/24"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+    ipaddress.IPv4Network("198.18.0.0/15"),
+    ipaddress.IPv4Network("198.51.100.0/24"),
+    ipaddress.IPv4Network("203.0.113.0/24"),
+    ipaddress.IPv4Network("240.0.0.0/4"),
+)
+_GLOBAL_OAUTH_IPV4_EXCEPTIONS = frozenset(
+    {
+        ipaddress.IPv4Address("192.0.0.9"),
+        ipaddress.IPv4Address("192.0.0.10"),
+    },
+)
+_NON_GLOBAL_OAUTH_IPV6_NETWORKS = (
+    ipaddress.IPv6Network("::/128"),
+    ipaddress.IPv6Network("::1/128"),
+    ipaddress.IPv6Network("::ffff:0:0/96"),
+    ipaddress.IPv6Network("64:ff9b:1::/48"),
+    ipaddress.IPv6Network("100::/64"),
+    ipaddress.IPv6Network("100:0:0:1::/64"),
+    ipaddress.IPv6Network("2001::/23"),
+    ipaddress.IPv6Network("2001:db8::/32"),
+    ipaddress.IPv6Network("2002::/16"),
+    ipaddress.IPv6Network("3fff::/20"),
+    ipaddress.IPv6Network("5f00::/16"),
+    ipaddress.IPv6Network("fc00::/7"),
+    ipaddress.IPv6Network("fe80::/10"),
+)
+_GLOBAL_OAUTH_IPV6_EXCEPTIONS = (
+    ipaddress.IPv6Network("2001:1::1/128"),
+    ipaddress.IPv6Network("2001:1::2/128"),
+    ipaddress.IPv6Network("2001:1::3/128"),
+    ipaddress.IPv6Network("2001:3::/32"),
+    ipaddress.IPv6Network("2001:4:112::/48"),
+    ipaddress.IPv6Network("2001:20::/28"),
+    ipaddress.IPv6Network("2001:30::/28"),
 )
 
 
@@ -130,6 +179,17 @@ def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     )
 
 
+def _is_non_global_oauth_ip_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether IANA designates an address as not globally reachable."""
+    if isinstance(address, ipaddress.IPv4Address):
+        return address not in _GLOBAL_OAUTH_IPV4_EXCEPTIONS and any(
+            address in network for network in _NON_GLOBAL_OAUTH_IPV4_NETWORKS
+        )
+    return not any(address in network for network in _GLOBAL_OAUTH_IPV6_EXCEPTIONS) and any(
+        address in network for network in _NON_GLOBAL_OAUTH_IPV6_NETWORKS
+    )
+
+
 def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return whether an address, including an IPv4-mapped address, is global unicast."""
     embedded_addresses: tuple[ipaddress.IPv4Address, ...] = ()
@@ -143,7 +203,7 @@ def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Ad
     if any(not _is_global_unicast_address(embedded) for embedded in embedded_addresses):
         return False
     return (
-        address.is_global
+        not _is_non_global_oauth_ip_address(address)
         and not address.is_link_local
         and not address.is_loopback
         and not address.is_multicast
@@ -221,6 +281,8 @@ def _validated_https_url(value: str) -> tuple[ParseResult, str] | None:
 
 def is_valid_hosted_oauth_callback_for_request(callback_uri: str, request_hostname: str | None) -> bool:
     """Return whether a hosted callback is public and shares the initiating request host."""
+    if "?" in callback_uri or "#" in callback_uri:
+        return False
     validated_callback = _validated_https_url(callback_uri)
     if request_hostname is None or request_hostname.endswith("."):
         return False
