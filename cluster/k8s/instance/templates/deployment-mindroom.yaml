@@ -120,6 +120,8 @@ spec:
           value: "/app/config.yaml"
         - name: MINDROOM_PUBLIC_URL
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MINDROOM_SCRIPT_GATEWAY_URL
+          value: "http://mindroom-{{ .Values.customer }}.{{ $instanceNamespace }}.svc.cluster.local:8765/api/script-gateway"
         - name: LOG_LEVEL
           value: "INFO"
         - name: MINDROOM_WORKER_BACKEND
