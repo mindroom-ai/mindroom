@@ -64,6 +64,7 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_shutdown_diagnostics import DeferredStopPhase
 from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
@@ -151,9 +152,23 @@ def _aggregate_response_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]
     return dict(sorted(aggregate.items()))
 
 
+def _aggregate_deferred_stop_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
+    """Count fixed deferred-release phases without exposing bot identities."""
+    aggregate: dict[str, int] = {}
+    for bot in bots:
+        phase = getattr(bot, "deferred_stop_phase", None)
+        try:
+            fixed_phase = DeferredStopPhase(phase)
+        except (TypeError, ValueError):
+            continue
+        aggregate[fixed_phase.value] = aggregate.get(fixed_phase.value, 0) + 1
+    return dict(sorted(aggregate.items()))
+
+
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
+_DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
 
 
 async def _gather_shutdown_phase(
@@ -165,6 +180,47 @@ async def _gather_shutdown_phase(
         return list(await asyncio.shield(phase)), None
     except asyncio.CancelledError as cancellation:
         return list(await phase), cancellation
+
+
+async def _gather_deferred_shutdown_phase(
+    bots: Iterable[AgentBot],
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish deferred releases while periodically exposing aggregate phases."""
+    bots = tuple(bots)
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    timer: asyncio.TimerHandle | None = None
+
+    def log_pending_phases() -> None:
+        nonlocal timer
+        if phase.done():
+            return
+        pending_response_owner_count = sum(
+            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        logger.warning(
+            "orchestrator_deferred_response_owners_pending",
+            live_response_owner_count=pending_response_owner_count,
+            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
+            pending_deferred_stop_phase_counts=_aggregate_deferred_stop_phase_counts(bots),
+        )
+        timer = loop.call_later(
+            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+            log_pending_phases,
+        )
+
+    timer = loop.call_later(
+        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+        log_pending_phases,
+    )
+    try:
+        try:
+            return list(await asyncio.shield(phase)), None
+        except asyncio.CancelledError as cancellation:
+            return list(await phase), cancellation
+    finally:
+        timer.cancel()
 
 
 async def _run_shutdown_step[Result](
@@ -2091,7 +2147,8 @@ class _MultiAgentOrchestrator:
         if deferred_bots:
             deferred_stop_results, cancellation = await _run_shutdown_step(
                 "deferred_response_owners",
-                _gather_shutdown_phase(
+                _gather_deferred_shutdown_phase(
+                    deferred_bots,
                     *(
                         bot.finish_deferred_stop(
                             shutdown_intent=ORDERLY_SHUTDOWN,

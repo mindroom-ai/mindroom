@@ -135,6 +135,7 @@ from .response_runner import (
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
 )
+from .response_shutdown_diagnostics import DeferredStopPhase
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -330,6 +331,7 @@ class AgentBot:
     _sync_shutting_down: bool
     _sync_shutdown_budget: ShutdownBudget | None
     _deferred_stop_required: bool
+    _deferred_stop_phase: DeferredStopPhase | None
     _matrix_ingestion_quiesce_requested: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
@@ -408,6 +410,7 @@ class AgentBot:
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
+        self._deferred_stop_phase = None
         self._matrix_ingestion_quiesce_requested = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
@@ -935,6 +938,12 @@ class AgentBot:
         return self._deferred_stop_required
 
     @property
+    def deferred_stop_phase(self) -> str | None:
+        """Return the fixed deferred-release phase, if cleanup is active."""
+        phase = self._deferred_stop_phase
+        return None if phase is None else phase.value
+
+    @property
     def admission_gate(self) -> ResponseAdmissionGate:
         """Return the gate deciding whether responses may start right now."""
         return self._runtime_view.response_admission_gate
@@ -1231,6 +1240,7 @@ class AgentBot:
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
+        self._deferred_stop_phase = None
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1802,18 +1812,22 @@ class AgentBot:
             raise RuntimeError(msg)
         if not self._deferred_stop_required:
             return
-        recoverable = await self._response_runner.finish_process_shutdown_recovery(
-            timeout_seconds=timeout_seconds,
-        )
-        if not recoverable:
-            msg = "deferred response cleanup lacks durable recovery proof"
-            raise ResponseShutdownTimeoutError(msg)
-        failures: list[BaseException] = []
-        await self._release_stopped_resources(failures)
-        if failures:
-            raise failures[0]
-        self._deferred_stop_required = False
-        self.logger.info("Stopped agent bot after deferred response cleanup")
+        try:
+            self._deferred_stop_phase = DeferredStopPhase.RECOVERY_PROOF
+            recoverable = await self._response_runner.finish_process_shutdown_recovery(
+                timeout_seconds=timeout_seconds,
+            )
+            if not recoverable:
+                msg = "deferred response cleanup lacks durable recovery proof"
+                raise ResponseShutdownTimeoutError(msg)
+            failures: list[BaseException] = []
+            await self._release_stopped_resources(failures)
+            if failures:
+                raise failures[0]
+            self._deferred_stop_required = False
+            self.logger.info("Stopped agent bot after deferred response cleanup")
+        finally:
+            self._deferred_stop_phase = None
 
     async def _release_stopped_resources(
         self,
@@ -1821,6 +1835,7 @@ class AgentBot:
     ) -> None:
         """Release resources after every response owner is terminal."""
         if self.agent_name == ROUTER_AGENT_NAME:
+            self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
             cleared_queued_tasks = clear_deferred_overdue_tasks()
             if cleared_queued_tasks > 0:
                 self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
@@ -1834,14 +1849,23 @@ class AgentBot:
         # the client and then aborted the config reload's removal of this
         # generation -- leaving it registered, half-stopped, while its
         # replacement opened the same database under the same principal.
+        self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
         await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
         if self._ingestion_session is not None:
+            self._mark_deferred_stop_phase(DeferredStopPhase.INGESTION_SESSION)
             await self._release("ingestion session", self._ingestion_session.close(), failures)
         if self._own_journal is not None:
+            self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_STORE)
             await self._release("journal store", self._own_journal.close(), failures)
         if self.client is not None:
+            self._mark_deferred_stop_phase(DeferredStopPhase.MATRIX_CLIENT)
             self.logger.warning("Client is not None in stop()")
             await self._release("matrix client", self.client.close(), failures)
+
+    def _mark_deferred_stop_phase(self, phase: DeferredStopPhase) -> None:
+        """Expose one fixed release phase only while deferred cleanup owns it."""
+        if getattr(self, "_deferred_stop_required", False):
+            self._deferred_stop_phase = phase
 
     async def _release(
         self,

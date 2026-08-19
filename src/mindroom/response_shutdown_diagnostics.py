@@ -22,6 +22,17 @@ class ResponseShutdownPhase(StrEnum):
     RECOVERY_PROOF = "recovery_proof"
 
 
+class DeferredStopPhase(StrEnum):
+    """Fixed deferred-release phases safe to aggregate in operational logs."""
+
+    RECOVERY_PROOF = "recovery_proof"
+    ROUTER_OVERDUE_TASKS = "router_overdue_tasks"
+    JOURNAL_DISPATCHER = "journal_dispatcher"
+    INGESTION_SESSION = "ingestion_session"
+    JOURNAL_STORE = "journal_store"
+    MATRIX_CLIENT = "matrix_client"
+
+
 @dataclass(slots=True)
 class ResponseShutdownPhaseTrace:
     """Track the deepest active fixed phase for one response owner."""
@@ -73,6 +84,7 @@ def response_shutdown_phase(phase: ResponseShutdownPhase) -> Iterator[None]:
 
 
 __all__ = [
+    "DeferredStopPhase",
     "ResponseShutdownPhase",
     "ResponseShutdownPhaseTrace",
     "context_with_response_shutdown_trace",
