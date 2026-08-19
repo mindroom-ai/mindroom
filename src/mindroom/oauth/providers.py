@@ -52,7 +52,18 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
-_NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = ("localhost", "local", "localdomain", "internal", "home.arpa")
+_NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = (
+    "localhost",
+    "local",
+    "localdomain",
+    "internal",
+    "home.arpa",
+    "example",
+    "invalid",
+    "test",
+    "onion",
+    "alt",
+)
 
 
 def _normalized_oauth_hostname(hostname: str | None) -> str | None:
@@ -121,8 +132,16 @@ def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
 
 def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return whether an address, including an IPv4-mapped address, is global unicast."""
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        return _is_global_unicast_address(address.ipv4_mapped)
+    embedded_addresses: tuple[ipaddress.IPv4Address, ...] = ()
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            embedded_addresses += (address.ipv4_mapped,)
+        if address.sixtofour is not None:
+            embedded_addresses += (address.sixtofour,)
+        if address.teredo is not None:
+            embedded_addresses += address.teredo
+    if any(not _is_global_unicast_address(embedded) for embedded in embedded_addresses):
+        return False
     return (
         address.is_global
         and not address.is_link_local
@@ -138,9 +157,7 @@ def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
     """Return whether browser URL parsing treats the final label as an IPv4 number."""
     final_label = hostname.rsplit(".", maxsplit=1)[-1]
     return final_label.isdigit() or (
-        final_label.startswith("0x")
-        and len(final_label) > 2
-        and all(character in "0123456789abcdef" for character in final_label[2:])
+        final_label.startswith("0x") and all(character in "0123456789abcdef" for character in final_label[2:])
     )
 
 
@@ -205,6 +222,8 @@ def _validated_https_url(value: str) -> tuple[ParseResult, str] | None:
 def is_valid_hosted_oauth_callback_for_request(callback_uri: str, request_hostname: str | None) -> bool:
     """Return whether a hosted callback is public and shares the initiating request host."""
     validated_callback = _validated_https_url(callback_uri)
+    if request_hostname is None or request_hostname.endswith("."):
+        return False
     normalized_request_hostname = _normalized_oauth_hostname(request_hostname)
     if validated_callback is None or normalized_request_hostname is None:
         return False

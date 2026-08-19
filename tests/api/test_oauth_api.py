@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import threading
 from collections.abc import AsyncIterator
@@ -15,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -850,9 +851,9 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "public_url",
     [
-        "https://mindroom.example.test",
+        "https://oauth.mindroom.chat",
         "https://8.8.8.8",
-        "https://m\u00fcnchen.example",
+        "https://m\u00fcnchen.mindroom.chat",
         "https://fa\u00df.de",
     ],
 )
@@ -908,11 +909,18 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
         ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
         ("https://xn--a.com/api/oauth/demo/callback", "xn--a.com"),
         ("https://0127.0.0.1/api/oauth/demo/callback", "0127.0.0.1"),
+        ("https://127.0.0.0x/api/oauth/demo/callback", "127.0.0.0x"),
+        ("https://example.com/api/oauth/demo/callback", "example.com."),
         ("https://example.com./api/oauth/demo/callback", "example.com"),
         ("https://224.0.0.1/api/oauth/demo/callback", "224.0.0.1"),
         ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
         ("https://[fec0::1]/api/oauth/demo/callback", "fec0::1"),
         ("https://service.local/api/oauth/demo/callback", "service.local"),
+        ("https://service.example/api/oauth/demo/callback", "service.example"),
+        ("https://service.invalid/api/oauth/demo/callback", "service.invalid"),
+        ("https://service.test/api/oauth/demo/callback", "service.test"),
+        ("https://service.onion/api/oauth/demo/callback", "service.onion"),
+        ("https://service.alt/api/oauth/demo/callback", "service.alt"),
         (
             "https://metadata.google.internal/api/oauth/demo/callback",
             "metadata.google.internal",
@@ -931,6 +939,14 @@ def test_hosted_oauth_callback_accepts_global_ipv6_literal() -> None:
         "https://[2001:4860:0000:0000:0000:0000:0000:8888]/api/oauth/demo/callback",
         "2001:4860::8888",
     )
+
+
+def test_hosted_oauth_callback_rejects_6to4_with_embedded_loopback_on_older_python() -> None:
+    with patch.object(ipaddress.IPv6Address, "is_global", new_callable=PropertyMock, return_value=True):
+        assert not is_valid_hosted_oauth_callback_for_request(
+            "https://[2002:7f00:1::]/api/oauth/demo/callback",
+            "2002:7f00:1::",
+        )
 
 
 @pytest.mark.parametrize(
@@ -982,16 +998,16 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
     ("public_url", "stored_redirect_uri", "registered_redirect_uri", "request_base_url"),
     [
         (
-            "https://mindroom.example.test",
-            "https://mindroom.example.test/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+            "https://oauth.mindroom.chat/api/oauth/public_mail/callback",
             None,
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
-            "https://callback.example.test",
-            "https://callback.example.test/api/oauth/public_mail/callback",
-            "https://callback.example.test/api/oauth/public_mail/callback",
-            "https://dashboard.example.test",
+            "https://callback.mindroom.chat",
+            "https://callback.mindroom.chat/api/oauth/public_mail/callback",
+            "https://callback.mindroom.chat/api/oauth/public_mail/callback",
+            "https://dashboard.mindroom.chat",
         ),
         (
             "https://fa\u00df.de",
@@ -1000,78 +1016,78 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             "https://fass.de",
         ),
         (
-            "https://app.example.test?tenant=one",
-            "https://app.example.test?tenant=one/api/oauth/public_mail/callback",
-            "https://app.example.test?tenant=one/api/oauth/public_mail/callback",
-            "https://app.example.test",
+            "https://app.mindroom.chat?tenant=one",
+            "https://app.mindroom.chat?tenant=one/api/oauth/public_mail/callback",
+            "https://app.mindroom.chat?tenant=one/api/oauth/public_mail/callback",
+            "https://app.mindroom.chat",
         ),
         (
-            "https://mindroom.example.test",
-            "https://other.example.test/api/oauth/public_mail/callback",
-            "https://mindroom.example.test/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
         ),
         (
-            "https://mindroom.example.test",
-            "https://other.example.test/api/oauth/public_mail/callback",
-            "https://other.example.test/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
         ),
-        ("https://mindroom.example.test", None, None, "https://mindroom.example.test"),
+        ("https://oauth.mindroom.chat", None, None, "https://oauth.mindroom.chat"),
         (
-            "http://mindroom.example.test",
-            "http://mindroom.example.test/api/oauth/public_mail/callback",
-            "http://mindroom.example.test/api/oauth/public_mail/callback",
-            "http://mindroom.example.test",
+            "http://oauth.mindroom.chat",
+            "http://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "http://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "http://oauth.mindroom.chat",
         ),
         (
             "https://localhost:8000",
             "https://localhost:8000/api/oauth/public_mail/callback",
             "https://localhost:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://127.0.0.2:8000",
             "https://127.0.0.2:8000/api/oauth/public_mail/callback",
             "https://127.0.0.2:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://localhost.:8000",
             "https://localhost.:8000/api/oauth/public_mail/callback",
             "https://localhost.:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://[::]:8000",
             "https://[::]:8000/api/oauth/public_mail/callback",
             "https://[::]:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://[fc00::1]:8000",
             "https://[fc00::1]:8000/api/oauth/public_mail/callback",
             "https://[fc00::1]:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://[::ffff:192.168.1.1]:8000",
             "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
             "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         (
             "https://example.com:invalid",
             "https://example.com:invalid/api/oauth/public_mail/callback",
             "https://example.com:invalid/api/oauth/public_mail/callback",
-            "https://mindroom.example.test",
+            "https://oauth.mindroom.chat",
         ),
         *[
             (
                 f"https://{hostname}:8000",
                 f"https://{hostname}:8000/api/oauth/public_mail/callback",
                 f"https://{hostname}:8000/api/oauth/public_mail/callback",
-                "https://mindroom.example.test",
+                "https://oauth.mindroom.chat",
             )
             for hostname in (
                 "2130706433",
