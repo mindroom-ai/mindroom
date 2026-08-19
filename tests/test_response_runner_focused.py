@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     from nio import AsyncClient
 
     from mindroom.hooks import MessageEnvelope
+    from mindroom.response_lifecycle import _QueuedMessageState
 
 
 def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePayloadPreparation:
@@ -1428,6 +1429,90 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
 
     assert event_id is None
     locked_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_input(tmp_path: Path) -> None:
+    """An internal resume must serialize without interrupting the active human turn."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$follow-up")
+    await _admit_approval_source(runner.deps.approval_store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-resume",
+        run_id="run-paused",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+    follow_up_started = asyncio.Event()
+    release_follow_up = asyncio.Event()
+
+    async def active_follow_up(
+        _target: MessageTarget,
+        _early_placeholder: response_runner._EarlyPlaceholderState,
+    ) -> str:
+        follow_up_started.set()
+        await release_follow_up.wait()
+        return "$follow-up-response"
+
+    follow_up = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            _plain_request(target, source_event_id="$follow-up"),
+            response_kind="ai",
+            locked_operation=active_follow_up,
+        ),
+    )
+    await asyncio.wait_for(follow_up_started.wait(), timeout=1.0)
+    lifecycle = runner._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    resume_entered = asyncio.Event()
+    begin_response_turn_notice = lifecycle._begin_response_turn_notice
+    run_approval_continuation = AsyncMock(return_value="$waiting")
+
+    def observe_response_turn_start(
+        *,
+        lifecycle_lock: asyncio.Lock,
+        queued_signal: _QueuedMessageState,
+        response_envelope: MessageEnvelope,
+        signal_queued_message: bool,
+    ) -> str | None:
+        notice = begin_response_turn_notice(
+            lifecycle_lock=lifecycle_lock,
+            queued_signal=queued_signal,
+            response_envelope=response_envelope,
+            signal_queued_message=signal_queued_message,
+        )
+        if response_envelope.source_event_id == "$source":
+            resume_entered.set()
+        return notice
+
+    with (
+        patch.object(lifecycle, "_begin_response_turn_notice", new=observe_response_turn_start),
+        patch.object(
+            runner,
+            "_run_owned_approval_continuation",
+            new=run_approval_continuation,
+        ),
+    ):
+        resume = asyncio.create_task(runner._resume_approval_source("$source"))
+        await asyncio.wait_for(resume_entered.wait(), timeout=1.0)
+
+        pending_human_messages = set(queued_signal.pending_human_message_event_ids)
+        run_approval_continuation.assert_not_awaited()
+        release_follow_up.set()
+        assert await asyncio.wait_for(follow_up, timeout=1.0) == "$follow-up-response"
+        await asyncio.wait_for(resume, timeout=1.0)
+        run_approval_continuation.assert_awaited_once()
+
+    assert pending_human_messages == set()
 
 
 @pytest.mark.asyncio
