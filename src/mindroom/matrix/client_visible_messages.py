@@ -250,6 +250,17 @@ async def extract_visible_edit_body(
     )
 
 
+def _is_replacement_for_event(
+    event_source: dict[str, Any],
+    *,
+    sender: str,
+    event_id: str,
+) -> bool:
+    """Return whether one replacement belongs to the event being recovered."""
+    event_info = EventInfo.from_event(event_source)
+    return event_source.get("sender") == sender and event_info.is_edit and event_info.original_event_id == event_id
+
+
 async def _latest_relation_or_original_body(
     client: nio.AsyncClient,
     *,
@@ -269,6 +280,8 @@ async def _latest_relation_or_original_body(
     )
     async with contextlib.aclosing(relations):
         async for candidate in relations:
+            if candidate.sender != event.sender:
+                continue
             replacement = candidate
             if isinstance(replacement, nio.MegolmEvent):
                 if client.olm is None:
@@ -279,7 +292,11 @@ async def _latest_relation_or_original_body(
                     return None
             if not is_visible_room_message(replacement):
                 return None
-            if replacement.sender != event.sender:
+            if not _is_replacement_for_event(
+                replacement.source,
+                sender=event.sender,
+                event_id=event_id,
+            ):
                 continue
             body, _content = await extract_visible_edit_body(
                 replacement.source,
@@ -321,9 +338,15 @@ async def fetch_latest_visible_body(
     if event_source is None:
         return None
     replacements = bundled_replacement_candidates(event_source)
-    if replacements:
+    for replacement in replacements:
+        if not _is_replacement_for_event(
+            replacement,
+            sender=event.sender,
+            event_id=event_id,
+        ):
+            continue
         body, _content = await extract_visible_edit_body(
-            replacements[0],
+            replacement,
             client,
             config=config,
             runtime_paths=runtime_paths,

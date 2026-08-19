@@ -1371,7 +1371,7 @@ def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent
     return event
 
 
-def _decrypted_edit(*, sender: str) -> nio.RoomMessage:
+def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.RoomMessage:
     """Return the visible edit corresponding to `_encrypted_event`."""
     event = nio.Event.parse_event(
         {
@@ -1383,7 +1383,7 @@ def _decrypted_edit(*, sender: str) -> nio.RoomMessage:
                 "msgtype": "m.text",
                 "body": "latest partial",
                 "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$waiting"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
             },
         },
     )
@@ -1401,15 +1401,17 @@ async def _relations(*events: nio.Event) -> AsyncIterator[nio.Event]:
 async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(tmp_path: Path) -> None:
     """An unreadable authoritative edit is retryable, not permission to use stale text."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    response = _visible_event_response(sender=runner.deps.matrix_full_id, body="original partial")
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
     client = runner._client()
     client.room_get_event = AsyncMock(return_value=response)
     extract_body = AsyncMock(side_effect=[(None, None), ("older partial", {})])
+    replacement = _decrypted_edit(sender=sender).source
 
     with (
         patch(
             "mindroom.matrix.client_visible_messages.bundled_replacement_candidates",
-            return_value=[{"new": 1}, {"old": 1}],
+            return_value=[replacement, replacement],
         ),
         patch("mindroom.matrix.client_visible_messages.extract_visible_edit_body", new=extract_body),
     ):
@@ -1423,6 +1425,74 @@ async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(t
 
     assert update is None
     assert extract_body.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replacement_sender", "target_event_id"),
+    [
+        ("@other:localhost", "$waiting"),
+        (None, "$other"),
+    ],
+    ids=("foreign-sender", "wrong-target"),
+)
+async def test_restart_recovery_ignores_unrelated_bundled_replacement(
+    tmp_path: Path,
+    *,
+    replacement_sender: str | None,
+    target_event_id: str,
+) -> None:
+    """A bundled edit cannot replace a different sender's event or target."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
+    response.event.source["unsigned"] = {
+        "m.relations": {
+            "m.replace": {
+                "latest_event": _decrypted_edit(
+                    sender=replacement_sender or sender,
+                    target_event_id=target_event_id,
+                ).source,
+            },
+        },
+    }
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    client.room_get_event_relations = MagicMock(return_value=_relations())
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_ignores_unreadable_foreign_relation(tmp_path: Path) -> None:
+    """An unreadable relation from another sender cannot block the original body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(
+        return_value=_relations(_encrypted_event(sender="@other:localhost")),
+    )
+    client.olm = MagicMock()
+    client.decrypt_event = MagicMock(side_effect=nio.EncryptionError("missing session"))
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
 
 
 @pytest.mark.asyncio
