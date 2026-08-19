@@ -32,7 +32,7 @@ from mindroom.oauth import (
     OAuthProvider,
     OAuthProviderError,
     is_oauth_loopback_hostname,
-    is_valid_hosted_oauth_redirect_uri,
+    is_valid_hosted_oauth_callback_for_request,
 )
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -137,13 +137,14 @@ def _dynamic_client_matches_hosted_callback(
     resolution: OAuthClientConfigResolution,
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
+    request_hostname: str | None,
 ) -> bool:
     """Return whether a dynamically registered client has its exact configured HTTPS callback."""
     if not resolution.dynamically_registered:
         return False
     expected_redirect_uri = provider.default_redirect_uri(runtime_paths)
     return (
-        is_valid_hosted_oauth_redirect_uri(expected_redirect_uri)
+        is_valid_hosted_oauth_callback_for_request(expected_redirect_uri, request_hostname)
         and resolution.config.redirect_uri == expected_redirect_uri
         and resolution.registered_redirect_uri == expected_redirect_uri
     )
@@ -170,7 +171,7 @@ async def _client_config_resolution_for_request(
         resolution is None
         or resolution.custom
         or is_oauth_loopback_hostname(request.url.hostname)
-        or _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths)
+        or _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths, request.url.hostname)
     ):
         return resolution
     if reject_remote_provisioned:

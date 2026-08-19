@@ -889,7 +889,7 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     )
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+        with TestClient(api_app, base_url=public_url) as client:
             _login(client)
             response = client.request(method, path, follow_redirects=False)
 
@@ -949,6 +949,18 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             "https://mindroom.example.test/api/oauth/public_mail/callback",
             None,
             "https://mindroom.example.test",
+        ),
+        (
+            "https://callback.example.test",
+            "https://callback.example.test/api/oauth/public_mail/callback",
+            "https://callback.example.test/api/oauth/public_mail/callback",
+            "https://dashboard.example.test",
+        ),
+        (
+            "https://app.example.test?tenant=one",
+            "https://app.example.test?tenant=one/api/oauth/public_mail/callback",
+            "https://app.example.test?tenant=one/api/oauth/public_mail/callback",
+            "https://app.example.test",
         ),
         (
             "https://mindroom.example.test",

@@ -15,7 +15,7 @@ import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
@@ -140,26 +140,43 @@ def _is_valid_hosted_oauth_hostname(hostname: str | None) -> bool:
     return not _hostname_ends_in_ipv4_number(normalized_hostname)
 
 
-def is_valid_hosted_oauth_redirect_uri(redirect_uri: str) -> bool:
-    """Return whether an HTTPS OAuth callback has an unambiguous public authority."""
-    if "\\" in redirect_uri or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in redirect_uri):
-        return False
+def _validated_https_url(value: str) -> tuple[ParseResult, str] | None:
+    """Return a parsed HTTPS URL and canonical hostname when its authority is unambiguous."""
+    if "\\" in value or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value):
+        return None
     try:
-        parsed_uri = urlparse(redirect_uri)
+        parsed_uri = urlparse(value)
         _ = parsed_uri.port
         username = parsed_uri.username
         password = parsed_uri.password
         hostname = parsed_uri.hostname
     except ValueError:
+        return None
+    normalized_hostname = _normalized_oauth_hostname(hostname)
+    if (
+        parsed_uri.scheme.casefold() != "https"
+        or not parsed_uri.netloc
+        or username is not None
+        or password is not None
+        or "%" in parsed_uri.netloc
+        or normalized_hostname is None
+    ):
+        return None
+    return parsed_uri, normalized_hostname
+
+
+def is_valid_hosted_oauth_callback_for_request(callback_uri: str, request_hostname: str | None) -> bool:
+    """Return whether a hosted callback is public and shares the initiating request host."""
+    validated_callback = _validated_https_url(callback_uri)
+    normalized_request_hostname = _normalized_oauth_hostname(request_hostname)
+    if validated_callback is None or normalized_request_hostname is None:
         return False
+    parsed_callback, callback_hostname = validated_callback
     return (
-        parsed_uri.scheme.casefold() == "https"
-        and bool(parsed_uri.netloc)
-        and username is None
-        and password is None
-        and "%" not in parsed_uri.netloc
-        and not parsed_uri.fragment
-        and _is_valid_hosted_oauth_hostname(hostname)
+        not parsed_callback.query
+        and not parsed_callback.fragment
+        and _is_valid_hosted_oauth_hostname(callback_hostname)
+        and normalized_request_hostname == callback_hostname
     )
 
 
