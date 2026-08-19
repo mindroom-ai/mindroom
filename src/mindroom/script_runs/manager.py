@@ -170,6 +170,11 @@ class ScriptRunManager:
         """Mark the empty admission set as drained before any worker launch begins."""
         self._worker_launches_drained.set()
 
+    @property
+    def worker_replacement_in_progress(self) -> bool:
+        """Return whether the replacement admission fence is closed."""
+        return self._worker_replacement_in_progress
+
     async def begin_worker_replacement(self) -> None:
         """Reject new worker launches and wait for already-admitted launches to finish."""
         async with self._worker_launch_gate_lock:
@@ -278,6 +283,9 @@ class ScriptRunManager:
             )
         await self._admit_worker_launch()
         try:
+            if self.worker_backend is None:
+                msg = "Background script worker backend is unavailable."
+                raise ScriptRunManagerError(msg)
             return await self._create_and_launch(
                 context,
                 run=run,

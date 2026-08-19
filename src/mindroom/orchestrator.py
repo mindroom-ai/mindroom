@@ -1790,11 +1790,10 @@ class _MultiAgentOrchestrator:
             new_config.authorization,
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
-        await self._script_runtime.apply_update_plan(plan)
         replay_startup_maintenance = False
-        worker_handoff_installed = False
 
         try:
+            await self._script_runtime.apply_update_plan(plan)
             replay_startup_maintenance = await self._startup_maintenance.cancel()
             if plugin_changes:
                 pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
@@ -1816,8 +1815,7 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
-            await self._script_runtime.install_committed_worker_generation()
-            worker_handoff_installed = True
+            await self._script_runtime.complete_worker_replacement()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -1876,8 +1874,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            if not worker_handoff_installed:
-                await self._script_runtime.abort_update_handoff()
+            await self._script_runtime.complete_worker_replacement()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_config_reload(
                     config=self.config,

@@ -3091,6 +3091,10 @@ class TestMultiAgentOrchestrator:
             authorization_changed=False,
         )
         runtime = orchestrator.script_runtime
+        completed_configs: list[Config] = []
+
+        async def complete_worker_replacement(_runtime: object) -> None:
+            completed_configs.append(orchestrator.config)
 
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
@@ -3103,11 +3107,67 @@ class TestMultiAgentOrchestrator:
                 "cancel",
                 new=AsyncMock(side_effect=RuntimeError("maintenance cancellation failed")),
             ),
+            patch.object(
+                type(runtime),
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
+                create=True,
+            ),
             pytest.raises(RuntimeError, match="maintenance cancellation failed"),
         ):
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
-        assert runtime.manager._worker_replacement_in_progress is False
+        assert completed_configs == [current_config]
+
+    @pytest.mark.asyncio
+    async def test_config_update_completes_the_worker_handoff_with_new_config_after_commit_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failure after commit must never reopen worker admission against the old config."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        completed_configs: list[Config] = []
+
+        async def complete_worker_replacement(_runtime: object) -> None:
+            completed_configs.append(orchestrator.config)
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
+            patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(
+                type(runtime),
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
+                create=True,
+            ),
+            patch.object(
+                orchestrator,
+                "_sync_mcp_manager",
+                new=AsyncMock(side_effect=RuntimeError("post-commit failure")),
+            ),
+            pytest.raises(RuntimeError, match="post-commit failure"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert completed_configs == [new_config, new_config]
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
@@ -3456,7 +3516,7 @@ class TestMultiAgentOrchestrator:
         )
         generation_refreshes: list[Config] = []
 
-        async def install_committed_worker_generation(_runtime: object) -> None:
+        async def complete_worker_replacement(_runtime: object) -> None:
             assert orchestrator.config is new_config
             generation_refreshes.append(new_config)
 
@@ -3471,8 +3531,8 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
             patch.object(
                 type(orchestrator.script_runtime),
-                "install_committed_worker_generation",
-                new=install_committed_worker_generation,
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
                 create=True,
             ),
         ):
@@ -3486,7 +3546,7 @@ class TestMultiAgentOrchestrator:
         # without the planner or the support sync ever being reached.
         mock_build_plan.assert_called_once()
         mock_sync_support.assert_awaited_once()
-        assert generation_refreshes == [new_config]
+        assert generation_refreshes == [new_config, new_config]
 
     @pytest.mark.asyncio
     async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(

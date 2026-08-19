@@ -339,8 +339,6 @@ class ScriptRuntimeLifecycle:
     _startup_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _current_worker_lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
-    _worker_replacement_pending: bool = field(default=False, init=False, repr=False)
-    _pending_worker_configuration_identity: str | None = field(default=None, init=False, repr=False)
     _worker_config_epoch: int = field(default=0, init=False, repr=False)
     _pending_worker_lease_task: asyncio.Task[_WorkerManagerLease | None] | None = field(
         default=None,
@@ -475,36 +473,31 @@ class ScriptRuntimeLifecycle:
         self._pending_worker_lease_epoch = self._worker_config_epoch
         return task, delivery, self._pending_worker_lease_epoch
 
-    async def install_committed_worker_generation(self) -> None:
-        """Install the committed worker configuration for subsequent launches."""
-        if self._worker_replacement_pending:
-            runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-            if any(not run.local_unsafe for run in runs):
-                logger.warning("script_worker_backend_replacement_pending")
-                return
-            current_config = self.config_provider()
-            if (
-                configured_primary_worker_manager_identity(self.runtime_paths, current_config)
-                != self._pending_worker_configuration_identity
-            ):
-                return
+    async def complete_worker_replacement(self) -> None:
+        """Publish the backend for the config visible when a replacement completes."""
+        if not self.manager.worker_replacement_in_progress:
+            return
+        async with self._worker_refresh_lock:
             await self._release_current_worker_lease()
-        self._worker_config_epoch += 1
-        try:
-            await asyncio.wait_for(self._refresh_worker_backend(), timeout=self.pass_timeout_seconds)
-        except TimeoutError:
-            self._clear_current_worker_backend()
-            logger.warning(
-                "script_worker_backend_commit_refresh_timeout",
-                timeout_seconds=self.pass_timeout_seconds,
-            )
-        except WorkerBackendError:
-            self._clear_current_worker_backend()
-            logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
-        finally:
-            if self._worker_replacement_pending:
-                self._worker_replacement_pending = False
-                self._pending_worker_configuration_identity = None
+            self._worker_config_epoch += 1
+            try:
+                if self.config_provider() is None:
+                    self._clear_current_worker_backend()
+                else:
+                    await asyncio.wait_for(
+                        self._refresh_worker_backend_locked(),
+                        timeout=self.pass_timeout_seconds,
+                    )
+            except TimeoutError:
+                self._clear_current_worker_backend()
+                logger.warning(
+                    "script_worker_backend_commit_refresh_timeout",
+                    timeout_seconds=self.pass_timeout_seconds,
+                )
+            except Exception:
+                self._clear_current_worker_backend()
+                logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
+            finally:
                 await self.manager.end_worker_replacement()
 
     def _clear_current_worker_backend(self) -> None:
@@ -522,10 +515,6 @@ class ScriptRuntimeLifecycle:
         self._clear_current_worker_backend()
         if lease is not None:
             await asyncio.to_thread(lease.release)
-
-    async def _release_replaced_worker_lease_if_drained(self, runs: list[ScriptRunRecord]) -> None:
-        if self._worker_replacement_pending and not any(not run.local_unsafe for run in runs):
-            await self._release_current_worker_lease()
 
     async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
@@ -553,11 +542,13 @@ class ScriptRuntimeLifecycle:
             if _agent_has_script_tool(current_config, agent_name)
             and not _agent_has_script_tool(plan.new_config, agent_name)
         }
-        if not removed_agents and not isolation_changes and not script_tool_removals and not worker_configuration_changed:
+        if (
+            not removed_agents
+            and not isolation_changes
+            and not script_tool_removals
+            and not worker_configuration_changed
+        ):
             return
-        if worker_configuration_changed:
-            self._worker_replacement_pending = True
-            self._pending_worker_configuration_identity = next_worker_configuration_identity
 
         async def apply_update_boundary() -> None:
             if worker_configuration_changed:
@@ -575,23 +566,8 @@ class ScriptRuntimeLifecycle:
                 timeout=self.pass_timeout_seconds,
             )
         except TimeoutError:
-            await self._abort_worker_replacement()
             msg = "Background script reload did not durably revoke every active run before the reload deadline."
             raise ScriptRuntimeLifecycleError(msg) from None
-        except BaseException:
-            await self._abort_worker_replacement()
-            raise
-
-    async def _abort_worker_replacement(self) -> None:
-        if not self._worker_replacement_pending:
-            return
-        self._worker_replacement_pending = False
-        self._pending_worker_configuration_identity = None
-        await self.manager.end_worker_replacement()
-
-    async def abort_update_handoff(self) -> None:
-        """Reopen worker admission when config application cannot finish its handoff."""
-        await self._abort_worker_replacement()
 
     async def _apply_update_pass(
         self,
@@ -690,7 +666,8 @@ class ScriptRuntimeLifecycle:
 
         await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        await self._release_replaced_worker_lease_if_drained(unfinished)
+        if worker_configuration_changed and not any(not run.local_unsafe for run in unfinished):
+            await self._release_current_worker_lease()
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
         """Run one bounded touch-first reconciliation pass."""
@@ -728,15 +705,6 @@ class ScriptRuntimeLifecycle:
                     )
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
-        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        await self._release_replaced_worker_lease_if_drained(unfinished)
-        if self._worker_replacement_pending and not any(not run.local_unsafe for run in unfinished):
-            current_config = self.config_provider()
-            if (
-                configured_primary_worker_manager_identity(self.runtime_paths, current_config)
-                == self._pending_worker_configuration_identity
-            ):
-                await self.install_committed_worker_generation()
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
         try:
@@ -872,7 +840,6 @@ class ScriptRuntimeLifecycle:
             self._pending_worker_lease_epoch = -1
             self._current_worker_lease = None
             self.manager.worker_backend = None
-            self._worker_replacement_pending = False
             await _release_worker_leases_before_deadline(
                 leases,
                 deadline=shutdown_deadline,

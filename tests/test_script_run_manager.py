@@ -335,6 +335,18 @@ async def test_worker_replacement_waits_for_admitted_launch_and_rejects_racing_l
 
 
 @pytest.mark.asyncio
+async def test_worker_launch_without_a_backend_is_rejected_before_creating_durable_intent(tmp_path: Path) -> None:
+    """A safe unavailable backend must not create a script row that can never launch."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.worker_backend = None
+
+    with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
+        await manager.run(_context(tmp_path), source="print('unavailable')\n")
+
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
 async def test_worker_launch_requires_primary_visible_state_before_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

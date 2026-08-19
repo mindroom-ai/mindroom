@@ -743,8 +743,11 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
     await runtime.reconcile_once()
     await runtime.apply_update_plan(_plan(old_config, new_config))
 
+    assert first.released is True
+    assert runtime._current_worker_lease is None
+
     committed_config = new_config
-    await runtime.install_committed_worker_generation()
+    await runtime.complete_worker_replacement()
 
     durable = store.get_run(run.run_id)
     assert durable.cancel_requested_at is not None
@@ -755,10 +758,9 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
     assert [call.state.value for call in store.pending_calls(run.run_id)] == []
     assert settlement_resolver.settled_runs == [run.run_id]
     assert release_observations == [durable]
-    assert first.released is True
     assert runtime._current_worker_lease is second
     assert manager._worker_replacement_in_progress is False
-    assert identities == ["backend-generation-a", "backend-generation-b", "backend-generation-b"]
+    assert identities == ["backend-generation-a", "backend-generation-b"]
 
 
 @pytest.mark.asyncio
@@ -841,6 +843,7 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
         cancellation_poll_interval_seconds=0,
     )
     lease = _Lease(backend)
+    backend_available = True
     monkeypatch.setattr(
         "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
         lambda _paths, config: "new" if config is new_config else "old",
@@ -852,7 +855,7 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock()),
         config_provider=lambda: committed_config,
-        worker_lease_provider=lambda: lease,
+        worker_lease_provider=lambda: lease if backend_available else None,
     )
     context = make_test_tool_runtime_context(
         agent_name="watcher",
@@ -890,8 +893,13 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     assert settlement_resolver.settled_runs == [run.run_id]
     assert manager._worker_replacement_in_progress is True
 
-    await runtime.abort_update_handoff()
+    backend_available = False
+    await runtime.complete_worker_replacement()
     assert manager._worker_replacement_in_progress is False
+
+    with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
+        await manager.run(context, source="print('unavailable')\n")
+    assert [stored.run_id for stored in store.list_runs()] == [run.run_id]
 
 
 @pytest.mark.asyncio
@@ -925,48 +933,63 @@ async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_committed_worker_lease_wins_over_an_inflight_precommit_refresh(tmp_path: Path) -> None:
-    """A slow pre-commit acquisition cannot overwrite the committed current lease."""
+async def test_worker_replacement_completion_uses_the_config_visible_at_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fallback completion reacquires the old or new backend without crossing identities."""
     runtime_paths = _runtime_paths(tmp_path)
-    first = _Lease(_Backend([]), generation_id="backend-generation-a")
-    second = _Lease(_Backend([]), generation_id="backend-generation-b")
-    provider_entered = threading.Event()
-    release_provider = threading.Event()
-    calls = 0
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
+        defaults={"tools": []},
+    )
+    committed_config = old_config
+    acquired_for: list[Config] = []
+    old_lease = _Lease(_Backend([]), generation_id="old")
+    restored_old_lease = _Lease(_Backend([]), generation_id="old-restored")
+    new_lease = _Lease(_Backend([]), generation_id="new")
+    leases = iter((old_lease, restored_old_lease, new_lease))
 
     def provider() -> _Lease:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            provider_entered.set()
-            assert release_provider.wait(timeout=5)
-            return first
-        return second
+        acquired_for.append(committed_config)
+        return next(leases)
 
-    manager = SimpleNamespace(
+    manager = ScriptRunManager(
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        worker_client=MagicMock(),
         worker_backend=None,
-        reconcile_durable=AsyncMock(),
+        gateway_url="http://primary.test/api/script-gateway",
     )
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
-        store=ScriptRunStore(runtime_paths),
+        store=manager.store,
         broker=MagicMock(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock()),
-        config_provider=_config,
+        config_provider=lambda: committed_config,
         worker_lease_provider=provider,
-        pass_timeout_seconds=1,
     )
-    old_refresh = asyncio.create_task(runtime.reconcile_once())
-    assert await asyncio.to_thread(provider_entered.wait, 1)
-    committed_refresh = asyncio.create_task(runtime.install_committed_worker_generation())
-    await asyncio.sleep(0)
-    release_provider.set()
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    await runtime.reconcile_once()
+    await runtime.apply_update_plan(_plan(old_config, new_config))
 
-    await asyncio.gather(old_refresh, committed_refresh)
+    await runtime.complete_worker_replacement()
+    assert acquired_for == [old_config, old_config]
+    assert runtime._current_worker_lease is restored_old_lease
 
-    assert runtime._worker_backend_for(None) is second.manager
-    assert manager.worker_backend is second.manager
+    await runtime.complete_worker_replacement()
+    assert acquired_for == [old_config, old_config]
+
+    await runtime.apply_update_plan(_plan(old_config, new_config))
+    committed_config = new_config
+    await runtime.complete_worker_replacement()
+    assert acquired_for == [old_config, old_config, new_config]
+    assert runtime._current_worker_lease is new_lease
 
 
 @pytest.mark.asyncio
