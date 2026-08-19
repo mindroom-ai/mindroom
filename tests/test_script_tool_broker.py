@@ -285,6 +285,7 @@ def _broker(
     resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
     run_id: str = "run-1",
     authorized: bool = True,
+    admission_open: bool = True,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -320,22 +321,22 @@ def _broker(
             local_unsafe=resolved_durable_local_unsafe,
         ),
     )
-    return (
-        ScriptToolBroker(
-            store=store,
-            runtime_resolver=_RuntimeResolver(
-                context,
-                approval_events=events,
-                approval_decision=approval_decision,
-                worker_id=live_worker_id,
-                private_agent_names=live_private_agent_names,
-                local_unsafe=resolved_live_local_unsafe,
-                resolved_worker_targets=resolved_worker_targets,
-                authorized=authorized,
-            ),
+    broker = ScriptToolBroker(
+        store=store,
+        runtime_resolver=_RuntimeResolver(
+            context,
+            approval_events=events,
+            approval_decision=approval_decision,
+            worker_id=live_worker_id,
+            private_agent_names=live_private_agent_names,
+            local_unsafe=resolved_live_local_unsafe,
+            resolved_worker_targets=resolved_worker_targets,
+            authorized=authorized,
         ),
-        token,
     )
+    if admission_open:
+        broker.open_call_admission()
+    return broker, token
 
 
 def _request(*, call_id: str = "call-1", b: int = 2, run_id: str = "run-1") -> ScriptToolCallRequest:
@@ -368,6 +369,26 @@ async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path
     accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert isinstance(accepted, ScriptCallRecord)
+
+
+@pytest.mark.asyncio
+async def test_script_broker_starts_claim_admission_closed_but_keeps_receipts_readable(tmp_path: Path) -> None:
+    """Startup blocks new claims without hiding an already durable receipt."""
+    broker, token = _broker(tmp_path, events=[], admission_open=False)
+
+    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        await broker.accept_authenticated(_request(), f"Bearer {token}")
+
+    broker.store.claim_call(
+        run_id="run-1",
+        call_id="existing-call",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="existing-arguments",
+    )
+    receipt = await broker.get_authenticated("run-1", "existing-call", f"Bearer {token}")
+
+    assert receipt.call_id == "existing-call"
+    assert broker.store.get_call("run-1", "existing-call") == receipt
 
 
 @pytest.mark.asyncio

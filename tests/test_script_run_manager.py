@@ -898,11 +898,20 @@ async def test_preallocation_cancel_releases_capacity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interruption_reason",
+    [
+        "Script owner no longer has room-and-agent reply authorization.",
+        "Worker configuration changed during configuration reload.",
+        "MindRoom runtime restarted.",
+    ],
+)
 async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    interruption_reason: str,
 ) -> None:
-    """A cancellation committed during worker assignment prevents process spawn."""
+    """Lifecycle interruption during worker assignment prevents process spawn."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     worker_assigned = threading.Event()
@@ -933,23 +942,30 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     assert await asyncio.to_thread(worker_assigned.wait, 5)
     [starting] = manager.store.list_runs(include_finished=False)
-    client.next_status = WorkerScriptStatus.unknown_handle()
-
-    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
-    assert cancelled.state is ScriptRunState.CANCELLED
+    manager.request_revocation(starting.run_id, reason=interruption_reason)
     release_assignment.set()
     launch_result = await launch
 
-    assert launch_result.state is ScriptRunState.CANCELLED
+    assert launch_result.state is ScriptRunState.INTERRUPTED
+    assert launch_result.cancellation_reason == interruption_reason
     assert client.requested_handles == []
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interruption_reason",
+    [
+        "Script owner no longer has room-and-agent reply authorization.",
+        "Worker configuration changed during configuration reload.",
+        "MindRoom runtime restarted.",
+    ],
+)
 async def test_worker_launch_rechecks_durable_intent_immediately_before_spawn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    interruption_reason: str,
 ) -> None:
-    """A durable cancellation committed during snapshot preparation prevents worker spawn."""
+    """Lifecycle interruption during snapshot preparation prevents worker spawn."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     original_write_snapshot = manager_module._write_snapshot
@@ -962,14 +978,15 @@ async def test_worker_launch_rechecks_durable_intent_immediately_before_spawn(
         token: str,
     ) -> tuple[Path, Path]:
         paths = original_write_snapshot(workspace, run_id, source=source, token=token)
-        manager.store.request_cancel(run_id, reason="cancelled during snapshot")
+        manager.store.request_cancel(run_id, reason=interruption_reason)
         return paths
 
     monkeypatch.setattr(manager_module, "_write_snapshot", snapshot_then_cancel)
 
     launch_result = await manager.run(context, source="print('ok')\n")
 
-    assert launch_result.state is ScriptRunState.CANCELLED
+    assert launch_result.state is ScriptRunState.INTERRUPTED
+    assert launch_result.cancellation_reason == interruption_reason
     assert client.requested_handles == []
 
 

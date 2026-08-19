@@ -843,14 +843,20 @@ def test_local_backend_retires_tree_deeper_than_python_recursion_without_fd_leak
         ),
     )
     deepest = paths.workspace
-    for _index in range(sys.getrecursionlimit() + 50):
+    recursion_limit = 250
+    for _index in range(recursion_limit + 50):
         deepest /= "d"
         deepest.mkdir()
     (deepest / "leaf.txt").write_text("deep", encoding="utf-8")
     fd_root = Path("/proc/self/fd")
     descriptors_before = len(tuple(fd_root.iterdir()))
 
-    backend.retire_worker(run_key)
+    original_recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(recursion_limit)
+        backend.retire_worker(run_key)
+    finally:
+        sys.setrecursionlimit(original_recursion_limit)
 
     assert len(tuple(fd_root.iterdir())) == descriptors_before
     assert paths.root.exists() is False

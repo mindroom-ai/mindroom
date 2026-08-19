@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import socket
 import threading
 import time
@@ -14,8 +15,12 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 import mindroom.workers.runtime as workers_runtime_module
+from mindroom.api.script_gateway import bind_script_tool_broker
+from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -30,7 +35,7 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
     script_gateway_url,
 )
-from mindroom.script_runs.broker import ScriptToolBroker
+from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
     ScriptRunRecord,
@@ -38,7 +43,12 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
     script_worker_key_for_run,
 )
-from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, ScriptRunStoreError
+from mindroom.script_runs.store import (
+    ScriptCallNotFoundError,
+    ScriptRunNotFoundError,
+    ScriptRunStore,
+    ScriptRunStoreError,
+)
 from mindroom.script_runs.worker_client import (
     ScriptWorkerError,
     WorkerScriptCancel,
@@ -196,6 +206,37 @@ class _TerminatingWorkerClient:
 
 
 @dataclass
+class _TermThenKillWorkerClient:
+    """Require both graceful and forced process signals before reporting exit."""
+
+    cancel_forces: list[bool] = field(default_factory=list)
+    exited: bool = False
+
+    async def status(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+    ) -> WorkerScriptStatus:
+        del run_id
+        if self.exited:
+            return WorkerScriptStatus(state="exited", output="terminated output", exit_code=137)
+        return WorkerScriptStatus(state="running")
+
+    async def cancel(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        force: bool = False,
+    ) -> WorkerScriptCancel:
+        del run_id
+        self.cancel_forces.append(force)
+        self.exited = force
+        return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
+
+
+@dataclass
 class _FailingStatusWorkerClient:
     """Accept cancellation but fail the immediate process-status reconciliation."""
 
@@ -308,6 +349,30 @@ class _FailingApprovalSettlementResolver:
         raise _ScriptRuntimeUnavailableError(msg)
 
 
+@dataclass
+class _StartupAdmissionResolver:
+    """Expose any inherited call that reaches execution during startup cleanup."""
+
+    execution_attempts: int = 0
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+        del run, config
+        return True
+
+    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> None:
+        del run, correlation_id
+        self.execution_attempts += 1
+        message = "inherited call reached execution"
+        raise RuntimeError(message)
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+
+    async def prune_approvals(self, run_id: str) -> bool:
+        del run_id
+        return True
+
+
 def _worker(run: ScriptRunRecord) -> WorkerHandle:
     assert run.worker_key is not None
     return WorkerHandle(
@@ -319,6 +384,14 @@ def _worker(run: ScriptRunRecord) -> WorkerHandle:
         backend_name="test",
         last_used_at=1.0,
         created_at=1.0,
+    )
+
+
+def _broker_lifecycle_stub() -> SimpleNamespace:
+    return SimpleNamespace(
+        _cleanup_tasks=set(),
+        close_call_admission=MagicMock(),
+        open_call_admission=MagicMock(),
     )
 
 
@@ -681,6 +754,89 @@ async def test_startup_revokes_and_retires_inherited_running_process(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_startup_revokes_inherited_authority_before_blocked_backend_acquisition(
+    tmp_path: Path,
+) -> None:
+    """A reachable gateway cannot claim inherited work while startup waits for its backend."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    token = "secret-token"  # noqa: S105
+    run_id = f"script-{'8' * 32}"
+    template = _run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING)
+    assert template.worker_key is not None
+    created = store.create_run(
+        replace(
+            template,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            worker_key=script_worker_key_for_run(template.worker_key, run_id),
+        ),
+    )
+    inherited = store.transition_run(created.run_id, state=ScriptRunState.RUNNING, worker_id="worker-1")
+    resolver = _StartupAdmissionResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)  # type: ignore[arg-type]
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        return store.request_cancel(run_id, reason=reason)
+
+    manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
+        gateway_url="",
+        worker_backend=None,
+        request_revocation=request_revocation,
+        revoke=AsyncMock(side_effect=lambda run_id, **_kwargs: store.get_run(run_id)),
+        reconcile_durable=AsyncMock(side_effect=lambda run_id, **_kwargs: store.get_run(run_id)),
+    )
+    acquisition_started = threading.Event()
+    release_acquisition = threading.Event()
+
+    def acquire_worker_backend() -> None:
+        acquisition_started.set()
+        assert release_acquisition.wait(timeout=5)
+
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=resolver,  # type: ignore[arg-type]
+        config_provider=_config,
+        worker_lease_provider=acquire_worker_backend,  # type: ignore[arg-type]
+    )
+    app = FastAPI()
+    app.include_router(script_gateway_router)
+    bind_script_tool_broker(app, broker)
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    startup = asyncio.create_task(runtime.start())
+
+    try:
+        assert await asyncio.to_thread(acquisition_started.wait, 5)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/script-gateway/calls",
+                json={
+                    "run_id": inherited.run_id,
+                    "call_id": "startup-call",
+                    "toolkit_name": "calculator",
+                    "function_name": "add",
+                    "arguments": {"a": 1, "b": 2},
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 404
+        with pytest.raises(ScriptCallNotFoundError):
+            store.get_call(inherited.run_id, "startup-call")
+        assert resolver.execution_attempts == 0
+        assert store.get_run(inherited.run_id).cancel_requested_at is not None
+    finally:
+        release_acquisition.set()
+        await asyncio.wait_for(startup, timeout=1)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path) -> None:
     """Removal records revocation before unavailable live runtime resolution."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -864,6 +1020,8 @@ def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Pat
     assert resolver.is_authorized(_run(runtime_paths)) is False
     memberships.is_allowed.return_value = True
     assert resolver.is_authorized(_run(runtime_paths)) is True
+    bot.running = False
+    assert resolver.is_authorized(_run(runtime_paths)) is None
 
 
 @pytest.mark.asyncio
@@ -902,6 +1060,46 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
     manager.request_revocation.assert_called_once()
     manager.revoke.assert_awaited_once()
     assert store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(tmp_path: Path) -> None:
+    """A transient bot restart is not denial, but it cannot authorize a broker call."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    token = "secret-token"  # noqa: S105
+    run = _run(runtime_paths, state=ScriptRunState.STARTING)
+    created = store.create_run(replace(run, token_hash=hashlib.sha256(token.encode()).hexdigest()))
+    running = store.transition_run(created.run_id, state=ScriptRunState.RUNNING, worker_id="worker-1")
+    resolver = SimpleNamespace(is_authorized=MagicMock(return_value=None))
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        return store.request_cancel(run_id, reason=reason)
+
+    manager = SimpleNamespace(
+        request_revocation=MagicMock(side_effect=request_revocation),
+        revoke=AsyncMock(return_value=running),
+        reconcile_durable=AsyncMock(return_value=running),
+    )
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)  # type: ignore[arg-type]
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=resolver,
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+
+    await runtime.reconcile_once()
+
+    durable = store.get_run(running.run_id)
+    assert durable.cancel_requested_at is None
+    manager.request_revocation.assert_not_called()
+    manager.reconcile_durable.assert_awaited_once_with(run_id=running.run_id)
+    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        broker.authenticate(running.run_id, f"Bearer {token}")
 
 
 @pytest.mark.asyncio
@@ -1094,7 +1292,7 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
     """A broker-close failure cannot publish a replacement over a revoked live process."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
+    run = _stored_run_pinned_to_worker(store, runtime_paths, run_id=f"script-{'d' * 32}")
     store.claim_call(
         run_id=run.run_id,
         call_id="call-1",
@@ -1104,10 +1302,11 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
     resolver = _FailingApprovalSettlementResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
     lease = _Lease(_Backend([_worker(run)]))
+    worker_client = _TermThenKillWorkerClient()
     manager = ScriptRunManager(
         store=store,
         broker=broker,
-        worker_client=_TerminatingWorkerClient(),  # type: ignore[arg-type]
+        worker_client=worker_client,  # type: ignore[arg-type]
         worker_backend=lease.manager,
         gateway_url="http://primary.test/api/script-gateway",
         cancellation_grace_seconds=0,
@@ -1139,8 +1338,12 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
     durable = store.get_run(run.run_id)
     assert durable.cancel_requested_at is not None
     assert durable.state is ScriptRunState.RUNNING
+    assert durable.finished_at is not None
+    assert durable.exit_code == 137
+    assert durable.output == "terminated output"
+    assert worker_client.cancel_forces == [False, True]
     assert store.pending_calls(run.run_id) == []
-    assert resolver.settlement_attempts == [run.run_id]
+    assert resolver.settlement_attempts == [run.run_id, run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
     assert manager.worker_replacement_in_progress is False
@@ -1952,7 +2155,7 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=SimpleNamespace(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),
@@ -2009,7 +2212,7 @@ async def test_shutdown_closes_launch_admission_before_snapshotting_runs(tmp_pat
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=SimpleNamespace(
             begin_shutdown=begin_shutdown,
             worker_backend=None,
@@ -2056,7 +2259,7 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=SimpleNamespace(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),
@@ -2122,7 +2325,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_without_releasi
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=manager,
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -2179,7 +2382,7 @@ async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=manager,
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -2357,7 +2560,7 @@ async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_pa
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
-        broker=SimpleNamespace(_cleanup_tasks=set()),
+        broker=_broker_lifecycle_stub(),
         manager=SimpleNamespace(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),

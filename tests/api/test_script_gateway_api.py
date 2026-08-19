@@ -265,6 +265,7 @@ async def test_script_gateway_returns_the_durable_conflict_after_slow_claim_reso
     runtime_resolver = MagicMock(spec=ScriptRuntimeResolver)
     runtime_resolver.is_authorized.return_value = True
     broker = ScriptToolBroker(store=BlockingStore(), runtime_resolver=runtime_resolver)  # type: ignore[arg-type]
+    broker.open_call_admission()
 
     async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
         response = await client.post(

@@ -431,11 +431,7 @@ class ScriptRunManager:
         if durable.state in _TERMINAL_STATES:
             return
         if durable.cancel_requested_at is not None:
-            failure_state = (
-                ScriptRunState.INTERRUPTED
-                if durable.cancellation_reason in _INTERRUPTION_REASONS
-                else ScriptRunState.CANCELLED
-            )
+            failure_state = _cancelled_state_for(durable)
         else:
             failure_state = (
                 ScriptRunState.INTERRUPTED if isinstance(failure, asyncio.CancelledError) else ScriptRunState.FAILED
@@ -465,7 +461,7 @@ class ScriptRunManager:
         return await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
-            state=ScriptRunState.CANCELLED,
+            state=_cancelled_state_for(run),
         )
 
     async def status(
@@ -644,16 +640,11 @@ class ScriptRunManager:
         if run.finished_at is not None:
             return await self._finalize_observed_exit(run, broker_revoked=broker_revoked)
         if run.cancel_requested_at is not None:
-            terminal_state = (
-                ScriptRunState.INTERRUPTED
-                if run.cancellation_reason in _INTERRUPTION_REASONS
-                else ScriptRunState.CANCELLED
-            )
             return await self._terminate_durable_run(
                 run,
                 force=False,
                 reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
-                terminal_state=terminal_state,
+                terminal_state=_cancelled_state_for(run),
                 broker_revoked=broker_revoked,
             )
         if _runtime_expired(run):
@@ -1205,6 +1196,10 @@ def _bounded_output(output: str) -> str:
     if len(encoded) <= _MAX_OUTPUT_BYTES:
         return output
     return encoded[-_MAX_OUTPUT_BYTES:].decode("utf-8", errors="ignore")
+
+
+def _cancelled_state_for(run: ScriptRunRecord) -> ScriptRunState:
+    return ScriptRunState.INTERRUPTED if run.cancellation_reason in _INTERRUPTION_REASONS else ScriptRunState.CANCELLED
 
 
 def _terminal_state_for_observed_exit(run: ScriptRunRecord) -> ScriptRunState:

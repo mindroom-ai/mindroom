@@ -184,11 +184,11 @@ class _LiveScriptRuntimeResolver:
     worker_backend_provider: Callable[[ScriptRunRecord | None], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
-        """Check the durable owner against current room, reply, and membership authority."""
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        """Return confirmed authority, denial, or transient live-runtime unavailability."""
         bot = self.bot_provider(run.agent_name)
         if bot is None or not bot.running:
-            return False
+            return None
         current_config = bot.config if config is None else config
         return is_sender_allowed_for_agent_reply_in_room(
             run.owner_user_id,
@@ -400,6 +400,7 @@ class ScriptRuntimeLifecycle:
                 return
             if not self._start_requested or not self._api_ready.is_set():
                 return
+            self.broker.close_call_admission()
             await self.manager.begin_startup_reconciliation()
             bind_script_run_manager(self.manager)
             self._started = True
@@ -422,6 +423,7 @@ class ScriptRuntimeLifecycle:
 
     async def unbind_api(self) -> None:
         """Withdraw gateway readiness without replacing lifecycle-owned services."""
+        self.broker.close_call_admission()
         self._api_ready.clear()
         self.manager.gateway_url = ""
         startup_task, self._startup_task = self._startup_task, None
@@ -633,7 +635,8 @@ class ScriptRuntimeLifecycle:
         unauthorized_ids = {
             run.run_id
             for run in runs
-            if authorization_config is not None and not self.resolver.is_authorized(run, config=authorization_config)
+            if authorization_config is not None
+            and self.resolver.is_authorized(run, config=authorization_config) is False
         }
         affected_agents = removed_agents | isolation_changes | script_tool_removals
         affected = [
@@ -749,18 +752,14 @@ class ScriptRuntimeLifecycle:
         broker_results = await asyncio.gather(
             *(revoke_broker_ownership(run) for run in runs),
         )
-        broker_revoked = [run for run, revoked in zip(runs, broker_results, strict=True) if revoked]
-        _require_successful_worker_replacement_stage(
-            runs,
-            broker_results,
-            worker_configuration_changed=require_worker_success,
-            error="Worker replacement did not close broker ownership for every active worker run.",
-        )
 
-        async def reconcile_run(run: ScriptRunRecord) -> bool:
+        async def reconcile_run(run: ScriptRunRecord, *, broker_revoked: bool) -> bool:
             async with semaphore:
                 try:
-                    await self.manager.reconcile_durable(run_id=run.run_id, broker_revoked=True)
+                    await self.manager.reconcile_durable(
+                        run_id=run.run_id,
+                        broker_revoked=broker_revoked,
+                    )
                 except (
                     ScriptRunManagerError,
                     ScriptWorkerError,
@@ -776,9 +775,20 @@ class ScriptRuntimeLifecycle:
                     return False
                 return True
 
-        reconciliation_results = await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
+        reconciliation_results = await asyncio.gather(
+            *(
+                reconcile_run(run, broker_revoked=broker_revoked)
+                for run, broker_revoked in zip(runs, broker_results, strict=True)
+            ),
+        )
         _require_successful_worker_replacement_stage(
-            broker_revoked,
+            runs,
+            broker_results,
+            worker_configuration_changed=require_worker_success,
+            error="Worker replacement did not close broker ownership for every active worker run.",
+        )
+        _require_successful_worker_replacement_stage(
+            runs,
             reconciliation_results,
             worker_configuration_changed=require_worker_success,
             error="Worker replacement did not complete process reconciliation for every active worker run.",
@@ -797,7 +807,7 @@ class ScriptRuntimeLifecycle:
         except WorkerBackendError:
             logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        unauthorized = [run for run in runs if not self.resolver.is_authorized(run)]
+        unauthorized = [run for run in runs if self.resolver.is_authorized(run) is False]
         if unauthorized:
             await self._interrupt_runs(
                 unauthorized,
@@ -832,14 +842,18 @@ class ScriptRuntimeLifecycle:
 
     async def _startup_cleanup_pass(self) -> None:
         """Revoke and retire every inherited nonterminal run before reopening launches."""
+        inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        durably_revoked = await self._durably_revoke_runs(
+            inherited,
+            reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
+        )
         try:
             await self._refresh_worker_backend()
         except WorkerBackendError:
             logger.warning("script_worker_backend_refresh_pending", exc_info=True)
-        inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        if inherited:
-            await self._interrupt_runs(
-                inherited,
+        if durably_revoked:
+            await self._interrupt_durably_revoked_runs(
+                durably_revoked,
                 reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
                 require_worker_success=False,
             )
@@ -847,6 +861,7 @@ class ScriptRuntimeLifecycle:
         if unfinished:
             return
         await self.manager.end_startup_reconciliation()
+        self.broker.open_call_admission()
         self._startup_cleanup_pending = False
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
@@ -931,6 +946,7 @@ class ScriptRuntimeLifecycle:
 
     async def shutdown(self, *, timeout_seconds: float = 5.0) -> None:
         """Run bounded final reconciliation, then clear the process-local tool binding."""
+        self.broker.close_call_admission()
         shutdown_deadline = asyncio.get_running_loop().time() + timeout_seconds
         was_activated = self._activated_once
         self._start_requested = False

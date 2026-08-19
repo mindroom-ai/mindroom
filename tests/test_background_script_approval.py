@@ -56,6 +56,7 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_pa
             worker_id=durable_run.worker_id,
         ),
     )
+    broker.open_call_admission()
     token_path = worker_client.launch_paths[durable_run.run_id][1]
     request = ScriptToolCallRequest(
         run_id=durable_run.run_id,

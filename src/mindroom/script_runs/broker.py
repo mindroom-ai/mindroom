@@ -9,6 +9,7 @@ import inspect
 import json
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from threading import Event
 from typing import TYPE_CHECKING, Protocol
 
 from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
@@ -106,8 +107,8 @@ class ScriptCallPreparationPendingError(RuntimeError):
 class ScriptRuntimeResolver(Protocol):
     """Resolve live runtime and approval services for one durable script owner."""
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
-        """Return whether the durable owner still has live room-and-agent authority."""
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        """Return allowed, denied, or unavailable live room-and-agent authority."""
         ...
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
@@ -236,6 +237,20 @@ class ScriptToolBroker:
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _call_admission_open: Event = field(default_factory=Event, init=False)
+
+    def open_call_admission(self) -> None:
+        """Allow new call claims only after lifecycle startup cleanup completes."""
+        self._call_admission_open.set()
+
+    def close_call_admission(self) -> None:
+        """Reject new call claims before lifecycle authority changes begin."""
+        self._call_admission_open.clear()
+
+    def _require_call_admission(self) -> None:
+        if not self._call_admission_open.is_set():
+            msg = "Background script call is unavailable."
+            raise ScriptBrokerAuthenticationError(msg)
 
     def _prepare_call(self, request: ScriptToolCallRequest, token: str) -> _PreparedScriptCall:
         run = self.store.require_active_capability(request.run_id, token)
@@ -257,6 +272,7 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> _PreparedScriptCall:
+        self._require_call_admission()
         token = self.authenticate(request.run_id, authorization)
         return self._prepare_call(request, token)
 
@@ -361,7 +377,7 @@ class ScriptToolBroker:
             or not matches
             or run.cancel_requested_at is not None
             or run.state not in _ACTIVE_RUN_STATES
-            or not self.runtime_resolver.is_authorized(run)
+            or self.runtime_resolver.is_authorized(run) is not True
         ):
             msg = "Background script call is unavailable."
             raise ScriptBrokerAuthenticationError(msg)
@@ -408,6 +424,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate and durably claim one gateway call before acknowledging it."""
+        self._require_call_admission()
         return await run_coroutine_until_complete(
             self._accept_prepared_call(request, authorization=authorization),
         )
@@ -657,7 +674,7 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
-        if not self.runtime_resolver.is_authorized(run, config=context.current_config):
+        if self.runtime_resolver.is_authorized(run, config=context.current_config) is not True:
             raise _CurrentGrantRevokedError
         if call.grant not in run.grants:
             raise _CurrentGrantRevokedError
