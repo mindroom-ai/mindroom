@@ -18,6 +18,7 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
 )
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
+from mindroom.workers.backends._metadata_store import remove_worker_state_root
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -546,6 +547,37 @@ class KubernetesWorkerBackend:
         """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
         return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Remove one exact Kubernetes worker and its persistent run state."""
+        with self._worker_lock(worker_key):
+            worker_id = self._worker_id(worker_key)
+            try:
+                deployment = self._resources.read_deployment(worker_id)
+            except Exception as exc:
+                msg = f"Failed to read Kubernetes worker '{worker_key}' for retirement: {exc}"
+                raise WorkerBackendError(msg) from exc
+            if (
+                deployment is not None
+                and self._handle_from_deployment(deployment, now=time.time()).worker_key != worker_key
+            ):
+                msg = f"Kubernetes worker metadata does not match retirement key '{worker_key}'."
+                raise WorkerBackendError(msg)
+            try:
+                self._resources.delete_deployment(
+                    worker_id,
+                    timeout_seconds=self.config.ready_timeout_seconds,
+                )
+                self._resources.delete_service(worker_id)
+                self._resources.delete_secret(worker_id)
+                state_root = self.storage_root / self._state_subpath(worker_key)
+                prefix = self.config.storage_subpath_prefix.strip().strip("/")
+                workers_root = self.storage_root / prefix if prefix else self.storage_root
+                remove_worker_state_root(state_root, workers_root=workers_root)
+            except Exception as exc:
+                msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
+            self._invalidate_ready_worker(worker_key)
 
     def _cleanup_idle_deployments(
         self,

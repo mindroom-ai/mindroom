@@ -377,6 +377,10 @@ class DockerProjectionManager:
             return {}
         return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
+    def retire_worker_projection(self, paths: LocalWorkerStatePaths) -> None:
+        """Remove every projected config snapshot owned by one exact worker root."""
+        _remove_path(self._worker_projected_configs_root(paths))
+
     def _prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
         """Remove stale projected config snapshots for one worker root."""
         projection_root = self._worker_projected_configs_root(paths)

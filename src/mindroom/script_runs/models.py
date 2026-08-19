@@ -115,3 +115,15 @@ def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
         msg = "Background scripts require a resolved user-agent worker key."
         raise ValueError(msg)
     return ":".join((*parts[:-1], run_id, parts[-1]))
+
+
+def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:
+    """Return whether *worker_key* is the exact user-agent key pinned to *run_id*."""
+    parts = worker_key.split(":")
+    if len(parts) < 6 or parts[-2] != run_id:
+        return False
+    base_worker_key = ":".join((*parts[:-2], parts[-1]))
+    try:
+        return script_worker_key_for_run(base_worker_key, run_id) == worker_key
+    except ValueError:
+        return False

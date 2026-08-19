@@ -26,6 +26,7 @@ from mindroom.constants import (
     startup_manifest_sha256,
 )
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -2674,6 +2675,54 @@ def test_kubernetes_backend_cleanup_idle_deletes_service_but_keeps_deployment() 
     assert apps_api.deployments[handle.worker_id].spec.replicas == 0
     assert handle.worker_id not in core_api.services
     assert handle.worker_id not in core_api.secrets
+
+
+def test_kubernetes_backend_retires_only_one_exact_run_worker_idempotently(tmp_path: Path) -> None:
+    """Kubernetes retirement removes one run's resources and state while preserving its ordinary worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'d' * 32}")
+    ordinary = backend.ensure_worker(WorkerSpec(base_key, private_agent_names=frozenset()), now=1.0)
+    retired = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    retired_root = backend.storage_root / "workers" / worker_dir_name(run_key)
+    (retired_root / "workspace").mkdir(parents=True, exist_ok=True)
+    (retired_root / "workspace" / "note.txt").write_text("retire me", encoding="utf-8")
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert retired.worker_id not in apps_api.deployments
+    assert retired.worker_id not in core_api.services
+    assert retired.worker_id not in core_api.secrets
+    assert retired_root.exists() is False
+    assert ordinary.worker_id in apps_api.deployments
+    assert ordinary.worker_id in core_api.services
+    assert ordinary.worker_id in core_api.secrets
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_kubernetes_backend_refuses_retirement_when_live_deployment_key_mismatches(tmp_path: Path) -> None:
+    """The computed resource name cannot authorize deletion when its live annotation differs."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'0' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    apps_api.deployments[handle.worker_id].metadata.annotations[ANNOTATION_WORKER_KEY] = base_key
+
+    with pytest.raises(WorkerBackendError, match="does not match retirement key"):
+        backend.retire_worker(run_key)
+
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id in core_api.services
+    assert handle.worker_id in core_api.secrets
 
 
 def _wire_fake_apis(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi, core_api: _FakeCoreApi) -> None:

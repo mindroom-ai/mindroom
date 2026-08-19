@@ -31,8 +31,13 @@ from mindroom.orchestration.script_runtime import (
 )
 from mindroom.script_runs.broker import ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
-from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
-from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore
+from mindroom.script_runs.models import (
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+    script_worker_key_for_run,
+)
+from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import (
     ScriptWorkerError,
     WorkerScriptCancel,
@@ -46,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
@@ -145,7 +151,7 @@ class _Backend:
 
 @dataclass
 class _Lease:
-    manager: _Backend
+    manager: WorkerBackend
     generation_id: str = "backend-generation-a"
     released: bool = False
     on_release: Callable[[], None] | None = None
@@ -316,6 +322,27 @@ def _stored_run(
     run_id: str = "run-1",
 ) -> ScriptRunRecord:
     created = store.create_run(_run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING))
+    return store.transition_run(
+        created.run_id,
+        state=ScriptRunState.RUNNING,
+        worker_id="worker-1",
+    )
+
+
+def _stored_run_pinned_to_worker(
+    store: ScriptRunStore,
+    runtime_paths: RuntimePaths,
+    *,
+    run_id: str,
+) -> ScriptRunRecord:
+    run = _run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING)
+    assert run.worker_key is not None
+    created = store.create_run(
+        replace(
+            run,
+            worker_key=script_worker_key_for_run(run.worker_key, run_id),
+        ),
+    )
     return store.transition_run(
         created.run_id,
         state=ScriptRunState.RUNNING,
@@ -1752,7 +1779,10 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 
     reconciliation_started = asyncio.Event()
 
-    async def blocking_shutdown_pass(_runtime: ScriptRuntimeLifecycle) -> None:
+    async def blocking_shutdown_pass(
+        _runtime: ScriptRuntimeLifecycle,
+        _runs: object,
+    ) -> None:
         reconciliation_started.set()
         await asyncio.Event().wait()
 
@@ -1761,13 +1791,167 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
     try:
         await asyncio.wait_for(reconciliation_started.wait(), timeout=1.0)
         await asyncio.wait_for(shutdown, timeout=1.0)
-        assert release_started.is_set()
+        assert await asyncio.to_thread(release_started.wait, 1.0)
         assert lease_released.is_set() is False
     finally:
         release_lease.set()
 
     assert await asyncio.to_thread(lease_released.wait, 1.0)
     assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_release_lease(
+    tmp_path: Path,
+) -> None:
+    """Queued revocations become durable before the bounded cleanup phase can release ownership."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    runs = [_stored_run(store, runtime_paths, run_id=f"script-{digit * 32}") for digit in ("1", "2", "3")]
+    first_revocation_started = threading.Event()
+    release_revocations = threading.Event()
+    lease_released = threading.Event()
+    release_observations: list[set[str]] = []
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        if run_id == runs[0].run_id:
+            first_revocation_started.set()
+            assert release_revocations.wait(timeout=1.0)
+        return store.request_cancel(run_id, reason=reason)
+
+    def observe_release() -> None:
+        release_observations.append(
+            {run.run_id for run in runs if store.get_run(run.run_id).cancel_requested_at is not None},
+        )
+        lease_released.set()
+
+    lease = _Lease(_Backend([_worker(run) for run in runs]), on_release=observe_release)
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=SimpleNamespace(
+            worker_backend=lease.manager,
+            request_revocation=request_revocation,
+            revoke=AsyncMock(),
+            reconcile_durable=AsyncMock(),
+        ),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        pass_concurrency=1,
+    )
+    runtime._activated_once = True
+    runtime._current_worker_lease = lease
+
+    shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
+    try:
+        assert await asyncio.to_thread(first_revocation_started.wait, 1.0)
+        assert await asyncio.to_thread(lease_released.wait, 0.2) is False
+        release_revocations.set()
+        await asyncio.wait_for(shutdown, timeout=1.0)
+        assert await asyncio.to_thread(lease_released.wait, 1.0)
+    finally:
+        release_revocations.set()
+        if not shutdown.done():
+            await asyncio.wait_for(shutdown, timeout=1.0)
+
+    expected_run_ids = {run.run_id for run in runs}
+    assert release_observations == [expected_run_ids]
+    assert {run.run_id for run in runs if store.get_run(run.run_id).cancel_requested_at is not None} == expected_run_ids
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancellation_finishes_durable_revocation_without_releasing_lease(tmp_path: Path) -> None:
+    """Caller cancellation cannot abandon accepted durable writes or lifecycle ownership."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    runs = [_stored_run(store, runtime_paths, run_id=f"script-{digit * 32}") for digit in ("4", "5")]
+    first_revocation_started = threading.Event()
+    release_revocations = threading.Event()
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        if run_id == runs[0].run_id:
+            first_revocation_started.set()
+            assert release_revocations.wait(timeout=1.0)
+        return store.request_cancel(run_id, reason=reason)
+
+    lease = _Lease(_Backend([_worker(run) for run in runs]))
+    manager = SimpleNamespace(
+        worker_backend=lease.manager,
+        request_revocation=request_revocation,
+        revoke=AsyncMock(),
+        reconcile_durable=AsyncMock(),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        pass_concurrency=1,
+    )
+    runtime._activated_once = True
+    runtime._current_worker_lease = lease
+
+    shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
+    try:
+        assert await asyncio.to_thread(first_revocation_started.wait, 1.0)
+        shutdown.cancel()
+        done, _pending = await asyncio.wait({shutdown}, timeout=0.1)
+        assert done == set()
+        release_revocations.set()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+    finally:
+        release_revocations.set()
+
+    assert all(store.get_run(run.run_id).cancel_requested_at is not None for run in runs)
+    assert lease.released is False
+    assert runtime._current_worker_lease is lease
+    assert manager.worker_backend is lease.manager
+
+
+@pytest.mark.asyncio
+async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership(tmp_path: Path) -> None:
+    """A failed cancellation write cannot detach the authoritative worker backend."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths, run_id=f"script-{'6' * 32}")
+
+    def request_revocation(*, run_id: str, reason: str) -> ScriptRunRecord:
+        del run_id, reason
+        msg = "durable store unavailable"
+        raise ScriptRunStoreError(msg)
+
+    lease = _Lease(_Backend([_worker(run)]))
+    manager = SimpleNamespace(
+        worker_backend=lease.manager,
+        request_revocation=request_revocation,
+        revoke=AsyncMock(),
+        reconcile_durable=AsyncMock(),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._activated_once = True
+    runtime._current_worker_lease = lease
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="durably revoke every active run"):
+        await runtime.shutdown(timeout_seconds=0.1)
+
+    assert store.get_run(run.run_id).cancel_requested_at is None
+    assert lease.released is False
+    assert runtime._current_worker_lease is lease
+    assert manager.worker_backend is lease.manager
 
 
 @pytest.mark.asyncio
@@ -2191,6 +2375,7 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
         worker_backend=None,
         reconcile_durable=reconcile_durable,
         cleanup_snapshot=AsyncMock(return_value=True),
+        request_revocation=store.request_cancel,
     )
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -2237,6 +2422,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
         worker_backend=None,
         reconcile_durable=reconcile_durable,
         cleanup_snapshot=AsyncMock(return_value=True),
+        request_revocation=store.request_cancel,
     )
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -2260,13 +2446,19 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
 
 @pytest.mark.asyncio
 async def test_terminal_run_is_pruned_only_after_retention_and_snapshot_cleanup(tmp_path: Path) -> None:
-    """Retention prunes a terminal row only after its source snapshot is gone."""
+    """Retention prunes after snapshot cleanup when the exact worker is already absent."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
-    running = _stored_run(store, runtime_paths)
+    run_id = f"script-{'e' * 32}"
+    running = _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id)
     terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
     assert terminal.finished_at is not None
+    backend = StaticSandboxRunnerBackend(
+        api_root="http://runner",
+        auth_token="token",  # noqa: S106
+    )
     manager = SimpleNamespace(
+        worker_backend=backend,
         revoke=AsyncMock(),
         reconcile=AsyncMock(),
         cleanup_snapshot=AsyncMock(return_value=True),
@@ -2284,16 +2476,164 @@ async def test_terminal_run_is_pruned_only_after_retention_and_snapshot_cleanup(
         worker_lease_provider=lambda: None,
         retention_seconds=60.0,
     )
+    runtime._current_worker_lease = _Lease(backend)
     finished_at = datetime.fromisoformat(terminal.finished_at)
 
     await runtime.prune_once(now=finished_at + timedelta(seconds=59))
-    assert store.get_run("run-1").state is ScriptRunState.EXITED
+    assert store.get_run(run_id).state is ScriptRunState.EXITED
     manager.cleanup_snapshot.assert_not_awaited()
 
     await runtime.prune_once(now=finished_at + timedelta(seconds=61))
     manager.cleanup_snapshot.assert_awaited_once_with(terminal)
     with pytest.raises(ScriptRunNotFoundError):
-        store.get_run("run-1")
+        store.get_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_prunes_only_after_exact_worker_retirement(tmp_path: Path) -> None:
+    """Snapshot cleanup and exact worker retirement both precede durable row deletion."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    running = _stored_run_pinned_to_worker(
+        store,
+        runtime_paths,
+        run_id=f"script-{'7' * 32}",
+    )
+    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+    assert terminal.worker_key is not None
+    actions: list[str] = []
+
+    @dataclass
+    class _RetiringBackend:
+        def retire_worker(self, worker_key: str) -> None:
+            assert worker_key == terminal.worker_key
+            assert store.get_run(terminal.run_id).state is ScriptRunState.EXITED
+            actions.append("retire-worker")
+
+    async def cleanup_snapshot(run: ScriptRunRecord) -> bool:
+        assert run == terminal
+        actions.append("cleanup-snapshot")
+        return True
+
+    backend = _RetiringBackend()
+    manager = SimpleNamespace(worker_backend=backend, cleanup_snapshot=cleanup_snapshot)
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.0,
+    )
+    runtime._current_worker_lease = _Lease(backend)
+    finished_at = datetime.fromisoformat(terminal.finished_at)
+
+    await runtime.prune_once(now=finished_at + timedelta(seconds=1))
+
+    assert actions == ["cleanup-snapshot", "retire-worker"]
+    with pytest.raises(ScriptRunNotFoundError):
+        store.get_run(terminal.run_id)
+
+
+@pytest.mark.asyncio
+async def test_worker_retirement_failure_keeps_terminal_run_for_retry(tmp_path: Path) -> None:
+    """An ambiguous first retirement keeps durable identity until a later pass confirms success."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    running = _stored_run_pinned_to_worker(
+        store,
+        runtime_paths,
+        run_id=f"script-{'8' * 32}",
+    )
+    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+    attempts = 0
+
+    @dataclass
+    class _RetryingBackend:
+        def retire_worker(self, worker_key: str) -> None:
+            nonlocal attempts
+            assert worker_key == terminal.worker_key
+            attempts += 1
+            if attempts == 1:
+                msg = "retirement outcome unavailable"
+                raise WorkerBackendError(msg)
+
+    backend = _RetryingBackend()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(worker_backend=backend, cleanup_snapshot=AsyncMock(return_value=True)),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.0,
+    )
+    runtime._current_worker_lease = _Lease(backend)
+    now = datetime.fromisoformat(terminal.finished_at) + timedelta(seconds=1)
+
+    await runtime.prune_once(now=now)
+    assert store.get_run(terminal.run_id).state is ScriptRunState.EXITED
+
+    await runtime.prune_once(now=now)
+    assert attempts == 2
+    with pytest.raises(ScriptRunNotFoundError):
+        store.get_run(terminal.run_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ordinary_worker_key",
+    [
+        "v1:t:shared:watcher",
+        "v1:t:user:alice",
+        "v1:t:user_agent:alice:watcher",
+    ],
+)
+async def test_script_retention_refuses_to_retire_ordinary_worker_keys(
+    tmp_path: Path,
+    ordinary_worker_key: str,
+) -> None:
+    """Only the durable run's exact run-pinned worker key may cross the destructive lifecycle seam."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run_id = f"script-{'9' * 32}"
+    created = store.create_run(
+        replace(
+            _run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING),
+            worker_key=ordinary_worker_key,
+        ),
+    )
+    store.transition_run(created.run_id, state=ScriptRunState.RUNNING, worker_id="worker-1")
+    terminal = store.transition_run(run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+
+    @dataclass
+    class _ProtectedBackend:
+        def retire_worker(self, worker_key: str) -> None:
+            msg = f"must not retire {worker_key}"
+            raise AssertionError(msg)
+
+    backend = _ProtectedBackend()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(worker_backend=backend, cleanup_snapshot=AsyncMock(return_value=True)),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.0,
+    )
+    runtime._current_worker_lease = _Lease(backend)
+
+    await runtime.prune_once(now=datetime.fromisoformat(terminal.finished_at) + timedelta(seconds=1))
+
+    assert store.get_run(run_id).state is ScriptRunState.EXITED
 
 
 @pytest.mark.asyncio

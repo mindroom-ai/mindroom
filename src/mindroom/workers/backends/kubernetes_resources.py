@@ -854,6 +854,11 @@ class KubernetesResourceManager:
         """Delete one worker Deployment, ignoring 404s."""
         self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
 
+    def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Delete one worker Deployment and confirm that it is absent."""
+        self._delete_deployment(deployment_name)
+        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""
         self._delete_object(self._core.delete_namespaced_service, service_name)

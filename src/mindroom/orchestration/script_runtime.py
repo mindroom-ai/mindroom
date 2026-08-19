@@ -23,7 +23,12 @@ from mindroom.script_runs.manager import (
     ScriptRunManagerError,
     script_execution_uses_worker,
 )
-from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.models import (
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+    script_worker_key_belongs_to_run,
+)
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
@@ -626,6 +631,20 @@ class ScriptRuntimeLifecycle:
         require_worker_success: bool,
     ) -> None:
         """Durably revoke, close broker work, and reconcile selected processes in phases."""
+        durably_revoked = await self._durably_revoke_runs(runs, reason_for=reason_for)
+        await self._interrupt_durably_revoked_runs(
+            durably_revoked,
+            reason_for=reason_for,
+            require_worker_success=require_worker_success,
+        )
+
+    async def _durably_revoke_runs(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        reason_for: Callable[[ScriptRunRecord], str],
+    ) -> Sequence[ScriptRunRecord]:
+        """Persist cancellation intent for every selected run before later cleanup."""
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         async def persist_revocation(run: ScriptRunRecord) -> bool:
@@ -650,7 +669,17 @@ class ScriptRuntimeLifecycle:
         if not all(durable_results):
             msg = "Worker replacement did not durably revoke every active run."
             raise _ScriptRuntimeLifecycleError(msg)
-        durably_revoked = [run for run, persisted in zip(runs, durable_results, strict=True) if persisted]
+        return [run for run, persisted in zip(runs, durable_results, strict=True) if persisted]
+
+    async def _interrupt_durably_revoked_runs(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        reason_for: Callable[[ScriptRunRecord], str],
+        require_worker_success: bool,
+    ) -> None:
+        """Close broker work and reconcile processes after durable revocation."""
+        semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
             async with semaphore:
@@ -675,11 +704,11 @@ class ScriptRuntimeLifecycle:
                 return True
 
         broker_results = await asyncio.gather(
-            *(revoke_broker_ownership(run) for run in durably_revoked),
+            *(revoke_broker_ownership(run) for run in runs),
         )
-        broker_revoked = [run for run, revoked in zip(durably_revoked, broker_results, strict=True) if revoked]
+        broker_revoked = [run for run, revoked in zip(runs, broker_results, strict=True) if revoked]
         _require_successful_worker_replacement_stage(
-            durably_revoked,
+            runs,
             broker_results,
             worker_configuration_changed=require_worker_success,
             error="Worker replacement did not close broker ownership for every active worker run.",
@@ -805,18 +834,44 @@ class ScriptRuntimeLifecycle:
                 cleaned = await self.manager.cleanup_snapshot(run)
                 if cleaned is False:
                     continue
+                worker_retired = await self._retire_run_worker(run)
+                if not worker_retired:
+                    continue
                 await asyncio.to_thread(
                     self.store.prune_terminal_run,
                     run.run_id,
                     finished_before=finished_before,
                 )
-            except (ScriptRunManagerError, _ScriptRuntimeUnavailableError):
+            except (ScriptRunManagerError, WorkerBackendError, _ScriptRuntimeUnavailableError):
                 logger.warning(
                     "script_run_retention_pending",
                     run_id=run.run_id,
                     agent_name=run.agent_name,
                     exc_info=True,
                 )
+
+    async def _retire_run_worker(self, run: ScriptRunRecord) -> bool:
+        """Retire only the exact one-shot worker durably pinned to *run*."""
+        if run.local_unsafe:
+            return run.worker_key is None and run.worker_id is None
+        worker_key = run.worker_key
+        if worker_key is None or not script_worker_key_belongs_to_run(worker_key, run.run_id):
+            logger.warning(
+                "script_run_worker_retirement_rejected",
+                run_id=run.run_id,
+                agent_name=run.agent_name,
+            )
+            return False
+        backend = self._worker_backend_for(run)
+        if backend is None:
+            logger.warning(
+                "script_run_worker_retirement_pending",
+                run_id=run.run_id,
+                agent_name=run.agent_name,
+            )
+            return False
+        await asyncio.to_thread(backend.retire_worker, worker_key)
+        return True
 
     async def _complete_pass(self) -> None:
         await self._reconcile_pass()
@@ -838,8 +893,16 @@ class ScriptRuntimeLifecycle:
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
 
+        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        durably_revoked = await run_coroutine_until_complete(
+            self._durably_revoke_runs(
+                runs,
+                reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
+            ),
+        )
         try:
             await self._run_shutdown_cleanup(
+                durably_revoked,
                 deadline=shutdown_deadline,
                 timeout_seconds=timeout_seconds,
             )
@@ -854,10 +917,16 @@ class ScriptRuntimeLifecycle:
                 timeout_seconds=timeout_seconds,
             )
 
-    async def _run_shutdown_cleanup(self, *, deadline: float, timeout_seconds: float) -> None:
+    async def _run_shutdown_cleanup(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        deadline: float,
+        timeout_seconds: float,
+    ) -> None:
         try:
             await asyncio.wait_for(
-                self._interrupt_and_prune_for_shutdown(),
+                self._interrupt_and_prune_for_shutdown(runs),
                 timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
             )
         except TimeoutError:
@@ -869,9 +938,8 @@ class ScriptRuntimeLifecycle:
         if not cleanup_drained:
             logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
 
-    async def _interrupt_and_prune_for_shutdown(self) -> None:
-        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        await self._interrupt_runs(
+    async def _interrupt_and_prune_for_shutdown(self, runs: Sequence[ScriptRunRecord]) -> None:
+        await self._interrupt_durably_revoked_runs(
             runs,
             reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
             require_worker_success=False,

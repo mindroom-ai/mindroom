@@ -49,6 +49,7 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
+    remove_worker_state_root,
     save_worker_metadata,
 )
 from mindroom.workers.backends.docker_config import (
@@ -592,6 +593,35 @@ class DockerWorkerBackend:
                     self._remove_container(container)
                     self._reconcile_missing_container_metadata(paths, metadata, None)
         return sorted(cleaned, key=lambda handle: handle.last_used_at, reverse=True)
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Remove one exact Docker worker container and all backend-owned state."""
+        with self._worker_lock(worker_key):
+            paths = self._state_paths(worker_key)
+            metadata = self._load_metadata(paths)
+            if metadata is not None and metadata.worker_key != worker_key:
+                msg = f"Docker worker metadata does not match retirement key '{worker_key}'."
+                raise WorkerBackendError(msg)
+            container_name = (
+                self._container_name_for_worker(worker_key) if metadata is None else metadata.container_name
+            )
+            container = self._read_container(container_name)
+            if container is not None and not self._container_env_matches(
+                container,
+                expected_env={_DEDICATED_WORKER_KEY_ENV: worker_key},
+            ):
+                msg = f"Docker worker container does not match retirement key '{worker_key}'."
+                raise WorkerBackendError(msg)
+            self._remove_container(container)
+            if self._read_container(container_name) is not None:
+                msg = f"Docker worker '{worker_key}' still exists after retirement."
+                raise WorkerBackendError(msg)
+            try:
+                self._projection_manager.retire_worker_projection(paths)
+                remove_worker_state_root(paths.root, workers_root=self._workers_root)
+            except (OSError, ValueError) as exc:
+                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""

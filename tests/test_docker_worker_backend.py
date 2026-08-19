@@ -26,7 +26,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
 )
-from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -2075,6 +2075,57 @@ def test_docker_backend_cleanup_stops_idle_workers(
     worker_file.parent.mkdir(parents=True, exist_ok=True)
     worker_file.write_text("still here", encoding="utf-8")
     assert worker_file.read_text(encoding="utf-8") == "still here"
+
+
+def test_docker_backend_retires_only_one_exact_run_worker_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement removes one run container and root without touching its ordinary worker."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    ordinary = backend.ensure_worker(WorkerSpec(base_key, private_agent_names=frozenset()), now=1.0)
+    retired = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    retired_root = worker_root_path(tmp_path, run_key)
+    retired_projection_root = backend._projection_manager._worker_projected_configs_root(
+        local_worker_state_paths_for_root(retired_root),
+    )
+    (retired_root / "workspace").mkdir(parents=True, exist_ok=True)
+    (retired_root / "workspace" / "note.txt").write_text("retire me", encoding="utf-8")
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[retired.worker_id].removed == 1
+    assert fake_client.containers.by_name[ordinary.worker_id].removed == 0
+    assert retired_root.exists() is False
+    assert retired_projection_root.exists() is False
+    assert worker_root_path(tmp_path, base_key).is_dir()
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_docker_backend_refuses_retirement_when_live_container_key_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale container name cannot authorize deletion when its live worker identity differs."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'f' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    raw_env = container.attrs["Config"]["Env"]
+    worker_key_env = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
+    container.attrs["Config"]["Env"] = [
+        f"{worker_key_env}={base_key}" if entry.startswith(f"{worker_key_env}=") else entry for entry in raw_env
+    ]
+
+    with pytest.raises(WorkerBackendError, match="does not match retirement key"):
+        backend.retire_worker(run_key)
+
+    assert container.removed == 0
+    assert worker_root_path(tmp_path, run_key).is_dir()
 
 
 def test_docker_backend_records_failure_and_stops_container(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Protocol
 
@@ -71,3 +72,20 @@ def save_worker_metadata(
     lock_context = nullcontext() if lock is None else lock
     with lock_context, paths.metadata_file.open("w", encoding="utf-8") as f:
         json.dump(vars(metadata), f, sort_keys=True)
+
+
+def remove_worker_state_root(worker_root: Path, *, workers_root: Path) -> None:
+    """Remove one exact worker root after validating its resolved parent."""
+    resolved_workers_root = workers_root.expanduser().resolve()
+    candidate = worker_root.expanduser()
+    if candidate.is_symlink():
+        msg = f"Worker state root cannot be a symbolic link: {candidate}"
+        raise ValueError(msg)
+    resolved_worker_root = candidate.resolve()
+    if resolved_worker_root.parent != resolved_workers_root:
+        msg = f"Worker state root must be one direct child of {resolved_workers_root}: {resolved_worker_root}"
+        raise ValueError(msg)
+    try:
+        shutil.rmtree(resolved_worker_root)
+    except FileNotFoundError:
+        return

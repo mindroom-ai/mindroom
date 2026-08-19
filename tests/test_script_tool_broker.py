@@ -1294,7 +1294,11 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         runtime_paths=_runtime_paths(tmp_path),
         store=broker.store,
         broker=broker,
-        manager=SimpleNamespace(worker_backend=None, worker_backend_generation=None),
+        manager=SimpleNamespace(
+            request_revocation=broker.store.request_cancel,
+            worker_backend=None,
+            worker_backend_generation=None,
+        ),
         resolver=SimpleNamespace(),
         config_provider=lambda: None,
         worker_lease_provider=lambda: None,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
@@ -170,3 +172,58 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
     assert touched is not None
     assert touched.status == "ready"
     assert touched.failure_reason is None
+
+
+def test_static_backend_retires_only_one_exact_run_worker_idempotently() -> None:
+    """Static retirement forgets one run handle without touching ordinary worker entries."""
+    backend = StaticSandboxRunnerBackend(
+        api_root="http://runner",
+        auth_token="tok",  # noqa: S106
+    )
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
+    ordinary_keys = (
+        "v1:t:shared:watcher",
+        "v1:t:user:alice",
+        base_key,
+    )
+    for worker_key in (*ordinary_keys, run_key):
+        backend.ensure_worker(WorkerSpec(worker_key), now=1.0)
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert {handle.worker_key for handle in backend.list_workers()} == set(ordinary_keys)
+
+
+def test_local_backend_retires_only_one_exact_run_worker_root_idempotently(tmp_path: Path) -> None:
+    """Local retirement removes one run root while preserving an ordinary user-agent root."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'b' * 32}")
+    for worker_key in (base_key, run_key):
+        paths = local_module._local_worker_state_paths(worker_key, worker_root=backend.worker_root)
+        paths.workspace.mkdir(parents=True)
+        save_worker_metadata(
+            paths,
+            local_module._LocalWorkerMetadata(
+                worker_id=worker_dir_name(worker_key),
+                worker_key=worker_key,
+                endpoint="/api/sandbox-runner/execute",
+                backend_name=backend.backend_name,
+                created_at=0.0,
+                last_used_at=0.0,
+                status="idle",
+            ),
+        )
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert not local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root).root.exists()
+    assert local_module._local_worker_state_paths(base_key, worker_root=backend.worker_root).root.is_dir()
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
