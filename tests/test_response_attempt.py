@@ -259,6 +259,8 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
     assert isinstance(results[0], asyncio.CancelledError)
     assert outer.cancelled()
     assert stop_manager.cleared_messages == [("$existing", False)]
+    runner.deps.logger.warning.assert_called_once()
+    assert runner.deps.logger.warning.call_args.kwargs["exc_info"] is False
 
 
 @pytest.mark.asyncio

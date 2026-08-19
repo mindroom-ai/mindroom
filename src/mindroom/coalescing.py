@@ -920,12 +920,12 @@ class CoalescingGate:
         except Exception as error:
             segment_owner.close_metadata_once()
             drain_context = self._current_drain_context(gate)
-            if (
-                drain_context is not None
-                and drain_context.shutdown_intent == ORDERLY_SHUTDOWN
-                and type(error) is ResponseAdmissionRefusedError
+            if type(error) is ResponseAdmissionRefusedError and (
+                self._is_shutting_down()
+                or (drain_context is not None and drain_context.shutdown_intent == ORDERLY_SHUTDOWN)
             ):
-                drain_context.result.admission_deferred_count += 1
+                if drain_context is not None:
+                    drain_context.result.admission_deferred_count += 1
             else:
                 if drain_context is not None:
                     drain_context.result.dispatch_failure_count += 1

@@ -125,6 +125,10 @@ def log_cancelled_response(
     interrupted_message: str,
 ) -> None:
     """Log one CancelledError with the right provenance label."""
+    try:
+        process_shutdown = current_task_is_process_shutdown()
+    except RuntimeError:
+        process_shutdown = False
     log_cancelled_response_source(
         logger,
         cancel_source=classify_cancel_source(exc),
@@ -132,7 +136,7 @@ def log_cancelled_response(
         restart_message=restart_message,
         user_stop_message=user_stop_message,
         interrupted_message=interrupted_message,
-        exc_info=(type(exc), exc, exc.__traceback__),
+        exc_info=False if process_shutdown else (type(exc), exc, exc.__traceback__),
     )
 
 

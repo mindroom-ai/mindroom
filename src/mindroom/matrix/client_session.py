@@ -101,6 +101,11 @@ class MindRoomAsyncClient(nio.AsyncClient):
 
     _process_shutdown_transport_fenced = False
 
+    @property
+    def process_shutdown_transport_fenced(self) -> bool:
+        """Return whether orderly shutdown permanently closed new transport."""
+        return self._process_shutdown_transport_fenced
+
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
         if self._process_shutdown_transport_fenced:

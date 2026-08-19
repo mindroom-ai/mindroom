@@ -86,6 +86,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
@@ -3942,6 +3943,39 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     assert "pending_count" in mock_exception.call_args.kwargs
     assert "oldest_pending_age_ms" in mock_exception.call_args.kwargs
     assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback() -> None:
+    """A fenced dispatch during shutdown is expected recovery work, not an exception storm."""
+    room = _make_room()
+    failure_handoffs: list[tuple[PendingEvent, ...]] = []
+
+    async def refused_dispatch_batch(_batch: object) -> None:
+        raise ResponseAdmissionRefusedError
+
+    gate = CoalescingGate(
+        dispatch_batch=refused_dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+        on_dispatch_failure=failure_handoffs.append,
+    )
+
+    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        await _admit_ready(
+            gate,
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+        await _wait_for(lambda: _coalescing_gate_is_idle(gate))
+
+    mock_exception.assert_not_called()
+    assert [[event.event.event_id for event in handoff] for handoff in failure_handoffs] == [["$m1"]]
+    assert not gate.has_pending_source_event("$m1")
 
 
 @pytest.mark.asyncio

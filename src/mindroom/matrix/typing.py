@@ -11,6 +11,7 @@ import nio
 
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_session import MindRoomAsyncClient
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -92,7 +93,14 @@ async def _refresh_typing(
                 state.started.cancel()
             raise
         except Exception:
-            logger.warning("Failed to set typing indicator", room_id=room_id, exc_info=True)
+            process_shutdown_fenced = (
+                isinstance(client, MindRoomAsyncClient) and client.process_shutdown_transport_fenced
+            )
+            logger.warning(
+                "Failed to set typing indicator",
+                room_id=room_id,
+                exc_info=not process_shutdown_fenced,
+            )
         if not state.started.done():
             state.started.set_result(None)
         with suppress(TimeoutError):

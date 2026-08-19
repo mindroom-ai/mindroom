@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
 from mindroom.matrix import typing as typing_module
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from tests.conftest import TEST_ACCESS_TOKEN
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -121,6 +123,35 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
     assert task.cancelled()
     assert [call.args[1] for call in client.room_typing.await_args_list] == [True]
     assert not typing_module._ACTIVE_TYPING
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_transport_fence_does_not_format_typing_traceback() -> None:
+    """An expected fenced refresh must not synchronously render a traceback."""
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
+    client.access_token = TEST_ACCESS_TOKEN
+    client.begin_process_shutdown_transport_fence()
+    state = typing_module._TypingState(
+        references=1,
+        timeout_seconds=30,
+        started=asyncio.get_running_loop().create_future(),
+    )
+
+    with patch("mindroom.matrix.typing.logger.warning") as warning:
+        task = asyncio.create_task(
+            typing_module._refresh_typing(client, "!room:example.org", state=state),
+        )
+        try:
+            await asyncio.wait_for(state.started, timeout=1.0)
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            await client.close()
+
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Failed to set typing indicator",)
+    assert warning.call_args.kwargs["exc_info"] is False
 
 
 @pytest.mark.asyncio
