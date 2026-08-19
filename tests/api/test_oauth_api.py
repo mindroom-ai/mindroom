@@ -949,6 +949,12 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
         (
             "https://mindroom.example.test",
             "https://other.example.test/api/oauth/public_mail/callback",
+            "https://mindroom.example.test/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+        (
+            "https://mindroom.example.test",
+            "https://other.example.test/api/oauth/public_mail/callback",
             "https://other.example.test/api/oauth/public_mail/callback",
             "https://mindroom.example.test",
         ),
