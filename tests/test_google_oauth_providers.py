@@ -424,7 +424,18 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
 
 @pytest.mark.parametrize(
     "hostname",
-    ["localhost", "localhost.", "app.localhost", "127.0.0.1", "127.0.0.2", "[::1]", "[::ffff:127.0.0.2]"],
+    [
+        "localhost",
+        "localhost.",
+        "app.localhost",
+        "127.0.0.1",
+        "127.0.0.2",
+        "2130706433",
+        "127.1",
+        "0x7f000001",
+        "[::1]",
+        "[::ffff:127.0.0.2]",
+    ],
 )
 def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     tmp_path: Path,
@@ -448,13 +459,14 @@ def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     assert resolution is not None
 
 
-def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hostname", ["provisioning.example", "1.1", "0x08080808"])
+def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path, hostname: str) -> None:
     """Pairing credentials must never be sent to a plaintext remote endpoint."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={
-            "MINDROOM_PROVISIONING_URL": "http://provisioning.example",
+            "MINDROOM_PROVISIONING_URL": f"http://{hostname}",
             "MINDROOM_LOCAL_CLIENT_ID": "local-client",
             "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
         },

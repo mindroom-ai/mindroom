@@ -9,6 +9,7 @@ import ipaddress
 import json
 import math
 import secrets
+import socket
 import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -50,7 +51,6 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
-_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 
 
 def is_oauth_loopback_hostname(hostname: str | None) -> bool:
@@ -58,12 +58,15 @@ def is_oauth_loopback_hostname(hostname: str | None) -> bool:
     if hostname is None:
         return False
     normalized_hostname = hostname.rstrip(".").casefold()
-    if normalized_hostname in _OAUTH_LOOPBACK_HOSTNAMES or normalized_hostname.endswith(".localhost"):
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
         return True
     try:
         address = ipaddress.ip_address(normalized_hostname)
     except ValueError:
-        return False
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(normalized_hostname))
+        except OSError:
+            return False
     return address.is_loopback or (
         isinstance(address, ipaddress.IPv6Address)
         and address.ipv4_mapped is not None

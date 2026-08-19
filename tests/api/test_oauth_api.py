@@ -983,6 +983,15 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             "https://localhost.:8000/api/oauth/public_mail/callback",
             "https://mindroom.example.test",
         ),
+        *[
+            (
+                f"https://{hostname}:8000",
+                f"https://{hostname}:8000/api/oauth/public_mail/callback",
+                f"https://{hostname}:8000/api/oauth/public_mail/callback",
+                "https://mindroom.example.test",
+            )
+            for hostname in ("2130706433", "127.1", "0x7f000001", "0177.0.0.1")
+        ],
     ],
 )
 @pytest.mark.parametrize(
