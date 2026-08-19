@@ -915,7 +915,7 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
-        fit_for_encrypted_delivery: Keep the prepared bytes valid if delivery becomes encrypted
+        fit_for_encrypted_delivery: Encrypt sidecars and fit bytes for a possible encrypted delivery
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -926,10 +926,11 @@ async def prepare_large_message(
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
+    encrypted_delivery_safe = room_encrypted or fit_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
-        room_encrypted=room_encrypted or fit_for_encrypted_delivery,
+        room_encrypted=encrypted_delivery_safe,
     )
     current_size = _calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
@@ -954,12 +955,12 @@ async def prepare_large_message(
             client,
             room_id,
             content,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
             file_info,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
         ):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
@@ -975,7 +976,7 @@ async def prepare_large_message(
             content,
             source_content,
             preview_text,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -1006,19 +1007,19 @@ async def prepare_large_message(
         content,
         preview_text,
         size_limit,
-        room_encrypted=room_encrypted,
+        room_encrypted=encrypted_delivery_safe,
     )
 
     sidecar_usable = sidecar_upload_is_usable(
         mxc_uri,
         file_info,
-        room_encrypted=room_encrypted,
+        room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,

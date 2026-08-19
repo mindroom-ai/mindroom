@@ -460,18 +460,33 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
     )
     client.upload.return_value = nio.UploadResponse("mxc://server/uncached-sidecar"), None
     client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
-    client.room_send.return_value = nio.RoomSendResponse("$encrypted", "!room:localhost")
+    client.room_send.side_effect = [
+        nio.SendRetryError("Classic Sync room state is being rebuilt."),
+        nio.RoomSendResponse("$encrypted", "!room:localhost"),
+    ]
 
-    outcome = await send_message_outcome(
-        client,
-        "!room:localhost",
-        {"body": "x" * 100_000, "msgtype": "m.text"},
-    )
+    async def restore_encrypted_room(_delay: float) -> None:
+        room = MagicMock()
+        room.encrypted = True
+        client.rooms["!room:localhost"] = room
+
+    with patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_encrypted_room):
+        outcome = await send_message_outcome(
+            client,
+            "!room:localhost",
+            {"body": "x" * 100_000, "msgtype": "m.text"},
+        )
 
     assert isinstance(outcome, DeliveredMatrixEvent)
     assert outcome.event_id == "$encrypted"
+    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert encrypted_file["url"] == "mxc://server/uncached-sidecar"
+    assert encrypted_file["key"]
+    assert encrypted_file["iv"]
+    assert encrypted_file["hashes"]
+    assert "url" not in outcome.content_sent
     assert client.room_get_state_event.await_count == 2
-    client.room_send.assert_awaited_once()
+    assert client.room_send.await_count == 2
     client._send.assert_not_awaited()
 
 
