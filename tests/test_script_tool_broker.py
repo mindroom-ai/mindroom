@@ -1011,19 +1011,20 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     broker.store.request_cancel(request.run_id)
 
     cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
-    await asyncio.sleep(0.05)
-    cancelled_promptly = cancellation.done()
-    close_started_before_body_returned = close_started.is_set()
-    release_body.set()
-    assert await asyncio.to_thread(close_started.wait, 1.0)
-    close_finished_before_release = close_finished.is_set()
-    release_close.set()
-    await asyncio.wait_for(cancellation, timeout=1.0)
+    try:
+        await asyncio.wait_for(asyncio.shield(cancellation), timeout=1.0)
+    finally:
+        close_started_before_body_returned = close_started.is_set()
+        release_body.set()
+        close_did_start = await asyncio.to_thread(close_started.wait, 1.0)
+        close_finished_before_release = close_finished.is_set()
+        release_close.set()
+        await asyncio.wait_for(cancellation, timeout=1.0)
     assert await asyncio.to_thread(close_finished.wait, 1.0)
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
 
-    assert cancelled_promptly is True
     assert close_started_before_body_returned is False
+    assert close_did_start is True
     assert close_finished_before_release is False
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE

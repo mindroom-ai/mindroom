@@ -634,6 +634,57 @@ async def test_task_cancellation_during_durable_reservation_finishes_as_interrup
 
 
 @pytest.mark.asyncio
+async def test_repeated_cancellation_cannot_abandon_durable_reservation_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancellation must not detach cleanup after the reservation commits."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    create_entered = threading.Event()
+    release_create = threading.Event()
+    create_finished = threading.Event()
+    finalization_entered = threading.Event()
+    release_finalization = threading.Event()
+    original_create = manager.store.create_run
+    original_get = manager.store.get_run
+
+    def blocked_create(run: ScriptRunRecord) -> None:
+        create_entered.set()
+        assert release_create.wait(timeout=5)
+        original_create(run)
+        create_finished.set()
+
+    def blocked_finalization_get(run_id: str) -> ScriptRunRecord:
+        finalization_entered.set()
+        assert release_finalization.wait(timeout=5)
+        return original_get(run_id)
+
+    monkeypatch.setattr(manager.store, "create_run", blocked_create)
+    monkeypatch.setattr(manager.store, "get_run", blocked_finalization_get)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(create_entered.wait, 5)
+
+    launch.cancel()
+    release_create.set()
+    assert await asyncio.to_thread(create_finished.wait, 5)
+    assert await asyncio.to_thread(finalization_entered.wait, 5)
+    launch.cancel()
+    await asyncio.sleep(0)
+    repeated_cancellation_retained_ownership = not launch.done()
+    release_finalization.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+
+    [stored] = manager.store.list_runs()
+    assert repeated_cancellation_retained_ownership is True
+    assert stored.state is ScriptRunState.INTERRUPTED
+    assert manager.broker.cancelled_runs == [stored.run_id]
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
 async def test_preallocation_cancel_releases_capacity_when_broker_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
