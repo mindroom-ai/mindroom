@@ -1271,8 +1271,15 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids = prepared_execution.unseen_event_ids
     run_messages = prepared_execution.messages
 
+    # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
     logger.info(
         "Preparing agent and prompt",
+        agent=agent_name,
+        message_count=len(run_messages),
+        unseen_event_count=len(unseen_event_ids),
+    )
+    logger.debug(
+        "Prepared agent full prompt",
         agent=agent_name,
         full_prompt=render_prepared_messages_text(run_messages),
     )
