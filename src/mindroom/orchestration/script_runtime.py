@@ -767,7 +767,10 @@ class ScriptRuntimeLifecycle:
 
         try:
             try:
-                await asyncio.wait_for(_cleanup(), timeout=timeout_seconds)
+                await asyncio.wait_for(
+                    _cleanup(),
+                    timeout=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
+                )
             except TimeoutError:
                 logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
             cleanup_drained = await drain_script_tool_cleanup(
@@ -801,18 +804,31 @@ class ScriptRuntimeLifecycle:
             self._current_worker_lease = None
             self.manager.worker_backend = None
             self.manager.worker_backend_generation = None
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*(asyncio.to_thread(lease.release) for lease in leases)),
-                    timeout=timeout_seconds,
-                )
-            except TimeoutError:
-                logger.warning("script_worker_backend_release_timeout", timeout_seconds=timeout_seconds)
+            await _release_worker_leases_before_deadline(
+                leases,
+                deadline=shutdown_deadline,
+                timeout_seconds=timeout_seconds,
+            )
 
 
-def _release_worker_lease_later(lease: _WorkerManagerLease) -> None:
+async def _release_worker_leases_before_deadline(
+    leases: list[_WorkerManagerLease],
+    *,
+    deadline: float,
+    timeout_seconds: float,
+) -> None:
+    release_tasks = [_release_worker_lease_later(lease) for lease in leases]
+    if not release_tasks:
+        return
+    remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+    _done, pending = await asyncio.wait(release_tasks, timeout=remaining)
+    if pending:
+        logger.warning("script_worker_backend_release_timeout", timeout_seconds=timeout_seconds)
+
+
+def _release_worker_lease_later(lease: _WorkerManagerLease) -> asyncio.Task[None]:
     """Release an acknowledged-cancelled delivery without blocking the event loop."""
-    create_logged_task(
+    return create_logged_task(
         asyncio.to_thread(lease.release),
         name="script_worker_backend_late_release",
         failure_message="Late background script worker lease release failed",
@@ -917,6 +933,8 @@ def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) 
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
+        or bool(parsed.query)
+        or bool(parsed.fragment)
         or (port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
     ):
         msg = "Background-script gateway must be a valid HTTP(S) URL."

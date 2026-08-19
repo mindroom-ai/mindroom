@@ -40,6 +40,7 @@ from mindroom.script_runs.broker import (
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
     ScriptToolCallRequest,
+    drain_script_tool_cleanup,
 )
 from mindroom.script_runs.models import (
     ScriptCallRecord,
@@ -819,10 +820,11 @@ async def test_cancelled_sync_connect_closes_only_after_connect_returns(
     cleanup_retained = bool(broker._cleanup_tasks)
     release_connect.set()
     close_after_connect = await asyncio.to_thread(close_started.wait, 1.0)
-    await asyncio.sleep(0)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
 
     assert cleanup_retained is True
     assert close_after_connect is True
+    assert cleanup_drained is True
     assert broker.get_call(request.run_id, request.call_id).state is ScriptCallState.INDETERMINATE
     assert broker._cleanup_tasks == set()
 
@@ -979,13 +981,96 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
     release_close.set()
     await asyncio.wait_for(cancellation, timeout=1.0)
     assert await asyncio.to_thread(close_finished.wait, 1.0)
-    await asyncio.sleep(0)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
 
     assert cancelled_promptly is True
     assert close_started_before_body_returned is False
     assert close_finished_before_release is False
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
+    assert cleanup_drained is True
+    assert broker._cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated owner cancellation cannot make a blocking sync close appear drained."""
+    body_entered = threading.Event()
+    release_body = threading.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+    close_calls = 0
+
+    class BlockingSyncToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            close_started.set()
+            release_close.wait()
+            close_finished.set()
+
+        def add(self, a: int, b: int) -> int:
+            body_entered.set()
+            release_body.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingSyncToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-sync-close")
+    await broker.accept_authenticated(request, f"Bearer {token}")
+    assert await asyncio.to_thread(body_entered.wait, 1.0)
+    broker.store.request_cancel(request.run_id)
+    await broker.cancel_run(request.run_id)
+
+    [body_owner] = broker._cleanup_tasks
+    body_owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await body_owner
+    await asyncio.sleep(0)
+    release_body.set()
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+
+    try:
+        [first_close_owner] = broker._cleanup_tasks
+        first_close_owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_close_owner
+        await asyncio.sleep(0)
+        owned_after_first_cancel = bool(broker._cleanup_tasks)
+        first_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
+
+        [second_close_owner] = broker._cleanup_tasks
+        second_close_owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second_close_owner
+        await asyncio.sleep(0)
+        owned_after_second_cancel = bool(broker._cleanup_tasks)
+        second_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
+        close_finished_before_release = close_finished.is_set()
+    finally:
+        release_close.set()
+
+    assert await asyncio.to_thread(close_finished.wait, 1.0)
+    assert await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+
+    assert owned_after_first_cancel is True
+    assert first_drain is False
+    assert owned_after_second_cancel is True
+    assert second_drain is False
+    assert close_finished_before_release is False
+    assert close_calls == 1
     assert broker._cleanup_tasks == set()
 
 
@@ -1048,11 +1133,12 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
 
     release_body.set()
     assert await asyncio.to_thread(close_started.wait, 1.0)
-    await asyncio.sleep(0)
+    cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
 
     assert shutdown_waited_for_cleanup is True
     assert close_started_before_body_returned is False
     assert cleanup_owned_after_timeout is True
+    assert cleanup_drained is True
     assert broker._cleanup_tasks == set()
 
 
@@ -1145,6 +1231,48 @@ async def test_script_broker_marks_unowned_pending_claim_indeterminate(tmp_path:
         "message": "The call was accepted, but its terminal result cannot be determined safely.",
         "retryable": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_post_returns_terminal_winner_when_claim_races_orphan_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate stale pending claim must return the receipt that won durably."""
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="racing-duplicate-post")
+    broker.store.claim_call(
+        run_id=request.run_id,
+        call_id=request.call_id,
+        grant=request.grant,
+        arguments_digest=request.arguments_digest,
+    )
+    original_claim_call = broker.store.claim_call
+    stale_claim_returned = threading.Event()
+    release_stale_claim = threading.Event()
+
+    def pause_after_stale_claim(**kwargs: object) -> object:
+        claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
+        stale_claim_returned.set()
+        assert release_stale_claim.wait(timeout=1.0)
+        return claim
+
+    monkeypatch.setattr(broker.store, "claim_call", pause_after_stale_claim)
+    submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
+    assert await asyncio.to_thread(stale_claim_returned.wait, 1.0)
+    published = broker.store.publish_call_result(
+        run_id=request.run_id,
+        call_id=request.call_id,
+        state=ScriptCallState.COMPLETED,
+        result=3,
+    )
+    release_stale_claim.set()
+    receipt = await submission
+
+    assert published.state is ScriptCallState.COMPLETED
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == 3
+    assert broker.store.get_call(request.run_id, request.call_id) == published
 
 
 def test_script_broker_get_marks_unowned_pending_claim_indeterminate(tmp_path: Path) -> None:

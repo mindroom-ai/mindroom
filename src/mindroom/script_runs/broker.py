@@ -308,10 +308,13 @@ class ScriptToolBroker:
                 preparation_finished = True
                 if prepared.call.state is ScriptCallState.PENDING and not owned_elsewhere:
                     return _AcceptedScriptCall(
-                        receipt=await self._publish_async(
-                            prepared.call,
-                            state=ScriptCallState.INDETERMINATE,
-                            error=_INDETERMINATE_ERROR,
+                        receipt=_receipt_from_record(
+                            await asyncio.to_thread(
+                                self.store.settle_orphaned_call,
+                                run_id=prepared.call.run_id,
+                                call_id=prepared.call.call_id,
+                                error=_INDETERMINATE_ERROR,
+                            ),
                         ),
                     )
                 return _AcceptedScriptCall(
@@ -634,21 +637,27 @@ class ScriptToolBroker:
         self,
         completion_task: asyncio.Task[object],
         toolkit: Toolkit,
+        *,
+        close_task: asyncio.Task[None] | None = None,
     ) -> None:
         async def cleanup() -> None:
+            completion_failure: BaseException | None = None
+            owned_close_task = close_task
             try:
-                await asyncio.shield(completion_task)
+                try:
+                    await asyncio.shield(completion_task)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:
+                    completion_failure = exc
+                if owned_close_task is None:
+                    owned_close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
+                await asyncio.shield(owned_close_task)
             except asyncio.CancelledError:
-                if completion_task.done():
-                    await _close_toolkit(toolkit)
-                else:
-                    self._retain_toolkit_cleanup(completion_task, toolkit)
+                self._retain_toolkit_cleanup(completion_task, toolkit, close_task=owned_close_task)
                 raise
-            except BaseException:
-                await _close_toolkit(toolkit)
-                raise
-            else:
-                await _close_toolkit(toolkit)
+            if completion_failure is not None:
+                raise completion_failure
 
         cleanup_task = asyncio.create_task(cleanup(), name="script-toolkit-cleanup")
         self._cleanup_tasks.add(cleanup_task)

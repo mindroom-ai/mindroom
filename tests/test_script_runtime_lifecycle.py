@@ -292,6 +292,41 @@ def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
         script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "configured_url"),
+    [
+        ("MINDROOM_SCRIPT_GATEWAY_URL", "https://gateway.test/api/script-gateway?token=x"),
+        ("MINDROOM_SCRIPT_GATEWAY_URL", "https://gateway.test/api/script-gateway#fragment"),
+        ("MINDROOM_PUBLIC_URL", "https://gateway.test/base?token=x"),
+        ("MINDROOM_PUBLIC_URL", "https://gateway.test/base#fragment"),
+    ],
+)
+def test_gateway_base_rejects_query_and_fragment_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    configured_url: str,
+) -> None:
+    """SDK endpoint suffixes must be appended to an unambiguous URL path."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            environment_name: configured_url,
+        },
+    )
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("192.0.2.10", 443))],
+    )
+
+    with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
+        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(tmp_path: Path) -> None:
     """Activation waits for both composition roots and shutdown clears the binding."""
@@ -1011,6 +1046,50 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             for retired_entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
                 retired_entry.active_leases = 0
         workers_runtime_module._reset_primary_worker_manager()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reconciliation and lease release share one budget without losing release ownership."""
+    release_lease = threading.Event()
+    lease_released = threading.Event()
+    lease = _Lease(_Backend([]))
+
+    def blocking_release() -> None:
+        assert release_lease.wait(timeout=1.0)
+        lease.released = True
+        lease_released.set()
+
+    lease.release = blocking_release  # type: ignore[method-assign]
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=_runtime_paths(tmp_path),
+        store=ScriptRunStore(_runtime_paths(tmp_path)),
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=SimpleNamespace(worker_backend=None, worker_backend_generation=None),
+        resolver=SimpleNamespace(),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._activated_once = True
+    runtime._worker_leases.append(lease)
+
+    async def blocking_complete_pass(_runtime: ScriptRuntimeLifecycle) -> None:
+        await asyncio.sleep(0.2)
+
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", blocking_complete_pass)
+    started = asyncio.get_running_loop().time()
+    try:
+        await runtime.shutdown(timeout_seconds=0.05)
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        release_lease.set()
+
+    assert elapsed < 0.08
+    assert await asyncio.to_thread(lease_released.wait, 1.0)
+    assert lease.released is True
 
 
 @pytest.mark.asyncio
