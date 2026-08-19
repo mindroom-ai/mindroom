@@ -99,6 +99,13 @@ def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     )
 
 
+def _is_global_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an address, including an IPv4-mapped address, is globally routable."""
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped.is_global
+    return address.is_global
+
+
 def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
     """Return whether browser URL parsing treats the final label as an IPv4 number."""
     final_label = hostname.rsplit(".", maxsplit=1)[-1]
@@ -120,8 +127,8 @@ def is_oauth_loopback_hostname(hostname: str | None) -> bool:
     return address is not None and _is_loopback_address(address)
 
 
-def is_valid_non_loopback_oauth_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname is valid and cannot canonicalize to a loopback address."""
+def _is_valid_hosted_oauth_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname is valid for a public hosted OAuth callback."""
     normalized_hostname = _normalized_oauth_hostname(hostname)
     if normalized_hostname is None:
         return False
@@ -129,8 +136,31 @@ def is_valid_non_loopback_oauth_hostname(hostname: str | None) -> bool:
         return False
     address = _oauth_ip_address(normalized_hostname)
     if address is not None:
-        return not _is_loopback_address(address)
+        return _is_global_address(address)
     return not _hostname_ends_in_ipv4_number(normalized_hostname)
+
+
+def is_valid_hosted_oauth_redirect_uri(redirect_uri: str) -> bool:
+    """Return whether an HTTPS OAuth callback has an unambiguous public authority."""
+    if "\\" in redirect_uri or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in redirect_uri):
+        return False
+    try:
+        parsed_uri = urlparse(redirect_uri)
+        _ = parsed_uri.port
+        username = parsed_uri.username
+        password = parsed_uri.password
+        hostname = parsed_uri.hostname
+    except ValueError:
+        return False
+    return (
+        parsed_uri.scheme.casefold() == "https"
+        and bool(parsed_uri.netloc)
+        and username is None
+        and password is None
+        and "%" not in parsed_uri.netloc
+        and not parsed_uri.fragment
+        and _is_valid_hosted_oauth_hostname(hostname)
+    )
 
 
 def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:

@@ -32,7 +32,7 @@ from mindroom.oauth import (
     OAuthProvider,
     OAuthProviderError,
     is_oauth_loopback_hostname,
-    is_valid_non_loopback_oauth_hostname,
+    is_valid_hosted_oauth_redirect_uri,
 )
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -142,10 +142,8 @@ def _dynamic_client_matches_hosted_callback(
     if not resolution.dynamically_registered:
         return False
     expected_redirect_uri = provider.default_redirect_uri(runtime_paths)
-    expected_callback = urlparse(expected_redirect_uri)
     return (
-        expected_callback.scheme.casefold() == "https"
-        and is_valid_non_loopback_oauth_hostname(expected_callback.hostname)
+        is_valid_hosted_oauth_redirect_uri(expected_redirect_uri)
         and resolution.config.redirect_uri == expected_redirect_uri
         and resolution.registered_redirect_uri == expected_redirect_uri
     )

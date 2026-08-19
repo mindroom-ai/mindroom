@@ -8,7 +8,7 @@ from mindroom.oauth.providers import (
     OAuthProviderError,
     OAuthRefreshRejectedError,
     is_oauth_loopback_hostname,
-    is_valid_non_loopback_oauth_hostname,
+    is_valid_hosted_oauth_redirect_uri,
     oauth_connect_url_requires_host_browser,
 )
 
@@ -20,7 +20,7 @@ __all__ = [
     "OAuthProviderError",
     "OAuthRefreshRejectedError",
     "is_oauth_loopback_hostname",
-    "is_valid_non_loopback_oauth_hostname",
+    "is_valid_hosted_oauth_redirect_uri",
     "oauth_connect_url_requires_host_browser",
     "oauth_runtime_bootstrapper",
 ]

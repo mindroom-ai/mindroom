@@ -846,29 +846,33 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
         ("GET", "/api/oauth/public_mail/authorize?agent_name=general", 307),
     ],
 )
+@pytest.mark.parametrize(
+    "public_url",
+    ["https://mindroom.example.test", "https://8.8.8.8", "https://m\u00fcnchen.example"],
+)
 def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     tmp_path: Path,
     method: str,
     path: str,
     expected_status: int,
+    public_url: str,
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {
             constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
-            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
+            "MINDROOM_PUBLIC_URL": public_url,
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
+    redirect_uri = f"{public_url}/api/oauth/public_mail/callback"
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "public_mail_oauth_client",
         {
             "client_id": "provisioned-client-id",
             "client_secret": "provisioned-client-secret",
-            "redirect_uri": "https://mindroom.example.test/api/oauth/public_mail/callback",
-            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: (
-                "https://mindroom.example.test/api/oauth/public_mail/callback"
-            ),
+            "redirect_uri": redirect_uri,
+            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
             "_source": "oauth_dynamic_client_registration",
             RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
         },
@@ -983,6 +987,30 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             "https://localhost.:8000/api/oauth/public_mail/callback",
             "https://mindroom.example.test",
         ),
+        (
+            "https://[::]:8000",
+            "https://[::]:8000/api/oauth/public_mail/callback",
+            "https://[::]:8000/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+        (
+            "https://[fc00::1]:8000",
+            "https://[fc00::1]:8000/api/oauth/public_mail/callback",
+            "https://[fc00::1]:8000/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+        (
+            "https://[::ffff:192.168.1.1]:8000",
+            "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
+            "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+        (
+            "https://example.com:invalid",
+            "https://example.com:invalid/api/oauth/public_mail/callback",
+            "https://example.com:invalid/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
         *[
             (
                 f"https://{hostname}:8000",
@@ -995,6 +1023,12 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
                 "127.1",
                 "0x7f000001",
                 "0177.0.0.1",
+                "0",
+                "0.0.0.0",  # noqa: S104
+                "192.168.1.1",
+                "169.254.169.254",
+                "localhost\\@example.com",
+                "user@example.com",
                 "%6cocalhost",
                 "%31%32%37.0.0.1",
                 "127\u30020\u30020\u30021",
