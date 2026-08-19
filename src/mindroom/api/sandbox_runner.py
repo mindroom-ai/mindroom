@@ -19,7 +19,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mindroom import constants, shell_supervisor
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
@@ -70,6 +70,7 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     tool_execution_identity,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import get_local_worker_manager
 
 if TYPE_CHECKING:
@@ -476,6 +477,20 @@ class SandboxRunnerLeaseResponse(BaseModel):
     lease_id: str
     expires_at: float
     max_uses: int
+
+
+class SandboxWorkerRetireRequest(BaseModel):
+    """Exact shared-runner worker identity to retire."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_key: str = Field(min_length=1, max_length=1024)
+
+
+class SandboxWorkerRetireResponse(BaseModel):
+    """Authoritative receipt that the exact shared-runner state is absent."""
+
+    retired: bool
 
 
 class SandboxRunnerExecuteResponse(BaseModel):
@@ -1423,6 +1438,22 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
         idle_timeout_seconds=worker_manager.idle_timeout_seconds,
         cleaned_workers=cleaned_workers,
     )
+
+
+@router.post("/workers/retire", response_model=SandboxWorkerRetireResponse)
+async def retire_worker(
+    request: Request,
+    payload: SandboxWorkerRetireRequest,
+) -> SandboxWorkerRetireResponse:
+    """Remove one exact shared-runner worker root and confirm its absence."""
+    runtime_paths = app_runtime_paths(request.app)
+    if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+        raise HTTPException(status_code=409, detail="Dedicated worker retirement belongs to its provisioning backend.")
+    try:
+        await asyncio.to_thread(get_local_worker_manager(runtime_paths).retire_worker, payload.worker_key)
+    except WorkerBackendError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return SandboxWorkerRetireResponse(retired=True)
 
 
 def _validate_execute_request_payload(

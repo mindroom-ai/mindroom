@@ -893,6 +893,7 @@ class ScriptRuntimeLifecycle:
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
 
+        await run_coroutine_until_complete(self.manager.begin_shutdown())
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         durably_revoked = await run_coroutine_until_complete(
             self._durably_revoke_runs(

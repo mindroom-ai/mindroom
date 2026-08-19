@@ -51,6 +51,7 @@ from mindroom.workers.backends._metadata_store import (
     load_worker_metadata,
     remove_worker_state_root,
     save_worker_metadata,
+    validate_worker_state_root,
 )
 from mindroom.workers.backends.docker_config import (
     DEFAULT_WORKER_PORT,
@@ -597,6 +598,12 @@ class DockerWorkerBackend:
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
         with self._worker_lock(worker_key):
+            state_root = self._workers_root / worker_dir_name(worker_key)
+            try:
+                validate_worker_state_root(state_root, workers_root=self._workers_root)
+            except (OSError, ValueError) as exc:
+                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
             paths = self._state_paths(worker_key)
             metadata = self._load_metadata(paths)
             if metadata is not None and metadata.worker_key != worker_key:
@@ -618,8 +625,8 @@ class DockerWorkerBackend:
                 raise WorkerBackendError(msg)
             try:
                 self._projection_manager.retire_worker_projection(paths)
-                remove_worker_state_root(paths.root, workers_root=self._workers_root)
-            except (OSError, ValueError) as exc:
+                remove_worker_state_root(state_root, workers_root=self._workers_root)
+            except (OSError, RuntimeError, ValueError) as exc:
                 msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 

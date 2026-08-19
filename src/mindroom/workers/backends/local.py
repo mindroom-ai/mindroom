@@ -32,6 +32,7 @@ from mindroom.workers.backends._metadata_store import (
     load_worker_metadata,
     remove_worker_state_root,
     save_worker_metadata,
+    validate_worker_state_root,
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -266,6 +267,12 @@ class _LocalWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact local worker root, including its durable metadata."""
+        state_root = self.worker_root / worker_dir_name(worker_key)
+        try:
+            validate_worker_state_root(state_root, workers_root=self.worker_root)
+        except (OSError, ValueError) as exc:
+            msg = f"Failed to retire local worker '{worker_key}': {exc}"
+            raise WorkerBackendError(msg) from exc
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
         with self._worker_lock(paths), self._lock:
             metadata = self._load_metadata(paths)
@@ -273,8 +280,8 @@ class _LocalWorkerBackend:
                 msg = f"Local worker metadata does not match retirement key '{worker_key}'."
                 raise WorkerBackendError(msg)
             try:
-                remove_worker_state_root(paths.root, workers_root=self.worker_root)
-            except (OSError, ValueError) as exc:
+                remove_worker_state_root(state_root, workers_root=self.worker_root)
+            except (OSError, RuntimeError, ValueError) as exc:
                 msg = f"Failed to retire local worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 

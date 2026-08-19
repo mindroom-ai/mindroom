@@ -175,6 +175,10 @@ class ScriptRunManager:
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _launch_admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _launches_drained: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _launches_in_progress: int = field(default=0, init=False)
+    _launch_admission_closed: bool = field(default=False, init=False)
     _worker_launch_gate_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _worker_launches_drained: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _worker_launches_in_progress: int = field(default=0, init=False)
@@ -182,6 +186,7 @@ class ScriptRunManager:
 
     def __post_init__(self) -> None:
         """Mark the empty admission set as drained before any worker launch begins."""
+        self._launches_drained.set()
         self._worker_launches_drained.set()
 
     @property
@@ -201,6 +206,28 @@ class ScriptRunManager:
         """Allow worker launches after the committed replacement is ready or aborted."""
         async with self._worker_launch_gate_lock:
             self._worker_replacement_in_progress = False
+
+    async def begin_shutdown(self) -> None:
+        """Permanently reject new launches and drain every already-admitted launch."""
+        async with self._launch_admission_lock:
+            self._launch_admission_closed = True
+            if self._launches_in_progress == 0:
+                self._launches_drained.set()
+        await self._launches_drained.wait()
+
+    async def _admit_launch(self) -> None:
+        async with self._launch_admission_lock:
+            if self._launch_admission_closed:
+                msg = "Background script runtime is shutting down."
+                raise ScriptRunManagerError(msg)
+            self._launches_in_progress += 1
+            self._launches_drained.clear()
+
+    async def _release_launch_admission(self) -> None:
+        async with self._launch_admission_lock:
+            self._launches_in_progress -= 1
+            if self._launches_in_progress == 0:
+                self._launches_drained.set()
 
     async def _admit_worker_launch(self) -> None:
         async with self._worker_launch_gate_lock:
@@ -285,30 +312,34 @@ class ScriptRunManager:
                 private_agent_names=worker_target.private_agent_names,
             )
         )
-        if local_unsafe:
-            return await self._create_and_launch(
-                context,
-                run=run,
-                source=source_bytes,
-                token=token,
-                max_concurrent_runs=effective_limits.max_concurrent_runs,
-                worker_spec=worker_spec,
-            )
-        await self._admit_worker_launch()
+        await self._admit_launch()
         try:
-            if self.worker_backend is None:
-                msg = "Background script worker backend is unavailable."
-                raise ScriptRunManagerError(msg)
-            return await self._create_and_launch(
-                context,
-                run=run,
-                source=source_bytes,
-                token=token,
-                max_concurrent_runs=effective_limits.max_concurrent_runs,
-                worker_spec=worker_spec,
-            )
+            if local_unsafe:
+                return await self._create_and_launch(
+                    context,
+                    run=run,
+                    source=source_bytes,
+                    token=token,
+                    max_concurrent_runs=effective_limits.max_concurrent_runs,
+                    worker_spec=worker_spec,
+                )
+            await self._admit_worker_launch()
+            try:
+                if self.worker_backend is None:
+                    msg = "Background script worker backend is unavailable."
+                    raise ScriptRunManagerError(msg)
+                return await self._create_and_launch(
+                    context,
+                    run=run,
+                    source=source_bytes,
+                    token=token,
+                    max_concurrent_runs=effective_limits.max_concurrent_runs,
+                    worker_spec=worker_spec,
+                )
+            finally:
+                await self._release_worker_launch_admission()
         finally:
-            await self._release_worker_launch_admission()
+            await self._release_launch_admission()
 
     async def _create_and_launch(
         self,

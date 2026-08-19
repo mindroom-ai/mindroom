@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Protocol
 
@@ -74,18 +76,47 @@ def save_worker_metadata(
         json.dump(vars(metadata), f, sort_keys=True)
 
 
-def remove_worker_state_root(worker_root: Path, *, workers_root: Path) -> None:
-    """Remove one exact worker root after validating its resolved parent."""
+def validate_worker_state_root(worker_root: Path, *, workers_root: Path) -> bool:
+    """Validate one unresolved direct-child worker root without following its leaf."""
     resolved_workers_root = workers_root.expanduser().resolve()
     candidate = worker_root.expanduser()
-    if candidate.is_symlink():
-        msg = f"Worker state root cannot be a symbolic link: {candidate}"
-        raise ValueError(msg)
-    resolved_worker_root = candidate.resolve()
-    if resolved_worker_root.parent != resolved_workers_root:
-        msg = f"Worker state root must be one direct child of {resolved_workers_root}: {resolved_worker_root}"
+    if candidate.parent.resolve() != resolved_workers_root:
+        msg = f"Worker state root must be one direct child of {resolved_workers_root}: {candidate}"
         raise ValueError(msg)
     try:
-        shutil.rmtree(resolved_worker_root)
+        metadata = candidate.lstat()
     except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        msg = f"Worker state root cannot be a symbolic link: {candidate}"
+        raise ValueError(msg)
+    if not stat.S_ISDIR(metadata.st_mode):
+        msg = f"Worker state root must be a directory: {candidate}"
+        raise ValueError(msg)
+    return True
+
+
+def remove_worker_state_root(worker_root: Path, *, workers_root: Path) -> None:
+    """Remove one exact worker root through a descriptor-relative no-follow operation."""
+    if not validate_worker_state_root(worker_root, workers_root=workers_root):
         return
+    if not shutil.rmtree.avoids_symlink_attacks:
+        msg = "Safe descriptor-relative worker-state removal is unavailable."
+        raise RuntimeError(msg)
+    resolved_workers_root = workers_root.expanduser().resolve()
+    candidate = worker_root.expanduser()
+    root_fd = os.open(resolved_workers_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            metadata = os.stat(candidate.name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(metadata.st_mode):
+            msg = f"Worker state root cannot be a symbolic link: {candidate}"
+            raise ValueError(msg)
+        if not stat.S_ISDIR(metadata.st_mode):
+            msg = f"Worker state root must be a directory: {candidate}"
+            raise ValueError(msg)
+        shutil.rmtree(candidate.name, dir_fd=root_fd)
+    finally:
+        os.close(root_fd)

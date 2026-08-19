@@ -1295,6 +1295,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         store=broker.store,
         broker=broker,
         manager=SimpleNamespace(
+            begin_shutdown=AsyncMock(),
             request_revocation=broker.store.request_cancel,
             worker_backend=None,
             worker_backend_generation=None,

@@ -552,6 +552,18 @@ class KubernetesWorkerBackend:
         """Remove one exact Kubernetes worker and its persistent run state."""
         with self._worker_lock(worker_key):
             worker_id = self._worker_id(worker_key)
+            storage_root = self.storage_root.expanduser().resolve()
+            workers_root = storage_root / self.config.storage_subpath_prefix
+            state_root = workers_root / worker_dir_name(worker_key)
+            resolved_workers_root = workers_root.resolve()
+            resolved_state_root = state_root.resolve()
+            if (
+                not resolved_workers_root.is_relative_to(storage_root)
+                or not resolved_state_root.is_relative_to(storage_root)
+                or resolved_state_root.parent != resolved_workers_root
+            ):
+                msg = f"Kubernetes worker state retirement must remain inside storage root '{storage_root}'."
+                raise WorkerBackendError(msg)
             try:
                 deployment = self._resources.read_deployment(worker_id)
             except Exception as exc:
@@ -570,9 +582,6 @@ class KubernetesWorkerBackend:
                 )
                 self._resources.delete_service(worker_id)
                 self._resources.delete_secret(worker_id)
-                state_root = self.storage_root / self._state_subpath(worker_key)
-                prefix = self.config.storage_subpath_prefix.strip().strip("/")
-                workers_root = self.storage_root / prefix if prefix else self.storage_root
                 remove_worker_state_root(state_root, workers_root=workers_root)
             except Exception as exc:
                 msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"

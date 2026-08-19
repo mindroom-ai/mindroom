@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
+
+import httpx
+import pytest
 
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import worker_dir_name
-from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -175,10 +179,18 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
 
 
 def test_static_backend_retires_only_one_exact_run_worker_idempotently() -> None:
-    """Static retirement forgets one run handle without touching ordinary worker entries."""
+    """Static retirement requires a confirmed remote deletion before forgetting the exact handle."""
+    retired_keys: list[str] = []
+
+    def retire_worker(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-mindroom-sandbox-token"] == "tok"
+        retired_keys.append(str(json.loads(request.content)["worker_key"]))
+        return httpx.Response(200, json={"retired": True})
+
     backend = StaticSandboxRunnerBackend(
         api_root="http://runner",
         auth_token="tok",  # noqa: S106
+        transport=httpx.MockTransport(retire_worker),
     )
     base_key = "v1:t:user_agent:alice:watcher"
     run_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
@@ -194,6 +206,23 @@ def test_static_backend_retires_only_one_exact_run_worker_idempotently() -> None
     backend.retire_worker(run_key)
 
     assert {handle.worker_key for handle in backend.list_workers()} == set(ordinary_keys)
+    assert retired_keys == [run_key, run_key]
+
+
+def test_static_backend_retirement_transport_failure_keeps_exact_handle() -> None:
+    """An unavailable shared runner cannot make remote state absence authoritative."""
+    backend = StaticSandboxRunnerBackend(
+        api_root="http://runner",
+        auth_token="tok",  # noqa: S106
+        transport=httpx.MockTransport(lambda _request: httpx.Response(503, json={"detail": "unavailable"})),
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'f' * 32}")
+    backend.ensure_worker(WorkerSpec(run_key), now=1.0)
+
+    with pytest.raises(WorkerBackendError, match="unavailable"):
+        backend.retire_worker(run_key)
+
+    assert [handle.worker_key for handle in backend.list_workers()] == [run_key]
 
 
 def test_local_backend_retires_only_one_exact_run_worker_root_idempotently(tmp_path: Path) -> None:
@@ -227,3 +256,25 @@ def test_local_backend_retires_only_one_exact_run_worker_root_idempotently(tmp_p
     assert not local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root).root.exists()
     assert local_module._local_worker_state_paths(base_key, worker_root=backend.worker_root).root.is_dir()
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_local_backend_refuses_symlinked_run_root_with_malformed_target_metadata(tmp_path: Path) -> None:
+    """Malformed metadata cannot turn a run-key symlink into authority to delete another worker root."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'0' * 32}")
+    target_root = backend.worker_root / worker_dir_name(base_key)
+    (target_root / "metadata").mkdir(parents=True)
+    (target_root / "metadata" / "worker.json").write_text("{malformed", encoding="utf-8")
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    (backend.worker_root / worker_dir_name(run_key)).symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="symbolic link"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"

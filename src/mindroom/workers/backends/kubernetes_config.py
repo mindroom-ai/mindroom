@@ -274,6 +274,17 @@ class KubernetesWorkerBackendConfig:
     extra_containers: tuple[dict[str, object], ...] = ()
     extra_volumes: tuple[dict[str, object], ...] = ()
 
+    def __post_init__(self) -> None:
+        """Reject storage prefixes that are not strict relative descendants."""
+        parts = self.storage_subpath_prefix.split("/")
+        if (
+            not self.storage_subpath_prefix
+            or self.storage_subpath_prefix.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            msg = f"{_STORAGE_SUBPATH_PREFIX_ENV} must be a relative path without traversal segments."
+            raise WorkerBackendError(msg)
+
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from one explicit runtime context."""

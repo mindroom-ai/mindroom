@@ -2128,6 +2128,27 @@ def test_docker_backend_refuses_retirement_when_live_container_key_mismatches(
     assert worker_root_path(tmp_path, run_key).is_dir()
 
 
+def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed metadata cannot redirect Docker worker-state retirement through a run-key symlink."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'1' * 32}")
+    target_root = worker_root_path(tmp_path, base_key)
+    (target_root / "metadata").mkdir(parents=True)
+    (target_root / "metadata" / "worker.json").write_text("{malformed", encoding="utf-8")
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    worker_root_path(tmp_path, run_key).symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="symbolic link"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
 def test_docker_backend_records_failure_and_stops_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

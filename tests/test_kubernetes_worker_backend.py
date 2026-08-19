@@ -2705,6 +2705,20 @@ def test_kubernetes_backend_retires_only_one_exact_run_worker_idempotently(tmp_p
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
 
 
+def test_kubernetes_backend_retirement_succeeds_when_state_prefix_is_absent(tmp_path: Path) -> None:
+    """An absent exact resource and absent state prefix are a confirmed idempotent retirement."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'f' * 32}")
+
+    backend.retire_worker(run_key)
+
+    assert (backend.storage_root / "workers").exists() is False
+
+
 def test_kubernetes_backend_refuses_retirement_when_live_deployment_key_mismatches(tmp_path: Path) -> None:
     """The computed resource name cannot authorize deletion when its live annotation differs."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -2723,6 +2737,31 @@ def test_kubernetes_backend_refuses_retirement_when_live_deployment_key_mismatch
     assert handle.worker_id in apps_api.deployments
     assert handle.worker_id in core_api.services
     assert handle.worker_id in core_api.secrets
+
+
+def test_kubernetes_backend_refuses_retirement_through_symlinked_storage_prefix(tmp_path: Path) -> None:
+    """A symlinked configured prefix cannot redirect recursive worker-state deletion outside storage."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_subpath_prefix="workers-link",
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'1' * 32}")
+    outside_root = tmp_path / "outside"
+    target_root = outside_root / worker_dir_name(run_key)
+    target_root.mkdir(parents=True)
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    backend.storage_root.mkdir(parents=True, exist_ok=True)
+    (backend.storage_root / "workers-link").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="storage root"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def _wire_fake_apis(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi, core_api: _FakeCoreApi) -> None:

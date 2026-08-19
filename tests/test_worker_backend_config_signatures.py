@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
 from mindroom.workers.backends.docker_config import docker_backend_config_signature
 from mindroom.workers.backends.kubernetes_config import (
@@ -178,6 +179,27 @@ def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> 
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
     )
+
+
+@pytest.mark.parametrize(
+    "storage_subpath_prefix",
+    ["../outside", "workers/../../outside", "/outside"],
+)
+def test_kubernetes_config_rejects_storage_subpath_traversal(
+    tmp_path: Path,
+    storage_subpath_prefix: str,
+) -> None:
+    """A Kubernetes storage subpath must remain a relative descendant before any backend is built."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": storage_subpath_prefix,
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="STORAGE_SUBPATH_PREFIX"):
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 @pytest.mark.parametrize(

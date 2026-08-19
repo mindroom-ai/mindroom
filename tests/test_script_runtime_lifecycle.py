@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 import mindroom.workers.runtime as workers_runtime_module
@@ -591,7 +592,7 @@ async def test_worker_gateway_dns_resolution_runs_off_event_loop(
 async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(tmp_path: Path) -> None:
     """Activation waits for both composition roots and shutdown clears the binding."""
     runtime_paths = _runtime_paths(tmp_path)
-    manager = SimpleNamespace(gateway_url="", worker_backend=MagicMock())
+    manager = SimpleNamespace(begin_shutdown=AsyncMock(), gateway_url="", worker_backend=MagicMock())
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
@@ -1598,6 +1599,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     )
     monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         gateway_url="",
         worker_backend=None,
         reconcile_durable=AsyncMock(),
@@ -1695,6 +1697,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
         return lease
 
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         gateway_url="",
         worker_backend=None,
         reconcile_durable=AsyncMock(),
@@ -1769,7 +1772,7 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=SimpleNamespace(_cleanup_tasks=set()),
-        manager=SimpleNamespace(worker_backend=None),
+        manager=SimpleNamespace(begin_shutdown=AsyncMock(), worker_backend=None),
         resolver=SimpleNamespace(),
         config_provider=_config,
         worker_lease_provider=lambda: None,
@@ -1798,6 +1801,41 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 
     assert await asyncio.to_thread(lease_released.wait, 1.0)
     assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_launch_admission_before_snapshotting_runs(tmp_path: Path) -> None:
+    """The shutdown snapshot cannot race any launch that crossed the manager admission boundary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    admission_closed = False
+    original_list_runs = store.list_runs
+
+    async def begin_shutdown() -> None:
+        nonlocal admission_closed
+        admission_closed = True
+
+    def list_after_admission_close(*args: object, **kwargs: object) -> list[ScriptRunRecord]:
+        assert admission_closed is True
+        return original_list_runs(*args, **kwargs)
+
+    store.list_runs = list_after_admission_close  # type: ignore[method-assign]
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=SimpleNamespace(
+            begin_shutdown=begin_shutdown,
+            worker_backend=None,
+        ),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+
+    await runtime.shutdown(timeout_seconds=0.1)
+
+    assert admission_closed is True
 
 
 @pytest.mark.asyncio
@@ -1831,6 +1869,7 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
         store=store,
         broker=SimpleNamespace(_cleanup_tasks=set()),
         manager=SimpleNamespace(
+            begin_shutdown=AsyncMock(),
             worker_backend=lease.manager,
             request_revocation=request_revocation,
             revoke=AsyncMock(),
@@ -1878,6 +1917,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_without_releasi
 
     lease = _Lease(_Backend([_worker(run) for run in runs]))
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         worker_backend=lease.manager,
         request_revocation=request_revocation,
         revoke=AsyncMock(),
@@ -1912,6 +1952,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_without_releasi
     assert lease.released is False
     assert runtime._current_worker_lease is lease
     assert manager.worker_backend is lease.manager
+    manager.begin_shutdown.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1928,6 +1969,7 @@ async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership
 
     lease = _Lease(_Backend([_worker(run)]))
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         worker_backend=lease.manager,
         request_revocation=request_revocation,
         revoke=AsyncMock(),
@@ -1952,6 +1994,7 @@ async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership
     assert lease.released is False
     assert runtime._current_worker_lease is lease
     assert manager.worker_backend is lease.manager
+    manager.begin_shutdown.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -2111,7 +2154,7 @@ async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_pa
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=SimpleNamespace(_cleanup_tasks=set()),
-        manager=SimpleNamespace(worker_backend=lease.manager),
+        manager=SimpleNamespace(begin_shutdown=AsyncMock(), worker_backend=lease.manager),
         resolver=SimpleNamespace(),
         config_provider=_config,
         worker_lease_provider=lambda: None,
@@ -2291,6 +2334,7 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
         return False
 
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         gateway_url="",
         worker_backend=None,
         reconcile_durable=AsyncMock(),
@@ -2371,6 +2415,7 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
         return store.get_run(run_id)
 
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         gateway_url="",
         worker_backend=None,
         reconcile_durable=reconcile_durable,
@@ -2418,6 +2463,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
         return store.get_run(run_id)
 
     manager = SimpleNamespace(
+        begin_shutdown=AsyncMock(),
         gateway_url="",
         worker_backend=None,
         reconcile_durable=reconcile_durable,
@@ -2456,6 +2502,7 @@ async def test_terminal_run_is_pruned_only_after_retention_and_snapshot_cleanup(
     backend = StaticSandboxRunnerBackend(
         api_root="http://runner",
         auth_token="token",  # noqa: S106
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"retired": True})),
     )
     manager = SimpleNamespace(
         worker_backend=backend,

@@ -347,6 +347,50 @@ async def test_worker_replacement_waits_for_admitted_launch_and_rejects_racing_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["all", "local"])
+async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Shutdown admission covers both worker and explicitly unsafe local launches."""
+    manager, _backend, client = _manager(tmp_path, mode=mode)
+    launch_entered = asyncio.Event()
+    release_launch = asyncio.Event()
+    if mode == "all":
+        client.launch_entered = launch_entered
+        client.launch_release = release_launch
+    else:
+
+        async def launch_local(*_args: object, **_kwargs: object) -> str:
+            launch_entered.set()
+            await release_launch.wait()
+            handle = str(_kwargs["handle"])
+            return f"Started background process\nHandle: {handle}"
+
+        monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+        monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+
+    admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
+    await asyncio.wait_for(launch_entered.wait(), timeout=1)
+    fence = asyncio.create_task(manager.begin_shutdown())
+    await asyncio.sleep(0)
+
+    with pytest.raises(ScriptRunManagerError, match="runtime is shutting down"):
+        await manager.run(_context(tmp_path, mode=mode), source="print('blocked')\n")
+
+    assert len(manager.store.list_runs()) == 1
+    assert fence.done() is False
+    release_launch.set()
+    await admitted_launch
+    await fence
+
+    with pytest.raises(ScriptRunManagerError, match="runtime is shutting down"):
+        await manager.run(_context(tmp_path, mode=mode), source="print('still blocked')\n")
+    assert len(manager.store.list_runs()) == 1
+
+
+@pytest.mark.asyncio
 async def test_worker_launch_without_a_backend_is_rejected_before_creating_durable_intent(tmp_path: Path) -> None:
     """A safe unavailable backend must not create a script row that can never launch."""
     manager, _backend, _client = _manager(tmp_path)
