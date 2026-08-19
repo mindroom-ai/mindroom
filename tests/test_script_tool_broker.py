@@ -454,10 +454,13 @@ async def test_script_broker_closes_a_filtered_requested_toolkit(
         def add(self, a: int, b: int) -> int:
             return a + b
 
-        async def close(self) -> None:
-            closed.set()
+    toolkit = AsyncClosingToolkit()
 
-    _replace_calculator_toolkit(monkeypatch, AsyncClosingToolkit)
+    async def close() -> None:
+        closed.set()
+
+    monkeypatch.setattr(toolkit, "close", close)
+    _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
     broker, token = _broker(
         tmp_path,
         events=[],

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.approval import ApprovalRuleConfig
 
 if TYPE_CHECKING:
-    from collections.abc import AbstractSet, Mapping
+    from collections.abc import Mapping
 
     from mindroom.config.main import Config
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 def build_automation_approval_config(
     config: Config,
     *,
-    function_owners: Mapping[str, AbstractSet[str]],
+    function_owners: Mapping[str, frozenset[str]],
     preapproved_toolkits: frozenset[str],
     never_preapprove_toolkits: frozenset[str],
 ) -> Config:
