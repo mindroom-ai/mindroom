@@ -659,6 +659,8 @@ async def test_prepare_oversized_file_edit_remains_parseable() -> None:
 
     assert isinstance(parsed, nio.RoomMessageFile)
     assert prepared["url"] == prepared["m.new_content"]["url"]
+    assert prepared["filename"] == prepared["m.new_content"]["filename"]
+    assert prepared["info"] == prepared["m.new_content"]["info"]
     assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
 
 
@@ -722,6 +724,49 @@ async def test_prepare_oversized_encrypted_file_edit_remains_parseable(
 
     assert isinstance(parsed, nio.RoomEncryptedFile)
     assert prepared["file"] == prepared["m.new_content"]["file"]
+    assert prepared["filename"] == prepared["m.new_content"]["filename"]
+    assert prepared["info"] == prepared["m.new_content"]["info"]
+    assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fallback() -> None:
+    """A failed replacement sidecar upload must not leave an invalid file wrapper."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    text = "updated file fallback " * 3000
+    edit_content = {
+        "body": f"* {text}",
+        "filename": "previous-message-content.json",
+        "info": {"mimetype": "application/json", "size": 123},
+        "m.new_content": {
+            "body": text,
+            "filename": "previous-message-content.json",
+            "info": {"mimetype": "application/json", "size": 123},
+            "msgtype": "m.file",
+            "url": "mxc://server/previous-sidecar",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        "msgtype": "m.file",
+        "url": "mxc://server/previous-sidecar",
+    }
+
+    prepared = await prepare_large_message(client, "!room:server", edit_content)
+
+    for event_id, fallback in (("$replacement", prepared), ("$new-content", prepared["m.new_content"])):
+        parsed = nio.Event.parse_event(
+            {
+                "content": fallback,
+                "event_id": event_id,
+                "sender": "@agent:server",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+            },
+        )
+        assert isinstance(parsed, nio.RoomMessageText)
+        assert fallback["msgtype"] == "m.text"
+        for media_key in ("url", "file", "filename", "info"):
+            assert media_key not in fallback
+
     assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
 
 
