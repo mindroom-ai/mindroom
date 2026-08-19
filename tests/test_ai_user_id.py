@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextvars import Context
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -708,8 +709,12 @@ class TestUserIdPassthrough:
         assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
 
     @pytest.mark.asyncio
-    async def test_prepare_agent_and_prompt_logs_only_safe_metadata(self, tmp_path: Path) -> None:
-        """Routine preparation logs must not include prepared message contents."""
+    async def test_prepare_agent_and_prompt_logs_full_prompt_only_at_debug(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Routine logs stay content-safe while debug logs retain the prepared prompt."""
         sensitive_marker = "sensitive prompt marker"
         config = _config()
         runtime_paths = _runtime_paths(tmp_path)
@@ -724,37 +729,51 @@ class TestUserIdPassthrough:
             prepared_history=PreparedHistoryState(),
         )
 
-        with (
-            patch(
-                "mindroom.ai.build_memory_prompt_parts",
-                new_callable=AsyncMock,
-                return_value=MemoryPromptParts(),
-            ),
-            patch("mindroom.ai.create_agent", return_value=mock_agent),
-            patch(
-                "mindroom.ai.prepare_agent_execution_context",
-                new=AsyncMock(return_value=prepared_execution),
-            ),
-            capture_logs() as logs,
-        ):
-            await _prepare_agent_and_prompt(
-                make_turn_context("general"),
-                prompt="current request",
-                runtime_paths=runtime_paths,
-                config=config,
-            )
+        async def prepare_with_debug(*, enabled: bool) -> list[dict[str, object]]:
+            level = logging.DEBUG if enabled else logging.INFO
+            with (
+                caplog.at_level(level, logger="mindroom.ai"),
+                patch(
+                    "mindroom.ai.build_memory_prompt_parts",
+                    new_callable=AsyncMock,
+                    return_value=MemoryPromptParts(),
+                ),
+                patch("mindroom.ai.create_agent", return_value=mock_agent),
+                patch(
+                    "mindroom.ai.prepare_agent_execution_context",
+                    new=AsyncMock(return_value=prepared_execution),
+                ),
+                capture_logs() as logs,
+            ):
+                await _prepare_agent_and_prompt(
+                    make_turn_context("general"),
+                    prompt="current request",
+                    runtime_paths=runtime_paths,
+                    config=config,
+                )
+            return logs
 
-        preparation_logs = [log for log in logs if log.get("event") == "Preparing agent and prompt"]
-        assert preparation_logs == [
+        safe_log = {
+            "agent": "general",
+            "event": "Preparing agent and prompt",
+            "log_level": "info",
+            "message_count": 2,
+            "unseen_event_count": 2,
+        }
+        normal_logs = await prepare_with_debug(enabled=False)
+        assert normal_logs == [safe_log]
+        assert sensitive_marker not in repr(normal_logs)
+
+        debug_logs = await prepare_with_debug(enabled=True)
+        assert debug_logs == [
+            safe_log,
             {
                 "agent": "general",
-                "event": "Preparing agent and prompt",
-                "log_level": "info",
-                "message_count": 2,
-                "unseen_event_count": 2,
+                "event": "Prepared agent full prompt",
+                "full_prompt": "sensitive prompt marker\n\ncurrent request",
+                "log_level": "debug",
             },
         ]
-        assert sensitive_marker not in repr(logs)
 
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(

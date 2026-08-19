@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from contextlib import aclosing
 from copy import deepcopy
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+_stdlib_logger = logging.getLogger(__name__)
 
 __all__ = [
     "AIStreamChunk",
@@ -1271,13 +1273,19 @@ async def _prepare_agent_and_prompt(
     unseen_event_ids = prepared_execution.unseen_event_ids
     run_messages = prepared_execution.messages
 
-    # Routine logs stay content-safe; full request text belongs only in opt-in request logging.
+    # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
     logger.info(
         "Preparing agent and prompt",
         agent=agent_name,
         message_count=len(run_messages),
         unseen_event_count=len(unseen_event_ids),
     )
+    if _stdlib_logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Prepared agent full prompt",
+            agent=agent_name,
+            full_prompt=render_prepared_messages_text(run_messages),
+        )
     return _PreparedAgentRun(
         agent=agent,
         messages=run_messages,
