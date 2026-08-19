@@ -265,44 +265,44 @@ class ScriptRunManager:
                 msg = "Background script concurrent-run limit exceeded."
                 raise ScriptRunManagerError(msg)
             await asyncio.to_thread(self.store.create_run, run)
-            try:
-                created = await asyncio.to_thread(self.store.get_run, run.run_id)
-                if created.cancel_requested_at is not None:
-                    return await self._complete_cancel_before_spawn(created)
-                if run.local_unsafe:
-                    return await self._launch_local(context, run=run, source=source, token=token)
-                return await self._launch_worker(
-                    context,
-                    run=run,
-                    source=source,
-                    token=token,
-                    worker_spec=_require_worker_spec(worker_spec),
-                )
-            except _AmbiguousLaunchError as exc:
-                await self._cleanup_token(run)
-                raise exc.cause from None
-            except BaseException as exc:
-                durable: ScriptRunRecord | None = None
-                with suppress(Exception):
-                    durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-                if durable is not None and durable.cancel_requested_at is not None:
-                    await self._cleanup_token(durable)
-                    raise
-                if isinstance(exc, asyncio.CancelledError):
-                    failure_state = ScriptRunState.INTERRUPTED
-                else:
-                    failure_state = ScriptRunState.FAILED
-                await asyncio.to_thread(
-                    self.store.transition_run,
-                    run.run_id,
-                    state=failure_state,
-                    error=_bounded_error(exc),
-                )
-                try:
-                    await self.broker.cancel_run(run.run_id)
-                finally:
-                    await self._cleanup_token(durable or run)
+        try:
+            created = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if created.cancel_requested_at is not None:
+                return await self._complete_cancel_before_spawn(created)
+            if run.local_unsafe:
+                return await self._launch_local(context, run=run, source=source, token=token)
+            return await self._launch_worker(
+                context,
+                run=run,
+                source=source,
+                token=token,
+                worker_spec=_require_worker_spec(worker_spec),
+            )
+        except _AmbiguousLaunchError as exc:
+            await self._cleanup_token(run)
+            raise exc.cause from None
+        except BaseException as exc:
+            durable: ScriptRunRecord | None = None
+            with suppress(Exception):
+                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if durable is not None and durable.cancel_requested_at is not None:
+                await self._cleanup_token(durable)
                 raise
+            if isinstance(exc, asyncio.CancelledError):
+                failure_state = ScriptRunState.INTERRUPTED
+            else:
+                failure_state = ScriptRunState.FAILED
+            await asyncio.to_thread(
+                self.store.transition_run,
+                run.run_id,
+                state=failure_state,
+                error=_bounded_error(exc),
+            )
+            try:
+                await self.broker.cancel_run(run.run_id)
+            finally:
+                await self._cleanup_token(durable or run)
+            raise
 
     async def _complete_cancel_before_spawn(
         self,
@@ -331,7 +331,7 @@ class ScriptRunManager:
         run_id: str,
     ) -> ScriptRunStatus:
         """Return one owned run after reconciling its supervisor state."""
-        run = self._owned_run(context, run_id)
+        run = await self._owned_run(context, run_id)
         if run.state in _TERMINAL_STATES:
             try:
                 await self.broker.cancel_run(run.run_id)
@@ -339,11 +339,16 @@ class ScriptRunManager:
                 await self._cleanup_token(run)
             return ScriptRunStatus(run=run)
         if run.cancel_requested_at is not None:
-            reconciled = await self.cancel(
-                context,
-                run_id=run.run_id,
-                reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
-            )
+            try:
+                reconciled = await self.cancel(
+                    context,
+                    run_id=run.run_id,
+                    reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
+                )
+            except ScriptRunManagerError:
+                pending = await self._owned_run(context, run.run_id)
+                status = await self._process_status(pending)
+                return ScriptRunStatus(run=pending, output=status.output)
             return ScriptRunStatus(run=reconciled)
         if _runtime_expired(run):
             reconciled = await self.reconcile(context, run_id=run.run_id)
@@ -393,7 +398,7 @@ class ScriptRunManager:
         terminal_state: ScriptRunState,
     ) -> ScriptRunRecord:
         """Revoke, signal, and publish one confirmed terminal process outcome."""
-        run = self._owned_run(context, run_id)
+        run = await self._owned_run(context, run_id)
         return await self._terminate_durable_run(
             run,
             force=force,
@@ -467,7 +472,7 @@ class ScriptRunManager:
         run_id: str,
     ) -> ScriptRunRecord:
         """Reconcile one owned durable run with its current process fact."""
-        run = self._owned_run(context, run_id)
+        run = await self._owned_run(context, run_id)
         return await self._reconcile_durable_run(run)
 
     async def reconcile_durable(
@@ -664,10 +669,10 @@ class ScriptRunManager:
             await self._preserve_ambiguous_launch(context, run.run_id)
             raise _AmbiguousLaunchError(exc) from exc
 
-    def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
+    async def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
         not_found = f"Background script '{run_id}' was not found."
         try:
-            run = self.store.get_run(run_id)
+            run = await asyncio.to_thread(self.store.get_run, run_id)
         except ScriptRunNotFoundError:
             raise ScriptRunManagerError(not_found) from None
         if run.agent_name != context.agent_name or run.owner_user_id != context.requester_id:

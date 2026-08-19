@@ -233,7 +233,7 @@ def _workspace_file(
     try:
         resolved = candidate.resolve(strict=True)
         metadata = resolved.stat()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{label} is unavailable in the worker workspace.") from exc
     if not resolved.is_relative_to(workspace.resolve()) or not stat.S_ISREG(metadata.st_mode):
         raise HTTPException(status_code=400, detail=f"{label} must be a regular file inside the worker workspace.")

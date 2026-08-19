@@ -52,7 +52,12 @@ from mindroom.script_runs.models import (
 from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
 from mindroom.tool_approval import ToolApprovalDecision
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.worker_routing import WorkerScope, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    WorkerScope,
+    resolved_worker_key_scope,
+    serialize_tool_execution_identity,
+)
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -181,6 +186,7 @@ class _RuntimeResolver:
         worker_id: str | None = None,
         private_agent_names: frozenset[str] | None = None,
         local_unsafe: bool = False,
+        resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
     ) -> None:
         self.context = context
         self.approval_events = approval_events
@@ -188,6 +194,7 @@ class _RuntimeResolver:
         self.worker_id = worker_id
         self.private_agent_names = private_agent_names
         self.local_unsafe = local_unsafe
+        self.resolved_worker_targets = resolved_worker_targets
         self.approval_wait: asyncio.Event | None = None
         self.approval_started: asyncio.Event | None = None
         self.settled_approvals: list[tuple[BackgroundScriptToolOrigin, str]] = []
@@ -207,6 +214,8 @@ class _RuntimeResolver:
         worker_target = context.resolve_worker_target()
         if self.private_agent_names is not None:
             worker_target = replace(worker_target, private_agent_names=self.private_agent_names)
+        if self.resolved_worker_targets is not None:
+            self.resolved_worker_targets.append(worker_target)
         return ScriptRuntimeWorkerAuthority(
             worker_id=self.worker_id,
             local_unsafe=self.local_unsafe,
@@ -261,6 +270,7 @@ def _broker(
     durable_local_unsafe: bool | None = None,
     live_local_unsafe: bool | None = None,
     worker_scope: WorkerScope | None = None,
+    resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -304,6 +314,7 @@ def _broker(
                 worker_id=live_worker_id,
                 private_agent_names=live_private_agent_names,
                 local_unsafe=resolved_live_local_unsafe,
+                resolved_worker_targets=resolved_worker_targets,
             ),
         ),
         token,
@@ -367,6 +378,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
 ) -> None:
     """The isolated script process does not override the called tool's configured worker target."""
     events: list[str] = []
+    resolved_worker_targets: list[ResolvedWorkerTarget] = []
     broker, token = _broker(
         tmp_path,
         events=events,
@@ -374,12 +386,18 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
         durable_worker_key="v1:default:user_agent:@alice:example.test:watcher",
         durable_worker_id="script-process-worker",
         live_worker_id="script-process-worker",
+        resolved_worker_targets=resolved_worker_targets,
     )
 
     receipt = await _call_through_gateway(broker, _request(), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
+    assert len(resolved_worker_targets) == 1
+    resolved_worker_key = resolved_worker_targets[0].worker_key
+    assert resolved_worker_key is not None
+    assert resolved_worker_key_scope(resolved_worker_key) == tool_worker_scope
+    assert resolved_worker_key != "v1:default:user_agent:@alice:example.test:watcher"
 
 
 @pytest.mark.asyncio
@@ -1573,6 +1591,8 @@ async def test_script_broker_rejects_durable_worker_key_mismatch_before_dispatch
     receipt = await _call_through_gateway(broker, _request(call_id="wrong-worker-key"), token)
 
     assert receipt.state is ScriptCallState.FAILED
+    assert isinstance(receipt.error, dict)
+    assert "worker key" in str(receipt.error.get("message", "")).lower()
     assert events == []
 
 

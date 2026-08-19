@@ -303,6 +303,7 @@ def _parse_receipt(
     if (
         run_id != expected_run_id
         or call_id != expected_call_id
+        or not isinstance(state, str)
         or state
         not in {
             "pending",
@@ -334,7 +335,7 @@ def _parse_receipt(
         toolkit_name=expected_toolkit_name,
         function_name=expected_function_name,
         arguments_digest=expected_arguments_digest,
-        state=cast("str", state),
+        state=state,
         result=payload.get("result"),
         error=payload.get("error"),
     )

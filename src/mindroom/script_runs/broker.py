@@ -807,13 +807,15 @@ def _validate_resolved_authority(
         runtime_paths=context.runtime_paths,
     )
     expected_durable_worker_key = None if run.local_unsafe else expected_process_worker_target.worker_key
+    if run.worker_key != expected_durable_worker_key:
+        msg = "Durable script worker key does not match the requester-and-agent process scope."
+        raise ValueError(msg)
     if (
         durable_identity != live_identity
         or durable_identity.agent_name != run.agent_name
         or durable_identity.requester_id != run.owner_user_id
         or durable_identity.room_id != run.room_id
         or durable_identity.resolved_thread_id != run.thread_root_event_id
-        or run.worker_key != expected_durable_worker_key
         or worker_authority.worker_id != run.worker_id
         or worker_authority.local_unsafe != run.local_unsafe
         or worker_authority.worker_target != expected_tool_worker_target

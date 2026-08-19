@@ -29,7 +29,7 @@ def _arguments_digest(arguments: dict[str, object]) -> str:
 
 
 def _receipt(
-    state: str,
+    state: object,
     *,
     result: object | None = None,
     error: object | None = None,
@@ -369,6 +369,28 @@ def test_script_sdk_rejects_removed_call_states(
     def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
         del timeout
         return io.BytesIO(_receipt(removed_state))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+
+    assert exc_info.value.kind == "invalid_response"
+
+
+@pytest.mark.parametrize("invalid_state", [[], {}])
+def test_script_sdk_rejects_unhashable_receipt_states(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid_state: object,
+) -> None:
+    """Malformed receipt state types should become stable SDK errors instead of raw TypeError."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(_receipt(invalid_state))
 
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)

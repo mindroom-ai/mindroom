@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -38,7 +37,7 @@ class ScriptTools(Toolkit):
         max_runtime_hours: float = 24,
     ) -> None:
         self.limits = ScriptRunLimits(
-            allowed_tools=tuple(dict.fromkeys(name.strip() for name in allowed_tools or ())) or None,
+            allowed_tools=_normalized_allowed_tools(allowed_tools),
             max_concurrent_runs=max_concurrent_runs,
             max_tool_calls_per_minute=max_tool_calls_per_minute,
             max_runtime_hours=max_runtime_hours,
@@ -139,12 +138,27 @@ def _payload(status: str, **fields: object) -> str:
 
 
 def _public_run(run: ScriptRunRecord) -> dict[str, object]:
-    fields = asdict(run)
-    fields.pop("token_hash")
-    fields.pop("execution_identity")
-    fields["state"] = run.state.value
-    fields["entity_kind"] = run.entity_kind.value
-    fields["grants"] = [
-        {"toolkit_name": grant.toolkit_name, "function_name": grant.function_name} for grant in run.grants
-    ]
-    return fields
+    return {
+        "run_id": run.run_id,
+        "agent_name": run.agent_name,
+        "name": run.name,
+        "state": run.state.value,
+        "entity_kind": run.entity_kind.value,
+        "local_unsafe": run.local_unsafe,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "exit_code": run.exit_code,
+        "error": run.error,
+        "cancel_requested_at": run.cancel_requested_at,
+        "cancellation_reason": run.cancellation_reason,
+        "call_count": run.call_count,
+        "max_tool_calls_per_minute": run.max_tool_calls_per_minute,
+        "max_runtime_seconds": run.max_runtime_seconds,
+        "grants": [{"toolkit_name": grant.toolkit_name, "function_name": grant.function_name} for grant in run.grants],
+    }
+
+
+def _normalized_allowed_tools(allowed_tools: list[str] | None) -> tuple[str, ...] | None:
+    normalized = (name.strip() for name in allowed_tools or ())
+    return tuple(dict.fromkeys(name for name in normalized if name)) or None

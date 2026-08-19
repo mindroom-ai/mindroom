@@ -908,6 +908,24 @@ async def test_signal_failure_stays_nonterminal_and_repeat_cancel_retries(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_status_reports_pending_cancellation_with_recent_output(tmp_path: Path) -> None:
+    """An unconfirmed termination remains inspectable through the status control."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(state="running", output="still stopping")
+
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await manager.cancel(context, run_id=run.run_id, force=True)
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.state is ScriptRunState.RUNNING
+    assert status.run.cancel_requested_at is not None
+    assert status.output == "still stopping"
+
+
+@pytest.mark.asyncio
 async def test_token_cleanup_failure_does_not_mask_cancel_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -942,7 +960,6 @@ def test_token_cleanup_does_not_follow_parent_swap(
     outside_token = outside_run / "capability"
     outside_token.write_text("outside", encoding="utf-8")
     saved_run_dir = run_dir.with_name("run-race-saved")
-    original_is_symlink = Path.is_symlink
     original_stat = manager_module.os.stat
     swapped = False
 
@@ -951,12 +968,6 @@ def test_token_cleanup_does_not_follow_parent_swap(
         run_dir.rename(saved_run_dir)
         run_dir.symlink_to(outside_run, target_is_directory=True)
         swapped = True
-
-    def swap_after_path_check(path: Path) -> bool:
-        if path == run_dir and not swapped:
-            swap_directory()
-            return False
-        return original_is_symlink(path)
 
     def swap_before_descriptor_stat(
         path: str,
@@ -968,7 +979,6 @@ def test_token_cleanup_does_not_follow_parent_swap(
             swap_directory()
         return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(Path, "is_symlink", swap_after_path_check)
     monkeypatch.setattr(manager_module.os, "stat", swap_before_descriptor_stat)
 
     manager_module._remove_snapshot_token(
@@ -1119,6 +1129,57 @@ async def test_concurrency_limit_is_scoped_to_owner_agent_and_worker(tmp_path: P
         limits=limits,
     )
     assert bob.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_slow_worker_launch_does_not_block_an_independent_reservation(tmp_path: Path) -> None:
+    """Remote launch latency should not hold the process-wide capacity lock."""
+    manager, _backend, client = _manager(tmp_path)
+    client.launch_entered = asyncio.Event()
+    client.launch_release = asyncio.Event()
+    first = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
+    await client.launch_entered.wait()
+
+    second = asyncio.create_task(
+        manager.run(
+            _context(tmp_path, requester_id="@bob:example.test"),
+            source="print('ok')\n",
+        ),
+    )
+    for _ in range(50):
+        if len(client.requested_handles) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    try:
+        assert len(client.requested_handles) == 2
+    finally:
+        client.launch_release.set()
+        await asyncio.gather(first, second)
+
+
+@pytest.mark.asyncio
+async def test_owned_run_lookup_runs_off_the_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frequent status reads must not execute SQLite work on the request loop."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(state="running", output="ready")
+    main_thread = threading.get_ident()
+    lookup_threads: list[int] = []
+    original_get_run = manager.store.get_run
+
+    def recording_get_run(run_id: str) -> ScriptRunRecord:
+        lookup_threads.append(threading.get_ident())
+        return original_get_run(run_id)
+
+    monkeypatch.setattr(manager.store, "get_run", recording_get_run)
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.output == "ready"
+    assert lookup_threads
+    assert main_thread not in lookup_threads
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom import shell_execution as shell_execution_module
 from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
@@ -474,6 +475,31 @@ async def test_caller_supplied_handle_is_registered_once() -> None:
             assert list(registry) == [requested_handle]
         finally:
             await _kill(socket_path, requested_handle, force=True)
+
+
+@pytest.mark.asyncio
+async def test_background_limit_discards_rejected_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rejecting a process at the background limit must not leave an unowned child."""
+    registry: dict[str, ProcessRecord] = {}
+    spawned_pids: list[int] = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def recording_spawn(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await original_spawn(*args, **kwargs)
+        spawned_pids.append(process.pid)
+        return process
+
+    monkeypatch.setattr(shell_execution_module, "_MAX_BACKGROUNDED", 1)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
+    async with _running_server(registry) as socket_path:
+        accepted = await _run(socket_path, ["sleep", "300"], timeout=0)
+        rejected = await _run(socket_path, ["sleep", "300"], timeout=0)
+        try:
+            assert "Too many backgrounded processes" in rejected
+            assert len(spawned_pids) == 2
+            await _assert_pid_dead(spawned_pids[1])
+        finally:
+            await _kill(socket_path, _extract_handle(accepted), force=True)
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,11 @@ def _run(*, state: ScriptRunState = ScriptRunState.RUNNING) -> ScriptRunRecord:
         grants=(),
         token_hash="must-not-leak",  # noqa: S106
         execution_identity={"requester_id": "must-not-leak"},
+        worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        worker_id="worker-private",
+        worker_backend_generation="backend-private",
+        supervisor_handle=f"shell:{'a' * 32}",
+        snapshot_locator="workers/private/.mindroom/script-runs/script-1",
         state=state,
     )
 
@@ -126,6 +131,13 @@ def test_script_tool_interface_exists() -> None:
     }
 
 
+def test_script_tool_discards_blank_allowed_tool_names() -> None:
+    """Whitespace-only config entries should not break toolkit construction."""
+    toolkit = ScriptTools(allowed_tools=[" calculator ", " ", "calculator", "matrix_message"])
+
+    assert toolkit.limits.allowed_tools == ("calculator", "matrix_message")
+
+
 @pytest.mark.asyncio
 async def test_script_tool_requires_live_room_context() -> None:
     """Detached construction cannot bypass requester and room ownership."""
@@ -164,6 +176,11 @@ async def test_script_tool_uses_configured_limits_and_redacts_capability_fields(
     assert payload["run"]["run_id"] == "script-1"
     assert "token_hash" not in payload["run"]
     assert "execution_identity" not in payload["run"]
+    assert "worker_key" not in payload["run"]
+    assert "worker_id" not in payload["run"]
+    assert "worker_backend_generation" not in payload["run"]
+    assert "supervisor_handle" not in payload["run"]
+    assert "snapshot_locator" not in payload["run"]
     assert manager.limits == ScriptRunLimits(
         max_concurrent_runs=2,
         max_tool_calls_per_minute=7,

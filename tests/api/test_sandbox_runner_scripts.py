@@ -178,6 +178,20 @@ def test_worker_script_endpoint_rejects_path_outside_worker_workspace(
     assert "workspace" in response.json()["detail"].lower()
 
 
+def test_worker_script_endpoint_rejects_nul_in_snapshot_path(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """Malformed path bytes must produce a client error instead of escaping as a server failure."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id="run-nul", source="print('no')\n")
+    payload["source_path"] = "source\x00.py"
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert "workspace" in response.json()["detail"].lower()
+
+
 def test_worker_script_endpoint_rejects_unapproved_environment_name(
     runner_client: tuple[TestClient, Path],
 ) -> None:
