@@ -335,6 +335,9 @@ class MatrixDelivery:
     # The scan key recovery pages on. Without it a pass that fails a whole page
     # re-reads the same page forever and never reaches what is behind it.
     created_at_ns: int
+    # Semantic facts retained locally for post-acknowledgement recovery. They
+    # are intentionally separate from ``payload``, which is Matrix wire data.
+    result: Mapping[str, object] | None = None
     event_type: str = "m.room.message"
     # Whether this row has already been offered to the homeserver. Together
     # with the device below it answers the only question a resend needs: can

@@ -572,6 +572,7 @@ class PrincipalStore:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -601,6 +602,7 @@ class PrincipalStore:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
             ),
@@ -1181,6 +1183,7 @@ def _enqueue_matrix_delivery(
     room_id: str,
     thread_id: str | None,
     payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
 ) -> str | None:
@@ -1254,6 +1257,7 @@ def _enqueue_matrix_delivery(
         membership_epoch=membership_epoch,
         thread_id=thread_id,
         payload=payload,
+        result=result,
         edits_event_id=edits_event_id,
     )
     if transaction_id is None:

@@ -233,6 +233,9 @@ _TABLES = (
         thread_id TEXT NOT NULL,
         transaction_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        -- Local semantic facts needed after acknowledgement. These are not
+        -- Matrix event content and are never sent by the delivery worker.
+        result_json TEXT,
         edits_event_id TEXT,
         -- A durable edit can be reserved before the INITIAL event ID exists.
         -- Its claim waits until INITIAL acknowledgement fills the target.

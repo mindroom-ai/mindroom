@@ -305,6 +305,7 @@ class MatrixDeliveryView(Protocol):
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),

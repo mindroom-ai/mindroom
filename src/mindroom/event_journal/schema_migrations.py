@@ -7,6 +7,7 @@ def pre_schema_migration_statements(
     *,
     approval_continuation_call_columns: frozenset[str] = frozenset(),
     interactive_question_columns: frozenset[str] = frozenset(),
+    matrix_delivery_outbox_columns: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """Return upgrades that must run before installing the current schema."""
     statements: list[str] = []
@@ -14,6 +15,8 @@ def pre_schema_migration_statements(
         statements.append(
             "ALTER TABLE approval_continuation_calls ADD COLUMN human_approval_required BOOLEAN",
         )
+    if matrix_delivery_outbox_columns and "result_json" not in matrix_delivery_outbox_columns:
+        statements.append("ALTER TABLE matrix_delivery_outbox ADD COLUMN result_json TEXT")
     if "claimed_source_event_id" in interactive_question_columns:
         statements.extend(
             (

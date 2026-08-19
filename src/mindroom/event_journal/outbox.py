@@ -40,10 +40,11 @@ if TYPE_CHECKING:
 
 _OUTBOX_COLUMNS = """
     delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
-    payload_json, edits_event_id, acknowledged_event_id, created_at_ns,
+    payload_json, result_json, edits_event_id, acknowledged_event_id, created_at_ns,
     attempted, retired, sending_device_id
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
+_LEGACY_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
 
 
 def _delivery_payload(
@@ -81,6 +82,13 @@ def delivery_payload_json(
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _delivery_result_json(result: Mapping[str, object] | None) -> str | None:
+    """Return canonical local result JSON without mixing it into wire content."""
+    if result is None:
+        return None
+    return json.dumps(dict(result), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
@@ -129,6 +137,7 @@ def enqueue(
     thread_id: str | None,
     payload: Mapping[str, object],
     edits_event_id: str | None,
+    result: Mapping[str, object] | None = None,
     edit_target_pending: bool = False,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
@@ -163,15 +172,16 @@ def enqueue(
         """
         INSERT INTO matrix_delivery_outbox (
             principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
-            thread_id, transaction_id, payload_json, edits_event_id,
+            thread_id, transaction_id, payload_json, result_json, edits_event_id,
             edit_target_pending, attempted, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             membership_epoch = excluded.membership_epoch,
             thread_id = excluded.thread_id,
             event_type = excluded.event_type,
             payload_json = excluded.payload_json,
+            result_json = excluded.result_json,
             edits_event_id = excluded.edits_event_id,
             edit_target_pending = excluded.edit_target_pending
         WHERE matrix_delivery_outbox.attempted = 0
@@ -186,6 +196,7 @@ def enqueue(
             encode_thread_id(thread_id),
             transaction_id,
             delivery_payload_json(principal_id, delivery_id, stage, payload),
+            _delivery_result_json(result),
             edits_event_id,
             int(edit_target_pending),
             time.time_ns(),
@@ -673,6 +684,21 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
+    raw_result = row["result_json"]
+    if raw_result is None:
+        replacement = payload.get("m.new_content")
+        legacy_result = (
+            replacement.get(_LEGACY_FINAL_OUTCOME_KEY)
+            if isinstance(replacement, dict)
+            else payload.get(_LEGACY_FINAL_OUTCOME_KEY)
+        )
+        result = dict(legacy_result) if isinstance(legacy_result, dict) else None
+    else:
+        decoded_result = json.loads(raw_result)
+        if not isinstance(decoded_result, dict):
+            msg = f"Outbox result for delivery {row['delivery_id']!r} is not an object"
+            raise TypeError(msg)
+        result = decoded_result
     return MatrixDelivery(
         delivery_id=row["delivery_id"],
         stage=DeliveryStage(row["stage"]),
@@ -685,6 +711,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         edits_event_id=row["edits_event_id"],
         acknowledged_event_id=row["acknowledged_event_id"],
         created_at_ns=int(row["created_at_ns"]),
+        result=result,
         attempted=bool(row["attempted"]),
         retired=bool(row["retired"]),
         sending_device_id=row["sending_device_id"],

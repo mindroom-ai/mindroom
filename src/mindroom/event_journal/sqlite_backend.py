@@ -211,9 +211,13 @@ class SqliteBackend:
             approval_continuation_call_columns = frozenset(
                 str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
             )
+            matrix_delivery_outbox_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
+            )
             for statement in pre_schema_migration_statements(
                 approval_continuation_call_columns=approval_continuation_call_columns,
                 interactive_question_columns=interactive_question_columns,
+                matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
             ):
                 connection.execute(statement)
             transaction = _SqliteTransaction(connection)

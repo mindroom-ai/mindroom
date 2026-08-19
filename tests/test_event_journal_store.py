@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 import pytest_asyncio
 
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.event_journal import (
     AdmissionResult,
     ApprovalCall,
@@ -110,6 +111,18 @@ CREATE TABLE matrix_delivery_outbox (
     edits_event_id TEXT, edit_target_pending INTEGER NOT NULL DEFAULT 0,
     attempted INTEGER NOT NULL DEFAULT 0, sending_device_id TEXT,
     acknowledged_event_id TEXT, created_at_ns BIGINT NOT NULL,
+    PRIMARY KEY (principal_id, delivery_id, stage)
+)
+"""
+_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL = """
+CREATE TABLE matrix_delivery_outbox (
+    principal_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+    stage TEXT NOT NULL, event_type TEXT NOT NULL, room_id TEXT NOT NULL,
+    membership_epoch BIGINT NOT NULL, thread_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+    edits_event_id TEXT, edit_target_pending INTEGER NOT NULL DEFAULT 0,
+    attempted INTEGER NOT NULL DEFAULT 0, retired INTEGER NOT NULL DEFAULT 0,
+    sending_device_id TEXT, acknowledged_event_id TEXT, created_at_ns BIGINT NOT NULL,
     PRIMARY KEY (principal_id, delivery_id, stage)
 )
 """
@@ -5557,6 +5570,31 @@ class TestOutbox:
         assert claimed is not None
         assert claimed.payload["body"] == "final"
 
+    async def test_an_unattempted_delivery_replaces_its_local_result(self, alice: PrincipalStore) -> None:
+        """Wire content and its local semantic result change atomically before claim."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("draft preview"),
+            result={"body": "draft full result"},
+        )
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("final preview"),
+            result={"body": "final full result"},
+        )
+
+        claimed = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert claimed is not None
+        assert claimed.payload["body"] == "final preview"
+        assert claimed.result == {"body": "final full result"}
+
     async def test_claiming_freezes_the_payload(self, alice: PrincipalStore) -> None:
         """Claiming freezes the payload.
 
@@ -5583,6 +5621,57 @@ class TestOutbox:
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "sent"
+
+    async def test_claiming_freezes_the_local_result_with_the_payload(self, alice: PrincipalStore) -> None:
+        """A regenerated turn cannot pair old wire bytes with new recovery facts."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent preview"),
+            result={"body": "sent full result"},
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated preview"),
+            result={"body": "regenerated full result"},
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.payload["body"] == "sent preview"
+        assert stored.result == {"body": "sent full result"}
+
+    async def test_legacy_inline_final_result_remains_recoverable(self, alice: PrincipalStore) -> None:
+        """Rows written before local result storage retain their semantic outcome."""
+        legacy_result = {"body": "legacy full result", "interactive": None}
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={
+                "msgtype": "m.text",
+                "body": "* legacy preview",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "legacy preview",
+                    DURABLE_FINAL_OUTCOME_KEY: legacy_result,
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+            },
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.result == legacy_result
 
     async def test_reclaiming_sends_the_identical_delivery(self, alice: PrincipalStore) -> None:
         """Everything that goes on the wire is frozen; the claim state is not.
@@ -8161,6 +8250,19 @@ class TestConnectionSecretsStayOutOfLogs:
 
 class TestSchemaUpgrades:
     """Opening the journal preserves old rows and enables current writes."""
+
+    async def test_sqlite_adds_local_results_to_an_existing_delivery_outbox(self, tmp_path: Path) -> None:
+        """A shipped outbox gains local result storage without rebuilding its wire rows."""
+        database_path = tmp_path / "delivery-result-upgrade.db"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL)
+
+        store = EventJournalStore.open_sqlite(database_path)
+        await store.close()
+
+        with sqlite3.connect(database_path) as connection:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")}
+        assert "result_json" in columns
 
     @staticmethod
     async def _assert_legacy_approval_call_provenance_is_unknown(backend: Backend) -> None:
