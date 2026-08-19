@@ -478,8 +478,18 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
-    """Edit regeneration should use the resolved edited body from a v2 sidecar."""
+@pytest.mark.parametrize(
+    ("download_succeeds", "expected_body"),
+    [(True, "@test_agent what is 99+1?"), (False, "Preview edit")],
+    ids=("hydrated", "preview_fallback"),
+)
+async def test_bot_edit_hooks_see_best_available_sidecar_edit_body(
+    tmp_path: Path,
+    *,
+    download_succeeds: bool,
+    expected_body: str,
+) -> None:
+    """Edit regeneration should keep the preview when a v2 sidecar cannot be hydrated."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -495,8 +505,8 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    bot.client.download = AsyncMock(
-        return_value=MagicMock(
+    download_response = (
+        MagicMock(
             spec=nio.DownloadResponse,
             body=json.dumps(
                 {
@@ -512,8 +522,11 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
                     },
                 },
             ).encode("utf-8"),
-        ),
+        )
+        if download_succeeds
+        else nio.DownloadError("missing")
     )
+    bot.client.download = AsyncMock(return_value=download_response)
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
 
@@ -581,7 +594,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
         await bot._on_message(room, edit_event)
 
     emitted_envelope = mock_emit_hooks.await_args.kwargs["envelope"]
-    assert emitted_envelope.body == "@test_agent what is 99+1?"
+    assert emitted_envelope.body == expected_body
 
 
 @pytest.mark.asyncio

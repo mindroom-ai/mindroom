@@ -244,14 +244,11 @@ async def extract_visible_edit_body(
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract one visible edit body using runtime-derived sender trust."""
-    body, content = await extract_edit_body(
+    return await extract_edit_body(
         event_source,
         client,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
-    if content is not None and holds_unresolved_sidecar(content):
-        return None, None
-    return body, content
 
 
 def _is_replacement_for_event(
@@ -304,14 +301,14 @@ async def _latest_relation_or_original_body(
                 event_id=event_id,
             ):
                 continue
-            body, _content = await extract_visible_edit_body(
+            body, content = await extract_visible_edit_body(
                 replacement.source,
                 client,
                 config=config,
                 runtime_paths=runtime_paths,
                 trusted_sender_ids=trusted_sender_ids,
             )
-            return body
+            return None if content is not None and holds_unresolved_sidecar(content) else body
 
     resolved_source, body = await resolve_visible_event_source(
         event.source,
@@ -354,14 +351,14 @@ async def fetch_latest_visible_body(
             event_id=event_id,
         ):
             continue
-        body, _content = await extract_visible_edit_body(
+        body, content = await extract_visible_edit_body(
             replacement,
             client,
             config=config,
             runtime_paths=runtime_paths,
             trusted_sender_ids=trusted_sender_ids,
         )
-        return body
+        return None if content is not None and holds_unresolved_sidecar(content) else body
 
     return await _latest_relation_or_original_body(
         client,
