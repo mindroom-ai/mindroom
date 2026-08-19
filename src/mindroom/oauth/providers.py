@@ -17,9 +17,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import ParseResult, urlparse
 
+import idna
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import URL, HTTPError, HTTPStatusError, InvalidURL
+from httpx import HTTPError, HTTPStatusError
 
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
@@ -59,13 +60,27 @@ def _normalized_oauth_hostname(hostname: str | None) -> str | None:
     if hostname is None or "%" in hostname:
         return None
     raw_hostname = hostname.rstrip(".")
-    if raw_hostname.isascii():
-        normalized_hostname = raw_hostname.casefold()
-    else:
+    try:
+        address = ipaddress.ip_address(raw_hostname)
+    except ValueError:
         try:
-            normalized_hostname = URL(scheme="https", host=raw_hostname).raw_host.decode("ascii").casefold()
-        except (InvalidURL, UnicodeError):
+            normalized_hostname = idna.encode(
+                raw_hostname,
+                uts46=True,
+                transitional=False,
+                std3_rules=True,
+            ).decode("ascii")
+        except idna.IDNAError:
             return None
+        try:
+            address = ipaddress.ip_address(normalized_hostname)
+        except ValueError:
+            pass
+        else:
+            normalized_hostname = address.compressed
+    else:
+        normalized_hostname = address.compressed
+    normalized_hostname = normalized_hostname.casefold()
     if not normalized_hostname or len(normalized_hostname) > 253:
         return None
     try:
@@ -147,6 +162,10 @@ def _is_valid_hosted_oauth_hostname(hostname: str | None) -> bool:
         return False
     address = _oauth_ip_address(normalized_hostname)
     if address is not None:
+        try:
+            ipaddress.ip_address(normalized_hostname)
+        except ValueError:
+            return False
         return _is_global_unicast_address(address)
     if "." not in normalized_hostname or any(
         normalized_hostname == suffix or normalized_hostname.endswith(f".{suffix}")

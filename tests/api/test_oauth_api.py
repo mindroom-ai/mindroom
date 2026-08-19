@@ -906,6 +906,8 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     ("callback_uri", "request_hostname"),
     [
         ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
+        ("https://xn--a.com/api/oauth/demo/callback", "xn--a.com"),
+        ("https://0127.0.0.1/api/oauth/demo/callback", "0127.0.0.1"),
         ("https://example.com./api/oauth/demo/callback", "example.com"),
         ("https://224.0.0.1/api/oauth/demo/callback", "224.0.0.1"),
         ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
@@ -926,8 +928,8 @@ def test_hosted_oauth_callback_rejects_browser_aliases_and_non_public_hosts(
 
 def test_hosted_oauth_callback_accepts_global_ipv6_literal() -> None:
     assert is_valid_hosted_oauth_callback_for_request(
-        "https://[2001:4860:4860::8888]/api/oauth/demo/callback",
-        "2001:4860:4860::8888",
+        "https://[2001:4860:0000:0000:0000:0000:0000:8888]/api/oauth/demo/callback",
+        "2001:4860::8888",
     )
 
 
