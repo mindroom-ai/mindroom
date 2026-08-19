@@ -104,6 +104,15 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
+
+def _permanent_delivery_failure_payload() -> dict[str, str]:
+    """Return a bounded wire-shaped tombstone for a preflight refusal."""
+    return {
+        "msgtype": "m.notice",
+        "body": "Message delivery failed before it could be sent.",
+    }
+
+
 _PLACEHOLDER_DELIVERY_FAILURE_TEXT = "Response delivery failed. Please retry."
 _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
     {
@@ -887,6 +896,7 @@ class DeliveryGateway:
             if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
                 return prepared
             preparation_failure: MatrixDeliveryFailure | None = prepared
+            content = _permanent_delivery_failure_payload()
         else:
             preparation_failure = None
             content = prepared
@@ -1058,6 +1068,7 @@ class DeliveryGateway:
             if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
                 return prepared
             preparation_failure = prepared
+            envelope = _permanent_delivery_failure_payload()
         else:
             preparation_failure = None
             envelope = prepared
@@ -1712,6 +1723,7 @@ class DeliveryGateway:
                 room_id,
                 wire_content,
                 room_encrypted=encryption_outcome,
+                fit_for_encrypted_delivery=True,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))

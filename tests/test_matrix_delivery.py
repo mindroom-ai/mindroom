@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -22,6 +23,11 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
     send_room_event_result,
 )
+from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_delivery_event_size
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from io import BytesIO
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -395,6 +401,78 @@ async def test_send_message_outcome_success_returns_delivered_event() -> None:
     assert isinstance(outcome, DeliveredMatrixEvent)
     assert outcome.event_id == "$event:localhost"
     assert outcome.content_sent == content
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_upload() -> None:
+    """A state change while preparation yields must not make the event oversized."""
+    client = _mock_client()
+    client.device_id = "D"
+
+    async def upload_and_enable_encryption(**kwargs: object) -> tuple[nio.UploadResponse, None]:
+        data_provider = cast("Callable[[object, object], BytesIO]", kwargs["data_provider"])
+        data_provider(None, None).read()
+        client.rooms["!room:localhost"].encrypted = True
+        client.olm = MagicMock()
+        client.olm.device_id = "D"
+        return nio.UploadResponse("mxc://server/direct-sidecar"), None
+
+    client.upload.side_effect = upload_and_enable_encryption
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
+
+    assert isinstance(outcome, DeliveredMatrixEvent)
+    assert (
+        _calculate_delivery_event_size(
+            outcome.content_sent,
+            room_id="!room:localhost",
+            room_encrypted=True,
+            device_id="D",
+        )
+        <= _MATRIX_EVENT_HARD_LIMIT
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_rejects_a_frozen_event_that_no_longer_fits() -> None:
+    """Recovery must validate the current encrypted envelope before network I/O."""
+    client = _mock_client(encrypted=True)
+    client.olm.device_id = "😀" * 512
+    frozen = {"body": "x" * 45_000, "msgtype": "m.text"}
+
+    assert (
+        _calculate_delivery_event_size(
+            frozen,
+            room_id="!room:localhost",
+            room_encrypted=True,
+            device_id="D",
+        )
+        <= _MATRIX_EVENT_HARD_LIMIT
+    )
+    assert (
+        _calculate_delivery_event_size(
+            frozen,
+            room_id="!room:localhost",
+            room_encrypted=True,
+            device_id=client.olm.device_id,
+        )
+        > _MATRIX_EVENT_HARD_LIMIT
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        frozen,
+        content_is_prepared=True,
+    )
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

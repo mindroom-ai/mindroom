@@ -81,6 +81,9 @@ _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
 _UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
+_PREPARED_MESSAGE_TOO_LARGE_ERROR = (
+    "Prepared Matrix event exceeds the hard size limit under the current delivery envelope"
+)
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
 
@@ -286,7 +289,9 @@ def _delivery_event_size_calculator(
     """Bind the currently observed delivery fields for size estimation."""
     device_id: str | None = None
     if room_encrypted:
-        device_id = client.olm.device_id if client.olm is not None else client.device_id
+        olm = getattr(client, "olm", None)
+        raw_device_id = getattr(olm, "device_id", None) if olm is not None else getattr(client, "device_id", None)
+        device_id = raw_device_id if isinstance(raw_device_id, str) else None
 
     def calculate(candidate: dict[str, Any]) -> int:
         return _calculate_delivery_event_size(
@@ -297,6 +302,23 @@ def _delivery_event_size_calculator(
         )
 
     return calculate
+
+
+def ensure_prepared_message_fits_delivery(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+) -> None:
+    """Reject prepared content that cannot fit its current wire envelope."""
+    calculate_delivery_event_size = _delivery_event_size_calculator(
+        client,
+        room_id=room_id,
+        room_encrypted=room_encrypted,
+    )
+    if calculate_delivery_event_size(content) > _MATRIX_EVENT_HARD_LIMIT:
+        raise MatrixEventTooLargeError(_PREPARED_MESSAGE_TOO_LARGE_ERROR)
 
 
 def _is_edit_message(content: dict[str, Any]) -> bool:
@@ -878,6 +900,7 @@ async def prepare_large_message(
     content: dict[str, Any],
     *,
     room_encrypted: bool | None = None,
+    fit_for_encrypted_delivery: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -892,6 +915,7 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
+        fit_for_encrypted_delivery: Keep the prepared bytes valid if delivery becomes encrypted
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -905,7 +929,7 @@ async def prepare_large_message(
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
-        room_encrypted=room_encrypted,
+        room_encrypted=room_encrypted or fit_for_encrypted_delivery,
     )
     current_size = _calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:

@@ -807,6 +807,7 @@ class TestSendMessageResult:
             "!room:localhost",
             {"body": "hello", "msgtype": "m.text"},
             room_encrypted=False,
+            fit_for_encrypted_delivery=True,
         )
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
         client.room_send.assert_not_awaited()
@@ -984,8 +985,10 @@ class TestSendMessageResult:
             _content: dict[str, object],
             *,
             room_encrypted: bool | None,
+            fit_for_encrypted_delivery: bool,
         ) -> dict[str, str]:
             assert room_encrypted is True
+            assert fit_for_encrypted_delivery is True
             client.rooms.clear()
             return {"body": "prepared", "msgtype": "m.text"}
 
