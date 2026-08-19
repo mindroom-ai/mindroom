@@ -72,9 +72,13 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
         STREAM_VISIBLE_BODY_KEY,
     },
 )
+_FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _MATRIX_EVENT_HARD_LIMIT = 64000
+_MEGOLM_AES_BLOCK_BYTES = 16
+_MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
+_MEGOLM_BASE64_KEY_LENGTH = 43
 _UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
@@ -116,6 +120,33 @@ def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: 
     )
 
 
+def _copy_file_edit_fallback_fields(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Keep the outer fallback independently valid when an edit replaces a file."""
+    target_content.update({key: source_content[key] for key in _FILE_FALLBACK_KEYS if key in source_content})
+
+
+def _wrap_large_edit(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    replacement_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a compact edit wrapper whose fallback is valid on its own."""
+    source_msgtype = source_content.get("msgtype", "m.text")
+    wrapper_msgtype = (
+        replacement_content.get("msgtype", source_msgtype) if source_msgtype == "m.file" else source_msgtype
+    )
+    wrapper = {
+        "msgtype": wrapper_msgtype,
+        "body": f"* {replacement_content['body']}",
+        "m.new_content": replacement_content,
+        "m.relates_to": content.get("m.relates_to", {}),
+    }
+    if source_msgtype == "m.file":
+        _copy_file_edit_fallback_fields(replacement_content, wrapper)
+    _copy_edit_wrapper_metadata(source_content, wrapper)
+    return wrapper
+
+
 def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
     """Copy metadata that should remain inline on rich streaming previews."""
     _copy_preview_metadata(source_content, target_content)
@@ -148,7 +179,8 @@ def _without_local_recovery_data(content: dict[str, Any]) -> dict[str, Any]:
 
 
 def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
-    return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
+    rooms = getattr(client, "rooms", {})
+    return bool(room_id and isinstance(rooms, dict) and room_id in rooms and rooms[room_id].encrypted)
 
 
 def _add_sidecar_metadata(
@@ -190,6 +222,75 @@ def _calculate_event_size(content: dict[str, Any]) -> int:
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
     # Add ~2KB overhead for event metadata, signatures, etc.
     return len(canonical.encode("utf-8")) + 2000
+
+
+def _calculate_delivery_event_size(
+    content: dict[str, Any],
+    *,
+    room_id: str,
+    room_encrypted: bool,
+    device_id: str | None,
+) -> int:
+    """Estimate the complete event size after nio's optional Megolm wrapping."""
+    if not room_encrypted:
+        return _calculate_event_size(content)
+
+    plaintext = nio.Api.to_json(
+        {
+            "content": content,
+            "type": "m.room.message",
+            "room_id": room_id,
+        },
+    )
+    plaintext_bytes = len(plaintext.encode("utf-8"))
+    padded_bytes = ((plaintext_bytes // _MEGOLM_AES_BLOCK_BYTES) + 1) * _MEGOLM_AES_BLOCK_BYTES
+    ciphertext_length_varint_bytes = max(1, (padded_bytes.bit_length() + 6) // 7)
+    signed_message_bytes = (
+        padded_bytes
+        + 1  # Megolm version byte.
+        + 1  # Message-index protobuf tag.
+        + _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES
+        + 1  # Ciphertext protobuf tag.
+        + ciphertext_length_varint_bytes
+        + 8  # HMAC-SHA-256 truncated MAC.
+        + 64  # Ed25519 signature.
+    )
+    ciphertext_bytes = ((signed_message_bytes + 2) // 3) * 4
+    estimated_content: dict[str, Any] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "sender_key": "s" * _MEGOLM_BASE64_KEY_LENGTH,
+        "ciphertext": "c" * ciphertext_bytes,
+        "session_id": "i" * _MEGOLM_BASE64_KEY_LENGTH,
+        "device_id": device_id,
+    }
+    relation = content.get("m.relates_to")
+    if isinstance(relation, dict):
+        estimated_content["m.relates_to"] = relation
+    return _calculate_event_size(estimated_content)
+
+
+def _delivery_event_size_calculator(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    room_encrypted: bool,
+) -> Callable[[dict[str, Any]], int]:
+    """Bind the delivery-specific fields needed by repeated preview fitting."""
+    olm = getattr(client, "olm", None)
+    raw_device_id = getattr(olm, "device_id", None)
+    if not isinstance(raw_device_id, str):
+        raw_device_id = getattr(client, "device_id", None)
+    device_id = raw_device_id if isinstance(raw_device_id, str) else None
+
+    def calculate(candidate: dict[str, Any]) -> int:
+        return _calculate_delivery_event_size(
+            candidate,
+            room_id=room_id,
+            room_encrypted=room_encrypted,
+            device_id=device_id,
+        )
+
+    return calculate
 
 
 def _is_edit_message(content: dict[str, Any]) -> bool:
@@ -249,6 +350,7 @@ def _build_nonterminal_streaming_edit_preview(
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     original_size: int,
+    calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any] | None:
     """Build an in-progress rich edit preview with a fresh full-content sidecar."""
     preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
@@ -282,7 +384,7 @@ def _build_nonterminal_streaming_edit_preview(
             "m.relates_to": content.get("m.relates_to", {}),
         }
         _copy_edit_wrapper_metadata(source_content, modified_content)
-        if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
+        if calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
             return modified_content
         if preview_limit == 0:
             break
@@ -297,6 +399,7 @@ def _build_terminal_edit_preview(
     preview_text: str,
     *,
     continuation_indicator: str,
+    calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
     """Fit a terminal edit after all replacement and wrapper metadata is present."""
     preview_body = preview_content.get("body")
@@ -328,17 +431,12 @@ def _build_terminal_edit_preview(
             if outer_limit > 0
             else ""
         )
-        modified_content: dict[str, Any] = {
-            "msgtype": source_content.get("msgtype", "m.text"),
-            "body": outer_body,
-            "m.new_content": inner_content,
-            "m.relates_to": content.get("m.relates_to", {}),
-        }
-        _copy_edit_wrapper_metadata(source_content, modified_content)
+        modified_content = _wrap_large_edit(content, source_content, inner_content)
+        modified_content["body"] = outer_body
         return modified_content
 
     def fits(inner_content: dict[str, Any], outer_limit: int) -> bool:
-        return _calculate_event_size(build_event(inner_content, outer_limit)) <= _MATRIX_EVENT_HARD_LIMIT
+        return calculate_event_size(build_event(inner_content, outer_limit)) <= _MATRIX_EVENT_HARD_LIMIT
 
     empty_inner = build_inner(0)
     if not fits(empty_inner, 0):
@@ -362,6 +460,52 @@ def _build_terminal_edit_preview(
     return build_event(fitted_inner, outer_limit)
 
 
+def _fit_regular_preview(
+    preview_content: dict[str, Any],
+    preview_text: str,
+    *,
+    continuation_indicator: str,
+    calculate_event_size: Callable[[dict[str, Any]], int],
+) -> dict[str, Any]:
+    """Fit a non-edit preview after all metadata and relations are present."""
+    preview_body = preview_content.get("body")
+    if not isinstance(preview_body, str):
+        msg = "Large-message preview body must be text"
+        raise TypeError(msg)
+
+    def build_event(preview_limit: int) -> dict[str, Any]:
+        event = dict(preview_content)
+        event["body"] = (
+            _create_preview(
+                preview_text,
+                preview_limit,
+                continuation_indicator=continuation_indicator,
+            )
+            if preview_limit > 0
+            else ""
+        )
+        sidecar_metadata = event.get("io.mindroom.long_text")
+        if isinstance(sidecar_metadata, dict):
+            sidecar_metadata = dict(sidecar_metadata)
+            sidecar_metadata["preview_size"] = len(event["body"])
+            event["io.mindroom.long_text"] = sidecar_metadata
+        return event
+
+    empty_preview = build_event(0)
+    if calculate_event_size(empty_preview) > _MATRIX_EVENT_HARD_LIMIT:
+        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
+
+    maximum_preview_limit = len(preview_body.encode("utf-8"))
+    full_preview = build_event(maximum_preview_limit)
+    if calculate_event_size(full_preview) <= _MATRIX_EVENT_HARD_LIMIT:
+        return full_preview
+    preview_limit = _largest_fitting_limit(
+        maximum_preview_limit,
+        lambda candidate_limit: calculate_event_size(build_event(candidate_limit)) <= _MATRIX_EVENT_HARD_LIMIT,
+    )
+    return build_event(preview_limit)
+
+
 def _largest_fitting_limit(maximum: int, fits: Callable[[int], bool]) -> int:
     """Return the greatest monotonic byte limit accepted by ``fits``."""
     lower = 0
@@ -375,9 +519,14 @@ def _largest_fitting_limit(maximum: int, fits: Callable[[int], bool]) -> int:
     return lower
 
 
-def _ensure_event_fits(content: dict[str, Any], *, room_id: str) -> None:
+def _ensure_event_fits(
+    content: dict[str, Any],
+    *,
+    room_id: str,
+    calculate_event_size: Callable[[dict[str, Any]], int],
+) -> None:
     """Reject any prepared payload that still exceeds the Matrix event limit."""
-    final_size = _calculate_event_size(content)
+    final_size = calculate_event_size(content)
     if final_size <= _MATRIX_EVENT_HARD_LIMIT:
         return
     logger.error(
@@ -681,13 +830,18 @@ async def prepare_large_message(
     content = _without_local_recovery_data(content)
     is_edit = _is_edit_message(content)
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
-
-    current_size = _calculate_event_size(content)
-    if current_size <= size_limit:
-        return content
-
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
+    calculate_delivery_event_size = _delivery_event_size_calculator(
+        client,
+        room_id=room_id,
+        room_encrypted=room_encrypted,
+    )
+
+    current_size = _calculate_event_size(content)
+    if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
+        return content
+
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
@@ -721,6 +875,7 @@ async def prepare_large_message(
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
+            calculate_event_size=calculate_delivery_event_size,
         )
         if modified_content is not None:
             inner: dict[str, Any] = modified_content["m.new_content"]
@@ -729,7 +884,7 @@ async def prepare_large_message(
                 room_id=room_id,
                 original_size_bytes=current_size,
                 preview_length=len(inner["body"]),
-                final_size_bytes=_calculate_event_size(modified_content),
+                final_size_bytes=calculate_delivery_event_size(modified_content),
                 has_sidecar="io.mindroom.long_text" in inner,
             )
             return modified_content
@@ -781,9 +936,21 @@ async def prepare_large_message(
             modified_content,
             preview_text,
             continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
+            calculate_event_size=calculate_delivery_event_size,
+        )
+    else:
+        modified_content = _fit_regular_preview(
+            modified_content,
+            preview_text,
+            continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
+            calculate_event_size=calculate_delivery_event_size,
         )
 
-    _ensure_event_fits(modified_content, room_id=room_id)
+    _ensure_event_fits(
+        modified_content,
+        room_id=room_id,
+        calculate_event_size=calculate_delivery_event_size,
+    )
 
     new_content = modified_content.get("m.new_content")
     inner = new_content if isinstance(new_content, dict) else modified_content

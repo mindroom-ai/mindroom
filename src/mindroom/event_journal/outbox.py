@@ -45,10 +45,6 @@ _OUTBOX_COLUMNS = """
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
 _LEGACY_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
-# New writers retain only this old-reader success signal on the wire. Any
-# richer value came from a legacy writer and is the semantic result belonging
-# to that writer's current payload, even when a stale result_json also exists.
-_LOCAL_RESULT_COMPATIBILITY_MARKER = {"version": 2}
 
 
 def matrix_delivery_payload(
@@ -104,6 +100,12 @@ def _legacy_delivery_result(payload: Mapping[str, object]) -> dict[str, object] 
         else payload.get(_LEGACY_FINAL_OUTCOME_KEY)
     )
     return dict(cast("Mapping[str, object]", legacy_result)) if isinstance(legacy_result, dict) else None
+
+
+def _is_local_result_compatibility_marker(result: Mapping[str, object]) -> bool:
+    """Return whether a version-only mapping is the bounded old-reader signal."""
+    version = result.get("version")
+    return set(result) == {"version"} and isinstance(version, int) and not isinstance(version, bool)
 
 
 def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
@@ -701,7 +703,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         raise TypeError(msg)
     legacy_result = _legacy_delivery_result(payload)
     raw_result = row["result_json"]
-    if (legacy_result is not None and legacy_result != _LOCAL_RESULT_COMPATIBILITY_MARKER) or raw_result is None:
+    if (legacy_result is not None and not _is_local_result_compatibility_marker(legacy_result)) or raw_result is None:
         result = legacy_result
     else:
         decoded_result = json.loads(raw_result)

@@ -5595,11 +5595,13 @@ class TestOutbox:
         assert claimed.payload["body"] == "final preview"
         assert claimed.result == {"body": "final full result"}
 
+    @pytest.mark.parametrize("marker_version", [2, 3])
     async def test_a_compatibility_marker_does_not_replace_the_local_result(
         self,
         alice: PrincipalStore,
+        marker_version: int,
     ) -> None:
-        """The bounded old-reader sentinel is not itself the semantic result."""
+        """Every version-only old-reader sentinel defers to the semantic result."""
         await alice.enqueue_matrix_delivery(
             delivery_id="turn-1",
             stage=DeliveryStage.FINAL,
@@ -5608,7 +5610,7 @@ class TestOutbox:
             payload={
                 "msgtype": "m.text",
                 "body": "preview",
-                DURABLE_FINAL_OUTCOME_KEY: {"version": 2},
+                DURABLE_FINAL_OUTCOME_KEY: {"version": marker_version},
             },
             result={"body": "full result", "interactive": None},
         )

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
+from nio.crypto import OutboundGroupSession
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -22,6 +23,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.matrix import large_messages
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
@@ -33,6 +35,7 @@ from mindroom.matrix.large_messages import (
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
 )
+from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
@@ -41,6 +44,7 @@ _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 class _UploadClient:
     rooms: dict = {}  # noqa: RUF012
+    device_id = "DEVICE"
 
     def __init__(self, upload_result: object | BaseException) -> None:
         self.upload_result = upload_result
@@ -58,6 +62,68 @@ class _UploadClient:
 
 def _large_text_content(prefix: str) -> dict[str, str]:
     return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
+
+
+def _actual_encrypted_event_size(content: dict[str, object], *, room_id: str) -> int:
+    """Encrypt one event with Megolm and measure the resulting content envelope."""
+    session = OutboundGroupSession()
+    session.shared = True
+    plaintext = nio.Api.to_json(
+        {
+            "content": content,
+            "type": "m.room.message",
+            "room_id": room_id,
+        },
+    )
+    encrypted_content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "sender_key": "s" * 43,
+        "ciphertext": session.encrypt(plaintext),
+        "session_id": "i" * 43,
+        "device_id": "DEVICE",
+    }
+    relation = content.get("m.relates_to")
+    if isinstance(relation, dict):
+        encrypted_content["m.relates_to"] = relation
+    return _calculate_event_size(encrypted_content)
+
+
+def test_encrypted_event_size_estimate_bounds_real_megolm_output() -> None:
+    """The delivery estimate must include Megolm expansion without consuming a live session."""
+    estimator = getattr(large_messages, "_calculate_delivery_event_size", None)
+    assert callable(estimator)
+    content: dict[str, object] = {
+        "body": "x" * 45_000,
+        "msgtype": "m.text",
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+    }
+
+    estimated = estimator(
+        content,
+        room_id="!room:server",
+        room_encrypted=True,
+        device_id="DEVICE",
+    )
+    actual = _actual_encrypted_event_size(content, room_id="!room:server")
+
+    assert actual <= estimated <= actual + 16
+
+
+@pytest.mark.asyncio
+async def test_prepare_encrypted_normal_message_fits_after_megolm_encryption() -> None:
+    """A plaintext-sized normal message must be sidecarred when ciphertext would overflow."""
+    content = {"body": "x" * 50_000, "msgtype": "m.text"}
+
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/encrypted-normal-sidecar")),
+        "!room:server",
+        content,
+        room_encrypted=True,
+    )
+
+    assert prepared["msgtype"] == "m.file"
+    assert prepared["file"]["url"] == "mxc://server/encrypted-normal-sidecar"
+    assert _actual_encrypted_event_size(prepared, room_id="!room:server") <= _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.parametrize("is_edit", [False, True])
@@ -732,6 +798,34 @@ async def test_prepare_terminal_edit_uses_empty_previews_at_the_metadata_boundar
 
 
 @pytest.mark.asyncio
+async def test_prepare_terminal_edit_fits_after_megolm_encryption() -> None:
+    """Encrypted delivery must fit after nio replaces plaintext with ciphertext."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/encrypted-boundary-final-edit"))
+    text = "x" * 61_400
+    metadata = "m" * 20_000
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            "io.mindroom.required_metadata": metadata,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        "io.mindroom.required_metadata": metadata,
+    }
+
+    result = await prepare_large_message(
+        client,
+        "!room:server",
+        edit_content,
+        room_encrypted=True,
+    )
+
+    assert _actual_encrypted_event_size(result, room_id="!room:server") <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
 async def test_prepare_terminal_edit_keeps_the_largest_outer_preview_that_fits() -> None:
     """A small overflow must trim only the bytes the finished envelope cannot carry."""
     client = _UploadClient(nio.UploadResponse("mxc://server/maximal-preview"))
@@ -787,6 +881,159 @@ async def test_prepare_terminal_edit_rejects_irreducible_metadata_before_repeate
         await prepare_large_message(client, "!room:server", edit_content)
 
     assert calculate_size.call_count <= 3
+
+
+@pytest.mark.asyncio
+async def test_prepare_oversized_file_edit_remains_parseable() -> None:
+    """A sidecar-backed file edit must carry a valid outer fallback event."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/replacement-sidecar"))
+    text = "updated file preview " * 3000
+    edit_content = {
+        "body": f"* {text}",
+        "filename": "previous-message-content.json",
+        "info": {"mimetype": "application/json", "size": 123},
+        "m.new_content": {
+            "body": text,
+            "filename": "previous-message-content.json",
+            "info": {"mimetype": "application/json", "size": 123},
+            "msgtype": "m.file",
+            "url": "mxc://server/previous-sidecar",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        "msgtype": "m.file",
+        "url": "mxc://server/previous-sidecar",
+    }
+
+    prepared = await prepare_large_message(client, "!room:server", edit_content)
+    parsed = nio.Event.parse_event(
+        {
+            "content": prepared,
+            "event_id": "$replacement",
+            "sender": "@agent:server",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+        },
+    )
+
+    assert isinstance(parsed, nio.RoomMessageFile)
+    assert prepared["url"] == prepared["m.new_content"]["url"]
+    assert prepared["filename"] == prepared["m.new_content"]["filename"]
+    assert prepared["info"] == prepared["m.new_content"]["info"]
+    assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_oversized_encrypted_file_edit_remains_parseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted sidecar edits must carry their file descriptor on the fallback."""
+    encrypted_file = {
+        "url": "mxc://server/replacement-sidecar",
+        "key": {
+            "alg": "A256CTR",
+            "ext": True,
+            "key_ops": ["encrypt", "decrypt"],
+            "kty": "oct",
+            "k": "synthetic-key",
+        },
+        "iv": "synthetic-iv",
+        "hashes": {"sha256": "synthetic-hash"},
+        "v": "v2",
+        "mimetype": "application/json",
+        "size": 123,
+    }
+
+    async def upload_sidecar(*_args: object, **_kwargs: object) -> tuple[str, dict[str, object]]:
+        return "mxc://server/replacement-sidecar", encrypted_file
+
+    monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", upload_sidecar)
+    text = "updated encrypted file preview " * 3000
+    edit_content = {
+        "body": f"* {text}",
+        "file": {**encrypted_file, "url": "mxc://server/previous-sidecar"},
+        "filename": "previous-message-content.json",
+        "info": {"mimetype": "application/json", "size": 123},
+        "m.new_content": {
+            "body": text,
+            "file": {**encrypted_file, "url": "mxc://server/previous-sidecar"},
+            "filename": "previous-message-content.json",
+            "info": {"mimetype": "application/json", "size": 123},
+            "msgtype": "m.file",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        "msgtype": "m.file",
+    }
+
+    prepared = await prepare_large_message(
+        _UploadClient(nio.UploadResponse("mxc://server/unused")),
+        "!room:server",
+        edit_content,
+        room_encrypted=True,
+    )
+    parsed = parse_matrix_media_event_source(
+        {
+            "content": prepared,
+            "event_id": "$replacement",
+            "sender": "@agent:server",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+        },
+    )
+
+    assert isinstance(parsed, nio.RoomEncryptedFile)
+    assert prepared["file"] == prepared["m.new_content"]["file"]
+    assert prepared["filename"] == prepared["m.new_content"]["filename"]
+    assert prepared["info"] == prepared["m.new_content"]["info"]
+    assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.parametrize("room_encrypted", [False, True])
+@pytest.mark.asyncio
+async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fallback(
+    room_encrypted: bool,
+) -> None:
+    """A failed replacement sidecar upload must not leave an invalid file wrapper."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    text = "updated file fallback " * 3000
+    edit_content = {
+        "body": f"* {text}",
+        "filename": "previous-message-content.json",
+        "info": {"mimetype": "application/json", "size": 123},
+        "m.new_content": {
+            "body": text,
+            "filename": "previous-message-content.json",
+            "info": {"mimetype": "application/json", "size": 123},
+            "msgtype": "m.file",
+            "url": "mxc://server/previous-sidecar",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        "msgtype": "m.file",
+        "url": "mxc://server/previous-sidecar",
+    }
+
+    prepared = await prepare_large_message(
+        client,
+        "!room:server",
+        edit_content,
+        room_encrypted=room_encrypted,
+    )
+
+    for event_id, fallback in (("$replacement", prepared), ("$new-content", prepared["m.new_content"])):
+        parsed = nio.Event.parse_event(
+            {
+                "content": fallback,
+                "event_id": event_id,
+                "sender": "@agent:server",
+                "origin_server_ts": 123,
+                "type": "m.room.message",
+            },
+        )
+        assert isinstance(parsed, nio.RoomMessageText)
+        assert fallback["msgtype"] == "m.text"
+        for media_key in ("url", "file", "filename", "info"):
+            assert media_key not in fallback
+
+    assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.asyncio
