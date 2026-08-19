@@ -12,13 +12,12 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from structlog.testing import capture_logs
 
 from mindroom.api import script_gateway
 from mindroom.api.script_gateway import bind_script_tool_broker, router
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
-    ScriptCallReceipt,
     ScriptToolBroker,
     digest_arguments,
 )
@@ -35,8 +34,8 @@ if TYPE_CHECKING:
     from mindroom.script_runs.broker import ScriptToolCallRequest
 
 
-def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptCallReceipt:
-    return ScriptCallReceipt(
+def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptCallRecord:
+    return ScriptCallRecord(
         run_id="run-1",
         call_id="call-1",
         grant=ScriptToolGrant("website", "read_url"),
@@ -50,8 +49,8 @@ def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptC
 
 @dataclass
 class _GatewayBroker:
-    submit_receipt: ScriptCallReceipt
-    get_receipt: ScriptCallReceipt
+    submit_receipt: ScriptCallRecord
+    get_receipt: ScriptCallRecord
     submitted: ScriptToolCallRequest | None = None
     authorization: str | None = None
 
@@ -59,7 +58,7 @@ class _GatewayBroker:
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         self.submitted = request
         self.authorization = authorization
         return self.submit_receipt
@@ -69,7 +68,7 @@ class _GatewayBroker:
         run_id: str,
         call_id: str,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         self.authorization = authorization
         assert (run_id, call_id) == ("run-1", "call-1")
         return self.get_receipt
@@ -91,7 +90,7 @@ async def test_script_gateway_reports_durable_rate_limit() -> None:
             self,
             request: ScriptToolCallRequest,
             authorization: str | None,
-        ) -> ScriptCallReceipt:
+        ) -> ScriptCallRecord:
             del request, authorization
             message = "Background script tool-call rate limit exceeded."
             raise ScriptCallRateLimitError(message)
@@ -222,10 +221,8 @@ async def test_script_gateway_returns_pending_only_after_durable_acceptance() ->
 
 
 @pytest.mark.asyncio
-async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Synchronous capability and claim work cannot hostage the API event loop."""
+async def test_script_gateway_returns_the_durable_conflict_after_slow_claim_resolution() -> None:
+    """A slow durable conflict remains a conflict rather than a synthetic gateway timeout."""
     grant = ScriptToolGrant("website", "read_url")
     run = ScriptRunRecord(
         run_id="run-1",
@@ -267,8 +264,6 @@ async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_reso
             return call
 
     broker = ScriptToolBroker(store=BlockingStore(), runtime_resolver=SimpleNamespace())  # type: ignore[arg-type]
-    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.01)
-    started = time.monotonic()
 
     async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
         response = await client.post(
@@ -277,10 +272,8 @@ async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_reso
             headers={"Authorization": "Bearer secret-token"},
         )
 
-    assert time.monotonic() - started < 0.07
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Background script call acceptance is not yet determined."}
-    await asyncio.sleep(0.12)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Stable call ID conflicts with its accepted request."}
 
     async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
         old_response = await client.get(
@@ -290,93 +283,6 @@ async def test_script_gateway_does_not_acknowledge_before_blocking_conflict_reso
 
     assert old_response.status_code == 200
     assert old_response.json()["arguments_digest"] == old_arguments_digest
-
-
-@pytest.mark.asyncio
-async def test_script_gateway_logs_unexpected_detached_acceptance_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unexpected acceptance failure after timeout must remain observable."""
-
-    class FailingBroker(_GatewayBroker):
-        async def accept_authenticated(
-            self,
-            request: ScriptToolCallRequest,
-            authorization: str | None,
-        ) -> ScriptCallReceipt:
-            del request, authorization
-            await asyncio.sleep(0.02)
-            message = "unexpected detached acceptance failure"
-            raise RuntimeError(message)
-
-    broker = FailingBroker(
-        submit_receipt=_receipt(ScriptCallState.COMPLETED),
-        get_receipt=_receipt(ScriptCallState.COMPLETED),
-    )
-    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.001)
-
-    with capture_logs() as logs:
-        async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
-            response = await client.post(
-                "/api/script-gateway/calls",
-                json=_payload(),
-                headers={"Authorization": "Bearer secret-token"},
-            )
-        await asyncio.sleep(0.03)
-
-    assert response.status_code == 503
-    assert logs == [
-        {
-            "event": "Background script call acceptance failed",
-            "exc_info": True,
-            "log_level": "error",
-            "task_name": "script-gateway:run-1:call-1",
-        },
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    [
-        ScriptBrokerAuthenticationError("unknown capability"),
-        ScriptCapabilityError("revoked capability"),
-        ScriptCallConflictError("conflicting stable call"),
-    ],
-)
-async def test_script_gateway_does_not_log_expected_detached_acceptance_rejections(
-    monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
-) -> None:
-    """Expected authentication, capability, and conflict outcomes stay quiet after timeout."""
-
-    class RejectingBroker(_GatewayBroker):
-        async def accept_authenticated(
-            self,
-            request: ScriptToolCallRequest,
-            authorization: str | None,
-        ) -> ScriptCallReceipt:
-            del request, authorization
-            await asyncio.sleep(0.02)
-            raise failure
-
-    broker = RejectingBroker(
-        submit_receipt=_receipt(ScriptCallState.COMPLETED),
-        get_receipt=_receipt(ScriptCallState.COMPLETED),
-    )
-    monkeypatch.setattr(script_gateway, "_INITIAL_WAIT_SECONDS", 0.001)
-
-    with capture_logs() as logs:
-        async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
-            response = await client.post(
-                "/api/script-gateway/calls",
-                json=_payload(),
-                headers={"Authorization": "Bearer secret-token"},
-            )
-        await asyncio.sleep(0.03)
-
-    assert response.status_code == 503
-    assert logs == []
 
 
 @pytest.mark.asyncio
@@ -409,7 +315,7 @@ async def test_script_gateway_unknown_and_revoked_capabilities_are_indistinguish
             self,
             request: ScriptToolCallRequest,
             authorization: str | None,
-        ) -> ScriptCallReceipt:
+        ) -> ScriptCallRecord:
             del request, authorization
             raise ScriptBrokerAuthenticationError(failure)
 
@@ -438,7 +344,7 @@ async def test_script_gateway_hides_capability_revocation_racing_after_authentic
             self,
             request: ScriptToolCallRequest,
             authorization: str | None,
-        ) -> ScriptCallReceipt:
+        ) -> ScriptCallRecord:
             del request, authorization
             message = "revoked after authentication"
             raise ScriptCapabilityError(message)
@@ -457,3 +363,76 @@ async def test_script_gateway_hides_capability_revocation_racing_after_authentic
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Background script call is unavailable."}
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_cancellation_waits_for_broker_acceptance_ownership() -> None:
+    """Cancelling the submitter cannot return before the broker owns the accepted call."""
+    acceptance_started = asyncio.Event()
+    finish_acceptance = asyncio.Event()
+
+    class BlockingBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del request, authorization
+
+            async def accept() -> ScriptCallRecord:
+                acceptance_started.set()
+                await finish_acceptance.wait()
+                return self.submit_receipt
+
+            return await run_coroutine_until_complete(accept())
+
+    broker = BlockingBroker(
+        submit_receipt=_receipt(ScriptCallState.PENDING),
+        get_receipt=_receipt(ScriptCallState.PENDING),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        submitter = asyncio.create_task(
+            client.post(
+                "/api/script-gateway/calls",
+                json=_payload(),
+                headers={"Authorization": "Bearer secret-token"},
+            ),
+        )
+        await acceptance_started.wait()
+        submitter.cancel()
+        await asyncio.sleep(0)
+
+        assert not submitter.done()
+
+        finish_acceptance.set()
+        with pytest.raises(asyncio.CancelledError):
+            await submitter
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_accepts_slow_valid_claim_without_gateway_timeout() -> None:
+    """A valid acceptance taking longer than one second is not rewritten as a gateway 503."""
+
+    class SlowBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del request, authorization
+            await asyncio.sleep(1.01)
+            return self.submit_receipt
+
+    broker = SlowBroker(
+        submit_receipt=_receipt(ScriptCallState.PENDING),
+        get_receipt=_receipt(ScriptCallState.PENDING),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            json=_payload(),
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "pending"

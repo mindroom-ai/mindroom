@@ -36,7 +36,6 @@ from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptCallPreparationPendingError,
-    ScriptCallReceipt,
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
     ScriptToolCallRequest,
@@ -339,13 +338,23 @@ async def _call_through_gateway(
     broker: ScriptToolBroker,
     request: ScriptToolCallRequest,
     token: str,
-) -> ScriptCallReceipt:
+) -> ScriptCallRecord:
     authorization = f"Bearer {token}"
     receipt = await broker.accept_authenticated(request, authorization)
     while receipt.state is ScriptCallState.PENDING:
         await asyncio.sleep(0)
         receipt = await broker.get_authenticated(request.run_id, request.call_id, authorization)
     return receipt
+
+
+@pytest.mark.asyncio
+async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path: Path) -> None:
+    """Broker acceptance must not project a second field-for-field receipt type."""
+    broker, token = _broker(tmp_path, events=[])
+
+    accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
+
+    assert isinstance(accepted, ScriptCallRecord)
 
 
 def _replace_calculator_toolkit(
@@ -962,6 +971,55 @@ async def test_script_broker_forgets_retained_execution_after_submitter_cancella
     assert receipt.state is ScriptCallState.COMPLETED
     assert broker._tasks == {}
     assert broker._run_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_script_broker_cancellation_waits_for_claim_schedule_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled submitter cannot return while a new durable claim lacks an execution owner."""
+    claim_returned = threading.Event()
+    release_claim = threading.Event()
+    execution_started = asyncio.Event()
+    release_execution = asyncio.Event()
+
+    class BlockingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        async def add(self, a: int, b: int) -> int:
+            execution_started.set()
+            await release_execution.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-claim")
+    original_claim_call = broker.store.claim_call
+
+    def claim_call(**kwargs: object) -> object:
+        claim = original_claim_call(**kwargs)  # type: ignore[arg-type]
+        claim_returned.set()
+        assert release_claim.wait(timeout=1.0)
+        return claim
+
+    monkeypatch.setattr(broker.store, "claim_call", claim_call)
+    submission = asyncio.create_task(broker.accept_authenticated(request, f"Bearer {token}"))
+    assert await asyncio.to_thread(claim_returned.wait, 1.0)
+    submission.cancel()
+    await asyncio.sleep(0)
+
+    assert not submission.done()
+
+    release_claim.set()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+    await execution_started.wait()
+
+    execution = broker._tasks[(request.run_id, request.call_id)]
+    release_execution.set()
+    assert (await execution).state is ScriptCallState.COMPLETED
 
 
 @pytest.mark.asyncio

@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
-from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
-    ScriptCallReceipt,
     ScriptToolCallRequest,
 )
-from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
+from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
 from mindroom.script_runs.store import (
     ScriptCallConflictError,
     ScriptCallNotFoundError,
@@ -24,9 +21,6 @@ from mindroom.script_runs.store import (
 )
 
 _MAX_REQUEST_BYTES = 64 * 1024
-_INITIAL_WAIT_SECONDS = 1.0
-_SUBMISSION_TASKS: set[asyncio.Task[ScriptCallReceipt]] = set()
-logger = get_logger(__name__)
 
 
 class _ScriptGatewayBroker(Protocol):
@@ -36,7 +30,7 @@ class _ScriptGatewayBroker(Protocol):
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         """Authenticate and durably claim one stable call."""
         ...
 
@@ -45,7 +39,7 @@ class _ScriptGatewayBroker(Protocol):
         run_id: str,
         call_id: str,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         """Authenticate and retrieve one stable receipt."""
         ...
 
@@ -86,7 +80,7 @@ class ScriptCallReceiptResponse(BaseModel):
     error: JsonValue = None
 
     @classmethod
-    def from_domain(cls, receipt: ScriptCallReceipt) -> ScriptCallReceiptResponse:
+    def from_domain(cls, receipt: ScriptCallRecord) -> ScriptCallReceiptResponse:
         """Translate one canonical broker receipt without adding identity fields."""
         return cls(
             run_id=receipt.run_id,
@@ -149,49 +143,17 @@ def _unavailable() -> HTTPException:
     return HTTPException(status_code=404, detail="Background script call is unavailable.")
 
 
-def _consume_submission_result(task: asyncio.Task[ScriptCallReceipt]) -> None:
-    """Retain accepted work while ensuring detached failures are observed."""
-    _SUBMISSION_TASKS.discard(task)
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except (
-        ScriptBrokerAuthenticationError,
-        ScriptCapabilityError,
-        ScriptCallConflictError,
-        ScriptCallRateLimitError,
-    ):
-        return
-    except Exception:
-        logger.exception(
-            "Background script call acceptance failed",
-            task_name=task.get_name(),
-        )
-
-
 @router.post("/calls", response_model=ScriptCallReceiptResponse)
 async def submit_script_call(
     request: Request,
     response: Response,
     authorization: Annotated[str | None, Header()] = None,
 ) -> ScriptCallReceiptResponse:
-    """Authenticate, accept, and briefly await one stable logical call."""
+    """Authenticate and accept one stable logical call."""
     payload = await _bounded_payload(request)
     broker = _app_script_tool_broker(request.app)
-    task = asyncio.create_task(
-        broker.accept_authenticated(payload.to_domain(), authorization),
-        name=f"script-gateway:{payload.run_id}:{payload.call_id}",
-    )
-    _SUBMISSION_TASKS.add(task)
-    task.add_done_callback(_consume_submission_result)
     try:
-        receipt = await asyncio.wait_for(asyncio.shield(task), timeout=_INITIAL_WAIT_SECONDS)
-    except TimeoutError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Background script call acceptance is not yet determined.",
-        ) from exc
+        receipt = await broker.accept_authenticated(payload.to_domain(), authorization)
     except (ScriptBrokerAuthenticationError, ScriptCapabilityError) as exc:
         raise _unavailable() from exc
     except ScriptCallConflictError as exc:

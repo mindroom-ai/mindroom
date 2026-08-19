@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
@@ -64,7 +65,6 @@ if TYPE_CHECKING:
 __all__ = [
     "ScriptBrokerAuthenticationError",
     "ScriptCallPreparationPendingError",
-    "ScriptCallReceipt",
     "ScriptRuntimeResolver",
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
@@ -174,12 +174,6 @@ class _PreparedExecution:
     approval_config: Config
 
 
-@dataclass(frozen=True, slots=True)
-class _AcceptedScriptCall:
-    receipt: ScriptCallReceipt
-    execution_task: asyncio.Task[ScriptCallReceipt] | None = None
-
-
 class _CurrentGrantRevokedError(ValueError):
     """Raised when a launch grant is absent from the current live surface."""
 
@@ -203,21 +197,6 @@ class ScriptToolCallRequest:
         return digest_arguments(self.arguments)
 
 
-@dataclass(frozen=True, slots=True)
-class ScriptCallReceipt:
-    """JSON-wire representation of one durable script call receipt."""
-
-    run_id: str
-    call_id: str
-    grant: ScriptToolGrant
-    arguments_digest: str
-    state: ScriptCallState
-    created_at: str
-    updated_at: str
-    result: object | None = None
-    error: object | None = None
-
-
 def digest_arguments(arguments: Mapping[str, object]) -> str:
     """Hash one canonical JSON-wire argument object."""
     normalized = to_json_compatible(arguments)
@@ -229,20 +208,6 @@ def digest_arguments(arguments: Mapping[str, object]) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _receipt_from_record(record: ScriptCallRecord) -> ScriptCallReceipt:
-    return ScriptCallReceipt(
-        run_id=record.run_id,
-        call_id=record.call_id,
-        grant=record.grant,
-        arguments_digest=record.arguments_digest,
-        state=record.state,
-        created_at=record.created_at,
-        updated_at=record.updated_at,
-        result=record.result,
-        error=record.error,
-    )
 
 
 def _background_origin(run: ScriptRunRecord, call: ScriptCallRecord) -> BackgroundScriptToolOrigin:
@@ -261,7 +226,7 @@ class ScriptToolBroker:
 
     store: ScriptRunStore
     runtime_resolver: ScriptRuntimeResolver
-    _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallReceipt]] = field(default_factory=dict, init=False)
+    _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallRecord]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
@@ -295,7 +260,7 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         *,
         authorization: str | None,
-    ) -> _AcceptedScriptCall:
+    ) -> ScriptCallRecord:
         key = (request.run_id, request.call_id)
         self._preparing[key] = self._preparing.get(key, 0) + 1
         preparation_finished = False
@@ -307,20 +272,13 @@ class ScriptToolBroker:
                 self._finish_preparation(key)
                 preparation_finished = True
                 if prepared.call.state is ScriptCallState.PENDING and not owned_elsewhere:
-                    return _AcceptedScriptCall(
-                        receipt=_receipt_from_record(
-                            await asyncio.to_thread(
-                                self.store.settle_orphaned_call,
-                                run_id=prepared.call.run_id,
-                                call_id=prepared.call.call_id,
-                                error=_INDETERMINATE_ERROR,
-                            ),
-                        ),
+                    return await asyncio.to_thread(
+                        self.store.settle_orphaned_call,
+                        run_id=prepared.call.run_id,
+                        call_id=prepared.call.call_id,
+                        error=_INDETERMINATE_ERROR,
                     )
-                return _AcceptedScriptCall(
-                    receipt=_receipt_from_record(prepared.call),
-                    execution_task=self._tasks.get(key),
-                )
+                return prepared.call
 
             task = asyncio.create_task(
                 self._execute_claimed_call(prepared.run, prepared.call, prepared.arguments),
@@ -330,17 +288,14 @@ class ScriptToolBroker:
             self._finish_preparation(key)
             preparation_finished = True
 
-            def forget_completed_task(completed: asyncio.Task[ScriptCallReceipt]) -> None:
+            def forget_completed_task(completed: asyncio.Task[ScriptCallRecord]) -> None:
                 if self._tasks.get(key) is completed:
                     self._tasks.pop(key, None)
                 if not any(active_key[0] == prepared.run.run_id for active_key in self._tasks):
                     self._run_locks.pop(prepared.run.run_id, None)
 
             task.add_done_callback(forget_completed_task)
-            return _AcceptedScriptCall(
-                receipt=_receipt_from_record(prepared.call),
-                execution_task=task,
-            )
+            return prepared.call
         finally:
             if not preparation_finished:
                 self._finish_preparation(key)
@@ -367,7 +322,7 @@ class ScriptToolBroker:
             preparation_count -= 1
         return preparation_count > 0
 
-    def get_call(self, run_id: str, call_id: str) -> ScriptCallReceipt:
+    def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
         """Return one stable durable call receipt."""
         key = (run_id, call_id)
         try:
@@ -383,7 +338,7 @@ class ScriptToolBroker:
                 call_id=call_id,
                 error=_INDETERMINATE_ERROR,
             )
-        return _receipt_from_record(record)
+        return record
 
     def authenticate(self, run_id: str, authorization: str | None) -> str:
         """Authenticate a bearer capability with one constant-time comparison path."""
@@ -440,17 +395,18 @@ class ScriptToolBroker:
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         """Authenticate and durably claim one gateway call before acknowledging it."""
-        accepted = await self._accept_prepared_call(request, authorization=authorization)
-        return accepted.receipt
+        return await run_coroutine_until_complete(
+            self._accept_prepared_call(request, authorization=authorization),
+        )
 
     async def get_authenticated(
         self,
         run_id: str,
         call_id: str,
         authorization: str | None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
         self.authenticate(run_id, authorization)
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
@@ -470,7 +426,7 @@ class ScriptToolBroker:
         run: ScriptRunRecord,
         call: ScriptCallRecord,
         arguments: dict[str, object],
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         run_lock = self._run_locks.setdefault(run.run_id, asyncio.Lock())
         async with run_lock:
             try:
@@ -488,7 +444,7 @@ class ScriptToolBroker:
         run: ScriptRunRecord,
         call: ScriptCallRecord,
         arguments: dict[str, object],
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         origin = _background_origin(run, call)
         correlation_id = f"background-script:{run.run_id}:{call.call_id}"
         execution_started = False
@@ -721,7 +677,7 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None = None,
         error: object | None = None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error)
 
     def _publish(
@@ -731,7 +687,7 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None = None,
         error: object | None = None,
-    ) -> ScriptCallReceipt:
+    ) -> ScriptCallRecord:
         try:
             stored = self.store.publish_call_result(
                 run_id=call.run_id,
@@ -750,12 +706,10 @@ class ScriptToolBroker:
                         error=_INDETERMINATE_ERROR,
                     )
                 except BaseException:
-                    return _receipt_from_record(
-                        replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR),
-                    )
+                    return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
             else:
-                return _receipt_from_record(replace(call, state=state, result=result, error=error))
-        return _receipt_from_record(stored)
+                return replace(call, state=state, result=result, error=error)
+        return stored
 
 
 async def drain_script_tool_cleanup(
