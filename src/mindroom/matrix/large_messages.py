@@ -67,6 +67,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
         STREAM_VISIBLE_BODY_KEY,
     },
 )
+_FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _MATRIX_EVENT_HARD_LIMIT = 64000
@@ -99,6 +100,33 @@ def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: 
     target_content.update(
         {key: value for key, value in source_content.items() if _is_passthrough_edit_wrapper_key(key)},
     )
+
+
+def _copy_file_edit_fallback_fields(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Keep the outer fallback independently valid when an edit replaces a file."""
+    target_content.update({key: source_content[key] for key in _FILE_FALLBACK_KEYS if key in source_content})
+
+
+def _wrap_large_edit(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    replacement_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a compact edit wrapper whose fallback is valid on its own."""
+    source_msgtype = source_content.get("msgtype", "m.text")
+    wrapper_msgtype = (
+        replacement_content.get("msgtype", source_msgtype) if source_msgtype == "m.file" else source_msgtype
+    )
+    wrapper = {
+        "msgtype": wrapper_msgtype,
+        "body": f"* {replacement_content['body']}",
+        "m.new_content": replacement_content,
+        "m.relates_to": content.get("m.relates_to", {}),
+    }
+    if source_msgtype == "m.file":
+        _copy_file_edit_fallback_fields(replacement_content, wrapper)
+    _copy_edit_wrapper_metadata(source_content, wrapper)
+    return wrapper
 
 
 def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
@@ -633,13 +661,7 @@ async def prepare_large_message(
         modified_content["m.relates_to"] = content["m.relates_to"]
 
     if is_edit and "m.new_content" in content:
-        modified_content = {
-            "msgtype": source_content.get("msgtype", "m.text"),
-            "body": f"* {modified_content['body']}",
-            "m.new_content": modified_content,
-            "m.relates_to": content.get("m.relates_to", {}),
-        }
-        _copy_edit_wrapper_metadata(source_content, modified_content)
+        modified_content = _wrap_large_edit(content, source_content, modified_content)
 
     final_size = _calculate_event_size(modified_content)
     if final_size > 64000:
