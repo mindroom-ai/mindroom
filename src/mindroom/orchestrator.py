@@ -182,6 +182,47 @@ async def _gather_shutdown_phase(
         return list(await phase), cancellation
 
 
+async def _gather_bot_shutdown_phase(
+    bots: Iterable[AgentBot],
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish initial bot stops while periodically exposing fixed phases."""
+    bots = tuple(bots)
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    timer: asyncio.TimerHandle | None = None
+
+    def log_pending_phases() -> None:
+        nonlocal timer
+        if phase.done():
+            return
+        pending_response_owner_count = sum(
+            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        logger.warning(
+            "orchestrator_bot_stop_pending",
+            live_response_owner_count=pending_response_owner_count,
+            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
+            pending_bot_stop_phase_counts=_aggregate_deferred_stop_phase_counts(bots),
+        )
+        timer = loop.call_later(
+            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+            log_pending_phases,
+        )
+
+    timer = loop.call_later(
+        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+        log_pending_phases,
+    )
+    try:
+        try:
+            return list(await asyncio.shield(phase)), None
+        except asyncio.CancelledError as cancellation:
+            return list(await phase), cancellation
+    finally:
+        timer.cancel()
+
+
 async def _gather_deferred_shutdown_phase(
     bots: Iterable[AgentBot],
     *awaitables: Awaitable[object],
@@ -2127,7 +2168,7 @@ class _MultiAgentOrchestrator:
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in stopping_bots]
         stop_results, cancellation = await _run_shutdown_step(
             "bot_stop",
-            _gather_shutdown_phase(*stop_tasks),
+            _gather_bot_shutdown_phase(stopping_bots, *stop_tasks),
         )
         if cancellation is not None:
             phase_cancellations.append(cancellation)

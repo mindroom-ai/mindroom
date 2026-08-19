@@ -939,7 +939,7 @@ class AgentBot:
 
     @property
     def deferred_stop_phase(self) -> str | None:
-        """Return the fixed deferred-release phase, if cleanup is active."""
+        """Return the fixed resource-release phase, if cleanup is active."""
         phase = self._deferred_stop_phase
         return None if phase is None else phase.value
 
@@ -1834,38 +1834,40 @@ class AgentBot:
         failures: list[BaseException],
     ) -> None:
         """Release resources after every response owner is terminal."""
-        if self.agent_name == ROUTER_AGENT_NAME:
-            self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
-            cleared_queued_tasks = clear_deferred_overdue_tasks()
-            if cleared_queued_tasks > 0:
-                self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
-            cancelled_tasks = await cancel_all_running_scheduled_tasks()
-            if cancelled_tasks > 0:
-                self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
+        try:
+            if self.agent_name == ROUTER_AGENT_NAME:
+                self._mark_deferred_stop_phase(DeferredStopPhase.ROUTER_OVERDUE_TASKS)
+                cleared_queued_tasks = clear_deferred_overdue_tasks()
+                if cleared_queued_tasks > 0:
+                    self.logger.info("Cleared queued overdue scheduled tasks", count=cleared_queued_tasks)
+                cancelled_tasks = await cancel_all_running_scheduled_tasks()
+                if cancelled_tasks > 0:
+                    self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
 
-        # Each of these owns a resource this bot alone holds, and none of them
-        # may skip the others. A lane that already faulted makes dispatcher stop
-        # raise, and before this isolation that exception skipped the store and
-        # the client and then aborted the config reload's removal of this
-        # generation -- leaving it registered, half-stopped, while its
-        # replacement opened the same database under the same principal.
-        self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
-        await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
-        if self._ingestion_session is not None:
-            self._mark_deferred_stop_phase(DeferredStopPhase.INGESTION_SESSION)
-            await self._release("ingestion session", self._ingestion_session.close(), failures)
-        if self._own_journal is not None:
-            self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_STORE)
-            await self._release("journal store", self._own_journal.close(), failures)
-        if self.client is not None:
-            self._mark_deferred_stop_phase(DeferredStopPhase.MATRIX_CLIENT)
-            self.logger.warning("Client is not None in stop()")
-            await self._release("matrix client", self.client.close(), failures)
+            # Each of these owns a resource this bot alone holds, and none of them
+            # may skip the others. A lane that already faulted makes dispatcher stop
+            # raise, and before this isolation that exception skipped the store and
+            # the client and then aborted the config reload's removal of this
+            # generation -- leaving it registered, half-stopped, while its
+            # replacement opened the same database under the same principal.
+            self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
+            await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+            if self._ingestion_session is not None:
+                self._mark_deferred_stop_phase(DeferredStopPhase.INGESTION_SESSION)
+                await self._release("ingestion session", self._ingestion_session.close(), failures)
+            if self._own_journal is not None:
+                self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_STORE)
+                await self._release("journal store", self._own_journal.close(), failures)
+            if self.client is not None:
+                self._mark_deferred_stop_phase(DeferredStopPhase.MATRIX_CLIENT)
+                self.logger.warning("Client is not None in stop()")
+                await self._release("matrix client", self.client.close(), failures)
+        finally:
+            self._deferred_stop_phase = None
 
     def _mark_deferred_stop_phase(self, phase: DeferredStopPhase) -> None:
-        """Expose one fixed release phase only while deferred cleanup owns it."""
-        if getattr(self, "_deferred_stop_required", False):
-            self._deferred_stop_phase = phase
+        """Expose one fixed release phase while any stop cleanup owns it."""
+        self._deferred_stop_phase = phase
 
     async def _release(
         self,

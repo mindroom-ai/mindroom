@@ -67,6 +67,7 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import (
+    _gather_bot_shutdown_phase,
     _gather_deferred_shutdown_phase,
     _MultiAgentOrchestrator,
     _run_shutdown_step,
@@ -3427,6 +3428,38 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
 
 
 @pytest.mark.asyncio
+async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None:
+    """A zero-owner stop exposes its fixed release phase before deferred selection."""
+    dispatcher_started = asyncio.Event()
+    release_dispatcher = asyncio.Event()
+
+    async def stop_dispatcher() -> None:
+        dispatcher_started.set()
+        await release_dispatcher.wait()
+
+    bot = object.__new__(AgentBot)
+    bot.agent_user = SimpleNamespace(agent_name="worker")
+    bot._deferred_stop_required = False
+    bot._deferred_stop_phase = None
+    bot._journal_dispatcher = SimpleNamespace(stop=AsyncMock(side_effect=stop_dispatcher))
+    bot._ingestion_session = None
+    bot._own_journal = None
+    bot._runtime_view = SimpleNamespace(client=None)
+
+    failures: list[BaseException] = []
+    stopping = asyncio.create_task(AgentBot._release_stopped_resources(bot, failures))
+    try:
+        await asyncio.wait_for(dispatcher_started.wait(), timeout=1)
+        assert bot.deferred_stop_phase == "journal_dispatcher"
+    finally:
+        release_dispatcher.set()
+        await stopping
+
+    assert bot.deferred_stop_phase is None
+    assert failures == []
+
+
+@pytest.mark.asyncio
 async def test_deferred_agent_stop_clears_phase_after_failed_recovery_proof() -> None:
     """A terminal failed bot cannot masquerade as another bot's live phase."""
     runner = MagicMock()
@@ -3477,6 +3510,103 @@ async def test_deferred_diagnostic_gather_preserves_second_cancellation() -> Non
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bot_stop_diagnostic_gather_preserves_second_cancellation() -> None:
+    """Initial bot-stop observation retains the original repeated-cancel behavior."""
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def resistant_child() -> None:
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+
+    task = asyncio.create_task(_gather_bot_shutdown_phase((), resistant_child()))
+    await child_started.wait()
+    task.cancel("first")
+    await asyncio.sleep(0)
+    task.cancel("second")
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=0.1)
+        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        assert task in done
+        assert child_cancelled.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_child.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_ordinary_resource_phase_while_bot_stop_blocks(
+    tmp_path: Path,
+) -> None:
+    """A zero-owner resource stall emits its fixed phase before bot-stop returns."""
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 0
+    bot.pending_response_phase_counts = {}
+    bot.deferred_stop_phase = None
+    bot.deferred_stop_required = False
+
+    async def stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        bot.deferred_stop_phase = "journal_dispatcher"
+        stop_started.set()
+        try:
+            await release_stop.wait()
+        finally:
+            bot.deferred_stop_phase = None
+
+    bot.stop = AsyncMock(side_effect=stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch(
+            "mindroom.orchestrator._DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS",
+            0.01,
+            create=True,
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        stop_task = asyncio.create_task(orchestrator.stop())
+        await stop_started.wait()
+        try:
+            await asyncio.sleep(0.03)
+            log_warning.assert_any_call(
+                "orchestrator_bot_stop_pending",
+                live_response_owner_count=0,
+                pending_response_phase_counts={},
+                pending_bot_stop_phase_counts={"journal_dispatcher": 1},
+            )
+        finally:
+            release_stop.set()
+            await stop_task
+
+    journal.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
