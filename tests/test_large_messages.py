@@ -10,6 +10,7 @@ from nio.crypto import OutboundGroupSession
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    CONFIG_CONFIRMATION_REACTION_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
@@ -20,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_WARMUP_SUFFIX_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
@@ -86,15 +88,26 @@ def _actual_encrypted_event_size(content: dict[str, object], *, room_id: str) ->
     relation = content.get("m.relates_to")
     if isinstance(relation, dict):
         encrypted_content["m.relates_to"] = relation
+    stream_status = content.get(STREAM_STATUS_KEY)
+    if isinstance(stream_status, str):
+        encrypted_content[STREAM_STATUS_KEY] = stream_status
+    if content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True:
+        encrypted_content[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
+    config_reaction_id = content.get(CONFIG_CONFIRMATION_REACTION_KEY)
+    if isinstance(config_reaction_id, str):
+        encrypted_content[CONFIG_CONFIRMATION_REACTION_KEY] = config_reaction_id
     return _calculate_event_size(encrypted_content)
 
 
 def test_encrypted_event_size_estimate_bounds_real_megolm_output() -> None:
     """The delivery estimate must include Megolm expansion without consuming a live session."""
     content: dict[str, object] = {
-        "body": "x" * 45_000,
+        "body": "x" * 45_750,
         "msgtype": "m.text",
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        STREAM_STATUS_KEY: "completed",
+        VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        CONFIG_CONFIRMATION_REACTION_KEY: "$reaction",
     }
 
     estimated = _calculate_delivery_event_size(
@@ -105,6 +118,7 @@ def test_encrypted_event_size_estimate_bounds_real_megolm_output() -> None:
     )
     actual = _actual_encrypted_event_size(content, room_id="!room:server")
 
+    assert _MATRIX_EVENT_HARD_LIMIT - 256 <= actual <= _MATRIX_EVENT_HARD_LIMIT
     assert actual <= estimated <= actual + 16
 
 

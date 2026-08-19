@@ -16,6 +16,7 @@ from nio import crypto
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    CONFIG_CONFIRMATION_REACTION_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
     DURABLE_FINAL_OUTCOME_VERSION,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
@@ -31,6 +32,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
     TOOL_TRACE_CONTENT_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
@@ -230,7 +232,13 @@ def _calculate_delivery_event_size(
     room_encrypted: bool,
     device_id: str | None,
 ) -> int:
-    """Estimate the complete event size after nio's optional Megolm wrapping."""
+    """Estimate the complete event size after nio's optional Megolm wrapping.
+
+    The custom client copies a small recovery-metadata allowlist onto the
+    encrypted envelope after Megolm encryption. Those outer fields are wire
+    bytes too, so this estimate must mirror ``_MindRoomAsyncClient.encrypt``;
+    omitting them would let a boundary payload fail identically on every replay.
+    """
     if not room_encrypted:
         return _calculate_event_size(content)
 
@@ -265,6 +273,14 @@ def _calculate_delivery_event_size(
     relation = content.get("m.relates_to")
     if isinstance(relation, dict):
         estimated_content["m.relates_to"] = relation
+    stream_status = content.get(STREAM_STATUS_KEY)
+    if isinstance(stream_status, str):
+        estimated_content[STREAM_STATUS_KEY] = stream_status
+    if content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True:
+        estimated_content[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
+    config_reaction_id = content.get(CONFIG_CONFIRMATION_REACTION_KEY)
+    if isinstance(config_reaction_id, str):
+        estimated_content[CONFIG_CONFIRMATION_REACTION_KEY] = config_reaction_id
     return _calculate_event_size(estimated_content)
 
 
