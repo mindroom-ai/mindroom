@@ -2076,6 +2076,17 @@ class _MultiAgentOrchestrator:
         if cancellation is not None:
             phase_cancellations.append(cancellation)
         deferred_bots = [bot for bot in stopping_bots if bot.deferred_stop_required is True]
+        pre_deferred_response_owner_count = sum(
+            count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        if pre_deferred_response_owner_count > 0:
+            logger.warning(
+                "orchestrator_response_shutdown_owners_pending",
+                live_response_owner_count=pre_deferred_response_owner_count,
+                pending_response_phase_counts=_aggregate_response_phase_counts(
+                    self.agent_bots.values(),
+                ),
+            )
         deferred_stop_results: list[object] = []
         if deferred_bots:
             deferred_stop_results, cancellation = await _run_shutdown_step(

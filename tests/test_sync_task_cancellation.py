@@ -3281,6 +3281,67 @@ async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_logs_response_phases_before_blocking_deferred_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A blocked deferred owner cannot hide its fixed shutdown phase snapshot."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    bot = AsyncMock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.pending_response_phase_counts = {"response_execution": 1}
+    bot.deferred_stop_required = True
+    bot.stop = AsyncMock(side_effect=response_failure)
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        deferred_started.set()
+        await release_deferred.wait()
+        bot.pending_response_owner_count = 0
+        bot.pending_response_phase_counts = {}
+        bot.deferred_stop_required = False
+
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        stop_task = asyncio.create_task(orchestrator.stop())
+        await deferred_started.wait()
+        try:
+            log_warning.assert_any_call(
+                "orchestrator_response_shutdown_owners_pending",
+                live_response_owner_count=1,
+                pending_response_phase_counts={"response_execution": 1},
+            )
+        finally:
+            release_deferred.set()
+            await stop_task
+
+    journal.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_stop_retries_response_cleanup_after_late_owner_release(
     tmp_path: Path,
 ) -> None:
