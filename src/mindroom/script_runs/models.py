@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -27,12 +28,6 @@ class ScriptCallState(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
-class ScriptRunEntityKind(StrEnum):
-    """Kinds of runtime entity that may request a background script run."""
-
-    AGENT = "agent"
-
-
 @dataclass(frozen=True, slots=True)
 class ScriptToolGrant:
     """One permitted toolkit/function pair captured at script launch."""
@@ -53,12 +48,10 @@ class ScriptRunRecord:
     grants: tuple[ScriptToolGrant, ...]
     token_hash: str
     preapprove_launch_grants: bool = False
-    entity_kind: ScriptRunEntityKind = ScriptRunEntityKind.AGENT
     thread_root_event_id: str | None = None
     execution_identity: dict[str, object] = field(default_factory=dict)
     worker_key: str | None = None
     worker_id: str | None = None
-    supervisor_handle: str | None = None
     snapshot_locator: str | None = None
     name: str | None = None
     local_unsafe: bool = False
@@ -72,7 +65,6 @@ class ScriptRunRecord:
     error: str | None = None
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
-    call_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +77,6 @@ class ScriptCallRecord:
     arguments_digest: str
     state: ScriptCallState
     created_at: str
-    updated_at: str
     result: object | None = None
     error: object | None = None
 
@@ -100,3 +91,15 @@ class ScriptCallClaim:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+_SCRIPT_RUN_ID_RE = re.compile(r"script-([0-9a-f]{32})")
+
+
+def supervisor_handle_for_run(run_id: str) -> str:
+    """Derive the sole valid shell-supervisor handle for a generated script run."""
+    match = _SCRIPT_RUN_ID_RE.fullmatch(run_id)
+    if match is None:
+        msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
+        raise ValueError(msg)
+    return f"shell:{match.group(1)}"

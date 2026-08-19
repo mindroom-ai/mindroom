@@ -20,7 +20,7 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant, supervisor_handle_for_run
 from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
@@ -241,7 +241,6 @@ class ScriptRunManager:
 
         token, token_hash = mint_script_capability()
         run_id = f"script-{uuid.uuid4().hex}"
-        supervisor_handle = f"shell:{uuid.uuid4().hex}"
         launch_grants = self.grant_resolver(context)
         if effective_limits.allowed_tools is not None:
             allowed_tools = frozenset(effective_limits.allowed_tools)
@@ -258,7 +257,6 @@ class ScriptRunManager:
             token_hash=token_hash,
             preapprove_launch_grants=effective_limits.allowed_tools is not None,
             worker_key=worker_key,
-            supervisor_handle=supervisor_handle,
             name=_validated_name(name),
             local_unsafe=local_unsafe,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
@@ -607,20 +605,16 @@ class ScriptRunManager:
             return await self._complete_cancel_before_spawn(assigned)
         workspace = _worker_workspace(context, worker)
         await self._record_snapshot_locator(run, workspace)
-        source_path, token_path = _write_snapshot(workspace, run.run_id, source=source, token=token)
+        _write_snapshot(workspace, run.run_id, source=source, token=token)
         ready = await asyncio.to_thread(self.store.get_run, run.run_id)
         if ready.cancel_requested_at is not None:
             return await self._complete_cancel_before_spawn(ready)
-        supervisor_handle = _require_supervisor_handle(run.supervisor_handle)
         try:
-            receipt = await self.worker_client.launch(
+            await self.worker_client.launch(
                 worker,
                 run_id=run.run_id,
-                source_path=str(source_path.relative_to(workspace)),
                 source_digest=run.source_digest,
-                token_path=str(token_path.relative_to(workspace)),
                 gateway_url=self.gateway_url,
-                supervisor_handle=supervisor_handle,
                 private_agent_names=(
                     tuple(sorted(worker_spec.private_agent_names))
                     if worker_spec.private_agent_names is not None
@@ -640,7 +634,6 @@ class ScriptRunManager:
                 run.run_id,
                 state=ScriptRunState.RUNNING,
                 worker_id=worker.worker_id,
-                supervisor_handle=receipt.supervisor_handle,
             )
         except BaseException as exc:
             durable: ScriptRunRecord | None = None
@@ -692,7 +685,7 @@ class ScriptRunManager:
                 "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
             },
         )
-        supervisor_handle = _require_supervisor_handle(run.supervisor_handle)
+        supervisor_handle = supervisor_handle_for_run(run.run_id)
         try:
             message = await run_command_via_supervisor(
                 socket_path,
@@ -713,7 +706,6 @@ class ScriptRunManager:
                 self.store.transition_run,
                 run.run_id,
                 state=ScriptRunState.RUNNING,
-                supervisor_handle=supervisor_handle,
             )
         except BaseException as exc:
             durable: ScriptRunRecord | None = None
@@ -767,14 +759,13 @@ class ScriptRunManager:
         return source_bytes
 
     async def _process_status(self, run: ScriptRunRecord) -> WorkerScriptStatus:
-        if run.supervisor_handle is None:
-            return WorkerScriptStatus.unknown_handle()
+        supervisor_handle = supervisor_handle_for_run(run.run_id)
         if run.local_unsafe:
             message = await asyncio.to_thread(
                 check_command_via_supervisor,
                 ensure_shell_supervisor(),
                 namespace=_local_namespace(run.run_id),
-                handle=run.supervisor_handle,
+                handle=supervisor_handle,
             )
             return _parse_local_status(message)
         worker = await self._worker_handle(run)
@@ -783,7 +774,6 @@ class ScriptRunManager:
         return await self.worker_client.status(
             worker,
             run_id=run.run_id,
-            supervisor_handle=run.supervisor_handle,
         )
 
     async def _apply_process_status(
@@ -872,14 +862,13 @@ class ScriptRunManager:
             await asyncio.sleep(min(self.cancellation_poll_interval_seconds, remaining))
 
     async def _signal_process(self, run: ScriptRunRecord, *, force: bool) -> WorkerScriptCancel:
-        if run.supervisor_handle is None:
-            return WorkerScriptCancel(cancel_requested=False, already_finished=False, unknown_handle=True)
+        supervisor_handle = supervisor_handle_for_run(run.run_id)
         if run.local_unsafe:
             message = await asyncio.to_thread(
                 kill_command_via_supervisor,
                 ensure_shell_supervisor(),
                 namespace=_local_namespace(run.run_id),
-                handle=run.supervisor_handle,
+                handle=supervisor_handle,
                 force=force,
             )
             return _parse_local_cancel(message)
@@ -889,7 +878,6 @@ class ScriptRunManager:
         return await self.worker_client.cancel(
             worker,
             run_id=run.run_id,
-            supervisor_handle=run.supervisor_handle,
             force=force,
         )
 
@@ -1137,10 +1125,3 @@ def _require_worker_spec(worker_spec: WorkerSpec | None) -> WorkerSpec:
         msg = "Background script worker specification is unavailable."
         raise ScriptRunManagerError(msg)
     return worker_spec
-
-
-def _require_supervisor_handle(supervisor_handle: str | None) -> str:
-    if supervisor_handle is None:
-        msg = "Background script supervisor handle is unavailable."
-        raise ScriptRunManagerError(msg)
-    return supervisor_handle

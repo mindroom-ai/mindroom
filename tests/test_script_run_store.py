@@ -77,7 +77,7 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert duplicate.call.call_id == first.call.call_id
     authenticated = store.require_active_capability(run.run_id, token)
     assert authenticated.run_id == run.run_id
-    assert authenticated.call_count == 1
+    assert len(store.pending_calls(run.run_id)) == 1
 
 
 def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths: RuntimePaths) -> None:
@@ -127,7 +127,7 @@ def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_pa
         arguments_digest=accepted_claim.call.arguments_digest,
     )
     assert duplicate.created is False
-    assert store.get_run(run.run_id).call_count == 1
+    assert len(store.pending_calls(run.run_id)) == 1
 
 
 def test_run_store_rejects_call_id_reuse_with_different_arguments(runtime_paths: RuntimePaths) -> None:
@@ -163,7 +163,7 @@ def test_run_store_rejects_call_grant_outside_launch_snapshot(runtime_paths: Run
             arguments_digest="digest-a",
         )
 
-    assert store.get_run("run-1").call_count == 0
+    assert store.pending_calls("run-1") == []
 
 
 def test_run_store_replays_equivalent_serialized_terminal_receipt(runtime_paths: RuntimePaths) -> None:

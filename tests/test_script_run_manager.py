@@ -25,7 +25,6 @@ from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptT
 from mindroom.script_runs.store import ScriptRunStore
 from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
-    WorkerScriptLaunch,
     WorkerScriptStatus,
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
@@ -197,26 +196,22 @@ class _WorkerClient:
         worker: WorkerHandle,
         *,
         run_id: str,
-        source_path: str,
         source_digest: str,
-        token_path: str,
         gateway_url: str,
-        supervisor_handle: str,
         private_agent_names: tuple[str, ...] | None = None,
-        tail_lines: int = 200,
-    ) -> WorkerScriptLaunch:
-        del source_digest, gateway_url, private_agent_names, tail_lines
+    ) -> None:
+        del source_digest, gateway_url, private_agent_names
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
-        assert starting.supervisor_handle == supervisor_handle
+        supervisor_handle = f"shell:{run_id.removeprefix('script-')}"
         assert len(supervisor_handle) == len("shell:") + 32
         self.requested_handles.append(supervisor_handle)
         if len(self.requested_handles) == 2 and self.second_launch_entered is not None:
             self.second_launch_entered.set()
         workspace = Path(worker.debug_metadata["state_root"]) / "workspace"
-        source = workspace / source_path
-        token = workspace / token_path
+        source = workspace / ".mindroom" / "script-runs" / run_id / "source.py"
+        token = workspace / ".mindroom" / "script-runs" / run_id / "capability"
         assert source.read_text(encoding="utf-8") == "print('ok')\n"
         assert stat.S_IMODE(source.stat().st_mode) == 0o600
         assert stat.S_IMODE(token.stat().st_mode) == 0o600
@@ -228,16 +223,14 @@ class _WorkerClient:
             await self.launch_release.wait()
         if self.launch_failure is not None:
             raise self.launch_failure
-        return WorkerScriptLaunch(supervisor_handle=supervisor_handle)
 
     async def status(
         self,
         worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
     ) -> WorkerScriptStatus:
-        del worker, run_id, supervisor_handle
+        del worker, run_id
         if self.status_results:
             return self.status_results.pop(0)
         return self.next_status
@@ -247,12 +240,11 @@ class _WorkerClient:
         worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
         force: bool = False,
     ) -> WorkerScriptCancel:
         del worker
         self.cancel_forces.append(force)
-        self.cancel_handles.append(supervisor_handle)
+        self.cancel_handles.append(f"shell:{run_id.removeprefix('script-')}")
         self.cancel_observed_revocation = self.store.get_run(run_id).cancel_requested_at is not None
         if self.cancel_failures:
             raise self.cancel_failures.pop(0)
@@ -278,7 +270,7 @@ def _manager(tmp_path: Path, *, mode: str | None = "all") -> tuple[ScriptRunMana
 
 
 @pytest.mark.asyncio
-async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_path: Path) -> None:
+async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: Path) -> None:
     """Worker allocation sees durable intent, then the launch sees private snapshotted files."""
     manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
@@ -293,7 +285,7 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
     assert run.state is ScriptRunState.RUNNING
     assert run.worker_key is not None
     assert run.worker_id == "worker-1"
-    assert run.supervisor_handle == client.requested_handles[0]
+    assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
     assert run.max_tool_calls_per_minute == 4
     assert run.max_runtime_seconds == 3600
     assert run.snapshot_locator is not None
@@ -474,7 +466,7 @@ async def test_starting_run_with_durable_handle_can_be_reconciled_and_signalled(
     launched = await manager.run(context, source="print('ok')\n")
     orphan = replace(
         launched,
-        run_id="script-orphaned-launch",
+        run_id=f"script-{'b' * 32}",
         state=ScriptRunState.STARTING,
         started_at=None,
     )
@@ -487,7 +479,7 @@ async def test_starting_run_with_durable_handle_can_be_reconciled_and_signalled(
     client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
     cancelled = await manager.cancel(context, run_id=orphan.run_id, force=True)
     assert cancelled.state is ScriptRunState.CANCELLED
-    assert client.cancel_handles[-1] == orphan.supervisor_handle
+    assert client.cancel_handles[-1] == f"shell:{orphan.run_id.removeprefix('script-')}"
 
 
 @pytest.mark.asyncio
@@ -504,9 +496,8 @@ async def test_ambiguous_worker_launch_failure_remains_retryable_until_exit(tmp_
     stored = manager.store.list_runs()[0]
     assert stored.state is ScriptRunState.STARTING
     assert stored.cancel_requested_at is not None
-    assert stored.supervisor_handle is not None
     assert client.cancel_forces == [True]
-    assert client.cancel_handles == [stored.supervisor_handle]
+    assert client.cancel_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
 
     client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
     reconciled = await manager.reconcile(_context(tmp_path), run_id=stored.run_id)
@@ -530,7 +521,6 @@ async def test_ambiguous_worker_running_persistence_remains_retryable(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
     ) -> ScriptRunRecord:
@@ -541,7 +531,6 @@ async def test_ambiguous_worker_running_persistence_remains_retryable(
             run_id,
             state=state,
             worker_id=worker_id,
-            supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
         )
@@ -779,7 +768,6 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
     ) -> ScriptRunRecord:
@@ -787,7 +775,6 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
             run_id,
             state=state,
             worker_id=worker_id,
-            supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
         )
@@ -828,7 +815,6 @@ async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
     ) -> ScriptRunRecord:
@@ -836,7 +822,6 @@ async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
             run_id,
             state=state,
             worker_id=worker_id,
-            supervisor_handle=supervisor_handle,
             exit_code=exit_code,
             error=error,
         )
@@ -1396,7 +1381,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         )
         assert handle is not None
         starting = manager.store.list_runs(include_finished=False)[0]
-        assert starting.supervisor_handle == handle
+        assert handle == f"shell:{starting.run_id.removeprefix('script-')}"
         return f"Started background process\nHandle: {handle}"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
@@ -1407,7 +1392,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
     assert run.local_unsafe is True
     assert run.worker_id is None
     assert run.worker_key is None
-    assert run.supervisor_handle == observed["handle"]
+    assert observed["handle"] == f"shell:{run.run_id.removeprefix('script-')}"
     assert observed["socket_path"] == "/control/shell.sock"
     assert observed["namespace"] == f"script:local:{run.run_id}"
 
@@ -1497,13 +1482,13 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     stored = manager.store.list_runs()[0]
     assert stored.state is ScriptRunState.STARTING
     assert stored.cancel_requested_at is not None
-    assert killed_handles == [stored.supervisor_handle]
+    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
 
     termination_confirmed = True
     reconciled = await manager.reconcile(context, run_id=stored.run_id)
 
     assert reconciled.state is ScriptRunState.CANCELLED
-    assert killed_handles == [stored.supervisor_handle, stored.supervisor_handle]
+    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"] * 2
 
 
 @pytest.mark.asyncio

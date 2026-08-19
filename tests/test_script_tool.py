@@ -65,7 +65,6 @@ def _run(*, state: ScriptRunState = ScriptRunState.RUNNING) -> ScriptRunRecord:
         execution_identity={"requester_id": "must-not-leak"},
         worker_key="v1:default:user_agent:@alice:example.test:watcher",
         worker_id="worker-private",
-        supervisor_handle=f"shell:{'a' * 32}",
         snapshot_locator="workers/private/.mindroom/script-runs/script-1",
         state=state,
     )
@@ -154,7 +153,7 @@ async def test_script_tool_requires_live_room_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_script_tool_uses_configured_limits_and_redacts_capability_fields(
+async def test_script_tool_public_run_uses_derived_execution_mode_without_redundant_fields(
     script_context: ToolRuntimeContext,
 ) -> None:
     """Toolkit config becomes durable launch limits without exposing capability material."""
@@ -180,6 +179,10 @@ async def test_script_tool_uses_configured_limits_and_redacts_capability_fields(
     assert "worker_backend_generation" not in payload["run"]
     assert "supervisor_handle" not in payload["run"]
     assert "snapshot_locator" not in payload["run"]
+    assert payload["run"]["execution_mode"] == "worker"
+    assert payload["run"]["local_unsafe"] is False
+    assert "entity_kind" not in payload["run"]
+    assert "call_count" not in payload["run"]
     assert manager.limits == ScriptRunLimits(
         max_concurrent_runs=2,
         max_tool_calls_per_minute=7,

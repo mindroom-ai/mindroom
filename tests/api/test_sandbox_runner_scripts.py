@@ -79,7 +79,7 @@ def runner_client(
 
 
 def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, str, str]:
-    relative_root = Path(".mindroom-script-runs") / run_id
+    relative_root = Path(".mindroom") / "script-runs" / run_id
     run_root = workspace / relative_root
     run_root.mkdir(parents=True)
     source_path = run_root / "source.py"
@@ -94,17 +94,57 @@ def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, st
 
 
 def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
-    source_path, token_path, source_digest = _write_run_files(workspace, run_id, source)
+    _source_path, _token_path, source_digest = _write_run_files(workspace, run_id, source)
     return {
         "run_id": run_id,
         "worker_key": _WORKER_KEY,
-        "source_path": source_path,
         "source_digest": source_digest,
-        "token_path": token_path,
-        "supervisor_handle": _SUPERVISOR_HANDLE,
-        "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": "http://primary:8765/api/script-gateway"},
-        "tail_lines": 100,
+        "gateway_url": "http://primary:8765/api/script-gateway",
     }
+
+
+def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A fixed run ID derives the worker paths and supervisor handle without caller control."""
+    client, workspace = runner_client
+    run_id = f"script-{'a' * 32}"
+    payload = _run_payload(workspace, run_id=run_id, source="print('ready')\n")
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "error": None, "failure_kind": None}
+    client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/cancel",
+        headers=_HEADERS,
+        json={"worker_key": _WORKER_KEY, "force": True},
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        ("source_path", ".mindroom/script-runs/elsewhere/source.py"),
+        ("token_path", ".mindroom/script-runs/elsewhere/capability"),
+        ("supervisor_handle", _SUPERVISOR_HANDLE),
+        ("environment", {"MINDROOM_CONTROL_STATE_PATH": "/primary/private"}),
+        ("tail_lines", 1),
+    ],
+)
+def test_worker_script_endpoint_narrow_request_rejects_extra_process_controls(
+    runner_client: tuple[TestClient, Path],
+    extra_field: tuple[str, object],
+) -> None:
+    """The actual request model rejects every primary-controlled launch setting."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'b' * 32}", source="print('no')\n")
+    payload[extra_field[0]] = extra_field[1]
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 422
+    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
 def test_worker_script_endpoint_launches_statuses_and_cancels_process(
@@ -112,7 +152,7 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
 ) -> None:
     """A valid request should traverse the real supervisor handle lifecycle."""
     client, workspace = runner_client
-    run_id = "run-1"
+    run_id = f"script-{'c' * 32}"
     response = client.post(
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
@@ -124,15 +164,12 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     )
 
     assert response.status_code == 200
-    launch = response.json()
-    assert launch["ok"] is True
-    handle = launch["supervisor_handle"]
-    assert handle == _SUPERVISOR_HANDLE
+    assert response.json()["ok"] is True
 
     status = client.get(
         f"/api/sandbox-runner/scripts/{run_id}",
         headers=_HEADERS,
-        params={"worker_key": _WORKER_KEY, "supervisor_handle": handle},
+        params={"worker_key": _WORKER_KEY},
     )
     assert status.status_code == 200
     assert status.json()["state"] == "running"
@@ -140,7 +177,7 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     cancelled = client.post(
         f"/api/sandbox-runner/scripts/{run_id}/cancel",
         headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "supervisor_handle": handle},
+        json={"worker_key": _WORKER_KEY},
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["cancel_requested"] is True
@@ -151,7 +188,7 @@ def test_worker_script_endpoint_rejects_source_digest_mismatch(
 ) -> None:
     """A changed snapshot must not launch under the primary's digest receipt."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-digest", source="print('expected')\n")
+    payload = _run_payload(workspace, run_id=f"script-{'d' * 32}", source="print('expected')\n")
     payload["source_digest"] = "0" * 64
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
@@ -160,36 +197,35 @@ def test_worker_script_endpoint_rejects_source_digest_mismatch(
     assert "digest" in response.json()["detail"].lower()
 
 
-def test_worker_script_endpoint_rejects_path_outside_worker_workspace(
+def test_worker_script_endpoint_rejects_caller_selected_source_path(
     runner_client: tuple[TestClient, Path],
     tmp_path: Path,
 ) -> None:
-    """A relative traversal must not escape the selected worker workspace."""
+    """The route does not accept a caller-selected source snapshot path."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-escape", source="print('no')\n")
+    payload = _run_payload(workspace, run_id=f"script-{'e' * 32}", source="print('no')\n")
     outside = tmp_path / "outside.py"
     outside.write_text("print('escaped')\n", encoding="utf-8")
     payload["source_path"] = str(outside)
-    payload["source_digest"] = hashlib.sha256(outside.read_bytes()).hexdigest()
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 
-    assert response.status_code == 400
-    assert "workspace" in response.json()["detail"].lower()
+    assert response.status_code == 422
+    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
-def test_worker_script_endpoint_rejects_nul_in_snapshot_path(
+def test_worker_script_endpoint_rejects_caller_selected_token_path(
     runner_client: tuple[TestClient, Path],
 ) -> None:
-    """Malformed path bytes must produce a client error instead of escaping as a server failure."""
+    """The route does not accept a caller-selected capability path."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-nul", source="print('no')\n")
-    payload["source_path"] = "source\x00.py"
+    payload = _run_payload(workspace, run_id=f"script-{'f' * 32}", source="print('no')\n")
+    payload["token_path"] = "capability"  # noqa: S105
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 
-    assert response.status_code == 400
-    assert "workspace" in response.json()["detail"].lower()
+    assert response.status_code == 422
+    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
 def test_worker_script_endpoint_rejects_unapproved_environment_name(
@@ -197,13 +233,13 @@ def test_worker_script_endpoint_rejects_unapproved_environment_name(
 ) -> None:
     """The launch protocol must not become an arbitrary environment injection channel."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-env", source="print('no')\n")
+    payload = _run_payload(workspace, run_id=f"script-{'1' * 32}", source="print('no')\n")
     payload["environment"] = {"MINDROOM_CONTROL_STATE_PATH": "/primary/private"}
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 
-    assert response.status_code == 400
-    assert "environment" in response.json()["detail"].lower()
+    assert response.status_code == 422
+    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
 def test_worker_script_endpoint_rejects_oversized_request(
@@ -211,7 +247,7 @@ def test_worker_script_endpoint_rejects_oversized_request(
 ) -> None:
     """The worker must reject oversized control bodies before process launch."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-large", source="print('no')\n")
+    payload = _run_payload(workspace, run_id=f"script-{'2' * 32}", source="print('no')\n")
     payload["environment"] = {"MINDROOM_SCRIPT_GATEWAY_URL": f"http://primary.test/{'x' * 20_000}"}
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
@@ -250,7 +286,7 @@ async def test_worker_script_endpoint_replays_valid_chunked_body_for_model_valid
 ) -> None:
     """A bounded streamed body must remain available to FastAPI's Pydantic parser."""
     client, workspace = runner_client
-    run_id = "run-streamed"
+    run_id = f"script-{'3' * 32}"
     raw_body = json.dumps(
         _run_payload(
             workspace,
@@ -273,11 +309,10 @@ async def test_worker_script_endpoint_replays_valid_chunked_body_for_model_valid
         )
 
     assert response.status_code == 200
-    handle = response.json()["supervisor_handle"]
     client.post(
         f"/api/sandbox-runner/scripts/{run_id}/cancel",
         headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "supervisor_handle": handle, "force": True},
+        json={"worker_key": _WORKER_KEY, "force": True},
     )
 
 
@@ -310,13 +345,10 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
         json={
-            "run_id": "run-sibling",
+            "run_id": f"script-{'4' * 32}",
             "worker_key": "worker-b",
-            "source_path": "source.py",
             "source_digest": "a" * 64,
-            "token_path": "capability",
-            "supervisor_handle": _SUPERVISOR_HANDLE,
-            "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": "http://primary.test/api/script-gateway"},
+            "gateway_url": "http://primary.test/api/script-gateway",
         },
     )
 
@@ -335,25 +367,26 @@ def test_worker_script_status_is_bound_to_run_namespace(
         headers=_HEADERS,
         json=_run_payload(
             workspace,
-            run_id="run-owned",
+            run_id=f"script-{'5' * 32}",
             source="import time\ntime.sleep(60)\n",
         ),
     )
-    handle = response.json()["supervisor_handle"]
+    assert response.status_code == 200
+    owned_run_id = f"script-{'5' * 32}"
     try:
         status = client.get(
-            "/api/sandbox-runner/scripts/run-other",
+            f"/api/sandbox-runner/scripts/script-{'6' * 32}",
             headers=_HEADERS,
-            params={"worker_key": _WORKER_KEY, "supervisor_handle": handle},
+            params={"worker_key": _WORKER_KEY},
         )
 
         assert status.status_code == 200
         assert status.json()["state"] == "unknown"
     finally:
         client.post(
-            "/api/sandbox-runner/scripts/run-owned/cancel",
+            f"/api/sandbox-runner/scripts/{owned_run_id}/cancel",
             headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY, "supervisor_handle": handle, "force": True},
+            json={"worker_key": _WORKER_KEY, "force": True},
         )
 
 
@@ -367,22 +400,22 @@ def test_worker_script_launch_rejects_path_like_run_id(
 ) -> None:
     """The entire launch run ID must match the filesystem-safe identifier grammar."""
     client, workspace = runner_client
-    payload = _run_payload(workspace, run_id="run-safe", source="print('no')\n")
-    payload["run_id"] = "run-safe/child"
+    payload = _run_payload(workspace, run_id=f"script-{'7' * 32}", source="print('no')\n")
+    payload["run_id"] = "script-safe/child"
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 
     assert response.status_code == 422
 
 
-def test_worker_script_cancel_rejects_handle_with_valid_prefix(
+def test_worker_script_cancel_rejects_caller_selected_handle(
     runner_client: tuple[TestClient, Path],
 ) -> None:
-    """A supervisor handle prefix must not authorize a different full handle string."""
+    """Cancellation derives the handle and rejects caller-selected alternatives."""
     client, _workspace = runner_client
 
     response = client.post(
-        "/api/sandbox-runner/scripts/run-safe/cancel",
+        f"/api/sandbox-runner/scripts/script-{'8' * 32}/cancel",
         headers=_HEADERS,
         json={"worker_key": _WORKER_KEY, "supervisor_handle": f"{_SUPERVISOR_HANDLE}-suffix"},
     )

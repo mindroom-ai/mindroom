@@ -13,11 +13,12 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.routing import APIRoute
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from mindroom.api import sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.script_runs.models import supervisor_handle_for_run
 from mindroom.shell_supervisor import (
     ShellSupervisorStartupError,
     check_command_via_supervisor,
@@ -37,10 +38,7 @@ if TYPE_CHECKING:
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_TOKEN_BYTES = 4096
-_ALLOWED_ENVIRONMENT_NAMES = frozenset({"MINDROOM_SCRIPT_GATEWAY_URL"})
-_RUN_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-_HANDLE_PATTERN = r"shell:[0-9a-f]{32}"
-_HANDLE_RE = re.compile(r"^" + _HANDLE_PATTERN + r"$")
+_RUN_ID_PATTERN = r"script-[0-9a-f]{32}"
 _LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{32})$", re.MULTILINE)
 
 __all__ = [
@@ -108,15 +106,7 @@ def _validate_run_id(value: str) -> str:
     return value
 
 
-def _validate_supervisor_handle(value: str) -> str:
-    if _HANDLE_RE.fullmatch(value) is None:
-        message = "Invalid script supervisor handle."
-        raise ValueError(message)
-    return value
-
-
 _RunId = Annotated[str, AfterValidator(_validate_run_id)]
-_SupervisorHandle = Annotated[str, AfterValidator(_validate_supervisor_handle)]
 
 
 router = APIRouter(
@@ -130,22 +120,21 @@ router = APIRouter(
 class SandboxScriptRunRequest(BaseModel):
     """Validated launch description for one already-snapshotted script."""
 
+    model_config = ConfigDict(extra="forbid")
+
     run_id: _RunId
     worker_key: str = Field(min_length=1, max_length=1024)
-    source_path: str = Field(min_length=1, max_length=1024)
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
-    token_path: str = Field(min_length=1, max_length=1024)
-    supervisor_handle: _SupervisorHandle
-    environment: dict[str, str] = Field(default_factory=dict, max_length=4)
+    gateway_url: str = Field(min_length=1, max_length=2048)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
-    tail_lines: int = Field(default=200, ge=1, le=1000)
 
 
 class SandboxScriptControlRequest(BaseModel):
     """Worker identity and supervisor handle for status-changing operations."""
 
+    model_config = ConfigDict(extra="forbid")
+
     worker_key: str = Field(min_length=1, max_length=1024)
-    supervisor_handle: _SupervisorHandle
     force: bool = False
 
 
@@ -153,7 +142,6 @@ class SandboxScriptRunResponse(BaseModel):
     """Worker launch receipt."""
 
     ok: bool
-    supervisor_handle: str | None = None
     error: str | None = None
     failure_kind: Literal["tool", "worker"] | None = None
 
@@ -242,22 +230,31 @@ def _workspace_file(
     return resolved
 
 
-def _validated_environment(payload: SandboxScriptRunRequest, *, workspace: Path, token_path: Path) -> dict[str, str]:
-    unexpected = sorted(set(payload.environment) - _ALLOWED_ENVIRONMENT_NAMES)
-    if unexpected:
-        raise HTTPException(status_code=400, detail=f"Script environment contains unsupported names: {unexpected}")
-    gateway_url = payload.environment.get("MINDROOM_SCRIPT_GATEWAY_URL", "")
-    parsed_url = urlsplit(gateway_url)
+def _script_snapshot_paths(workspace: Path, run_id: str) -> tuple[Path, Path]:
+    relative_root = Path(".mindroom") / "script-runs" / run_id
+    return (
+        _workspace_file(workspace, str(relative_root / "source.py"), label="Script source", byte_limit=_MAX_SOURCE_BYTES),
+        _workspace_file(
+            workspace,
+            str(relative_root / "capability"),
+            label="Script capability file",
+            byte_limit=_MAX_TOKEN_BYTES,
+        ),
+    )
+
+
+def _script_environment(payload: SandboxScriptRunRequest, *, workspace: Path, token_path: Path) -> dict[str, str]:
+    parsed_url = urlsplit(payload.gateway_url)
     if (
         parsed_url.scheme not in {"http", "https"}
         or not parsed_url.hostname
         or parsed_url.username is not None
         or parsed_url.password is not None
-        or len(gateway_url) > 2048
+        or len(payload.gateway_url) > 2048
     ):
         raise HTTPException(status_code=400, detail="Script gateway environment must contain a safe HTTP(S) URL.")
     return {
-        "MINDROOM_SCRIPT_GATEWAY_URL": gateway_url.rstrip("/"),
+        "MINDROOM_SCRIPT_GATEWAY_URL": payload.gateway_url.rstrip("/"),
         "MINDROOM_SCRIPT_RUN_ID": payload.run_id,
         "MINDROOM_SCRIPT_SOURCE_DIGEST": payload.source_digest,
         "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
@@ -271,10 +268,10 @@ def _validate_source_digest(source_path: Path, expected_digest: str) -> None:
         raise HTTPException(status_code=400, detail="Script source digest does not match the launch receipt.")
 
 
-def _parse_launch_message(message: str) -> SandboxScriptRunResponse:
+def _parse_launch_message(message: str, *, expected_handle: str) -> SandboxScriptRunResponse:
     match = _LAUNCH_HANDLE_RE.search(message)
-    if match is not None:
-        return SandboxScriptRunResponse(ok=True, supervisor_handle=match.group(1))
+    if match is not None and match.group(1) == expected_handle:
+        return SandboxScriptRunResponse(ok=True)
     return SandboxScriptRunResponse(ok=False, error=message, failure_kind="worker")
 
 
@@ -318,20 +315,9 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         private_agent_names=payload.private_agent_names,
     )
     workspace = prepared.paths.workspace.resolve()
-    source_path = _workspace_file(
-        workspace,
-        payload.source_path,
-        label="Script source",
-        byte_limit=_MAX_SOURCE_BYTES,
-    )
-    token_path = _workspace_file(
-        workspace,
-        payload.token_path,
-        label="Script capability file",
-        byte_limit=_MAX_TOKEN_BYTES,
-    )
+    source_path, token_path = _script_snapshot_paths(workspace, payload.run_id)
     _validate_source_digest(source_path, payload.source_digest)
-    script_environment = _validated_environment(payload, workspace=workspace, token_path=token_path)
+    script_environment = _script_environment(payload, workspace=workspace, token_path=token_path)
     python_executable, base_environment, _cwd = sandbox_exec.resolve_subprocess_worker_context(prepared.paths)
     if python_executable is None or base_environment is None:
         return SandboxScriptRunResponse(ok=False, error="Worker Python runtime is unavailable.", failure_kind="worker")
@@ -348,11 +334,11 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
         env=environment,
         cwd=str(workspace),
-        tail=payload.tail_lines,
+        tail=200,
         timeout=0,
-        handle=payload.supervisor_handle,
+        handle=supervisor_handle_for_run(payload.run_id),
     )
-    return _parse_launch_message(message)
+    return _parse_launch_message(message, expected_handle=supervisor_handle_for_run(payload.run_id))
 
 
 @router.get("/{run_id}", response_model=SandboxScriptStatusResponse)
@@ -360,7 +346,6 @@ async def status_script_in_worker(
     request: Request,
     run_id: _RunId,
     worker_key: Annotated[str, Query(min_length=1, max_length=1024)],
-    supervisor_handle: Annotated[_SupervisorHandle, Query()],
 ) -> SandboxScriptStatusResponse:
     """Poll one namespaced supervisor handle without owning lifecycle state."""
     normalized_worker_key = _normalized_worker_key(request, worker_key)
@@ -369,7 +354,7 @@ async def status_script_in_worker(
         check_command_via_supervisor,
         socket_path,
         namespace=_script_namespace(normalized_worker_key, run_id),
-        handle=supervisor_handle,
+        handle=supervisor_handle_for_run(run_id),
     )
     return _parse_status_message(message)
 
@@ -387,7 +372,7 @@ async def cancel_script_in_worker(
         kill_command_via_supervisor,
         socket_path,
         namespace=_script_namespace(normalized_worker_key, run_id),
-        handle=payload.supervisor_handle,
+        handle=supervisor_handle_for_run(run_id),
         force=payload.force,
     )
     return _parse_cancel_message(message)

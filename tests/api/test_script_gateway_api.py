@@ -42,7 +42,6 @@ def _receipt(state: ScriptCallState, *, result: object | None = None) -> ScriptC
         arguments_digest=digest_arguments({"url": "https://example.org/"}),
         state=state,
         created_at="2026-08-18T00:00:00Z",
-        updated_at="2026-08-18T00:00:01Z",
         result=result,
     )
 
@@ -193,7 +192,6 @@ async def test_script_gateway_passes_bearer_only_to_broker_and_returns_wire_rece
         "arguments_digest": digest_arguments({"url": "https://example.org/"}),
         "state": "completed",
         "created_at": "2026-08-18T00:00:00Z",
-        "updated_at": "2026-08-18T00:00:01Z",
         "result": "page body",
         "error": None,
     }
@@ -241,7 +239,6 @@ async def test_script_gateway_returns_the_durable_conflict_after_slow_claim_reso
         arguments_digest=old_arguments_digest,
         state=ScriptCallState.COMPLETED,
         created_at="2026-08-18T00:00:00Z",
-        updated_at="2026-08-18T00:00:01Z",
         result="later",
     )
 

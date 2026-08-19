@@ -17,7 +17,6 @@ from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,
     ScriptCallState,
-    ScriptRunEntityKind,
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
@@ -138,14 +137,14 @@ class ScriptRunStore:
                 connection.execute(
                     """
                     INSERT INTO script_runs (
-                        run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
+                        run_id, agent_name, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash, preapprove_launch_grants,
-                        worker_key, worker_id, supervisor_handle,
+                        worker_key, worker_id,
                         snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
-                        cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        cancellation_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -263,8 +262,8 @@ class ScriptRunStore:
                 """
                 INSERT INTO script_calls (
                     run_id, call_id, toolkit_name, function_name, arguments_digest,
-                    state, receipt_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    state, receipt_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
                 """,
                 (
                     run_id,
@@ -274,10 +273,8 @@ class ScriptRunStore:
                     arguments_digest,
                     ScriptCallState.PENDING.value,
                     now,
-                    now,
                 ),
             )
-            connection.execute("UPDATE script_runs SET call_count = call_count + 1 WHERE run_id = ?", (run_id,))
         return ScriptCallClaim(
             call=ScriptCallRecord(
                 run_id=run_id,
@@ -286,7 +283,6 @@ class ScriptRunStore:
                 arguments_digest=arguments_digest,
                 state=ScriptCallState.PENDING,
                 created_at=now,
-                updated_at=now,
             ),
             created=True,
         )
@@ -330,17 +326,15 @@ class ScriptRunStore:
             existing = _call_from_row(row)
             if existing.state in _TERMINAL_CALL_STATES:
                 return existing
-            now = _utc_now()
             connection.execute(
                 """
                 UPDATE script_calls
-                SET state = ?, receipt_json = ?, updated_at = ?
+                SET state = ?, receipt_json = ?
                 WHERE run_id = ? AND call_id = ? AND state = ?
                 """,
                 (
                     ScriptCallState.INDETERMINATE.value,
                     receipt_json,
-                    now,
                     run_id,
                     call_id,
                     ScriptCallState.PENDING.value,
@@ -351,7 +345,6 @@ class ScriptRunStore:
             existing,
             state=ScriptCallState.INDETERMINATE,
             error=stored_error,
-            updated_at=now,
         )
 
     def publish_call_result(  # noqa: Vulture
@@ -381,17 +374,16 @@ class ScriptRunStore:
                     return existing
                 msg = f"Script call '{call_id}' already has a terminal receipt."
                 raise ScriptCallConflictError(msg)
-            now = _utc_now()
             connection.execute(
                 """
                 UPDATE script_calls
-                SET state = ?, receipt_json = ?, updated_at = ?
+                SET state = ?, receipt_json = ?
                 WHERE run_id = ? AND call_id = ?
                 """,
-                (state.value, receipt_json, now, run_id, call_id),
+                (state.value, receipt_json, run_id, call_id),
             )
         stored_result, stored_error = _receipt_values(receipt_json)
-        return replace(existing, state=state, result=stored_result, error=stored_error, updated_at=now)
+        return replace(existing, state=state, result=stored_result, error=stored_error)
 
     def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:  # noqa: Vulture
         """Durably revoke a run before any cancellation signal is sent."""
@@ -441,7 +433,6 @@ class ScriptRunStore:
         *,
         state: ScriptRunState,
         worker_id: str | None = None,
-        supervisor_handle: str | None = None,
         exit_code: int | None = None,
         error: str | None = None,
     ) -> ScriptRunRecord:
@@ -469,7 +460,6 @@ class ScriptRunStore:
                 run,
                 state=state,
                 worker_id=worker_id if worker_id is not None else run.worker_id,
-                supervisor_handle=supervisor_handle if supervisor_handle is not None else run.supervisor_handle,
                 started_at=started_at,
                 finished_at=finished_at,
                 exit_code=exit_code if exit_code is not None else run.exit_code,
@@ -483,13 +473,12 @@ class ScriptRunStore:
             connection.execute(
                 """
                 UPDATE script_runs
-                SET worker_id = ?, supervisor_handle = ?, state = ?, started_at = ?,
+                SET worker_id = ?, state = ?, started_at = ?,
                     finished_at = ?, exit_code = ?, error = ?
                 WHERE run_id = ?
                 """,
                 (
                     updated.worker_id,
-                    updated.supervisor_handle,
                     updated.state.value,
                     updated.started_at,
                     updated.finished_at,
@@ -557,7 +546,6 @@ _SCHEMA_STATEMENTS = (
                 CREATE TABLE IF NOT EXISTS script_runs (
                     run_id TEXT PRIMARY KEY,
                     agent_name TEXT NOT NULL,
-                    entity_kind TEXT NOT NULL CHECK (entity_kind = 'agent'),
                     owner_user_id TEXT NOT NULL,
                     room_id TEXT NOT NULL,
                     thread_root_event_id TEXT,
@@ -568,7 +556,6 @@ _SCHEMA_STATEMENTS = (
                     preapprove_launch_grants INTEGER NOT NULL,
                     worker_key TEXT,
                     worker_id TEXT,
-                    supervisor_handle TEXT,
                     snapshot_locator TEXT,
                     name TEXT,
                     local_unsafe INTEGER NOT NULL,
@@ -581,8 +568,7 @@ _SCHEMA_STATEMENTS = (
                     exit_code INTEGER,
                     error TEXT,
                     cancel_requested_at TEXT,
-                    cancellation_reason TEXT,
-                    call_count INTEGER NOT NULL
+                    cancellation_reason TEXT
                 )
                 """,
     """
@@ -595,13 +581,16 @@ _SCHEMA_STATEMENTS = (
                     state TEXT NOT NULL,
                     receipt_json TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
                     PRIMARY KEY (run_id, call_id)
                 )
                 """,
     """
                 CREATE INDEX IF NOT EXISTS script_runs_owner_agent_created_idx
                     ON script_runs(owner_user_id, agent_name, created_at DESC)
+                """,
+    """
+                CREATE INDEX IF NOT EXISTS script_calls_run_created_idx
+                    ON script_calls(run_id, created_at)
                 """,
 )
 
@@ -624,7 +613,6 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
     return (
         run.run_id,
         run.agent_name,
-        run.entity_kind.value,
         run.owner_user_id,
         run.room_id,
         run.thread_root_event_id,
@@ -638,7 +626,6 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         int(run.preapprove_launch_grants),
         run.worker_key,
         run.worker_id,
-        run.supervisor_handle,
         run.snapshot_locator,
         run.name,
         int(run.local_unsafe),
@@ -652,7 +639,6 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         run.error,
         run.cancel_requested_at,
         run.cancellation_reason,
-        run.call_count,
     )
 
 
@@ -670,12 +656,10 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         preapprove_launch_grants=(
             bool(row["preapprove_launch_grants"]) if "preapprove_launch_grants" in column_names else False
         ),
-        entity_kind=ScriptRunEntityKind(str(row["entity_kind"])),
         thread_root_event_id=_nullable_string(row["thread_root_event_id"]),
         execution_identity=cast("dict[str, object]", execution_identity),
         worker_key=_nullable_string(row["worker_key"]),
         worker_id=_nullable_string(row["worker_id"]),
-        supervisor_handle=_nullable_string(row["supervisor_handle"]),
         snapshot_locator=_nullable_string(row["snapshot_locator"]),
         name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),
@@ -689,7 +673,6 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         error=_nullable_string(row["error"]),
         cancel_requested_at=_nullable_string(row["cancel_requested_at"]),
         cancellation_reason=_nullable_string(row["cancellation_reason"]),
-        call_count=int(row["call_count"]),
     )
 
 
@@ -705,7 +688,6 @@ def _call_from_row(row: sqlite3.Row) -> ScriptCallRecord:
         arguments_digest=str(row["arguments_digest"]),
         state=ScriptCallState(str(row["state"])),
         created_at=str(row["created_at"]),
-        updated_at=str(row["updated_at"]),
         result=result,
         error=error,
     )

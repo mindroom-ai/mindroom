@@ -75,7 +75,6 @@ class ScriptCallReceiptResponse(BaseModel):
     arguments_digest: str
     state: ScriptCallState
     created_at: str
-    updated_at: str
     result: JsonValue = None
     error: JsonValue = None
 
@@ -90,7 +89,6 @@ class ScriptCallReceiptResponse(BaseModel):
             arguments_digest=receipt.arguments_digest,
             state=receipt.state,
             created_at=receipt.created_at,
-            updated_at=receipt.updated_at,
             result=cast("JsonValue", receipt.result),
             error=cast("JsonValue", receipt.error),
         )

@@ -11,7 +11,6 @@ from mindroom.script_runs.worker_client import (
     ScriptWorkerClient,
     ScriptWorkerError,
     WorkerScriptCancel,
-    WorkerScriptLaunch,
     WorkerScriptStatus,
 )
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
@@ -44,33 +43,34 @@ def _client(
 
 
 @pytest.mark.asyncio
-async def test_script_worker_client_launches_with_worker_auth_and_validates_receipt() -> None:
-    """Launch should use the selected worker URL/token and return only a valid handle."""
+async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> None:
+    """The worker receives only immutable launch inputs, never primary path or handle choices."""
     observed: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         observed["url"] = str(request.url)
         observed["token"] = request.headers.get("x-mindroom-sandbox-token")
         observed["payload"] = request.read().decode()
-        return httpx.Response(200, json={"ok": True, "supervisor_handle": _SUPERVISOR_HANDLE})
+        return httpx.Response(200, json={"ok": True})
 
     result = await _client(handler).launch(
         _handle(),
-        run_id="run-1",
-        source_path=".mindroom-script-runs/run-1/source.py",
+        run_id=f"script-{'a' * 32}",
         source_digest="a" * 64,
-        token_path=".mindroom-script-runs/run-1/capability",  # noqa: S106
         gateway_url="http://primary.test/api/script-gateway",
-        supervisor_handle=_SUPERVISOR_HANDLE,
-        tail_lines=80,
+        private_agent_names=("private-agent",),
     )
 
-    assert result == WorkerScriptLaunch(supervisor_handle=_SUPERVISOR_HANDLE)
+    assert result is None
     assert observed["url"] == "http://worker.test/api/sandbox-runner/scripts/run"
     assert observed["token"] == _WORKER_TOKEN
-    assert '"worker_key":"v1:test:shared:scripts"' in str(observed["payload"])
-    assert '"run_id":"run-1"' in str(observed["payload"])
-    assert f'"supervisor_handle":"{_SUPERVISOR_HANDLE}"' in str(observed["payload"])
+    assert httpx.Response(200, content=str(observed["payload"])).json() == {
+        "run_id": f"script-{'a' * 32}",
+        "worker_key": "v1:test:shared:scripts",
+        "source_digest": "a" * 64,
+        "gateway_url": "http://primary.test/api/script-gateway",
+        "private_agent_names": ["private-agent"],
+    }
 
 
 @pytest.mark.asyncio
@@ -96,8 +96,8 @@ async def test_script_worker_client_returns_normalized_status_and_cancel_receipt
     client = _client(handler)
     handle = _handle()
 
-    status = await client.status(handle, run_id="run-1", supervisor_handle=_SUPERVISOR_HANDLE)
-    cancelled = await client.cancel(handle, run_id="run-1", supervisor_handle=_SUPERVISOR_HANDLE)
+    status = await client.status(handle, run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    cancelled = await client.cancel(handle, run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
     assert status == WorkerScriptStatus(state="exited", output="done", exit_code=7)
     assert cancelled == WorkerScriptCancel(cancel_requested=False, already_finished=True, unknown_handle=False)
@@ -112,8 +112,7 @@ async def test_script_worker_client_exposes_unknown_handle_as_status() -> None:
 
     status = await _client(handler).status(
         _handle(),
-        run_id="run-1",
-        supervisor_handle=_SUPERVISOR_HANDLE,
+        run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
     assert status == WorkerScriptStatus.unknown_handle()
@@ -130,8 +129,7 @@ async def test_script_worker_client_rejects_unhashable_status_state(invalid_stat
     with pytest.raises(ScriptWorkerError, match="invalid script status receipt") as exc_info:
         await _client(handler).status(
             _handle(),
-            run_id="run-1",
-            supervisor_handle=_SUPERVISOR_HANDLE,
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
 
     assert exc_info.value.failure_kind == "worker"
@@ -163,12 +161,9 @@ async def test_script_worker_client_classifies_request_and_worker_failures(
     with pytest.raises(ScriptWorkerError) as exc_info:
         await _client(handler).launch(
             _handle(),
-            run_id="run-1",
-            source_path="source.py",
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             source_digest="a" * 64,
-            token_path="capability",  # noqa: S106
             gateway_url="http://primary.test/api/script-gateway",
-            supervisor_handle=_SUPERVISOR_HANDLE,
         )
 
     assert exc_info.value.failure_kind == expected_kind
@@ -184,8 +179,7 @@ async def test_script_worker_client_rejects_missing_worker_token_before_transpor
     with pytest.raises(ScriptWorkerError, match="authentication token") as exc_info:
         await _client(handler).status(
             _handle(token=None),
-            run_id="run-1",
-            supervisor_handle=_SUPERVISOR_HANDLE,
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
 
     assert exc_info.value.failure_kind == "worker"

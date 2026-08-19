@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Literal, cast
 from urllib.parse import quote
@@ -12,14 +11,12 @@ import httpx
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
-_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 
 __all__ = [
     "ScriptWorkerClient",
     "ScriptWorkerError",
     "WorkerScriptCancel",
-    "WorkerScriptLaunch",
     "WorkerScriptStatus",
 ]
 
@@ -30,13 +27,6 @@ class ScriptWorkerError(RuntimeError):
     def __init__(self, message: str, *, failure_kind: Literal["tool", "worker"]) -> None:
         super().__init__(message)
         self.failure_kind = failure_kind
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerScriptLaunch:
-    """Validated worker launch receipt."""
-
-    supervisor_handle: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,15 +64,11 @@ class ScriptWorkerClient:
         worker: WorkerHandle,
         *,
         run_id: str,
-        source_path: str,
         source_digest: str,
-        token_path: str,
         gateway_url: str,
-        supervisor_handle: str,
         private_agent_names: tuple[str, ...] | None = None,
-        tail_lines: int = 200,
-    ) -> WorkerScriptLaunch:
-        """Launch one source snapshot and validate its supervisor receipt."""
+    ) -> None:
+        """Launch the run's fixed source snapshot under its derived handle."""
         data = await self._request(
             worker,
             method="POST",
@@ -90,32 +76,18 @@ class ScriptWorkerClient:
             json={
                 "run_id": run_id,
                 "worker_key": worker.worker_key,
-                "source_path": source_path,
                 "source_digest": source_digest,
-                "token_path": token_path,
-                "supervisor_handle": supervisor_handle,
-                "environment": {"MINDROOM_SCRIPT_GATEWAY_URL": gateway_url},
+                "gateway_url": gateway_url,
                 "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,
-                "tail_lines": tail_lines,
             },
         )
         self._raise_structured_failure(data)
-        returned_handle = data.get("supervisor_handle")
-        if (
-            not isinstance(returned_handle, str)
-            or _HANDLE_RE.fullmatch(returned_handle) is None
-            or returned_handle != supervisor_handle
-        ):
-            message = "Worker returned an invalid script launch receipt."
-            raise ScriptWorkerError(message, failure_kind="worker")
-        return WorkerScriptLaunch(supervisor_handle=returned_handle)
 
     async def status(
         self,
         worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
     ) -> WorkerScriptStatus:
         """Poll one worker-owned supervisor handle."""
         data = await self._request(
@@ -124,7 +96,6 @@ class ScriptWorkerClient:
             url=f"{worker_api_endpoint(worker, 'script-status')}/{quote(run_id, safe='')}",
             params={
                 "worker_key": worker.worker_key,
-                "supervisor_handle": supervisor_handle,
             },
         )
         self._raise_structured_failure(data)
@@ -145,7 +116,6 @@ class ScriptWorkerClient:
         worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
         force: bool = False,
     ) -> WorkerScriptCancel:
         """Request graceful or forced termination of one worker-owned handle."""
@@ -155,7 +125,6 @@ class ScriptWorkerClient:
             url=f"{worker_api_endpoint(worker, 'script-cancel')}/{quote(run_id, safe='')}/cancel",
             json={
                 "worker_key": worker.worker_key,
-                "supervisor_handle": supervisor_handle,
                 "force": force,
             },
         )
