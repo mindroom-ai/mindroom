@@ -54,6 +54,7 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     OAuthTokenResult,
     _OAuthClaimValidationContext,
+    is_valid_hosted_oauth_callback_for_request,
 )
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system import plugin_imports
@@ -848,7 +849,12 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 )
 @pytest.mark.parametrize(
     "public_url",
-    ["https://mindroom.example.test", "https://8.8.8.8", "https://m\u00fcnchen.example"],
+    [
+        "https://mindroom.example.test",
+        "https://8.8.8.8",
+        "https://m\u00fcnchen.example",
+        "https://fa\u00df.de",
+    ],
 )
 def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     tmp_path: Path,
@@ -894,6 +900,35 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
             response = client.request(method, path, follow_redirects=False)
 
     assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("callback_uri", "request_hostname"),
+    [
+        ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
+        ("https://example.com./api/oauth/demo/callback", "example.com"),
+        ("https://224.0.0.1/api/oauth/demo/callback", "224.0.0.1"),
+        ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
+        ("https://[fec0::1]/api/oauth/demo/callback", "fec0::1"),
+        ("https://service.local/api/oauth/demo/callback", "service.local"),
+        (
+            "https://metadata.google.internal/api/oauth/demo/callback",
+            "metadata.google.internal",
+        ),
+    ],
+)
+def test_hosted_oauth_callback_rejects_browser_aliases_and_non_public_hosts(
+    callback_uri: str,
+    request_hostname: str,
+) -> None:
+    assert not is_valid_hosted_oauth_callback_for_request(callback_uri, request_hostname)
+
+
+def test_hosted_oauth_callback_accepts_global_ipv6_literal() -> None:
+    assert is_valid_hosted_oauth_callback_for_request(
+        "https://[2001:4860:4860::8888]/api/oauth/demo/callback",
+        "2001:4860:4860::8888",
+    )
 
 
 @pytest.mark.parametrize(
@@ -955,6 +990,12 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
             "https://callback.example.test/api/oauth/public_mail/callback",
             "https://callback.example.test/api/oauth/public_mail/callback",
             "https://dashboard.example.test",
+        ),
+        (
+            "https://fa\u00df.de",
+            "https://fa\u00df.de/api/oauth/public_mail/callback",
+            "https://fa\u00df.de/api/oauth/public_mail/callback",
+            "https://fass.de",
         ),
         (
             "https://app.example.test?tenant=one",

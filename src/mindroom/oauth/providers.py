@@ -19,7 +19,7 @@ from urllib.parse import ParseResult, urlparse
 
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import HTTPError, HTTPStatusError
+from httpx import URL, HTTPError, HTTPStatusError, InvalidURL
 
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
@@ -51,16 +51,21 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
+_NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = ("localhost", "local", "localdomain", "internal", "home.arpa")
 
 
 def _normalized_oauth_hostname(hostname: str | None) -> str | None:
     """Return a validated ASCII hostname without browser-canonicalization ambiguity."""
     if hostname is None or "%" in hostname:
         return None
-    try:
-        normalized_hostname = hostname.encode("idna").decode("ascii").rstrip(".").casefold()
-    except UnicodeError:
-        return None
+    raw_hostname = hostname.rstrip(".")
+    if raw_hostname.isascii():
+        normalized_hostname = raw_hostname.casefold()
+    else:
+        try:
+            normalized_hostname = URL(scheme="https", host=raw_hostname).raw_host.decode("ascii").casefold()
+        except (InvalidURL, UnicodeError):
+            return None
     if not normalized_hostname or len(normalized_hostname) > 253:
         return None
     try:
@@ -99,11 +104,19 @@ def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address)
     )
 
 
-def _is_global_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return whether an address, including an IPv4-mapped address, is globally routable."""
+def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an address, including an IPv4-mapped address, is global unicast."""
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        return address.ipv4_mapped.is_global
-    return address.is_global
+        return _is_global_unicast_address(address.ipv4_mapped)
+    return (
+        address.is_global
+        and not address.is_link_local
+        and not address.is_loopback
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
+        and not (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
+    )
 
 
 def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
@@ -132,11 +145,14 @@ def _is_valid_hosted_oauth_hostname(hostname: str | None) -> bool:
     normalized_hostname = _normalized_oauth_hostname(hostname)
     if normalized_hostname is None:
         return False
-    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
-        return False
     address = _oauth_ip_address(normalized_hostname)
     if address is not None:
-        return _is_global_address(address)
+        return _is_global_unicast_address(address)
+    if "." not in normalized_hostname or any(
+        normalized_hostname == suffix or normalized_hostname.endswith(f".{suffix}")
+        for suffix in _NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES
+    ):
+        return False
     return not _hostname_ends_in_ipv4_number(normalized_hostname)
 
 
@@ -159,6 +175,8 @@ def _validated_https_url(value: str) -> tuple[ParseResult, str] | None:
         or username is not None
         or password is not None
         or "%" in parsed_uri.netloc
+        or hostname is None
+        or hostname.endswith(".")
         or normalized_hostname is None
     ):
         return None
