@@ -1231,8 +1231,59 @@ async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_claimed_approval_user_stop_keeps_user_stop_settlement(tmp_path: Path) -> None:
-    """Explicit user cancellation must not be relabeled as a service restart."""
+async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_path: Path) -> None:
+    """A restart cancellation stays recognizable after the claim is fenced."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-restart-cancelled",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="current-runtime",
+    )
+    assert claimed is not None
+
+    with (
+        patch.object(
+            runner,
+            "_run_claimed_approval_lifecycle",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner._run_owned_approval_continuation(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    failing = await store.approval_continuation(continuation.approval_id)
+    assert failing is not None
+    assert failing.state == "failing"
+    assert failing.failure_reason == "sync_restart_cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
+async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
+    tmp_path: Path,
+    failure_reason: str,
+) -> None:
+    """User stops and hook suppression must not be relabeled as interruptions."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     continuation = MagicMock(spec=ApprovalContinuation)
     settle_failure = AsyncMock()
@@ -1240,7 +1291,7 @@ async def test_claimed_approval_user_stop_keeps_user_stop_settlement(tmp_path: P
     outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$waiting",
-        failure_reason="cancelled_by_user",
+        failure_reason=failure_reason,
         is_visible_response=True,
     )
 
@@ -1250,7 +1301,7 @@ async def test_claimed_approval_user_stop_keeps_user_stop_settlement(tmp_path: P
     ):
         await runner._settle_failed_approval_outcome(continuation, outcome)
 
-    settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
+    settle_failure.assert_awaited_once_with(continuation, failure_reason)
     restart_recovery.assert_not_awaited()
 
 

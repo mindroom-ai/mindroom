@@ -1168,8 +1168,8 @@ class ResponseRunner:
     ) -> None:
         """Preserve partial text for interrupted continuations, but not explicit stops."""
         reason = outcome.failure_reason or "Tool approval continuation failed safely."
-        cancel_source = cancel_source_from_failure_reason(reason)
-        if outcome.terminal_status == "cancelled" and cancel_source != "user_stop":
+        cancel_source = _approval_interruption_cancel_source(reason)
+        if outcome.terminal_status == "cancelled" and cancel_source is not None:
             await self._settle_interrupted_approval_recovery(
                 continuation,
                 reason=cancel_failure_reason(cancel_source),
@@ -2141,12 +2141,13 @@ class ResponseRunner:
     ) -> str | None:
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            reason = cancel_failure_reason(classify_cancel_source(error))
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
                     target=target,
-                    reason="Tool approval continuation was interrupted and denied safely.",
+                    reason=reason,
                 ),
             )
             if owns_final:
