@@ -139,13 +139,13 @@ class ScriptRunStore:
                     """
                     INSERT INTO script_runs (
                         run_id, agent_name, entity_kind, owner_user_id, room_id, thread_root_event_id,
-                        execution_identity_json, source_digest, grants_json, token_hash,
+                        execution_identity_json, source_digest, grants_json, token_hash, preapprove_launch_grants,
                         worker_key, worker_id, worker_backend_generation, supervisor_handle,
                         snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, cancel_requested_at,
                         cancellation_reason, call_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -540,6 +540,10 @@ class ScriptRunStore:
                 connection.execute("ALTER TABLE script_runs ADD COLUMN snapshot_locator TEXT")
             if "worker_backend_generation" not in columns:
                 connection.execute("ALTER TABLE script_runs ADD COLUMN worker_backend_generation TEXT")
+            if "preapprove_launch_grants" not in columns:
+                connection.execute(
+                    "ALTER TABLE script_runs ADD COLUMN preapprove_launch_grants INTEGER NOT NULL DEFAULT 0",
+                )
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -647,6 +651,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
             separators=(",", ":"),
         ),
         run.token_hash,
+        int(run.preapprove_launch_grants),
         run.worker_key,
         run.worker_id,
         run.worker_backend_generation,
@@ -670,6 +675,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
 
 def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
     execution_identity = json.loads(str(row["execution_identity_json"]))
+    column_names = row.keys()
     return ScriptRunRecord(
         run_id=str(row["run_id"]),
         agent_name=str(row["agent_name"]),
@@ -678,6 +684,9 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         source_digest=str(row["source_digest"]),
         grants=_grants_from_json(str(row["grants_json"])),
         token_hash=str(row["token_hash"]),
+        preapprove_launch_grants=(
+            bool(row["preapprove_launch_grants"]) if "preapprove_launch_grants" in column_names else False
+        ),
         entity_kind=ScriptRunEntityKind(str(row["entity_kind"])),
         thread_root_event_id=_nullable_string(row["thread_root_event_id"]),
         execution_identity=cast("dict[str, object]", execution_identity),

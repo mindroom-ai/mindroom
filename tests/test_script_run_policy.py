@@ -7,17 +7,16 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools import Toolkit
 
+import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.message_target import MessageTarget
-from mindroom.script_runs import policy as policy_module
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import (
-    effective_script_grants,
+    resolve_current_script_tool,
     resolve_script_launch_grants,
 )
 from mindroom.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
@@ -33,6 +32,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from agno.tools import Toolkit
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -55,31 +56,6 @@ def _context_for_config(tmp_path: Path, config: Config) -> ToolRuntimeContext:
         conversation_reader=make_conversation_reader_mock(),
         room=None,
         storage_path=None,
-    )
-
-
-def _toolkit(name: str, *function_names: str) -> Toolkit:
-    toolkit = Toolkit(name=name)
-    for function_name in function_names:
-        toolkit.functions[function_name] = SimpleNamespace(name=function_name)
-    return toolkit
-
-
-def test_effective_grants_never_expand_after_launch() -> None:
-    """A live tool addition cannot enlarge an existing run's launch snapshot."""
-    launched = (
-        ScriptToolGrant("website", "read_url"),
-        ScriptToolGrant("matrix_message", "matrix_message"),
-    )
-    current = frozenset(
-        {
-            ScriptToolGrant("website", "read_url"),
-            ScriptToolGrant("shell", "run_shell_command"),
-        },
-    )
-
-    assert effective_script_grants(launched, current) == frozenset(
-        {ScriptToolGrant("website", "read_url")},
     )
 
 
@@ -140,7 +116,7 @@ def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
     assert all(grant.toolkit_name != "shell" for grant in grants)
 
 
-def test_current_grants_use_live_config_and_agent_removal_revokes_surface(tmp_path: Path) -> None:
+def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:
     """Hot reload removals revoke grants without consulting the launch config again."""
     context = _context_for_config(
         tmp_path,
@@ -160,11 +136,11 @@ def test_current_grants_use_live_config_and_agent_removal_revokes_surface(tmp_pa
     )
     context = replace(context, config_provider=lambda: removed)
 
-    assert policy_module.resolve_current_script_tool_surface(context).grants == frozenset()
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add")) is None
 
 
-def test_current_surface_returns_exact_grants_with_their_built_toolkits(tmp_path: Path) -> None:
-    """The broker must be able to execute the same toolkit instance used to derive live authority."""
+def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> None:
+    """The broker executes the one live toolkit that still exposes its launch grant."""
     context = _context_for_config(
         tmp_path,
         Config(
@@ -175,10 +151,38 @@ def test_current_surface_returns_exact_grants_with_their_built_toolkits(tmp_path
     )
     context = replace(context, tool_function_filter=lambda function: function.name == "add")
 
-    surface = policy_module.resolve_current_script_tool_surface(context)
+    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
 
-    assert surface.grants == frozenset({ScriptToolGrant("calculator", "add")})
-    assert surface.toolkits_by_name["calculator"].functions["add"].name == "add"
+    assert toolkit is not None
+    assert toolkit.functions["add"].name == "add"
+
+
+def test_requested_toolkit_builds_only_the_granted_toolkit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatching one grant must not construct unrelated eligible toolkits."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "website"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+    )
+    built: list[str] = []
+    original_build = agents_module.build_agent_toolkit
+
+    def recording_build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        built.append(tool_name)
+        return original_build(tool_name, **kwargs)
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", recording_build)
+
+    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+
+    assert toolkit is not None
+    assert built == ["calculator"]
 
 
 def test_background_approval_overlay_never_preapproves_system_mutation() -> None:
@@ -190,14 +194,14 @@ def test_background_approval_overlay_never_preapproves_system_mutation() -> None
             },
         },
     )
-    toolkits = {
-        "website": _toolkit("website", "read_url"),
-        "config_manager": _toolkit("config_manager", "update_config"),
+    function_owners = {
+        "read_url": frozenset({"website"}),
+        "update_config": frozenset({"config_manager"}),
     }
 
     resolved = build_automation_approval_config(
         config,
-        toolkits_by_name=toolkits,
+        function_owners=function_owners,
         preapproved_toolkits=frozenset({"*"}),
         never_preapprove_toolkits=frozenset({"config_manager", "scheduler", "subagents", "claude_agent"}),
     )
@@ -213,14 +217,14 @@ def test_background_approval_overlay_never_preapproves_system_mutation() -> None
 def test_background_approval_overlay_keeps_colliding_owner_gated() -> None:
     """A bare function collision cannot leak one toolkit's preapproval to another owner."""
     config = Config()
-    toolkits = {
-        "python": _toolkit("python", "read_file", "run_python_code"),
-        "file": _toolkit("file", "read_file"),
+    function_owners = {
+        "read_file": frozenset({"python", "file"}),
+        "run_python_code": frozenset({"python"}),
     }
 
     resolved = build_automation_approval_config(
         config,
-        toolkits_by_name=toolkits,
+        function_owners=function_owners,
         preapproved_toolkits=frozenset({"python"}),
         never_preapprove_toolkits=frozenset(),
     )

@@ -20,7 +20,7 @@ from mindroom.script_runs.models import (
     ScriptRunState,
     ScriptToolGrant,
 )
-from mindroom.script_runs.policy import effective_script_grants, resolve_current_script_tool_surface
+from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptCapabilityError,
@@ -690,21 +690,20 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
-        current_surface = resolve_current_script_tool_surface(context)
-        if call.grant not in effective_script_grants(run.grants, current_surface.grants):
+        if call.grant not in run.grants:
+            raise _CurrentGrantRevokedError
+        toolkit = resolve_current_script_tool(context, call.grant)
+        if toolkit is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
-        toolkit = current_surface.toolkits_by_name.get(call.grant.toolkit_name)
-        if toolkit is None:
-            raise _CurrentGrantRevokedError
         function = _toolkit_function(toolkit, call.grant.function_name)
         return _PreparedExecution(
             context=context,
             execution_identity=execution_identity,
             toolkit=toolkit,
             function=function,
-            approval_config=_background_approval_config(context, current_surface.toolkits_by_name),
+            approval_config=_background_approval_config(context, run),
         )
 
     async def _publish_async(
@@ -894,29 +893,25 @@ async def _request_authored_confirmation(
     )
 
 
-def _script_allowed_toolkits(config: Config, agent_name: str) -> frozenset[str]:
-    for entry in config.resolve_entity(agent_name).tool_configs:
-        if entry.name != "script":
-            continue
-        raw_allowed = entry.tool_config_overrides.get("allowed_tools")
-        if isinstance(raw_allowed, str):
-            return frozenset({raw_allowed.strip()}) if raw_allowed.strip() else frozenset()
-        if isinstance(raw_allowed, list):
-            return frozenset(item.strip() for item in raw_allowed if isinstance(item, str) and item.strip())
-    return frozenset()
-
-
 def _background_approval_config(
     context: ToolRuntimeContext,
-    toolkits_by_name: Mapping[str, Toolkit],
+    run: ScriptRunRecord,
 ) -> Config:
-    config = context.current_config
     return build_automation_approval_config(
-        config,
-        toolkits_by_name=toolkits_by_name,
-        preapproved_toolkits=_script_allowed_toolkits(config, context.agent_name),
+        context.current_config,
+        function_owners=_launch_function_owners(run),
+        preapproved_toolkits=(
+            frozenset(grant.toolkit_name for grant in run.grants) if run.preapprove_launch_grants else frozenset()
+        ),
         never_preapprove_toolkits=_NEVER_PREAPPROVE_TOOLKITS,
     )
+
+
+def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
+    owners: dict[str, set[str]] = {}
+    for grant in run.grants:
+        owners.setdefault(grant.function_name, set()).add(grant.toolkit_name)
+    return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
 def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:

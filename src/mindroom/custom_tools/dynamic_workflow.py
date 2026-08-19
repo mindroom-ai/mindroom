@@ -803,10 +803,19 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
         return context.config
     return build_automation_approval_config(
         context.config,
-        toolkits_by_name=toolkits_by_name,
+        function_owners=_toolkit_function_owners(toolkits_by_name),
         preapproved_toolkits=_workflow_allowed_tools(context),
         never_preapprove_toolkits=_WORKFLOW_NO_PREAPPROVAL_TOOLS,
     )
+
+
+def _toolkit_function_owners(toolkits_by_name: dict[str, Toolkit]) -> dict[str, frozenset[str]]:
+    """Map each participant function to every already-built toolkit that owns it."""
+    owners: dict[str, set[str]] = {}
+    for toolkit_name, toolkit in toolkits_by_name.items():
+        for function_name in (*toolkit.functions, *toolkit.async_functions):
+            owners.setdefault(function_name, set()).add(toolkit_name)
+    return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:

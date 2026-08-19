@@ -2085,12 +2085,9 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
 def test_dynamic_workflow_uses_shared_automation_approval_policy(tmp_path: Path) -> None:
     """The extracted helper preserves the participant approval overlay exactly."""
     context = _make_context(tmp_path)
-    website = Toolkit(name="fake_website")
-    website.functions["read_url"] = SimpleNamespace(name="read_url")
-
     shared = build_automation_approval_config(
         context.config,
-        toolkits_by_name={"website": website},
+        function_owners={"read_url": frozenset({"website"})},
         preapproved_toolkits=frozenset({"website"}),
         never_preapprove_toolkits=dynamic_workflow_module._WORKFLOW_NO_PREAPPROVAL_TOOLS,
     )

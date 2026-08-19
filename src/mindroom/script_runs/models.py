@@ -52,6 +52,7 @@ class ScriptRunRecord:
     source_digest: str
     grants: tuple[ScriptToolGrant, ...]
     token_hash: str
+    preapprove_launch_grants: bool = False
     entity_kind: ScriptRunEntityKind = ScriptRunEntityKind.AGENT
     thread_root_event_id: str | None = None
     execution_identity: dict[str, object] = field(default_factory=dict)

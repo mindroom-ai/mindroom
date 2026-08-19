@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
+from agno.tools import Toolkit
 
 from mindroom.approval_manager import _ApprovalManager
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.event_journal import (
     ApprovalCardReservation,
     BackgroundApprovalDecision,
@@ -16,11 +20,38 @@ from mindroom.event_journal import (
     MatrixDelivery,
     StoredApprovalCard,
 )
-from mindroom.tool_approval import BackgroundScriptToolOrigin
+from mindroom.script_runs import broker as broker_module
+from mindroom.script_runs.models import ScriptToolGrant
+from mindroom.tool_approval import BackgroundScriptToolOrigin, tool_may_require_approval
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_launch_preapproval_does_not_expand_from_live_script_config() -> None:
+    """A tool enabled after an unapproved launch still needs Matrix approval."""
+    config = Config(
+        agents={
+            "watcher": AgentConfig(
+                display_name="Watcher",
+                tools=["calculator", {"script": {"allowed_tools": ["calculator"]}}],
+            ),
+        },
+    )
+    toolkit = Toolkit(name="calculator")
+    toolkit.functions["add"] = SimpleNamespace(name="add")
+    launched_without_preapproval = SimpleNamespace(
+        grants=(ScriptToolGrant("calculator", "add"),),
+        preapprove_launch_grants=False,
+    )
+
+    approval_config = broker_module._background_approval_config(
+        SimpleNamespace(current_config=config),
+        launched_without_preapproval,
+    )
+
+    assert tool_may_require_approval(approval_config, "add") is True
 
 
 def _origin(*, run_id: str = "run-1", call_id: str = "call-1") -> BackgroundScriptToolOrigin:

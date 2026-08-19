@@ -207,7 +207,7 @@ class ScriptRunManager:
         run_id = f"script-{uuid.uuid4().hex}"
         supervisor_handle = f"shell:{uuid.uuid4().hex}"
         launch_grants = self.grant_resolver(context)
-        if effective_limits.allowed_tools:
+        if effective_limits.allowed_tools is not None:
             allowed_tools = frozenset(effective_limits.allowed_tools)
             launch_grants = tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
         run = ScriptRunRecord(
@@ -220,6 +220,7 @@ class ScriptRunManager:
             source_digest=source_digest,
             grants=launch_grants,
             token_hash=token_hash,
+            preapprove_launch_grants=effective_limits.allowed_tools is not None,
             worker_key=worker_key,
             supervisor_handle=supervisor_handle,
             name=_validated_name(name),

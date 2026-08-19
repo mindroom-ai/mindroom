@@ -299,6 +299,7 @@ def _broker(
             source_digest="source-digest",
             grants=(ScriptToolGrant("calculator", "add"),),
             token_hash=token_hash,
+            preapprove_launch_grants=preapprove_script_tool,
             worker_key=durable_worker_key,
             worker_id=durable_worker_id,
             local_unsafe=resolved_durable_local_unsafe,
@@ -529,11 +530,6 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
             return a + b
 
     _replace_calculator_toolkit(monkeypatch, ConfirmingToolkit)
-    monkeypatch.setattr(
-        broker_module,
-        "_script_allowed_toolkits",
-        lambda _config, _agent_name: frozenset({"calculator"}),
-    )
     broker, token = _broker(
         tmp_path,
         events=events,
@@ -586,11 +582,6 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
     assert cached.result == 3
     events.clear()
     _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
-    monkeypatch.setattr(
-        broker_module,
-        "_script_allowed_toolkits",
-        lambda _config, _agent_name: frozenset({"calculator"}),
-    )
     broker, token = _broker(
         tmp_path,
         events=events,

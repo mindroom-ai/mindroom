@@ -372,6 +372,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
     )
 
     assert run.grants == (ScriptToolGrant("calculator", "add"),)
+    assert run.preapprove_launch_grants is True
 
 
 @pytest.mark.asyncio
