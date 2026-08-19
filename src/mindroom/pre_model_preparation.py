@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from mindroom.history.runtime import close_agent_runtime_state_dbs
@@ -22,6 +23,15 @@ if TYPE_CHECKING:
 
 # Keep extraction behavior-neutral for per-logger routing and emitted logger fields.
 logger = get_logger("mindroom.ai")
+
+# Agent construction is synchronous and must stay off the event loop, but the
+# default executor is shared with hundreds of unrelated offloads.  Keeping the
+# raw concurrent future lets shutdown atomically cancel a build that never
+# acquired a worker while still joining and closing one that already started.
+_AGENT_BUILD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="mindroom_agent_build",
+)
 
 
 def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label: str) -> None:
@@ -50,14 +60,32 @@ def _close_unreturned_agent(
         logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
 
 
+def _run_agent_build_in_context(
+    context: contextvars.Context,
+    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+) -> tuple[ResolvedRuntimeModel, Agent]:
+    """Run one synchronous agent build inside its captured dispatch context."""
+    return context.run(build_agent)
+
+
 async def _drain_unreturned_agent_build(
     build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]],
+    build_call: Future[tuple[ResolvedRuntimeModel, Agent]],
     *,
     agent_name: str,
     shared_scope_storage: BaseDb | None,
     caller_owned_agent: Agent | None,
 ) -> None:
     """Wait through repeated cancellation and clean an unreturned agent build."""
+    cancelled_before_start = build_call.cancel()
+    logger.info(
+        "pre_model_agent_build_cancelled",
+        agent=agent_name,
+        cancelled_before_start=cancelled_before_start,
+    )
+    if cancelled_before_start:
+        await asyncio.gather(build_future, return_exceptions=True)
+        return
     while not build_future.done():
         try:
             await asyncio.shield(build_future)
@@ -111,7 +139,12 @@ async def _prepare_prompt_branches(
 
     context = contextvars.copy_context()
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-    build_future = asyncio.get_running_loop().run_in_executor(None, context.run, build_agent)
+    build_call: Future[tuple[ResolvedRuntimeModel, Agent]] = _AGENT_BUILD_EXECUTOR.submit(
+        _run_agent_build_in_context,
+        context,
+        build_agent,
+    )
+    build_future: asyncio.Future[tuple[ResolvedRuntimeModel, Agent]] = asyncio.wrap_future(build_call)
     build_future.add_done_callback(
         lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
     )
@@ -135,6 +168,7 @@ async def _prepare_prompt_branches(
     except BaseException:
         await _drain_unreturned_agent_build(
             build_future,
+            build_call,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,
             caller_owned_agent=caller_owned_agent,

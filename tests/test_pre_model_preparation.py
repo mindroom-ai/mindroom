@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
@@ -152,6 +153,58 @@ async def test_prepare_prompt_branches_preserves_caller_owned_agent_on_memory_fa
         )
 
     close_unreturned.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prepare_prompt_branches_cancellation_discards_queued_agent_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation removes a build that never acquired its dedicated worker."""
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    memory_started = asyncio.Event()
+    agent_started = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test_agent_build")
+
+    def occupy_worker() -> None:
+        worker_started.set()
+        assert worker_release.wait(5.0)
+
+    blocker = executor.submit(occupy_worker)
+    assert await asyncio.to_thread(worker_started.wait, 1.0)
+    monkeypatch.setattr(pre_model_preparation_module, "_AGENT_BUILD_EXECUTOR", executor)
+
+    async def blocked_memory() -> MemoryPromptParts:
+        memory_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def queued_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
+        agent_started.set()
+        return ResolvedRuntimeModel(model_name="default", context_window=None), MagicMock()
+
+    prepare_task = asyncio.create_task(
+        prepare_prompt_branches(
+            prepare_memory=blocked_memory,
+            build_agent=queued_agent,
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        ),
+    )
+    try:
+        await asyncio.wait_for(memory_started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not agent_started.is_set()
+
+        prepare_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(prepare_task, timeout=0.5)
+        assert not agent_started.is_set()
+    finally:
+        worker_release.set()
+        await asyncio.to_thread(blocker.result, 1.0)
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.mark.asyncio
