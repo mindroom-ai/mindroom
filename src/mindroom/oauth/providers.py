@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import math
 import secrets
@@ -49,12 +50,25 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
-_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
 
 
 def is_oauth_loopback_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname is supported by local loopback OAuth flows."""
-    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
+    """Return whether a hostname resolves by definition to the local loopback interface."""
+    if hostname is None:
+        return False
+    normalized_hostname = hostname.rstrip(".").casefold()
+    if normalized_hostname in _OAUTH_LOOPBACK_HOSTNAMES or normalized_hostname.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or (
+        isinstance(address, ipaddress.IPv6Address)
+        and address.ipv4_mapped is not None
+        and address.ipv4_mapped.is_loopback
+    )
 
 
 def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:

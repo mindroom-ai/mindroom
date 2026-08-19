@@ -422,7 +422,10 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
     assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
-@pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
+@pytest.mark.parametrize(
+    "hostname",
+    ["localhost", "localhost.", "app.localhost", "127.0.0.1", "127.0.0.2", "[::1]", "[::ffff:127.0.0.2]"],
+)
 def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
