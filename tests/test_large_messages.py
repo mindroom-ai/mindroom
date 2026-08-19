@@ -729,8 +729,11 @@ async def test_prepare_oversized_encrypted_file_edit_remains_parseable(
     assert _calculate_event_size(prepared) <= _MATRIX_EVENT_HARD_LIMIT
 
 
+@pytest.mark.parametrize("room_encrypted", [False, True])
 @pytest.mark.asyncio
-async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fallback() -> None:
+async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fallback(
+    room_encrypted: bool,
+) -> None:
     """A failed replacement sidecar upload must not leave an invalid file wrapper."""
     client = _UploadClient(RuntimeError("upload failed"))
     text = "updated file fallback " * 3000
@@ -750,7 +753,12 @@ async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fa
         "url": "mxc://server/previous-sidecar",
     }
 
-    prepared = await prepare_large_message(client, "!room:server", edit_content)
+    prepared = await prepare_large_message(
+        client,
+        "!room:server",
+        edit_content,
+        room_encrypted=room_encrypted,
+    )
 
     for event_id, fallback in (("$replacement", prepared), ("$new-content", prepared["m.new_content"])):
         parsed = nio.Event.parse_event(
