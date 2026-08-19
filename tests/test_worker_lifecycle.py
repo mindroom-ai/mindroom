@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-import httpx
 import pytest
 
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -21,9 +20,6 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import save_worker_metadata
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _handle(worker_key: str, *, status: WorkerStatus, last_used_at: float) -> WorkerHandle:
@@ -179,18 +175,10 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
 
 
 def test_static_backend_retires_only_one_exact_run_worker_idempotently() -> None:
-    """Static retirement requires a confirmed remote deletion before forgetting the exact handle."""
-    retired_keys: list[str] = []
-
-    def retire_worker(request: httpx.Request) -> httpx.Response:
-        assert request.headers["x-mindroom-sandbox-token"] == "tok"
-        retired_keys.append(str(json.loads(request.content)["worker_key"]))
-        return httpx.Response(200, json={"retired": True})
-
+    """Static retirement forgets one harmless local handle without touching ordinary entries."""
     backend = StaticSandboxRunnerBackend(
         api_root="http://runner",
         auth_token="tok",  # noqa: S106
-        transport=httpx.MockTransport(retire_worker),
     )
     base_key = "v1:t:user_agent:alice:watcher"
     run_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
@@ -206,23 +194,6 @@ def test_static_backend_retires_only_one_exact_run_worker_idempotently() -> None
     backend.retire_worker(run_key)
 
     assert {handle.worker_key for handle in backend.list_workers()} == set(ordinary_keys)
-    assert retired_keys == [run_key, run_key]
-
-
-def test_static_backend_retirement_transport_failure_keeps_exact_handle() -> None:
-    """An unavailable shared runner cannot make remote state absence authoritative."""
-    backend = StaticSandboxRunnerBackend(
-        api_root="http://runner",
-        auth_token="tok",  # noqa: S106
-        transport=httpx.MockTransport(lambda _request: httpx.Response(503, json={"detail": "unavailable"})),
-    )
-    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'f' * 32}")
-    backend.ensure_worker(WorkerSpec(run_key), now=1.0)
-
-    with pytest.raises(WorkerBackendError, match="unavailable"):
-        backend.retire_worker(run_key)
-
-    assert [handle.worker_key for handle in backend.list_workers()] == [run_key]
 
 
 def test_local_backend_retires_only_one_exact_run_worker_root_idempotently(tmp_path: Path) -> None:
@@ -277,4 +248,89 @@ def test_local_backend_refuses_symlinked_run_root_with_malformed_target_metadata
     with pytest.raises(WorkerBackendError, match="symbolic link"):
         backend.retire_worker(run_key)
 
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("metadata_contents", [None, "{malformed"])
+def test_local_backend_refuses_existing_run_root_without_exact_identity(
+    tmp_path: Path,
+    metadata_contents: str | None,
+) -> None:
+    """An existing local state root needs readable exact-key metadata before recursive deletion."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'2' * 32}")
+    state_root = backend.worker_root / worker_dir_name(run_key)
+    state_root.mkdir()
+    sentinel = state_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    if metadata_contents is not None:
+        metadata_file = state_root / "metadata" / "worker.json"
+        metadata_file.parent.mkdir()
+        metadata_file.write_text(metadata_contents, encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity metadata"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_local_backend_refuses_worker_root_swapped_after_identity_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement directory cannot be recursively deleted after the exact root was validated."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'3' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=worker_dir_name(run_key),
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    sentinel = replacement_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    retired_root = tmp_path / "retired-original"
+    swapped = False
+    original_stat = metadata_store_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == paths.root.name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == backend.worker_root:
+                paths.root.rename(retired_root)
+                replacement_root.rename(paths.root)
+                replacement_root.symlink_to(paths.root, target_is_directory=True)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(metadata_store_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert swapped is True
     assert sentinel.read_text(encoding="utf-8") == "keep"

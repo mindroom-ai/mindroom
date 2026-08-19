@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
+from mindroom.workers.backends._metadata_store import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
     validate_local_copy_source_dir,
@@ -377,9 +378,14 @@ class DockerProjectionManager:
             return {}
         return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
-    def retire_worker_projection(self, paths: LocalWorkerStatePaths) -> None:
+    def retire_worker_projection(self, worker_name: str) -> None:
         """Remove every projected config snapshot owned by one exact worker root."""
-        _remove_path(self._worker_projected_configs_root(paths))
+        with open_worker_state_root(
+            self._projected_configs_root.parent,
+            workers_subpath=(self._projected_configs_root.name,),
+            worker_name=worker_name,
+        ) as projection:
+            projection.remove()
 
     def _prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
         """Remove stale projected config snapshots for one worker root."""

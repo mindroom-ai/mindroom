@@ -6,8 +6,6 @@ import threading
 import time
 from dataclasses import dataclass
 
-import httpx
-
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import (
@@ -28,9 +26,7 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
-_DEFAULT_RETIREMENT_TIMEOUT_SECONDS = 15.0
 _SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
-_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 
 
 def normalize_static_runner_api_root(base_url: str) -> str:
@@ -69,12 +65,10 @@ class StaticSandboxRunnerBackend:
         api_root: str,
         auth_token: str | None,
         idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
-        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.api_root = normalize_static_runner_api_root(api_root)
         self.auth_token = auth_token
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
-        self._transport = transport
         self._lock = threading.Lock()
         self._workers: dict[str, _StaticWorkerMetadata] = {}
 
@@ -148,37 +142,7 @@ class StaticSandboxRunnerBackend:
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
     def retire_worker(self, worker_key: str) -> None:
-        """Retire exact remote shared-runner state before forgetting its local handle."""
-        if not self.api_root or self.auth_token is None:
-            msg = "Static sandbox worker retirement requires a configured authenticated runner."
-            raise WorkerBackendError(msg)
-        try:
-            with httpx.Client(timeout=_DEFAULT_RETIREMENT_TIMEOUT_SECONDS, transport=self._transport) as client:
-                response = client.post(
-                    f"{self.api_root}/workers/retire",
-                    headers={_TOKEN_HEADER: self.auth_token},
-                    json={"worker_key": worker_key},
-                )
-        except httpx.HTTPError as exc:
-            msg = f"Static sandbox worker retirement failed: {exc}"
-            raise WorkerBackendError(msg) from exc
-        if response.status_code >= 400:
-            detail = response.text
-            try:
-                payload = response.json()
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
-                detail = payload["detail"]
-            raise WorkerBackendError(detail.strip() or "Static sandbox worker retirement failed.")
-        try:
-            receipt = response.json()
-        except ValueError as exc:
-            msg = "Static sandbox worker retirement returned a non-JSON receipt."
-            raise WorkerBackendError(msg) from exc
-        if not isinstance(receipt, dict) or receipt.get("retired") is not True:
-            msg = "Static sandbox worker retirement was not confirmed."
-            raise WorkerBackendError(msg)
+        """Forget one harmless process-local handle for the common backend protocol."""
         with self._lock:
             self._workers.pop(worker_key, None)
 

@@ -2764,6 +2764,113 @@ def test_kubernetes_backend_refuses_retirement_through_symlinked_storage_prefix(
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
+def test_kubernetes_backend_refuses_storage_prefix_swapped_during_deployment_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prefix replacement during external shutdown cannot redirect persistent-state deletion."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'4' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    workers_root = backend.storage_root / "workers"
+    retired_workers_root = backend.storage_root / "workers-original"
+    outside_root = tmp_path / "outside"
+    target_root = outside_root / worker_dir_name(run_key)
+    target_root.mkdir(parents=True)
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_delete = backend._resources.delete_deployment
+    swapped = False
+
+    def delete_and_swap(worker_id: str, *, timeout_seconds: float) -> None:
+        nonlocal swapped
+        original_delete(worker_id, timeout_seconds=timeout_seconds)
+        workers_root.rename(retired_workers_root)
+        workers_root.symlink_to(outside_root, target_is_directory=True)
+        swapped = True
+
+    monkeypatch.setattr(backend._resources, "delete_deployment", delete_and_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert swapped is True
+    assert handle.worker_id not in apps_api.deployments
+    assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_kubernetes_backend_refuses_storage_root_swapped_during_deployment_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured storage-root replacement cannot detach recursive deletion from its trust anchor."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'6' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    retired_storage_root = tmp_path / "storage-original"
+    replacement_storage_root = tmp_path / "storage-replacement"
+    replacement_state_root = replacement_storage_root / "workers" / worker_dir_name(run_key)
+    replacement_state_root.mkdir(parents=True)
+    sentinel = replacement_state_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_delete = backend._resources.delete_deployment
+    swapped = False
+
+    def delete_and_swap(worker_id: str, *, timeout_seconds: float) -> None:
+        nonlocal swapped
+        original_delete(worker_id, timeout_seconds=timeout_seconds)
+        backend.storage_root.rename(retired_storage_root)
+        replacement_storage_root.rename(backend.storage_root)
+        swapped = True
+
+    monkeypatch.setattr(backend._resources, "delete_deployment", delete_and_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert swapped is True
+    assert handle.worker_id not in apps_api.deployments
+    assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
+    assert (retired_storage_root / "workers" / worker_dir_name(run_key)).is_dir()
+    assert (backend.storage_root / "workers" / worker_dir_name(run_key) / sentinel.name).read_text(
+        encoding="utf-8",
+    ) == "keep"
+
+
+def test_kubernetes_backend_refuses_state_root_with_malformed_identity_manifest(tmp_path: Path) -> None:
+    """Malformed pinned-state identity fails before external or filesystem deletion."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'5' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    manifest_path = sandbox_startup_manifest_path(
+        backend.storage_root / "workers" / worker_dir_name(run_key),
+    )
+    manifest_path.write_text("{malformed", encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity metadata"):
+        backend.retire_worker(run_key)
+
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id in core_api.services
+    assert handle.worker_id in core_api.secrets
+    assert manifest_path.read_text(encoding="utf-8") == "{malformed"
+
+
 def _wire_fake_apis(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi, core_api: _FakeCoreApi) -> None:
     backend._resources.apps_api = apps_api
     backend._resources.core_api = core_api

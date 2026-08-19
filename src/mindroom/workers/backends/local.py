@@ -30,9 +30,8 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
-    remove_worker_state_root,
+    open_worker_state_root,
     save_worker_metadata,
-    validate_worker_state_root,
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -152,7 +151,11 @@ def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
 
 
 def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
-    lock_key = str(paths.root)
+    return _shared_worker_initialization_lock_for_root(paths.root)
+
+
+def _shared_worker_initialization_lock_for_root(state_root: Path) -> threading.Lock:
+    lock_key = str(state_root)
     with _SHARED_INITIALIZATION_LOCK:
         worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
         if worker_lock is None:
@@ -267,21 +270,20 @@ class _LocalWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact local worker root, including its durable metadata."""
-        state_root = self.worker_root / worker_dir_name(worker_key)
-        try:
-            validate_worker_state_root(state_root, workers_root=self.worker_root)
-        except (OSError, ValueError) as exc:
-            msg = f"Failed to retire local worker '{worker_key}': {exc}"
-            raise WorkerBackendError(msg) from exc
-        paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        with self._worker_lock(paths), self._lock:
-            metadata = self._load_metadata(paths)
-            if metadata is not None and metadata.worker_key != worker_key:
-                msg = f"Local worker metadata does not match retirement key '{worker_key}'."
-                raise WorkerBackendError(msg)
+        worker_name = worker_dir_name(worker_key)
+        state_root = self.worker_root / worker_name
+        with _shared_worker_initialization_lock_for_root(state_root), self._lock:
             try:
-                remove_worker_state_root(state_root, workers_root=self.worker_root)
-            except (OSError, RuntimeError, ValueError) as exc:
+                with open_worker_state_root(
+                    self.worker_root,
+                    workers_subpath=(),
+                    worker_name=worker_name,
+                    expected_worker_key=worker_key,
+                    identity_path=("metadata", "worker.json"),
+                    identity_field_path=("worker_key",),
+                ) as state:
+                    state.remove()
+            except (OSError, TypeError, ValueError) as exc:
                 msg = f"Failed to retire local worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 

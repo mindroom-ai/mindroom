@@ -34,6 +34,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptStatus,
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
@@ -400,6 +401,24 @@ async def test_worker_launch_without_a_backend_is_rejected_before_creating_durab
         await manager.run(_context(tmp_path), source="print('unavailable')\n")
 
     assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_static_worker_backend_rejects_script_before_creating_any_state(tmp_path: Path) -> None:
+    """A shared static proxy cannot host an isolated one-shot background script."""
+    manager, _backend, client = _manager(tmp_path)
+    static_backend = StaticSandboxRunnerBackend(
+        api_root="http://runner",
+        auth_token="token",  # noqa: S106
+    )
+    manager.worker_backend = static_backend
+
+    with pytest.raises(ScriptRunManagerError, match="unsafe-local mode or a Docker or Kubernetes worker"):
+        await manager.run(_context(tmp_path, backend="static"), source="print('unavailable')\n")
+
+    assert manager.store.list_runs() == []
+    assert static_backend.list_workers() == []
+    assert client.requested_handles == []
 
 
 @pytest.mark.asyncio

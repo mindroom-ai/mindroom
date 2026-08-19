@@ -49,9 +49,8 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
-    remove_worker_state_root,
+    open_worker_state_root,
     save_worker_metadata,
-    validate_worker_state_root,
 )
 from mindroom.workers.backends.docker_config import (
     DEFAULT_WORKER_PORT,
@@ -598,35 +597,31 @@ class DockerWorkerBackend:
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
         with self._worker_lock(worker_key):
-            state_root = self._workers_root / worker_dir_name(worker_key)
+            worker_name = worker_dir_name(worker_key)
             try:
-                validate_worker_state_root(state_root, workers_root=self._workers_root)
-            except (OSError, ValueError) as exc:
-                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
-                raise WorkerBackendError(msg) from exc
-            paths = self._state_paths(worker_key)
-            metadata = self._load_metadata(paths)
-            if metadata is not None and metadata.worker_key != worker_key:
-                msg = f"Docker worker metadata does not match retirement key '{worker_key}'."
-                raise WorkerBackendError(msg)
-            container_name = (
-                self._container_name_for_worker(worker_key) if metadata is None else metadata.container_name
-            )
-            container = self._read_container(container_name)
-            if container is not None and not self._container_env_matches(
-                container,
-                expected_env={_DEDICATED_WORKER_KEY_ENV: worker_key},
-            ):
-                msg = f"Docker worker container does not match retirement key '{worker_key}'."
-                raise WorkerBackendError(msg)
-            self._remove_container(container)
-            if self._read_container(container_name) is not None:
-                msg = f"Docker worker '{worker_key}' still exists after retirement."
-                raise WorkerBackendError(msg)
-            try:
-                self._projection_manager.retire_worker_projection(paths)
-                remove_worker_state_root(state_root, workers_root=self._workers_root)
-            except (OSError, RuntimeError, ValueError) as exc:
+                with open_worker_state_root(
+                    self._workers_root,
+                    workers_subpath=(),
+                    worker_name=worker_name,
+                    expected_worker_key=worker_key,
+                    identity_path=("metadata", "worker.json"),
+                    identity_field_path=("worker_key",),
+                ) as state:
+                    container_name = self._container_name_for_worker(worker_key)
+                    container = self._read_container(container_name)
+                    if container is not None and not self._container_env_matches(
+                        container,
+                        expected_env={_DEDICATED_WORKER_KEY_ENV: worker_key},
+                    ):
+                        msg = f"Docker worker container does not match retirement key '{worker_key}'."
+                        raise WorkerBackendError(msg)
+                    self._remove_container(container)
+                    if self._read_container(container_name) is not None:
+                        msg = f"Docker worker '{worker_key}' still exists after retirement."
+                        raise WorkerBackendError(msg)
+                    self._projection_manager.retire_worker_projection(worker_name)
+                    state.remove()
+            except (OSError, TypeError, ValueError) as exc:
                 msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 

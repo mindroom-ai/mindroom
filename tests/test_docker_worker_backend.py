@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
@@ -2147,6 +2148,119 @@ def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadat
         backend.retire_worker(run_key)
 
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("metadata_contents", [None, "{malformed"])
+def test_docker_backend_refuses_existing_run_root_without_exact_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metadata_contents: str | None,
+) -> None:
+    """An existing Docker state root needs readable exact-key metadata before recursive deletion."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'2' * 32}")
+    state_root = worker_root_path(tmp_path, run_key)
+    state_root.mkdir(parents=True)
+    sentinel = state_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    if metadata_contents is not None:
+        metadata_file = state_root / "metadata" / "worker.json"
+        metadata_file.parent.mkdir()
+        metadata_file.write_text(metadata_contents, encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity metadata"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement after validating exact state."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'3' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    state_root = worker_root_path(tmp_path, run_key)
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    sentinel = replacement_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    retired_root = tmp_path / "retired-original"
+    swapped = False
+    original_stat = metadata_store_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == state_root.name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == backend._workers_root:
+                state_root.rename(retired_root)
+                replacement_root.rename(state_root)
+                replacement_root.symlink_to(state_root, target_is_directory=True)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(metadata_store_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert swapped is True
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_projection_root_swapped_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement projection root."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'4' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    worker_name = worker_dir_name(run_key)
+    projected_configs_root = backend._projection_manager._projected_configs_root
+    projection_root = projected_configs_root / worker_name
+    projection_root.mkdir(parents=True, exist_ok=True)
+    (projection_root / "old.txt").write_text("old", encoding="utf-8")
+    replacement_root = tmp_path / "replacement-projection"
+    replacement_root.mkdir()
+    (replacement_root / "keep.txt").write_text("keep", encoding="utf-8")
+    retired_projection_root = tmp_path / "retired-projection"
+    swapped = False
+    original_stat = metadata_store_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == worker_name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == projected_configs_root:
+                projection_root.rename(retired_projection_root)
+                replacement_root.rename(projection_root)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(metadata_store_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert swapped is True
+    assert worker_root_path(tmp_path, run_key).is_dir()
+    assert (projection_root / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_docker_backend_records_failure_and_stops_container(

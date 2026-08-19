@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 
 import mindroom.workers.runtime as workers_runtime_module
@@ -2502,7 +2501,6 @@ async def test_terminal_run_is_pruned_only_after_retention_and_snapshot_cleanup(
     backend = StaticSandboxRunnerBackend(
         api_root="http://runner",
         auth_token="token",  # noqa: S106
-        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"retired": True})),
     )
     manager = SimpleNamespace(
         worker_backend=backend,

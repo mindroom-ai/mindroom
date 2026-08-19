@@ -44,6 +44,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from mindroom.workspaces import resolve_workspace_relative_path
 
@@ -264,18 +265,25 @@ class ScriptRunManager:
             execution_identity=execution_identity,
             runtime_paths=context.runtime_paths,
         )
-        run_id = f"script-{uuid.uuid4().hex}"
         execution_mode = sandbox_proxy_config(context.runtime_paths).execution_mode
         if script_execution_uses_worker(
             context.runtime_paths,
             worker_backend_configured=self._worker_backend_for(None) is not None,
         ):
+            if isinstance(self.worker_backend, StaticSandboxRunnerBackend):
+                msg = (
+                    "Background scripts cannot use the shared static sandbox runner; configure explicit "
+                    "unsafe-local mode or a Docker or Kubernetes worker backend."
+                )
+                raise ScriptRunManagerError(msg)
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
+            run_id = f"script-{uuid.uuid4().hex}"
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
+            run_id = f"script-{uuid.uuid4().hex}"
             worker_key = None
             local_unsafe = True
         else:
