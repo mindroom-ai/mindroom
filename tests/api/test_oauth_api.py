@@ -908,6 +908,7 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     [
         ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
         ("https://xn--a.com/api/oauth/demo/callback", "xn--a.com"),
+        ("https://[v1.foo]/api/oauth/demo/callback", "v1.foo"),
         ("https://0127.0.0.1/api/oauth/demo/callback", "0127.0.0.1"),
         ("https://127.0.0.0x/api/oauth/demo/callback", "127.0.0.0x"),
         ("https://mindroom.chat/api/oauth/demo/callback", "mindroom.chat."),
@@ -919,6 +920,8 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
         ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
         ("https://[fec0::1]/api/oauth/demo/callback", "fec0::1"),
         ("https://192.0.0.8/api/oauth/demo/callback", "192.0.0.8"),
+        ("https://[64:ff9b::7f00:1]/api/oauth/demo/callback", "64:ff9b::7f00:1"),
+        ("https://[64:ff9b::c0a8:101]/api/oauth/demo/callback", "64:ff9b::c0a8:101"),
         ("https://service.local/api/oauth/demo/callback", "service.local"),
         ("https://service.example/api/oauth/demo/callback", "service.example"),
         ("https://service.example.com/api/oauth/demo/callback", "service.example.com"),
@@ -950,7 +953,10 @@ def test_hosted_oauth_callback_accepts_global_ipv6_literal() -> None:
     )
 
 
-@pytest.mark.parametrize("address", ["192.0.0.9", "192.0.0.10", "2001:1::3"])
+@pytest.mark.parametrize(
+    "address",
+    ["192.0.0.9", "192.0.0.10", "64:ff9b::808:808", "2001:1::3"],
+)
 def test_hosted_oauth_callback_accepts_registry_global_ip_literal(address: str) -> None:
     authority = f"[{address}]" if ":" in address else address
     assert is_valid_hosted_oauth_callback_for_request(

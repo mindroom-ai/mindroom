@@ -113,6 +113,11 @@ _GLOBAL_OAUTH_IPV6_EXCEPTIONS = (
     ipaddress.IPv6Network("2001:20::/28"),
     ipaddress.IPv6Network("2001:30::/28"),
 )
+_IPV4_TRANSLATION_OAUTH_NETWORK = ipaddress.IPv6Network("64:ff9b::/96")
+_GLOBAL_OAUTH_IPV6_NETWORKS = (
+    _IPV4_TRANSLATION_OAUTH_NETWORK,
+    ipaddress.IPv6Network("2000::/3"),
+)
 
 
 def _normalized_oauth_hostname(hostname: str | None) -> str | None:
@@ -190,6 +195,13 @@ def _is_non_global_oauth_ip_address(address: ipaddress.IPv4Address | ipaddress.I
     )
 
 
+def _is_in_global_oauth_address_space(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an address is in currently allocated global-unicast space."""
+    return isinstance(address, ipaddress.IPv4Address) or any(
+        address in network for network in _GLOBAL_OAUTH_IPV6_NETWORKS
+    )
+
+
 def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return whether an address, including an IPv4-mapped address, is global unicast."""
     embedded_addresses: tuple[ipaddress.IPv4Address, ...] = ()
@@ -200,14 +212,16 @@ def _is_global_unicast_address(address: ipaddress.IPv4Address | ipaddress.IPv6Ad
             embedded_addresses += (address.sixtofour,)
         if address.teredo is not None:
             embedded_addresses += address.teredo
+        if address in _IPV4_TRANSLATION_OAUTH_NETWORK:
+            embedded_addresses += (ipaddress.IPv4Address(int(address) & 0xFFFFFFFF),)
     if any(not _is_global_unicast_address(embedded) for embedded in embedded_addresses):
         return False
     return (
         not _is_non_global_oauth_ip_address(address)
+        and _is_in_global_oauth_address_space(address)
         and not address.is_link_local
         and not address.is_loopback
         and not address.is_multicast
-        and not address.is_reserved
         and not address.is_unspecified
         and not (isinstance(address, ipaddress.IPv6Address) and address.is_site_local)
     )
@@ -264,6 +278,11 @@ def _validated_https_url(value: str) -> tuple[ParseResult, str] | None:
         hostname = parsed_uri.hostname
     except ValueError:
         return None
+    if parsed_uri.netloc.startswith("["):
+        try:
+            ipaddress.IPv6Address(hostname or "")
+        except ipaddress.AddressValueError:
+            return None
     normalized_hostname = _normalized_oauth_hostname(hostname)
     if (
         parsed_uri.scheme.casefold() != "https"
