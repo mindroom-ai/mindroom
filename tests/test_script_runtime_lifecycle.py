@@ -360,6 +360,49 @@ async def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["docker", "kubernetes"])
+@pytest.mark.parametrize("execution_mode", ["off", "local", "disabled"])
+async def test_explicit_local_script_mode_uses_embedded_gateway_with_dedicated_backend(
+    tmp_path: Path,
+    backend: str,
+    execution_mode: str,
+) -> None:
+    """An explicitly unsafe-local script mode takes precedence over backend selection."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": execution_mode,
+            "MINDROOM_WORKER_BACKEND": backend,
+        },
+    )
+
+    gateway_url = await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+    assert gateway_url == "http://127.0.0.1:8765/api/script-gateway"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["docker", "kubernetes"])
+@pytest.mark.parametrize("execution_mode", ["all", "sandbox_all", None])
+async def test_effective_worker_script_mode_requires_reachable_gateway_with_dedicated_backend(
+    tmp_path: Path,
+    backend: str,
+    execution_mode: str | None,
+) -> None:
+    """Explicit worker modes and implicit dedicated backends require a reachable gateway."""
+    process_env = {"MINDROOM_WORKER_BACKEND": backend}
+    if execution_mode is not None:
+        process_env["MINDROOM_SANDBOX_EXECUTION_MODE"] = execution_mode
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env=process_env,
+    )
+
+    with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.asyncio
 async def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
     """A separate static runner must not receive the primary process's loopback URL."""
     runtime_paths = replace(
@@ -901,7 +944,7 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
     assert resolver.settlement_attempts == [run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is True
+    assert manager.worker_replacement_in_progress is False
 
 
 @pytest.mark.asyncio
@@ -954,7 +997,7 @@ async def test_generation_replacement_aborts_when_process_reconciliation_fails(
     assert resolver.settled_runs == [run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is True
+    assert manager.worker_replacement_in_progress is False
 
 
 @pytest.mark.asyncio
@@ -1016,7 +1059,7 @@ async def test_generation_replacement_aborts_when_reconciliation_leaves_a_worker
     assert resolver.settled_runs == [run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is True
+    assert manager.worker_replacement_in_progress is False
 
 
 @pytest.mark.asyncio
@@ -1709,11 +1752,11 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 
     reconciliation_started = asyncio.Event()
 
-    async def blocking_complete_pass(_runtime: ScriptRuntimeLifecycle) -> None:
+    async def blocking_shutdown_pass(_runtime: ScriptRuntimeLifecycle) -> None:
         reconciliation_started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", blocking_complete_pass)
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", blocking_shutdown_pass)
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.05))
     try:
         await asyncio.wait_for(reconciliation_started.wait(), timeout=1.0)
@@ -1724,6 +1767,155 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
         release_lease.set()
 
     assert await asyncio.to_thread(lease_released.wait, 1.0)
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activated", [True, False])
+async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(
+    tmp_path: Path,
+    activated: bool,
+) -> None:
+    """Full shutdown revokes broker and process ownership before publishing interruption."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths, run_id=f"script-{'c' * 32}")
+    store.claim_call(
+        run_id=run.run_id,
+        call_id="call-1",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="arguments-digest",
+    )
+    actions: list[str] = []
+
+    @dataclass
+    class _Resolver(_ApprovalSettlementResolver):
+        async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+            actions.append("settle-approval")
+            await super().settle_run_approvals(run_id, reason=reason)
+
+    @dataclass
+    class _Client(_TerminatingWorkerClient):
+        async def status(self, _worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
+            actions.append("status")
+            return await super().status(_worker, run_id=run_id)
+
+        async def cancel(
+            self,
+            _worker: WorkerHandle,
+            *,
+            run_id: str,
+            force: bool = False,
+        ) -> WorkerScriptCancel:
+            assert store.get_run(run_id).cancel_requested_at is not None
+            assert store.get_call(run_id, "call-1").state.value == "indeterminate"
+            assert broker_task.cancelled()
+            actions.append("signal")
+            return await super().cancel(_worker, run_id=run_id, force=force)
+
+    resolver = _Resolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    broker_call_started = asyncio.Event()
+
+    async def active_broker_call() -> None:
+        broker_call_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            actions.append("cancel-broker-call")
+
+    broker_task = asyncio.create_task(active_broker_call())
+    broker._tasks[(run.run_id, "call-1")] = broker_task  # type: ignore[assignment]
+    await broker_call_started.wait()
+    backend = _Backend([_worker(run)])
+
+    def observe_release() -> None:
+        durable = store.get_run(run.run_id)
+        assert durable.state is ScriptRunState.INTERRUPTED
+        actions.append("release")
+
+    lease = _Lease(backend, on_release=observe_release)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=_Client(),  # type: ignore[arg-type]
+        worker_backend=backend,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._activated_once = activated
+    runtime._current_worker_lease = lease
+
+    await runtime.shutdown()
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.INTERRUPTED
+    assert store.get_call(run.run_id, "call-1").state.value == "indeterminate"
+    assert resolver.settled_runs == [run.run_id]
+    assert actions.index("cancel-broker-call") < actions.index("settle-approval")
+    assert actions.index("settle-approval") < actions.index("signal")
+    assert actions[-1] == "release"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_deadline_leaves_revoked_run_nonterminal(tmp_path: Path) -> None:
+    """An exhausted shutdown budget cannot claim interruption before confirmed exit."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths, run_id=f"script-{'d' * 32}")
+    status_started = asyncio.Event()
+
+    @dataclass
+    class _Client(_TerminatingWorkerClient):
+        async def status(self, _worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
+            del run_id
+            status_started.set()
+            await asyncio.Event().wait()
+            msg = "unreachable"
+            raise AssertionError(msg)
+
+    resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    backend = _Backend([_worker(run)])
+    lease = _Lease(backend)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=_Client(),  # type: ignore[arg-type]
+        worker_backend=backend,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=1,
+        cancellation_poll_interval_seconds=0,
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._activated_once = True
+    runtime._current_worker_lease = lease
+
+    await runtime.shutdown(timeout_seconds=1.0)
+
+    assert status_started.is_set()
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.RUNNING
     assert lease.released is True
 
 
@@ -1973,7 +2165,10 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_maintenance_retries_after_an_unexpected_cycle_failure(tmp_path: Path) -> None:
+async def test_maintenance_retries_after_an_unexpected_cycle_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One unexpected pass failure is logged and the next maintenance interval still runs."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
@@ -2012,13 +2207,17 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(tmp_path: P
 
     await runtime.start()
     await asyncio.wait_for(recovered.wait(), timeout=0.2)
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
     assert calls >= 3
 
 
 @pytest.mark.asyncio
-async def test_started_lifecycle_periodically_enforces_run_limits(tmp_path: Path) -> None:
+async def test_started_lifecycle_periodically_enforces_run_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Max-runtime reconciliation continues without a caller requesting status."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
@@ -2053,6 +2252,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(tmp_path: Path
 
     await runtime.start()
     await asyncio.wait_for(reconciled_twice.wait(), timeout=0.2)
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     await runtime.shutdown()
 
     assert calls >= 2

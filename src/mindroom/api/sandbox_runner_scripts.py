@@ -233,7 +233,12 @@ def _workspace_file(
 def _script_snapshot_paths(workspace: Path, run_id: str) -> tuple[Path, Path]:
     relative_root = Path(".mindroom") / "script-runs" / run_id
     return (
-        _workspace_file(workspace, str(relative_root / "source.py"), label="Script source", byte_limit=_MAX_SOURCE_BYTES),
+        _workspace_file(
+            workspace,
+            str(relative_root / "source.py"),
+            label="Script source",
+            byte_limit=_MAX_SOURCE_BYTES,
+        ),
         _workspace_file(
             workspace,
             str(relative_root / "capability"),

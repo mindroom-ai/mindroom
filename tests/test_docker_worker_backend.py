@@ -27,6 +27,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -1321,6 +1322,45 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+def test_docker_backend_keeps_run_pinned_worker_roots_out_of_sibling_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two script worker keys create distinct containers that mount only their own run roots."""
+    config_text = """
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watch values
+    model: default
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip()
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    base_key = "v1:default:user_agent:@alice:example.test:watcher"
+    broad_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
+    narrow_key = script_worker_key_for_run(base_key, f"script-{'b' * 32}")
+
+    broad = backend.ensure_worker(WorkerSpec(broad_key, private_agent_names=frozenset()), now=10.0)
+    narrow = backend.ensure_worker(WorkerSpec(narrow_key, private_agent_names=frozenset()), now=10.0)
+
+    assert broad.worker_id != narrow.worker_id
+    broad_root = worker_root_path(tmp_path, broad_key)
+    narrow_root = worker_root_path(tmp_path, narrow_key)
+    assert broad.debug_metadata["state_root"] == str(broad_root)
+    assert narrow.debug_metadata["state_root"] == str(narrow_root)
+    broad_volumes = fake_client.containers.run_calls[0]["volumes"]
+    narrow_volumes = fake_client.containers.run_calls[1]["volumes"]
+    assert isinstance(broad_volumes, dict)
+    assert isinstance(narrow_volumes, dict)
+    assert str(broad_root) in broad_volumes
+    assert str(narrow_root) not in broad_volumes
+    assert str(narrow_root) in narrow_volumes
+    assert str(broad_root) not in narrow_volumes
 
 
 def test_docker_backend_accepts_manager_progress_sink(

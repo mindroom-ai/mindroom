@@ -5,7 +5,7 @@ icon: lucide/file-clock
 # Background Python Scripts
 
 The `script` tool lets an agent launch and supervise a Python program after the initiating chat turn has ended.
-The program runs with a requester-and-agent-scoped identity and can call a bounded subset of the agent's registered tools through MindRoom's normal hooks, approval rules, worker routing, and audit path.
+The program keeps a requester-and-agent-scoped execution identity and can call a bounded subset of the agent's registered tools through MindRoom's normal hooks, approval rules, worker routing, and audit path.
 Use it for watchers, polling loops, and other small automations that should wake an agent only when something changes.
 
 ## Enable The Tool
@@ -52,7 +52,7 @@ Functions that declare their own confirmation requirement still require Matrix a
 The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
 
 The limits are captured with each run.
-`max_concurrent_runs` defaults to `3` for one requester, agent, and worker scope.
+`max_concurrent_runs` defaults to `3` for one requester and agent.
 `max_tool_calls_per_minute` defaults to `30` and counts newly claimed logical calls rather than receipt polling or an identical retry.
 `max_runtime_hours` defaults to `24`, must be positive and finite, and is enforced by lifecycle reconciliation.
 
@@ -195,8 +195,10 @@ Build the worker image from the same source checkout when testing unreleased cod
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
-Background scripts always use requester-and-agent process isolation even when ordinary tools use a broader worker scope.
-Their governed tool calls still follow each tool's configured primary-or-worker execution target.
+Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
+The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
+The worker root exposes only that run's script snapshot, and sibling worker roots and snapshots are not mounted into it.
+Brokered tool calls still use the durable requester-and-agent execution identity and each tool's current primary-or-worker execution target rather than the arbitrary script process's run-specific worker.
 
 Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` permits local execution instead of a worker.
 Local execution is marked unsafe, runs under the primary host account, inherits the primary process environment, and makes no secret-isolation claim.
@@ -216,8 +218,9 @@ Calls are serialized within one run to keep approval and side-effect order predi
 
 Scripts do not survive worker loss in the first release, and MindRoom does not automatically restart the Python source after an `interrupted` run.
 A primary-runtime restart can reconcile a still-live worker process, but worker eviction, restart, or migration may end it.
-Worker configuration replacement and full upgrades do not preserve or relaunch active scripts.
+Worker configuration replacement, primary-runtime shutdown, and full upgrades do not preserve or relaunch active scripts.
 MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
+If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
 
 Process output is bounded, and cancellation cannot guarantee that an external side effect already started by a tool was rolled back.

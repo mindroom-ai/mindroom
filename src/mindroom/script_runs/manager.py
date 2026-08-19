@@ -20,7 +20,13 @@ from mindroom.background_tasks import run_blocking_until_complete, run_coroutine
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant, supervisor_handle_for_run
+from mindroom.script_runs.models import (
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+    script_worker_key_for_run,
+    supervisor_handle_for_run,
+)
 from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
@@ -73,10 +79,12 @@ _TERMINAL_STATES = frozenset(
 )
 _ISOLATION_INTERRUPTION_REASON = "Agent isolation changed during configuration reload."
 _WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
+_RUNTIME_SHUTDOWN_INTERRUPTION_REASON = "MindRoom runtime shut down."
 _INTERRUPTION_REASONS = frozenset(
     {
         _ISOLATION_INTERRUPTION_REASON,
         _WORKER_CONFIGURATION_INTERRUPTION_REASON,
+        _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
     },
 )
 
@@ -98,12 +106,18 @@ class _ScriptBroker(Protocol):
         """Cancel in-process broker executions for one revoked run."""
 
 
-def script_execution_uses_worker(runtime_paths: RuntimePaths) -> bool:
+def script_execution_uses_worker(
+    runtime_paths: RuntimePaths,
+    *,
+    worker_backend_configured: bool = False,
+) -> bool:
     """Return whether configured script execution leaves the primary process."""
     proxy_config = sandbox_proxy_config(runtime_paths)
-    return proxy_config.execution_mode not in _LOCAL_EXECUTION_MODES and (
-        proxy_config.execution_mode is not None or proxy_config.proxy_url is not None
-    )
+    if proxy_config.execution_mode in _LOCAL_EXECUTION_MODES:
+        return False
+    if proxy_config.execution_mode in _WORKER_EXECUTION_MODES:
+        return True
+    return proxy_config.execution_mode is None and (worker_backend_configured or proxy_config.proxy_url is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,14 +237,16 @@ class ScriptRunManager:
             execution_identity=execution_identity,
             runtime_paths=context.runtime_paths,
         )
+        run_id = f"script-{uuid.uuid4().hex}"
         execution_mode = sandbox_proxy_config(context.runtime_paths).execution_mode
-        if execution_mode in _WORKER_EXECUTION_MODES or (
-            execution_mode is None and self._worker_backend_for(None) is not None
+        if script_execution_uses_worker(
+            context.runtime_paths,
+            worker_backend_configured=self._worker_backend_for(None) is not None,
         ):
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
-            worker_key = worker_target.worker_key
+            worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
             worker_key = None
@@ -240,7 +256,6 @@ class ScriptRunManager:
             raise ScriptRunManagerError(msg)
 
         token, token_hash = mint_script_capability()
-        run_id = f"script-{uuid.uuid4().hex}"
         launch_grants = self.grant_resolver(context)
         if effective_limits.allowed_tools is not None:
             allowed_tools = frozenset(effective_limits.allowed_tools)
@@ -312,8 +327,7 @@ class ScriptRunManager:
                 owner_user_id=context.requester_id,
                 include_finished=False,
             )
-            scoped_active = [candidate for candidate in active if candidate.worker_key == run.worker_key]
-            if len(scoped_active) >= max_concurrent_runs:
+            if len(active) >= max_concurrent_runs:
                 msg = "Background script concurrent-run limit exceeded."
                 raise ScriptRunManagerError(msg)
             try:

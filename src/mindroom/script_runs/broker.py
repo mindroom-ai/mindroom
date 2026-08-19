@@ -20,6 +20,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
+    script_worker_key_for_run,
 )
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
@@ -767,7 +768,11 @@ def _validate_resolved_authority(
         execution_identity=durable_identity,
         runtime_paths=context.runtime_paths,
     )
-    expected_durable_worker_key = None if run.local_unsafe else expected_process_worker_target.worker_key
+    expected_durable_worker_key = (
+        None
+        if run.local_unsafe or expected_process_worker_target.worker_key is None
+        else script_worker_key_for_run(expected_process_worker_target.worker_key, run.run_id)
+    )
     if run.worker_key != expected_durable_worker_key:
         msg = "Durable script worker key does not match the requester-and-agent process scope."
         raise ValueError(msg)

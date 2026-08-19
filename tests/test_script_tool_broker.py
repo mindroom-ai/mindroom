@@ -73,6 +73,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
+_WORKER_RUN_ID = f"script-{'a' * 32}"
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return RuntimePaths(
         config_path=tmp_path / "config.yaml",
@@ -273,6 +276,7 @@ def _broker(
     live_local_unsafe: bool | None = None,
     worker_scope: WorkerScope | None = None,
     resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
+    run_id: str = "run-1",
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -289,7 +293,7 @@ def _broker(
     resolved_live_local_unsafe = resolved_durable_local_unsafe if live_local_unsafe is None else live_local_unsafe
     store.create_run(
         ScriptRunRecord(
-            run_id="run-1",
+            run_id=run_id,
             agent_name="watcher",
             owner_user_id=context.requester_id,
             room_id=context.room_id,
@@ -325,9 +329,9 @@ def _broker(
     )
 
 
-def _request(*, call_id: str = "call-1", b: int = 2) -> ScriptToolCallRequest:
+def _request(*, call_id: str = "call-1", b: int = 2, run_id: str = "run-1") -> ScriptToolCallRequest:
     return ScriptToolCallRequest(
-        run_id="run-1",
+        run_id=run_id,
         call_id=call_id,
         grant=ScriptToolGrant("calculator", "add"),
         arguments={"a": 1, "b": b},
@@ -397,13 +401,14 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
         tmp_path,
         events=events,
         worker_scope=tool_worker_scope,
-        durable_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        durable_worker_key=f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher",
         durable_worker_id="script-process-worker",
         live_worker_id="script-process-worker",
         resolved_worker_targets=resolved_worker_targets,
+        run_id=_WORKER_RUN_ID,
     )
 
-    receipt = await _call_through_gateway(broker, _request(), token)
+    receipt = await _call_through_gateway(broker, _request(run_id=_WORKER_RUN_ID), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
@@ -411,7 +416,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
     resolved_worker_key = resolved_worker_targets[0].worker_key
     assert resolved_worker_key is not None
     assert resolved_worker_key_scope(resolved_worker_key) == tool_worker_scope
-    assert resolved_worker_key != "v1:default:user_agent:@alice:example.test:watcher"
+    assert resolved_worker_key != f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher"
 
 
 @pytest.mark.asyncio
@@ -1295,7 +1300,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         worker_lease_provider=lambda: None,
     )
     lifecycle._activated_once = True
-    monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", AsyncMock())
+    monkeypatch.setattr(ScriptRuntimeLifecycle, "_interrupt_and_prune_for_shutdown", AsyncMock())
     drain_started = asyncio.Event()
     original_drain = broker_module.drain_script_tool_cleanup
 
@@ -1673,10 +1678,15 @@ async def test_script_broker_rejects_durable_worker_key_mismatch_before_dispatch
     broker, token = _broker(
         tmp_path,
         events=events,
-        durable_worker_key="v1:default:user_agent:mallory:watcher",
+        durable_worker_key=f"v1:default:user_agent:mallory:{_WORKER_RUN_ID}:watcher",
+        run_id=_WORKER_RUN_ID,
     )
 
-    receipt = await _call_through_gateway(broker, _request(call_id="wrong-worker-key"), token)
+    receipt = await _call_through_gateway(
+        broker,
+        _request(call_id="wrong-worker-key", run_id=_WORKER_RUN_ID),
+        token,
+    )
 
     assert receipt.state is ScriptCallState.FAILED
     assert isinstance(receipt.error, dict)

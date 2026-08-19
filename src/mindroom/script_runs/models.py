@@ -103,3 +103,15 @@ def supervisor_handle_for_run(run_id: str) -> str:
         msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
         raise ValueError(msg)
     return f"shell:{match.group(1)}"
+
+
+def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
+    """Derive one run-pinned user-agent worker key while keeping the agent final."""
+    if _SCRIPT_RUN_ID_RE.fullmatch(run_id) is None:
+        msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
+        raise ValueError(msg)
+    parts = base_worker_key.split(":")
+    if len(parts) < 5 or parts[0] != "v1" or parts[2] != "user_agent" or not parts[-1]:
+        msg = "Background scripts require a resolved user-agent worker key."
+        raise ValueError(msg)
+    return ":".join((*parts[:-1], run_id, parts[-1]))

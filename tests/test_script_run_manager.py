@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import stat
+import sys
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -11,10 +12,15 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from mindroom.api import sandbox_runner as sandbox_runner_module
+from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.manager import (
     ScriptRunLimits,
@@ -38,14 +44,22 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _runtime_paths(tmp_path: Path, *, mode: str | None = "all") -> RuntimePaths:
+def _runtime_paths(
+    tmp_path: Path,
+    *,
+    mode: str | None = "all",
+    backend: str | None = None,
+) -> RuntimePaths:
+    process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": mode} if mode is not None else {}
+    if backend is not None:
+        process_env["MINDROOM_WORKER_BACKEND"] = backend
     return RuntimePaths(
         config_path=tmp_path / "config.yaml",
         config_dir=tmp_path,
         env_path=tmp_path / ".env",
         storage_root=tmp_path / "storage",
         control_state_root=tmp_path / "control",
-        process_env=({"MINDROOM_SANDBOX_EXECUTION_MODE": mode} if mode is not None else {}),
+        process_env=process_env,
     )
 
 
@@ -57,8 +71,9 @@ def _context(
     mode: str | None = "all",
     private: bool = False,
     worker_scope: str = "user_agent",
+    backend: str | None = None,
 ) -> ToolRuntimeContext:
-    runtime_paths = _runtime_paths(tmp_path, mode=mode)
+    runtime_paths = _runtime_paths(tmp_path, mode=mode, backend=backend)
     watcher: dict[str, object] = {
         "display_name": "Watcher",
         "worker_scope": worker_scope,
@@ -251,8 +266,13 @@ class _WorkerClient:
         return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
 
 
-def _manager(tmp_path: Path, *, mode: str | None = "all") -> tuple[ScriptRunManager, _WorkerBackend, _WorkerClient]:
-    context = _context(tmp_path, mode=mode)
+def _manager(
+    tmp_path: Path,
+    *,
+    mode: str | None = "all",
+    backend: str | None = None,
+) -> tuple[ScriptRunManager, _WorkerBackend, _WorkerClient]:
+    context = _context(tmp_path, mode=mode, backend=backend)
     store = ScriptRunStore(context.runtime_paths)
     backend = _WorkerBackend(store=store, runtime_paths=context.runtime_paths)
     client = _WorkerClient(store=store)
@@ -419,6 +439,91 @@ async def test_worker_keys_are_requester_and_agent_scoped(tmp_path: Path) -> Non
 
     assert alice.worker_key != bob.worker_key
     assert alice.worker_id != bob.worker_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_path: Path) -> None:
+    """A narrow run's worker cannot select or locate a sibling run's snapshot."""
+    manager, backend, _client = _manager(tmp_path)
+    manager.grant_resolver = lambda _context: (
+        ScriptToolGrant("calculator", "add"),
+        ScriptToolGrant("website", "read_url"),
+    )
+    context = _context(tmp_path)
+
+    broad = await manager.run(
+        context,
+        source="print('ok')\n",
+        limits=ScriptRunLimits(allowed_tools=("calculator", "website")),
+    )
+    narrow = await manager.run(
+        context,
+        source="print('ok')\n",
+        limits=ScriptRunLimits(allowed_tools=("calculator",)),
+    )
+
+    assert broad.worker_key is not None
+    assert narrow.worker_key is not None
+    assert broad.worker_key != narrow.worker_key
+    assert broad.worker_key.endswith(":watcher")
+    assert narrow.worker_key.endswith(":watcher")
+    assert broad.worker_id != narrow.worker_id
+    broad_root = Path(backend.handles[broad.worker_key].debug_metadata["state_root"])
+    narrow_root = Path(backend.handles[narrow.worker_key].debug_metadata["state_root"])
+    assert broad_root != narrow_root
+    assert not (narrow_root / "workspace" / ".mindroom" / "script-runs" / broad.run_id).exists()
+    assert {path.parent.name for path in narrow_root.rglob("capability")} == {narrow.run_id}
+
+    (narrow_root / "venv" / "bin").mkdir(parents=True)
+    (narrow_root / "venv" / "bin" / "python").symlink_to(Path(sys.executable))
+    dedicated_paths = RuntimePaths(
+        config_path=context.runtime_paths.config_path,
+        config_dir=context.runtime_paths.config_dir,
+        env_path=context.runtime_paths.env_path,
+        storage_root=narrow_root,
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: narrow.worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(narrow_root),
+        },
+    )
+    app = FastAPI()
+    app.include_router(sandbox_runner_scripts_router)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        dedicated_paths,
+        config=context.config,
+        runner_token="worker-token",  # noqa: S106
+    )
+    route_client = TestClient(app)
+    headers = {"x-mindroom-sandbox-token": "worker-token"}
+
+    sibling_key = route_client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=headers,
+        json={
+            "run_id": broad.run_id,
+            "worker_key": broad.worker_key,
+            "source_digest": broad.source_digest,
+            "gateway_url": "http://primary.test/api/script-gateway",
+            "private_agent_names": [],
+        },
+    )
+    sibling_snapshot = route_client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=headers,
+        json={
+            "run_id": broad.run_id,
+            "worker_key": narrow.worker_key,
+            "source_digest": broad.source_digest,
+            "gateway_url": "http://primary.test/api/script-gateway",
+            "private_agent_names": [],
+        },
+    )
+
+    assert sibling_key.status_code == 400
+    assert "dedicated worker" in sibling_key.json()["detail"].lower()
+    assert sibling_snapshot.status_code == 400
+    assert "unavailable" in sibling_snapshot.json()["detail"].lower()
 
 
 @pytest.mark.parametrize("configured_scope", ["shared", "user"])
@@ -1349,13 +1454,17 @@ async def test_process_only_reconciliation_does_not_rescan_broker_after_trusted_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["docker", "kubernetes"])
+@pytest.mark.parametrize("execution_mode", ["off", "local", "disabled"])
 async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    execution_mode: str,
 ) -> None:
     """Only an explicit disabled-sandbox mode may launch through the primary shell supervisor."""
-    manager, _backend, _client = _manager(tmp_path, mode="local")
-    context = _context(tmp_path, mode="local")
+    manager, _backend, _client = _manager(tmp_path, mode=execution_mode, backend=backend)
+    context = _context(tmp_path, mode=execution_mode, backend=backend)
     observed: dict[str, object] = {}
 
     async def launch_local(

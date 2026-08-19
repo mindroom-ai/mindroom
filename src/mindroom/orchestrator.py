@@ -1791,9 +1791,9 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
+        await self._script_runtime.apply_update_plan(plan)
 
         try:
-            await self._script_runtime.apply_update_plan(plan)
             replay_startup_maintenance = await self._startup_maintenance.cancel()
             if plugin_changes:
                 pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(

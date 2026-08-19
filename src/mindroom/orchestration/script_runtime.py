@@ -61,6 +61,7 @@ _REMOVED_AGENT_REASON = "Owning agent was removed by configuration reload."
 _ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload."
 _SCRIPT_TOOL_REMOVED_REASON = "Background script tool was removed by configuration reload."
 _WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
+_RUNTIME_SHUTDOWN_INTERRUPTION_REASON = "MindRoom runtime shut down."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -556,8 +557,12 @@ class ScriptRuntimeLifecycle:
         ):
             return
 
+        replacement_started = False
+
         async def apply_update_boundary() -> None:
+            nonlocal replacement_started
             if worker_configuration_changed:
+                replacement_started = True
                 await self.manager.begin_worker_replacement()
             await self._apply_update_pass(
                 removed_agents=removed_agents,
@@ -571,9 +576,13 @@ class ScriptRuntimeLifecycle:
                 apply_update_boundary(),
                 timeout=self.pass_timeout_seconds,
             )
-        except TimeoutError:
-            msg = "Background script reload did not durably revoke every active run before the reload deadline."
-            raise _ScriptRuntimeLifecycleError(msg) from None
+        except BaseException as exc:
+            if replacement_started:
+                await run_coroutine_until_complete(self.manager.end_worker_replacement())
+            if isinstance(exc, TimeoutError):
+                msg = "Background script reload did not durably revoke every active run before the reload deadline."
+                raise _ScriptRuntimeLifecycleError(msg) from None
+            raise
 
     async def _apply_update_pass(
         self,
@@ -590,6 +599,33 @@ class ScriptRuntimeLifecycle:
             for run in runs
             if run.agent_name in affected_agents or (worker_configuration_changed and not run.local_unsafe)
         ]
+        await self._interrupt_runs(
+            affected,
+            reason_for=lambda run: _reload_reason_for(
+                run,
+                removed_agents=removed_agents,
+                isolation_changes=isolation_changes,
+                worker_configuration_changed=worker_configuration_changed,
+            ),
+            require_worker_success=worker_configuration_changed,
+        )
+
+        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        _require_terminal_worker_replacement(
+            unfinished,
+            worker_configuration_changed=worker_configuration_changed,
+        )
+        if worker_configuration_changed:
+            await self._release_current_worker_lease()
+
+    async def _interrupt_runs(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        reason_for: Callable[[ScriptRunRecord], str],
+        require_worker_success: bool,
+    ) -> None:
+        """Durably revoke, close broker work, and reconcile selected processes in phases."""
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         async def persist_revocation(run: ScriptRunRecord) -> bool:
@@ -598,12 +634,7 @@ class ScriptRuntimeLifecycle:
                     await asyncio.to_thread(
                         self.manager.request_revocation,
                         run_id=run.run_id,
-                        reason=_reload_reason_for(
-                            run,
-                            removed_agents=removed_agents,
-                            isolation_changes=isolation_changes,
-                            worker_configuration_changed=worker_configuration_changed,
-                        ),
+                        reason=reason_for(run),
                     )
                 except (ScriptRunManagerError, ScriptRunStoreError):
                     logger.warning(
@@ -615,23 +646,18 @@ class ScriptRuntimeLifecycle:
                     return False
                 return True
 
-        durable_results = await asyncio.gather(*(persist_revocation(run) for run in affected))
+        durable_results = await asyncio.gather(*(persist_revocation(run) for run in runs))
         if not all(durable_results):
             msg = "Worker replacement did not durably revoke every active run."
             raise _ScriptRuntimeLifecycleError(msg)
-        durably_revoked = [run for run, persisted in zip(affected, durable_results, strict=True) if persisted]
+        durably_revoked = [run for run, persisted in zip(runs, durable_results, strict=True) if persisted]
 
         async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
             async with semaphore:
                 try:
                     await self.manager.revoke(
                         run.run_id,
-                        reason=_reload_reason_for(
-                            run,
-                            removed_agents=removed_agents,
-                            isolation_changes=isolation_changes,
-                            worker_configuration_changed=worker_configuration_changed,
-                        ),
+                        reason=reason_for(run),
                     )
                 except (
                     ScriptRunManagerError,
@@ -655,7 +681,7 @@ class ScriptRuntimeLifecycle:
         _require_successful_worker_replacement_stage(
             durably_revoked,
             broker_results,
-            worker_configuration_changed=worker_configuration_changed,
+            worker_configuration_changed=require_worker_success,
             error="Worker replacement did not close broker ownership for every active worker run.",
         )
 
@@ -682,17 +708,9 @@ class ScriptRuntimeLifecycle:
         _require_successful_worker_replacement_stage(
             broker_revoked,
             reconciliation_results,
-            worker_configuration_changed=worker_configuration_changed,
+            worker_configuration_changed=require_worker_success,
             error="Worker replacement did not complete process reconciliation for every active worker run.",
         )
-
-        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        _require_terminal_worker_replacement(
-            unfinished,
-            worker_configuration_changed=worker_configuration_changed,
-        )
-        if worker_configuration_changed:
-            await self._release_current_worker_lease()
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
         """Run one bounded touch-first reconciliation pass."""
@@ -820,56 +838,66 @@ class ScriptRuntimeLifecycle:
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
 
-        async def _cleanup() -> None:
-            await self._complete_pass()
-
         try:
-            if was_activated:
-                try:
-                    await asyncio.wait_for(
-                        _cleanup(),
-                        timeout=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
-                    )
-                except TimeoutError:
-                    logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
-                cleanup_drained = await drain_script_tool_cleanup(
-                    self.broker,
-                    timeout_seconds=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
-                )
-                if not cleanup_drained:
-                    logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
+            await self._run_shutdown_cleanup(
+                deadline=shutdown_deadline,
+                timeout_seconds=timeout_seconds,
+            )
         finally:
             if was_activated:
                 bind_script_run_manager(None)
             self._started = False
             self._activated_once = False
-            leases: list[_WorkerManagerLease] = []
-            current_lease = self._current_worker_lease
-            if current_lease is not None:
-                leases.append(current_lease)
-            pending_lease_task = self._pending_worker_lease_task
-            pending_delivery = self._pending_worker_lease_delivery
-            if pending_delivery is not None:
-                pending_lease = pending_delivery.abandon()
-                if pending_lease is not None:
-                    leases.append(pending_lease)
-            if pending_lease_task is not None and pending_lease_task.done() and not pending_lease_task.cancelled():
-                pending_failure = pending_lease_task.exception()
-                if pending_failure is not None:
-                    logger.warning(
-                        "script_worker_backend_pending_acquire_failed",
-                        exc_info=(type(pending_failure), pending_failure, pending_failure.__traceback__),
-                    )
-            self._pending_worker_lease_task = None
-            self._pending_worker_lease_delivery = None
-            self._pending_worker_lease_epoch = -1
-            self._current_worker_lease = None
-            self.manager.worker_backend = None
             await _release_worker_leases_before_deadline(
-                leases,
+                self._detach_worker_leases(),
                 deadline=shutdown_deadline,
                 timeout_seconds=timeout_seconds,
             )
+
+    async def _run_shutdown_cleanup(self, *, deadline: float, timeout_seconds: float) -> None:
+        try:
+            await asyncio.wait_for(
+                self._interrupt_and_prune_for_shutdown(),
+                timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+        except TimeoutError:
+            logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
+        cleanup_drained = await drain_script_tool_cleanup(
+            self.broker,
+            timeout_seconds=max(0.0, deadline - asyncio.get_running_loop().time()),
+        )
+        if not cleanup_drained:
+            logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
+
+    async def _interrupt_and_prune_for_shutdown(self) -> None:
+        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        await self._interrupt_runs(
+            runs,
+            reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
+            require_worker_success=False,
+        )
+        await self._prune_pass()
+
+    def _detach_worker_leases(self) -> list[_WorkerManagerLease]:
+        leases = [self._current_worker_lease] if self._current_worker_lease is not None else []
+        pending_lease_task = self._pending_worker_lease_task
+        if self._pending_worker_lease_delivery is not None:
+            pending_lease = self._pending_worker_lease_delivery.abandon()
+            if pending_lease is not None:
+                leases.append(pending_lease)
+        if pending_lease_task is not None and pending_lease_task.done() and not pending_lease_task.cancelled():
+            pending_failure = pending_lease_task.exception()
+            if pending_failure is not None:
+                logger.warning(
+                    "script_worker_backend_pending_acquire_failed",
+                    exc_info=(type(pending_failure), pending_failure, pending_failure.__traceback__),
+                )
+        self._pending_worker_lease_task = None
+        self._pending_worker_lease_delivery = None
+        self._pending_worker_lease_epoch = -1
+        self._current_worker_lease = None
+        self.manager.worker_backend = None
+        return leases
 
 
 async def _release_worker_leases_before_deadline(
@@ -1006,9 +1034,13 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
 
 async def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
     """Return the gateway URL injected into isolated script processes."""
-    worker_process_enabled = script_execution_uses_worker(runtime_paths) or primary_worker_backend_is_dedicated(
+    worker_process_enabled = script_execution_uses_worker(
         runtime_paths,
+        worker_backend_configured=primary_worker_backend_is_dedicated(runtime_paths),
     )
+    if not worker_process_enabled:
+        gateway_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
+        return f"http://{gateway_host}:{port}/api/script-gateway"
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:
         gateway_url = explicit_url.rstrip("/")
@@ -1019,11 +1051,8 @@ async def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: in
         gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
         await _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
         return gateway_url
-    if worker_process_enabled:
-        msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
-        raise ValueError(msg)
-    gateway_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
-    return f"http://{gateway_host}:{port}/api/script-gateway"
+    msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
+    raise ValueError(msg)
 
 
 async def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
