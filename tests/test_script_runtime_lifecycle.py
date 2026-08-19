@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -51,6 +53,9 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import _metadata_store as metadata_store_module
+from mindroom.workers.backends import local as local_module
+from mindroom.workers.backends._metadata_store import save_worker_metadata
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -58,7 +63,6 @@ from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.workers.backend import WorkerBackend
@@ -2628,6 +2632,170 @@ async def test_worker_retirement_failure_keeps_terminal_run_for_retry(tmp_path: 
     assert attempts == 2
     with pytest.raises(ScriptRunNotFoundError):
         store.get_run(terminal.run_id)
+
+
+@pytest.mark.asyncio
+async def test_late_worker_root_failure_restores_identity_for_next_prune(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late root-removal failure keeps exact identity so the next retention pass can finish."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    running = _stored_run_pinned_to_worker(
+        store,
+        runtime_paths,
+        run_id=f"script-{'a' * 32}",
+    )
+    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    assert terminal.finished_at is not None
+    assert terminal.worker_key is not None
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    paths = local_module._local_worker_state_paths(terminal.worker_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    (paths.workspace / "remove-before-late-failure.txt").write_text("remove", encoding="utf-8")
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=terminal.worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    exact_identity = paths.metadata_file.read_bytes()
+    original_rmdir = metadata_store_module.os.rmdir
+    fail_root_once = True
+
+    def fail_first_worker_root_rmdir(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        nonlocal fail_root_once
+        if path == paths.root.name and fail_root_once:
+            fail_root_once = False
+            msg = "injected final worker-root removal failure"
+            raise OSError(msg)
+        original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metadata_store_module.os, "rmdir", fail_first_worker_root_rmdir)
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(worker_backend=backend, cleanup_snapshot=AsyncMock(return_value=True)),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.0,
+    )
+    runtime._current_worker_lease = _Lease(backend)
+    now = datetime.fromisoformat(terminal.finished_at) + timedelta(seconds=1)
+
+    await runtime.prune_once(now=now)
+
+    assert store.get_run(terminal.run_id).state is ScriptRunState.EXITED
+    assert paths.metadata_file.read_bytes() == exact_identity
+    assert paths.workspace.exists() is False
+
+    await runtime.prune_once(now=now)
+
+    assert paths.root.exists() is False
+    with pytest.raises(ScriptRunNotFoundError):
+        store.get_run(terminal.run_id)
+
+
+@pytest.mark.asyncio
+async def test_deep_worker_tree_retires_without_fd_leak_and_prunes_later_run(tmp_path: Path) -> None:
+    """Descriptor traversal handles depth beyond Python recursion and continues to the next run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+
+    def create_terminal_run(*, run_id: str, created_at: str) -> ScriptRunRecord:
+        run = _run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING)
+        assert run.worker_key is not None
+        created = store.create_run(
+            replace(
+                run,
+                worker_key=script_worker_key_for_run(run.worker_key, run_id),
+                created_at=created_at,
+            ),
+        )
+        running = store.transition_run(created.run_id, state=ScriptRunState.RUNNING, worker_id="worker-1")
+        return store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+
+    later = create_terminal_run(
+        run_id=f"script-{'b' * 32}",
+        created_at="2026-08-18T00:00:00Z",
+    )
+    deep = create_terminal_run(
+        run_id=f"script-{'c' * 32}",
+        created_at="2026-08-19T00:00:00Z",
+    )
+    assert later.worker_key is not None
+    assert deep.worker_key is not None
+    assert later.finished_at is not None
+    assert deep.finished_at is not None
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+
+    def create_worker_state(run: ScriptRunRecord) -> local_module.LocalWorkerStatePaths:
+        assert run.worker_key is not None
+        paths = local_module._local_worker_state_paths(run.worker_key, worker_root=backend.worker_root)
+        paths.workspace.mkdir(parents=True)
+        save_worker_metadata(
+            paths,
+            local_module._LocalWorkerMetadata(
+                worker_id=paths.root.name,
+                worker_key=run.worker_key,
+                endpoint="/api/sandbox-runner/execute",
+                backend_name=backend.backend_name,
+                created_at=0.0,
+                last_used_at=0.0,
+                status="idle",
+            ),
+        )
+        return paths
+
+    later_paths = create_worker_state(later)
+    deep_paths = create_worker_state(deep)
+    deepest = deep_paths.workspace
+    for _index in range(sys.getrecursionlimit() + 50):
+        deepest /= "d"
+        deepest.mkdir()
+    (deepest / "leaf.txt").write_text("deep", encoding="utf-8")
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(worker_backend=backend, cleanup_snapshot=AsyncMock(return_value=True)),
+        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+        retention_seconds=0.0,
+    )
+    runtime._current_worker_lease = _Lease(backend)
+    fd_root = Path("/proc/self/fd")
+    descriptors_before = len(tuple(fd_root.iterdir()))
+    now = max(datetime.fromisoformat(deep.finished_at), datetime.fromisoformat(later.finished_at)) + timedelta(
+        seconds=1,
+    )
+
+    await runtime.prune_once(now=now)
+
+    assert len(tuple(fd_root.iterdir())) == descriptors_before
+    assert deep_paths.root.exists() is False
+    assert later_paths.root.exists() is False
+    for run in (deep, later):
+        with pytest.raises(ScriptRunNotFoundError):
+            store.get_run(run.run_id)
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -25,6 +25,7 @@ class _WorkerStatePathsLike(Protocol):
 
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _IDENTITY_FILE_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+_IDENTITY_FILE_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
 _MAX_IDENTITY_METADATA_BYTES = 4 * 1024 * 1024
 
 
@@ -45,6 +46,21 @@ class _TrustedRootBinding:
     inode: int
 
 
+@dataclass(frozen=True, slots=True)
+class _WorkerIdentity:
+    path: tuple[str, ...]
+    contents: bytes
+    mode: int
+
+
+@dataclass(slots=True)
+class _RemovalFrame:
+    descriptor: int
+    binding: _DirectoryBinding | None
+    relative_path: tuple[str, ...]
+    remaining_names: list[str]
+
+
 @dataclass(slots=True)
 class _BoundWorkerStateRoot:
     """One exact worker-state target pinned beneath an opened trusted root."""
@@ -54,6 +70,7 @@ class _BoundWorkerStateRoot:
     _worker_parent_fd: int | None
     _worker_name: str
     _worker_fd: int | None
+    _identity: _WorkerIdentity | None = None
     _absent_parent_fd: int | None = None
     _absent_name: str | None = None
     _absent_trusted_root: Path | None = None
@@ -81,10 +98,25 @@ class _BoundWorkerStateRoot:
             raise ValueError(msg)
 
         assert self._worker_parent_fd is not None
-        _remove_directory_contents(self._worker_fd)
+        preserved_path = () if self._identity is None else self._identity.path
+        _remove_directory_contents(self._worker_fd, preserved_path=preserved_path)
         _validate_trusted_root(self._trusted_root)
         _validate_bindings(self._bindings)
-        os.rmdir(self._worker_name, dir_fd=self._worker_parent_fd)
+        identity_finalization_started = False
+        worker_removed = False
+        try:
+            if self._identity is not None:
+                identity_finalization_started = True
+                _remove_identity_path(self._worker_fd, self._identity.path)
+            _validate_trusted_root(self._trusted_root)
+            _validate_bindings(self._bindings)
+            os.rmdir(self._worker_name, dir_fd=self._worker_parent_fd)
+            worker_removed = True
+        except (OSError, ValueError):
+            if identity_finalization_started and not worker_removed:
+                assert self._identity is not None
+                _restore_identity(self._worker_fd, self._identity)
+            raise
         _validate_trusted_root(self._trusted_root)
         _validate_bindings(self._bindings[:-1])
         try:
@@ -167,11 +199,13 @@ def _open_directory_at(parent_fd: int, name: str) -> int:
             msg = f"Worker state path cannot contain a symbolic link: {name}"
             raise ValueError(msg) from exc
         raise
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISDIR(metadata.st_mode):
-        os.close(descriptor)
-        msg = f"Worker state path must contain only directories: {name}"
-        raise ValueError(msg)
+    with ExitStack() as cleanup:
+        cleanup.callback(os.close, descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            msg = f"Worker state path must contain only directories: {name}"
+            raise ValueError(msg)
+        cleanup.pop_all()
     return descriptor
 
 
@@ -253,7 +287,7 @@ def _open_identity_directory(worker_fd: int, directory_parts: tuple[str, ...]) -
             os.close(descriptor)
 
 
-def _read_bounded_identity_file(parent_fd: int, filename: str) -> bytes:
+def _read_bounded_identity_file(parent_fd: int, filename: str) -> tuple[bytes, int]:
     _validate_segment(filename)
     try:
         identity_fd = os.open(filename, _IDENTITY_FILE_OPEN_FLAGS, dir_fd=parent_fd)
@@ -277,21 +311,21 @@ def _read_bounded_identity_file(parent_fd: int, filename: str) -> bytes:
         if len(raw_payload) > _MAX_IDENTITY_METADATA_BYTES:
             msg = "Worker identity metadata must be a bounded regular file."
             raise ValueError(msg)
-        return raw_payload
+        return raw_payload, stat.S_IMODE(metadata.st_mode)
     finally:
         os.close(identity_fd)
 
 
-def _read_identity_payload(
+def _read_identity(
     worker_fd: int,
     *,
     identity_path: tuple[str, ...],
-) -> dict[str, object]:
+) -> tuple[dict[str, object], _WorkerIdentity]:
     if not identity_path:
         msg = "Worker identity metadata path is missing."
         raise ValueError(msg)
     with _open_identity_directory(worker_fd, identity_path[:-1]) as identity_parent_fd:
-        raw_payload = _read_bounded_identity_file(identity_parent_fd, identity_path[-1])
+        raw_payload, mode = _read_bounded_identity_file(identity_parent_fd, identity_path[-1])
     try:
         payload = json.loads(raw_payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -300,7 +334,11 @@ def _read_identity_payload(
     if not isinstance(payload, dict):
         msg = "Worker identity metadata must contain a valid JSON object."
         raise TypeError(msg)
-    return cast("dict[str, object]", payload)
+    return cast("dict[str, object]", payload), _WorkerIdentity(
+        path=identity_path,
+        contents=raw_payload,
+        mode=mode,
+    )
 
 
 def _identity_value(payload: dict[str, object], field_path: tuple[str, ...]) -> object:
@@ -313,29 +351,163 @@ def _identity_value(payload: dict[str, object], field_path: tuple[str, ...]) -> 
     return value
 
 
-def _remove_directory_contents(directory_fd: int) -> None:
-    for name in os.listdir(directory_fd):
-        try:
-            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        if not stat.S_ISDIR(metadata.st_mode):
-            os.unlink(name, dir_fd=directory_fd)
-            continue
-        child_fd = _open_directory_at(directory_fd, name)
-        try:
-            child_metadata = os.fstat(child_fd)
-            if child_metadata.st_dev != metadata.st_dev or child_metadata.st_ino != metadata.st_ino:
+def _binding_is_current(binding: _DirectoryBinding) -> bool:
+    metadata = os.stat(binding.name, dir_fd=binding.parent_fd, follow_symlinks=False)
+    descriptor_metadata = os.fstat(binding.descriptor)
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_dev == binding.device
+        and metadata.st_ino == binding.inode
+        and descriptor_metadata.st_dev == binding.device
+        and descriptor_metadata.st_ino == binding.inode
+    )
+
+
+def _path_is_identity_directory(relative_path: tuple[str, ...], identity_path: tuple[str, ...]) -> bool:
+    return (
+        bool(identity_path)
+        and len(relative_path) < len(identity_path)
+        and identity_path[: len(relative_path)] == relative_path
+    )
+
+
+def _require_opened_directory_matches(metadata: os.stat_result, descriptor: int) -> None:
+    opened = os.fstat(descriptor)
+    if opened.st_dev != metadata.st_dev or opened.st_ino != metadata.st_ino:
+        msg = "Worker state root changed during retirement."
+        raise ValueError(msg)
+
+
+def _open_removal_frame(
+    parent: _RemovalFrame,
+    *,
+    name: str,
+    relative_path: tuple[str, ...],
+    metadata: os.stat_result,
+) -> _RemovalFrame:
+    with ExitStack() as cleanup:
+        child_fd = _open_directory_at(parent.descriptor, name)
+        cleanup.callback(os.close, child_fd)
+        _require_opened_directory_matches(metadata, child_fd)
+        frame = _RemovalFrame(
+            descriptor=child_fd,
+            binding=_binding(parent.descriptor, name, child_fd),
+            relative_path=relative_path,
+            remaining_names=os.listdir(child_fd),  # noqa: PTH208 -- Path cannot enumerate an fd.
+        )
+        cleanup.pop_all()
+    return frame
+
+
+def _finish_removal_frame(frame: _RemovalFrame, *, preserved_path: tuple[str, ...]) -> None:
+    if frame.binding is None:
+        return
+    try:
+        if _path_is_identity_directory(frame.relative_path, preserved_path):
+            return
+        if not _binding_is_current(frame.binding):
+            msg = "Worker state root changed during retirement."
+            raise ValueError(msg)
+        os.rmdir(frame.binding.name, dir_fd=frame.binding.parent_fd)
+    finally:
+        os.close(frame.descriptor)
+
+
+def _remove_directory_contents(directory_fd: int, *, preserved_path: tuple[str, ...]) -> None:
+    stack = [
+        _RemovalFrame(
+            descriptor=directory_fd,
+            binding=None,
+            relative_path=(),
+            remaining_names=os.listdir(directory_fd),
+        ),
+    ]
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame.remaining_names:
+                name = frame.remaining_names.pop()
+                relative_path = (*frame.relative_path, name)
+                try:
+                    metadata = os.stat(name, dir_fd=frame.descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(metadata.st_mode):
+                    if relative_path != preserved_path:
+                        os.unlink(name, dir_fd=frame.descriptor)
+                    continue
+                stack.append(
+                    _open_removal_frame(
+                        frame,
+                        name=name,
+                        relative_path=relative_path,
+                        metadata=metadata,
+                    ),
+                )
+                continue
+
+            _finish_removal_frame(stack.pop(), preserved_path=preserved_path)
+    finally:
+        for frame in reversed(stack):
+            if frame.binding is not None:
+                os.close(frame.descriptor)
+
+
+def _remove_identity_path(worker_fd: int, identity_path: tuple[str, ...]) -> None:
+    descriptors: list[int] = []
+    bindings: list[_DirectoryBinding] = []
+    current_fd = worker_fd
+    try:
+        for segment in identity_path[:-1]:
+            child_fd = _open_directory_at(current_fd, segment)
+            descriptors.append(child_fd)
+            bindings.append(_binding(current_fd, segment, child_fd))
+            current_fd = child_fd
+        os.unlink(identity_path[-1], dir_fd=current_fd)
+        for binding in reversed(bindings):
+            if not _binding_is_current(binding):
                 msg = "Worker state root changed during retirement."
                 raise ValueError(msg)
-            _remove_directory_contents(child_fd)
-            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if current.st_dev != metadata.st_dev or current.st_ino != metadata.st_ino:
-                msg = "Worker state root changed during retirement."
-                raise ValueError(msg)
-            os.rmdir(name, dir_fd=directory_fd)
+            os.rmdir(binding.name, dir_fd=binding.parent_fd)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _restore_identity(worker_fd: int, identity: _WorkerIdentity) -> None:
+    descriptors: list[int] = []
+    current_fd = worker_fd
+    try:
+        for segment in identity.path[:-1]:
+            try:
+                child_fd = _open_directory_at(current_fd, segment)
+            except FileNotFoundError:
+                os.mkdir(segment, mode=0o700, dir_fd=current_fd)
+                child_fd = _open_directory_at(current_fd, segment)
+            descriptors.append(child_fd)
+            current_fd = child_fd
+        filename = identity.path[-1]
+        with suppress(FileNotFoundError):
+            os.unlink(filename, dir_fd=current_fd)
+        identity_fd = os.open(
+            filename,
+            _IDENTITY_FILE_CREATE_FLAGS,
+            identity.mode,
+            dir_fd=current_fd,
+        )
+        try:
+            remaining = memoryview(identity.contents)
+            while remaining:
+                written = os.write(identity_fd, remaining)
+                if written == 0:
+                    msg = "Worker identity metadata restoration made no progress."
+                    raise OSError(msg)
+                remaining = remaining[written:]
         finally:
-            os.close(child_fd)
+            os.close(identity_fd)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 @contextmanager
@@ -366,10 +538,10 @@ def open_worker_state_root(
         )
         return
     descriptors.append(root_fd)
-    trusted_root_binding = _trusted_root_binding(trusted_root, root_fd)
-    _validate_trusted_root(trusted_root_binding)
-    current_fd = root_fd
     try:
+        trusted_root_binding = _trusted_root_binding(trusted_root, root_fd)
+        _validate_trusted_root(trusted_root_binding)
+        current_fd = root_fd
         for segment in workers_subpath:
             try:
                 child_fd = _open_directory_at(current_fd, segment)
@@ -405,9 +577,9 @@ def open_worker_state_root(
             return
         descriptors.append(worker_fd)
         bindings.append(_binding(worker_parent_fd, worker_name, worker_fd))
-        identity_payload = None
+        identity = None
         if expected_worker_key is not None:
-            identity_payload = _read_identity_payload(worker_fd, identity_path=identity_path)
+            identity_payload, identity = _read_identity(worker_fd, identity_path=identity_path)
             if _identity_value(identity_payload, identity_field_path) != expected_worker_key:
                 msg = f"Worker identity metadata does not match retirement key '{expected_worker_key}'."
                 raise ValueError(msg)
@@ -417,6 +589,7 @@ def open_worker_state_root(
             _worker_parent_fd=worker_parent_fd,
             _worker_name=worker_name,
             _worker_fd=worker_fd,
+            _identity=identity,
         )
     finally:
         for descriptor in reversed(descriptors):

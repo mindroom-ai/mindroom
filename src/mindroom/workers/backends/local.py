@@ -283,7 +283,7 @@ class _LocalWorkerBackend:
                     identity_field_path=("worker_key",),
                 ) as state:
                     state.remove()
-            except (OSError, TypeError, ValueError) as exc:
+            except (OSError, RecursionError, TypeError, ValueError) as exc:
                 msg = f"Failed to retire local worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 

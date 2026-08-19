@@ -334,3 +334,112 @@ def test_local_backend_refuses_worker_root_swapped_after_identity_validation(
 
     assert swapped is True
     assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("failure_point", ["binding", "validation"])
+def test_local_backend_closes_trusted_root_fd_when_initial_binding_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    """Repeated initial trust failures cannot leak the successfully opened root descriptor."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'5' * 32}")
+
+    def fail_trusted_root(*_args: object, **_kwargs: object) -> object:
+        msg = f"injected trusted-root {failure_point} failure"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(
+        metadata_store_module,
+        "_trusted_root_binding" if failure_point == "binding" else "_validate_trusted_root",
+        fail_trusted_root,
+    )
+    fd_root = Path("/proc/self/fd")
+    descriptors_before = len(tuple(fd_root.iterdir()))
+
+    for _attempt in range(20):
+        with pytest.raises(WorkerBackendError, match=f"injected trusted-root {failure_point} failure"):
+            backend.retire_worker(run_key)
+
+    assert len(tuple(fd_root.iterdir())) == descriptors_before
+
+
+def test_local_backend_closes_worker_fd_when_open_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-open worker-directory failure cannot leak the not-yet-returned descriptor."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'7' * 32}")
+    state_root = backend.worker_root / worker_dir_name(run_key)
+    state_root.mkdir()
+    original_fstat = metadata_store_module.os.fstat
+
+    def fail_worker_fstat(descriptor: int) -> object:
+        descriptor_root = Path(f"/proc/self/fd/{descriptor}").resolve()
+        if descriptor_root == state_root:
+            msg = "injected worker-directory validation failure"
+            raise OSError(msg)
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(metadata_store_module.os, "fstat", fail_worker_fstat)
+    fd_root = Path("/proc/self/fd")
+    descriptors_before = len(tuple(fd_root.iterdir()))
+
+    for _attempt in range(20):
+        with pytest.raises(WorkerBackendError, match="injected worker-directory validation failure"):
+            backend.retire_worker(run_key)
+
+    assert len(tuple(fd_root.iterdir())) == descriptors_before
+
+
+def test_local_backend_normalizes_retirement_recursion_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A depth failure crosses the Local backend boundary as a typed retryable error."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'6' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    exact_identity = paths.metadata_file.read_bytes()
+    original_listdir = metadata_store_module.os.listdir
+
+    def fail_worker_traversal(path: int) -> list[str]:
+        descriptor_root = Path(f"/proc/self/fd/{path}").resolve()
+        if descriptor_root == paths.root:
+            msg = "injected retirement depth failure"
+            raise RecursionError(msg)
+        return original_listdir(path)
+
+    monkeypatch.setattr(metadata_store_module.os, "listdir", fail_worker_traversal)
+
+    with pytest.raises(WorkerBackendError, match="injected retirement depth failure"):
+        backend.retire_worker(run_key)
+
+    assert paths.metadata_file.read_bytes() == exact_identity

@@ -621,7 +621,7 @@ class DockerWorkerBackend:
                         raise WorkerBackendError(msg)
                     self._projection_manager.retire_worker_projection(worker_name)
                     state.remove()
-            except (OSError, TypeError, ValueError) as exc:
+            except (OSError, RecursionError, TypeError, ValueError) as exc:
                 msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
                 raise WorkerBackendError(msg) from exc
 
