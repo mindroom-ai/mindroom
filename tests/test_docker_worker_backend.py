@@ -29,6 +29,7 @@ from mindroom.constants import (
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
@@ -3366,23 +3367,24 @@ def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
-def test_docker_backend_rejects_user_agent_worker_keys_when_agent_is_shared(
+def test_docker_backend_projects_shared_agent_for_narrower_user_agent_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A user-agent worker key must fail closed when the agent still exists but is not user_agent scoped."""
+    """A script-isolated worker should project its agent even when normal tools use shared scope."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
 
-    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
-        backend.ensure_worker(
-            WorkerSpec(
-                "v1:default:user_agent:@alice:example.org:alpha",
-                private_agent_names=frozenset({"alpha"}),
-            ),
-            now=10.0,
-        )
-    assert fake_client.containers.run_calls == []
+    backend.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=frozenset()),
+        now=10.0,
+    )
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    projected_config = yaml.safe_load((_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8"))
+    assert list(projected_config["agents"]) == ["alpha"]
+    assert str(agent_state_root_path(tmp_path, "alpha")) in volumes
 
 
 def test_docker_backend_projects_only_user_scoped_assets_for_requester_worker(

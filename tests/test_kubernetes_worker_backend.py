@@ -1790,6 +1790,50 @@ router:
     }
 
 
+def test_kubernetes_backend_projects_shared_agent_for_narrower_user_agent_worker(tmp_path: Path) -> None:
+    """A script-isolated worker should retain its shared agent's state and assigned knowledge."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "watcher-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watcher test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [watcher_docs]
+knowledge_bases:
+  watcher_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user_agent:@alice:example.org:watcher"
+
+    backend.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=frozenset()),
+        now=10.0,
+    )
+
+    deployment = apps_api.created_bodies[0]
+    mount_paths = {
+        mount["mountPath"] for mount in deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    }
+    assert "/app/worker/agents/watcher" in mount_paths
+    assert "/app/worker/knowledge/watcher-docs" in mount_paths
+
+
 def test_kubernetes_backend_matches_normalized_agent_name_for_knowledge_mount(tmp_path: Path) -> None:
     """Knowledge selection should match the normalized agent name encoded in a worker key."""
     storage_root = tmp_path / "storage"

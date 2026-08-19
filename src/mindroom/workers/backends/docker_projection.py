@@ -649,7 +649,8 @@ class DockerProjectionManager:
         worker_scope: WorkerScope | None,
     ) -> bool:
         expected_scope = "unscoped" if worker_scope is None else worker_scope
-        if resolved_worker_key_scope(worker_key) != expected_scope:
+        actual_scope = resolved_worker_key_scope(worker_key)
+        if actual_scope not in {expected_scope, "user_agent"}:
             return False
         encoded_agent_name = worker_key_agent_name(worker_key)
         if encoded_agent_name is None:

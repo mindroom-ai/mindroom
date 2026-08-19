@@ -656,6 +656,12 @@ def _agent_names_addressed_by_worker_key(
     encoded_agent_name = worker_key_agent_name(worker_key)
     if encoded_agent_name is None:
         return ()
+    if scope == "user_agent":
+        return tuple(
+            agent_name
+            for agent_name in resolved_agent_policies
+            if normalize_worker_key_part(agent_name) == encoded_agent_name
+        )[:1]
     expected_scope = None if scope == "unscoped" else scope
     return tuple(
         agent_name
