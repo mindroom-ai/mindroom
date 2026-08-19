@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.approval_manager import _ApprovalManager
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
 from mindroom.event_journal import (
     ApprovalCardReservation,
     BackgroundApprovalDecision,
@@ -20,38 +18,56 @@ from mindroom.event_journal import (
     MatrixDelivery,
     StoredApprovalCard,
 )
-from mindroom.script_runs import broker as broker_module
-from mindroom.script_runs.models import ScriptToolGrant
-from mindroom.tool_approval import BackgroundScriptToolOrigin, tool_may_require_approval
+from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
+from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
+from mindroom.tool_approval import BackgroundScriptToolOrigin
 from tests.conftest import test_runtime_paths
+from tests.test_script_run_manager import _context as _manager_context
+from tests.test_script_run_manager import _manager
+from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolver
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_launch_preapproval_does_not_expand_from_live_script_config() -> None:
-    """A tool enabled after an unapproved launch still needs Matrix approval."""
-    config = Config(
-        agents={
-            "watcher": AgentConfig(
-                display_name="Watcher",
-                tools=["calculator", {"script": {"allowed_tools": ["calculator"]}}],
-            ),
-        },
+@pytest.mark.asyncio
+async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_path: Path) -> None:
+    """A live allowlist added after launch cannot bypass Matrix approval."""
+    manager, _backend, worker_client = _manager(tmp_path)
+    launch_context = _manager_context(tmp_path)
+    launched = await manager.run(launch_context, source="print('ok')\n")
+    durable_run = manager.store.get_run(launched.run_id)
+    assert durable_run.preapprove_launch_grants is False
+
+    live_watcher = AgentConfig(
+        display_name="Watcher",
+        worker_scope="user_agent",
+        tools=["calculator", {"script": {"allowed_tools": ["calculator"]}}],
     )
-    toolkit = Toolkit(name="calculator")
-    toolkit.functions["add"] = SimpleNamespace(name="add")
-    launched_without_preapproval = SimpleNamespace(
-        grants=(ScriptToolGrant("calculator", "add"),),
-        preapprove_launch_grants=False,
+    live_config = launch_context.config.model_copy(
+        update={"agents": {**launch_context.config.agents, "watcher": live_watcher}},
+    )
+    approval_events: list[str] = []
+    broker = ScriptToolBroker(
+        store=manager.store,
+        runtime_resolver=_RuntimeResolver(
+            replace(launch_context, config_provider=lambda: live_config),
+            approval_events=approval_events,
+            worker_id=durable_run.worker_id,
+        ),
+    )
+    token_path = worker_client.launch_paths[durable_run.run_id][1]
+    request = ScriptToolCallRequest(
+        run_id=durable_run.run_id,
+        call_id="live-allowlist",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
     )
 
-    approval_config = broker_module._background_approval_config(
-        SimpleNamespace(current_config=config),
-        launched_without_preapproval,
-    )
+    receipt = await _call_through_gateway(broker, request, token_path.read_text(encoding="utf-8"))
 
-    assert tool_may_require_approval(approval_config, "add") is True
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert approval_events == [f"approval:{durable_run.run_id}:live-allowlist"]
 
 
 def _origin(*, run_id: str = "run-1", call_id: str = "call-1") -> BackgroundScriptToolOrigin:

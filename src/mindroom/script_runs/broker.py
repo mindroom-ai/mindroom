@@ -692,7 +692,11 @@ class ScriptToolBroker:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
         if call.grant not in run.grants:
             raise _CurrentGrantRevokedError
-        toolkit = resolve_current_script_tool(context, call.grant)
+        toolkit = resolve_current_script_tool(
+            context,
+            call.grant,
+            rejected_toolkit_cleanup=self._close_rejected_toolkit,
+        )
         if toolkit is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
@@ -705,6 +709,10 @@ class ScriptToolBroker:
             function=function,
             approval_config=_background_approval_config(context, run),
         )
+
+    def _close_rejected_toolkit(self, toolkit: Toolkit) -> None:
+        """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
+        asyncio.run(_close_toolkit(toolkit))
 
     async def _publish_async(
         self,

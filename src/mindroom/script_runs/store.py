@@ -581,6 +581,7 @@ _SCHEMA_STATEMENTS = (
                     source_digest TEXT NOT NULL,
                     grants_json TEXT NOT NULL,
                     token_hash TEXT NOT NULL,
+                    preapprove_launch_grants INTEGER NOT NULL,
                     worker_key TEXT,
                     worker_id TEXT,
                     worker_backend_generation TEXT,

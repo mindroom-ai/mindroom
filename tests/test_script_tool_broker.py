@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agno.tools import Toolkit
-from agno.tools.function import FunctionCall
+from agno.tools.function import Function, FunctionCall
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -130,6 +130,7 @@ def _context(
     require_approval: bool = False,
     log_tool_calls: bool = False,
     preapprove_script_tool: bool = False,
+    tool_function_filter: Callable[[Function], bool] | None = None,
     worker_scope: WorkerScope | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(tmp_path)
@@ -160,7 +161,7 @@ def _context(
         ),
         runtime_paths,
     )
-    return make_test_tool_runtime_context(
+    context = make_test_tool_runtime_context(
         agent_name="watcher",
         target=MessageTarget.resolve(
             room_id="!room:example.test",
@@ -175,6 +176,7 @@ def _context(
         conversation_reader=make_conversation_reader_mock(),
         hook_registry=hook_registry,
     )
+    return replace(context, tool_function_filter=tool_function_filter)
 
 
 class _RuntimeResolver:
@@ -267,6 +269,7 @@ def _broker(
     live_worker_id: str | None = None,
     live_private_agent_names: frozenset[str] | None = None,
     preapprove_script_tool: bool = False,
+    tool_function_filter: Callable[[Function], bool] | None = None,
     durable_local_unsafe: bool | None = None,
     live_local_unsafe: bool | None = None,
     worker_scope: WorkerScope | None = None,
@@ -278,6 +281,7 @@ def _broker(
         require_approval=require_approval,
         log_tool_calls=log_tool_calls,
         preapprove_script_tool=preapprove_script_tool,
+        tool_function_filter=tool_function_filter,
         worker_scope=worker_scope,
     )
     store = ScriptRunStore(context.runtime_paths)
@@ -423,6 +427,38 @@ async def test_script_broker_builds_the_selected_live_toolkit_once(
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert builds == 1
+
+
+@pytest.mark.asyncio
+async def test_script_broker_closes_a_filtered_requested_toolkit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected live toolkit must finish its asynchronous close lifecycle."""
+    closed = asyncio.Event()
+
+    class AsyncClosingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+            self._requires_connect = True
+
+        def add(self, a: int, b: int) -> int:
+            return a + b
+
+        async def close(self) -> None:
+            closed.set()
+
+    _replace_calculator_toolkit(monkeypatch, AsyncClosingToolkit)
+    broker, token = _broker(
+        tmp_path,
+        events=[],
+        tool_function_filter=lambda _function: False,
+    )
+
+    receipt = await _call_through_gateway(broker, _request(call_id="filtered-toolkit"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    await asyncio.wait_for(closed.wait(), timeout=1.0)
 
 
 @pytest.mark.asyncio
