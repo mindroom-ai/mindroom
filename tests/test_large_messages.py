@@ -653,6 +653,59 @@ async def test_prepare_terminal_edit_with_durable_outcome_fits_hard_limit() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_terminal_edit_updates_sidecar_size_after_inner_preview_shrinks() -> None:
+    """Fitting the replacement body must keep its sidecar metadata truthful."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/fitted-final-edit"))
+    text = "final answer " + ("x" * 50_000)
+    semantic_outcome = {"body": text, "interactive": None}
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    inner = result["m.new_content"]
+    assert len(inner["body"]) < 22_000
+    assert inner["io.mindroom.long_text"]["preview_size"] == len(inner["body"])
+    assert inner[DURABLE_FINAL_OUTCOME_KEY] == semantic_outcome
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_edit_uses_empty_previews_at_the_metadata_boundary() -> None:
+    """Mandatory metadata may consume the final bytes without making the edit impossible."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/boundary-final-edit"))
+    text = "x" * 61_400
+    semantic_outcome = {"body": text, "interactive": None}
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["body"] == ""
+    assert result["m.new_content"]["body"] == ""
+    assert result["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == semantic_outcome
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
 async def test_prepare_large_message_never_returns_an_unrepresentable_payload() -> None:
     """Metadata that cannot fit even without a preview must fail before delivery."""
     client = _UploadClient(nio.UploadResponse("mxc://server/unrepresentable-edit"))

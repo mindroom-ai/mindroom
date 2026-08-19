@@ -273,21 +273,30 @@ def _build_terminal_edit_preview(
     inner_limit = len(preview_body.encode("utf-8"))
     while True:
         inner_content = dict(preview_content)
-        inner_content["body"] = _create_preview(
-            preview_text,
-            inner_limit,
-            continuation_indicator=continuation_indicator,
+        inner_content["body"] = (
+            _create_preview(
+                preview_text,
+                inner_limit,
+                continuation_indicator=continuation_indicator,
+            )
+            if inner_limit > 0
+            else ""
         )
+        sidecar_metadata = inner_content.get("io.mindroom.long_text")
+        if isinstance(sidecar_metadata, dict):
+            sidecar_metadata = dict(sidecar_metadata)
+            sidecar_metadata["preview_size"] = len(inner_content["body"])
+            inner_content["io.mindroom.long_text"] = sidecar_metadata
         outer_limit = len(inner_content["body"].encode("utf-8"))
         while True:
-            outer_preview = _create_preview(
-                preview_text,
-                outer_limit,
-                continuation_indicator=continuation_indicator,
+            outer_body = (
+                f"* {_create_preview(preview_text, outer_limit, continuation_indicator=continuation_indicator)}"
+                if outer_limit > 0
+                else ""
             )
             modified_content: dict[str, Any] = {
                 "msgtype": source_content.get("msgtype", "m.text"),
-                "body": f"* {outer_preview}",
+                "body": outer_body,
                 "m.new_content": inner_content,
                 "m.relates_to": content.get("m.relates_to", {}),
             }
