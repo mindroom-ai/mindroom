@@ -179,8 +179,7 @@ def _without_local_recovery_data(content: dict[str, Any]) -> dict[str, Any]:
 
 
 def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
-    rooms = getattr(client, "rooms", {})
-    return bool(room_id and isinstance(rooms, dict) and room_id in rooms and rooms[room_id].encrypted)
+    return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
 
 
 def _add_sidecar_metadata(
@@ -276,11 +275,10 @@ def _delivery_event_size_calculator(
     room_encrypted: bool,
 ) -> Callable[[dict[str, Any]], int]:
     """Bind the delivery-specific fields needed by repeated preview fitting."""
-    olm = getattr(client, "olm", None)
-    raw_device_id = getattr(olm, "device_id", None)
-    if not isinstance(raw_device_id, str):
-        raw_device_id = getattr(client, "device_id", None)
-    device_id = raw_device_id if isinstance(raw_device_id, str) else None
+    device_id: str | None = None
+    if room_encrypted:
+        raw_device_id = client.olm.device_id if client.olm is not None else client.device_id
+        device_id = raw_device_id if isinstance(raw_device_id, str) else None
 
     def calculate(candidate: dict[str, Any]) -> int:
         return _calculate_delivery_event_size(

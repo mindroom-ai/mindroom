@@ -23,11 +23,11 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.matrix import large_messages
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
     _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
+    _calculate_delivery_event_size,
     _calculate_event_size,
     _create_preview,
     _is_edit_message,
@@ -44,6 +44,7 @@ _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 class _UploadClient:
     rooms: dict = {}  # noqa: RUF012
+    olm = None
     device_id = "DEVICE"
 
     def __init__(self, upload_result: object | BaseException) -> None:
@@ -90,15 +91,13 @@ def _actual_encrypted_event_size(content: dict[str, object], *, room_id: str) ->
 
 def test_encrypted_event_size_estimate_bounds_real_megolm_output() -> None:
     """The delivery estimate must include Megolm expansion without consuming a live session."""
-    estimator = getattr(large_messages, "_calculate_delivery_event_size", None)
-    assert callable(estimator)
     content: dict[str, object] = {
         "body": "x" * 45_000,
         "msgtype": "m.text",
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
     }
 
-    estimated = estimator(
+    estimated = _calculate_delivery_event_size(
         content,
         room_id="!room:server",
         room_encrypted=True,

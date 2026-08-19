@@ -31,6 +31,8 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
     client.olm = MagicMock() if encrypted else None
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 
@@ -251,6 +253,8 @@ def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
         encryption_state.status_code = "M_NOT_FOUND"
     client.room_get_state_event = AsyncMock(return_value=encryption_state)
     client.olm = MagicMock() if encrypted else None
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 

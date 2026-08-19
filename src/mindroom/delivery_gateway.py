@@ -1671,7 +1671,7 @@ class DeliveryGateway:
             return content
         client = self._client()
         room_encrypted: bool | None = None
-        if isinstance(getattr(client, "rooms", None), Mapping):
+        if isinstance(client.rooms, Mapping):
             encryption_outcome = await resolve_room_encryption_outcome(
                 client,
                 room_id,

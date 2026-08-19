@@ -377,6 +377,9 @@ class TestAgentBot(AgentBotTestBase):
             rejection_message="Rejected request",
         )
         bot.client = AsyncMock(spec=nio.AsyncClient)
+        cached_room = MagicMock()
+        cached_room.encrypted = False
+        bot.client.rooms = {room.room_id: cached_room}
 
         with (
             patch(

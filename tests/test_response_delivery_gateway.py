@@ -763,7 +763,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outcome.terminal_status == "completed"
         frozen = outbox.rows["$cause", "final"].payload
-        assert _calculate_event_size(frozen) <= 64_000
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
