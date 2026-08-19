@@ -550,7 +550,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         event = MagicMock(spec=nio.RoomMessageText)
@@ -2760,7 +2760,7 @@ class TestAgentBot(AgentBotTestBase):
         """Incomplete placeholder cleanup should leave the source event retryable."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
+        bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
@@ -3100,7 +3100,7 @@ class TestAgentBot(AgentBotTestBase):
         """Failed edits of an existing visible response must keep the prior event visible but retryable."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
+        bot.client = _make_matrix_client_mock()
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
         gateway = replace_delivery_gateway_deps(
             bot,

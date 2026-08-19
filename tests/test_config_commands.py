@@ -47,7 +47,7 @@ from mindroom.tool_system.plugins import PluginReloadResult
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock, write_config_yaml
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -157,7 +157,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
 @pytest.mark.asyncio
 async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations() -> None:
     """Config confirmation should add canonical Matrix annotation reactions."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
     await _add_confirmation_reactions(client, "!room:example.org", "$preview")
@@ -195,7 +195,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
     with pytest.raises(RuntimeError, match="Failed to store pending config change"):
         await config_confirmation._store_pending_change_in_matrix(state_client, "$preview", pending_change)
 
-    reaction_client = AsyncMock()
+    reaction_client = make_matrix_client_mock()
     reaction_client.room_send.return_value = nio.RoomSendError.from_dict(
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!room:example.org",
@@ -207,7 +207,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
 @pytest.mark.asyncio
 async def test_confirmation_setup_adopts_existing_duplicate_reaction() -> None:
     """A replayed setup should accept the homeserver's duplicate-annotation proof."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_send.side_effect = [
         nio.RoomSendError("already exists", "M_DUPLICATE_ANNOTATION"),
         nio.RoomSendResponse("$cancel-reaction", "!room:example.org"),

@@ -8,12 +8,13 @@ import nio
 import pytest
 
 from mindroom import interactive
+from tests.conftest import make_matrix_client_mock
 
 
 @pytest.fixture
 def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.user_id = "@mindroom_test:localhost"
     return client
 
