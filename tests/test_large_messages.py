@@ -9,6 +9,7 @@ import pytest
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    DURABLE_FINAL_OUTCOME_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
@@ -622,6 +623,55 @@ async def test_prepare_edit_message() -> None:
     assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
     assert client.uploaded_data is not None
     assert json.loads(client.uploaded_data.decode("utf-8")) == edit_content
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_edit_with_durable_outcome_fits_hard_limit() -> None:
+    """A deferred final edit must not freeze a payload Matrix will always reject."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/final-edit"))
+    text = "final answer " + ("x" * 20_000)
+    semantic_outcome = {"body": text, "interactive": None}
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+    assert DURABLE_FINAL_OUTCOME_KEY not in result
+    assert result["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == semantic_outcome
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == edit_content
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_never_returns_an_unrepresentable_payload() -> None:
+    """Metadata that cannot fit even without a preview must fail before delivery."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/unrepresentable-edit"))
+    text = "final answer " + ("x" * 70_000)
+    semantic_outcome = {"body": text, "interactive": None}
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
+    }
+
+    with pytest.raises(ValueError, match="cannot fit within the Matrix event limit"):
+        await prepare_large_message(client, "!room:server", edit_content)
 
 
 @pytest.mark.asyncio

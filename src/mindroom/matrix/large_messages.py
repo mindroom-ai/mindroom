@@ -16,6 +16,7 @@ from nio import crypto
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    DURABLE_FINAL_OUTCOME_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -70,6 +71,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _MATRIX_EVENT_HARD_LIMIT = 64000
+_UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
 
@@ -86,7 +88,12 @@ def _is_passthrough_preview_key(key: object) -> bool:
 
 def _is_passthrough_edit_wrapper_key(key: object) -> bool:
     """Return whether one source key should be mirrored onto the edit wrapper."""
-    return isinstance(key, str) and key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
+    return (
+        isinstance(key, str)
+        and key.startswith("io.mindroom.")
+        and key not in _SIDECAR_ONLY_MINDROOM_KEYS
+        and key != DURABLE_FINAL_OUTCOME_KEY
+    )
 
 
 def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
@@ -247,6 +254,66 @@ def _build_nonterminal_streaming_edit_preview(
             break
         preview_limit = max(0, preview_limit // 2)
     return None
+
+
+def _build_terminal_edit_preview(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    preview_content: dict[str, Any],
+    preview_text: str,
+    *,
+    continuation_indicator: str,
+) -> dict[str, Any]:
+    """Fit a terminal edit after all replacement and wrapper metadata is present."""
+    preview_body = preview_content.get("body")
+    if not isinstance(preview_body, str):
+        msg = "Large-message preview body must be text"
+        raise TypeError(msg)
+
+    inner_limit = len(preview_body.encode("utf-8"))
+    while True:
+        inner_content = dict(preview_content)
+        inner_content["body"] = _create_preview(
+            preview_text,
+            inner_limit,
+            continuation_indicator=continuation_indicator,
+        )
+        outer_limit = len(inner_content["body"].encode("utf-8"))
+        while True:
+            outer_preview = _create_preview(
+                preview_text,
+                outer_limit,
+                continuation_indicator=continuation_indicator,
+            )
+            modified_content: dict[str, Any] = {
+                "msgtype": source_content.get("msgtype", "m.text"),
+                "body": f"* {outer_preview}",
+                "m.new_content": inner_content,
+                "m.relates_to": content.get("m.relates_to", {}),
+            }
+            _copy_edit_wrapper_metadata(source_content, modified_content)
+            if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
+                return modified_content
+            if outer_limit == 0:
+                break
+            outer_limit = max(0, outer_limit // 2)
+        if inner_limit == 0:
+            raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
+        inner_limit = max(0, inner_limit // 2)
+
+
+def _ensure_event_fits(content: dict[str, Any], *, room_id: str) -> None:
+    """Reject any prepared payload that still exceeds the Matrix event limit."""
+    final_size = _calculate_event_size(content)
+    if final_size <= _MATRIX_EVENT_HARD_LIMIT:
+        return
+    logger.error(
+        "large_message_cannot_fit_event_limit",
+        room_id=room_id,
+        final_size_bytes=final_size,
+        size_limit_bytes=_MATRIX_EVENT_HARD_LIMIT,
+    )
+    raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
 
 
 def _prefix_by_bytes(text: str, max_bytes: int) -> str:
@@ -609,7 +676,8 @@ async def prepare_large_message(
         room_encrypted=room_encrypted,
     )
 
-    if sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+    sidecar_usable = sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted)
+    if sidecar_usable:
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
@@ -633,22 +701,15 @@ async def prepare_large_message(
         modified_content["m.relates_to"] = content["m.relates_to"]
 
     if is_edit and "m.new_content" in content:
-        modified_content = {
-            "msgtype": source_content.get("msgtype", "m.text"),
-            "body": f"* {modified_content['body']}",
-            "m.new_content": modified_content,
-            "m.relates_to": content.get("m.relates_to", {}),
-        }
-        _copy_edit_wrapper_metadata(source_content, modified_content)
-
-    final_size = _calculate_event_size(modified_content)
-    if final_size > 64000:
-        logger.warning(
-            "large_message_still_exceeds_limit",
-            room_id=room_id,
-            final_size_bytes=final_size,
-            size_limit_bytes=64000,
+        modified_content = _build_terminal_edit_preview(
+            content,
+            source_content,
+            modified_content,
+            preview_text,
+            continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
         )
+
+    _ensure_event_fits(modified_content, room_id=room_id)
 
     new_content = modified_content.get("m.new_content")
     inner = new_content if isinstance(new_content, dict) else modified_content

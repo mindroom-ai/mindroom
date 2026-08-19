@@ -19,6 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -33,6 +34,7 @@ from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_event_size
 from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -679,6 +681,44 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
         assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+
+    async def test_large_deferred_final_edit_freezes_a_sendable_semantic_payload(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A recoverable final edit must not leave an impossible outbox retry."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/final-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        answer = "final answer " + ("x" * 20_000)
+
+        outcome = await gateway.deliver_final(
+            replace(
+                self._final_request(answer),
+                existing_event_id="$placeholder",
+                defer_source_handoff=True,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert DURABLE_FINAL_OUTCOME_KEY not in frozen
+        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY]["body"] == answer
+        assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
