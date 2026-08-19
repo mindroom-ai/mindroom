@@ -527,6 +527,33 @@ def _validate_identity_file_binding(
         raise ValueError(msg)
 
 
+def _fsync_retirement_identity(
+    parent_fd: int,
+    filename: str,
+    binding: _IdentityFileBinding,
+) -> None:
+    """Sync one exact bound retirement identity inode through its sidecar name."""
+    _validate_segment(filename)
+    try:
+        identity_fd = os.open(filename, _IDENTITY_FILE_OPEN_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        msg = "Worker retirement identity metadata changed during retirement."
+        raise ValueError(msg) from exc
+    try:
+        metadata = os.fstat(identity_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != binding.device or metadata.st_ino != binding.inode:
+            msg = "Worker retirement identity metadata changed during retirement."
+            raise ValueError(msg)
+        os.fsync(identity_fd)
+        metadata = os.fstat(identity_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != binding.device or metadata.st_ino != binding.inode:
+            msg = "Worker retirement identity metadata changed during retirement."
+            raise ValueError(msg)
+        _validate_identity_file_binding(parent_fd, filename, binding)
+    finally:
+        os.close(identity_fd)
+
+
 def _fsync_and_require_name_absent(parent_fd: int, name: str) -> None:
     os.fsync(parent_fd)
     try:
@@ -549,6 +576,7 @@ def _read_retirement_identity(
     if _identity_value(payload, identity_field_path) != expected_worker_key:
         msg = f"Worker retirement identity metadata does not match retirement key '{expected_worker_key}'."
         raise ValueError(msg)
+    _fsync_retirement_identity(parent_fd, filename, binding)
     return binding
 
 
@@ -622,6 +650,7 @@ def _stage_retirement_identity(
         if retirement_binding != identity.binding:
             msg = "Worker retirement identity metadata changed during retirement."
             raise ValueError(msg)
+        _fsync_retirement_identity(worker_parent_fd, retirement_name, retirement_binding)
         os.fsync(worker_parent_fd)
         _validate_identity_file_binding(current_fd, identity_name, identity.binding)
         _validate_identity_file_binding(worker_parent_fd, retirement_name, retirement_binding)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -227,6 +229,120 @@ def test_local_backend_retires_only_one_exact_run_worker_root_idempotently(tmp_p
     assert not local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root).root.exists()
     assert local_module._local_worker_state_paths(base_key, worker_root=backend.worker_root).root.is_dir()
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_local_backend_fsyncs_staged_retirement_identity_before_canonical_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh retirement must sync the exact identity inode before removing its canonical name."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'8' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    events: list[str] = []
+    original_fsync = metadata_store_module.os.fsync
+    original_unlink = metadata_store_module.os.unlink
+
+    def track_fsync(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            events.append("identity_fsync")
+        original_fsync(descriptor)
+
+    def track_unlink(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        if path == paths.metadata_file.name:
+            events.append("canonical_unlink")
+        original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metadata_store_module.os, "fsync", track_fsync)
+    monkeypatch.setattr(metadata_store_module.os, "unlink", track_unlink)
+
+    backend.retire_worker(run_key)
+
+    assert events.index("identity_fsync") < events.index("canonical_unlink")
+
+
+def test_local_backend_fsyncs_adopted_retirement_identity_before_canonical_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry must sync a pre-existing retirement identity before removing its canonical hard link."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'9' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    original_unlink = metadata_store_module.os.unlink
+
+    def interrupt_after_staging(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        if path == paths.metadata_file.name:
+            msg = "injected interruption after retirement identity staging"
+            raise OSError(msg)
+        original_unlink(path, dir_fd=dir_fd)
+
+    with monkeypatch.context() as staging_fault:
+        staging_fault.setattr(metadata_store_module.os, "unlink", interrupt_after_staging)
+        with pytest.raises(WorkerBackendError, match="injected interruption"):
+            backend.retire_worker(run_key)
+
+    assert paths.metadata_file.is_file()
+    assert len(tuple(paths.root.parent.glob(f".{paths.root.name}.retirement-identity.*"))) == 1
+
+    events: list[str] = []
+    original_fsync = metadata_store_module.os.fsync
+
+    def track_fsync(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            events.append("identity_fsync")
+        original_fsync(descriptor)
+
+    def track_unlink(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        if path == paths.metadata_file.name:
+            events.append("canonical_unlink")
+        original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metadata_store_module.os, "fsync", track_fsync)
+    monkeypatch.setattr(metadata_store_module.os, "unlink", track_unlink)
+    retry_backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+
+    retry_backend.retire_worker(run_key)
+
+    assert events.index("identity_fsync") < events.index("canonical_unlink")
 
 
 def test_local_backend_refuses_symlinked_run_root_with_malformed_target_metadata(tmp_path: Path) -> None:
