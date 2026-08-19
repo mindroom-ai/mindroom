@@ -82,9 +82,7 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal import reads as journal_reads
-from mindroom.event_journal.outbox import (
-    _delivery_payload,
-)
+from mindroom.event_journal.outbox import _legacy_delivery_result, matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
@@ -1148,6 +1146,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.
     client.device_id = "TESTDEVICE"
+    client.olm = None
     client.rooms = _AutoRoomCache(user_id)
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
@@ -1306,9 +1305,11 @@ class FakeOutbox:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
 
@@ -1349,15 +1350,17 @@ class FakeOutbox:
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if key in self.attempted:
+            if key in self.attempted or existing.permanently_failed:
                 return existing.transaction_id
             self.rows[key] = replace(
                 existing,
                 room_id=room_id,
                 thread_id=thread_id,
-                payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
+                payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
+                result=dict(result) if result is not None else _legacy_delivery_result(payload),
                 event_type=event_type,
                 edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
             )
             return existing.transaction_id
         if delivery_id in self.ended_membership_turn_ids:
@@ -1371,10 +1374,12 @@ class FakeOutbox:
             membership_epoch=membership_epoch,
             thread_id=thread_id,
             transaction_id=transaction_id,
-            payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
+            payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
+            result=dict(result) if result is not None else _legacy_delivery_result(payload),
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
+            permanent_failure_reason=permanent_failure_reason,
         )
         return transaction_id
 
@@ -1392,7 +1397,7 @@ class FakeOutbox:
         """
         key = (delivery_id, stage.value)
         row = self.rows.get(key)
-        if row is None or row.retired:
+        if row is None or row.retired or row.permanently_failed:
             return None
         if (
             stage is DeliveryStage.INITIAL
@@ -1433,6 +1438,25 @@ class FakeOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return self.rows.get((delivery_id, stage.value))
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        if not reason:
+            msg = "A permanent Matrix delivery failure requires a reason"
+            raise ValueError(msg)
+        key = (delivery_id, stage.value)
+        row = self.rows.get(key)
+        if row is None or row.acknowledged_event_id is not None:
+            return None if row is None else row.acknowledged_event_id
+        if not row.retired and not row.permanently_failed:
+            self.rows[key] = replace(row, permanent_failure_reason=reason)
+        return None
 
     async def retire_matrix_delivery(
         self,
@@ -1475,7 +1499,11 @@ class FakeOutbox:
             # the row already names rather than its own, and told it bound
             # nothing -- which stays true even when the two events are equal.
             return DeliveryAcknowledgement(settled_event_id=already, bound=False)
-        self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
+        self.rows[key] = replace(
+            self.rows[key],
+            acknowledged_event_id=event_id,
+            permanent_failure_reason=None,
+        )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
@@ -1498,7 +1526,12 @@ class FakeOutbox:
             (
                 row
                 for row in self.rows.values()
-                if row.event_type == event_type and row.acknowledged_event_id is None and not row.retired
+                if (
+                    row.event_type == event_type
+                    and row.acknowledged_event_id is None
+                    and not row.retired
+                    and not row.permanently_failed
+                )
             ),
             key=lambda row: (row.created_at_ns, row.delivery_id, row.stage.value),
         )
@@ -1580,9 +1613,11 @@ class DiesAfterAcknowledgement:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent."""
         return await self.inner.enqueue_matrix_delivery(
@@ -1591,9 +1626,11 @@ class DiesAfterAcknowledgement:
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
             event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
@@ -1631,6 +1668,20 @@ class DiesAfterAcknowledgement:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
 
     async def retire_matrix_delivery(
         self,

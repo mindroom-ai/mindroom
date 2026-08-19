@@ -28,7 +28,6 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
@@ -1151,7 +1150,7 @@ class ResponseRunner:
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
-        semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
+        semantic = delivery.result
         semantic_body: object = None
         interactive_metadata = None
         if isinstance(semantic, dict):
@@ -1194,6 +1193,8 @@ class ResponseRunner:
         """Complete acknowledged FINAL debt, or retain unacknowledged delivery ownership."""
         delivery = await self._approval_responses.final_delivery(claimed, recover=True)
         if delivery is None:
+            return False, None
+        if delivery.permanently_failed:
             return False, None
         if delivery.acknowledged_event_id is None:
             return True, None
@@ -2116,7 +2117,12 @@ class ResponseRunner:
 
         async def recover(_target: MessageTarget) -> bool:
             delivery = await self._approval_responses.final_delivery(continuation, recover=True)
-            if delivery is None or delivery.acknowledged_event_id is None:
+            if delivery is None:
+                return False
+            if delivery.permanently_failed:
+                reason = delivery.permanent_failure_reason or "Final Matrix delivery was permanently refused."
+                return await self._approval_responses.settle_failure(continuation, reason)
+            if delivery.acknowledged_event_id is None:
                 return False
             if await self._approval_responses.successful_final_delivery(continuation) is None:
                 return await self.deps.approval_store.finish_approval_continuation(continuation.approval_id)

@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
+class PermanentDeliveryError(RuntimeError):
+    """A definitive refusal that must not remain ordinary recovery work."""
+
+
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
@@ -145,7 +150,9 @@ class MatrixDeliveryWorker:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Enqueue, claim, send, and acknowledge one delivery.
 
@@ -180,7 +187,9 @@ class MatrixDeliveryWorker:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
             )
         return await self._finish_flush(delivery_id, outcome)
 
@@ -192,7 +201,9 @@ class MatrixDeliveryWorker:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None,
         edits_event_id: str | None,
+        permanent_failure_reason: str | None,
     ) -> _FlushOutcome:
         """Finish a delivery whose durable handoff may already have committed."""
         completed: _FlushOutcome | None = None
@@ -208,8 +219,10 @@ class MatrixDeliveryWorker:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
+                permanent_failure_reason=permanent_failure_reason,
             )
             if transaction_id is None:
                 logger.info("matrix_delivery_refused_for_ended_membership", delivery_id=delivery_id, stage=stage.value)
@@ -311,7 +324,12 @@ class MatrixDeliveryWorker:
                 if stage is DeliveryStage.FINAL
                 else None
             )
-            blocked_final = stage is DeliveryStage.FINAL and stored is not None and not stored.retired
+            blocked_final = (
+                stage is DeliveryStage.FINAL
+                and stored is not None
+                and not stored.retired
+                and not stored.permanently_failed
+            )
             logger.info(
                 "matrix_delivery_stage_blocked" if blocked_final else "matrix_delivery_row_withdrawn",
                 delivery_id=delivery_id,
@@ -387,7 +405,15 @@ class MatrixDeliveryWorker:
             stage=claimed.stage,
             device_id=self.sending_device_id,
         )
-        event_id = await self.send(claimed)
+        try:
+            event_id = await self.send(claimed)
+        except PermanentDeliveryError as error:
+            acknowledged_event_id = await self.store.record_permanent_matrix_delivery_failure(
+                delivery_id=claimed.delivery_id,
+                stage=claimed.stage,
+                reason=str(error),
+            )
+            return _FlushOutcome(event_id=acknowledged_event_id)
         return await self._acknowledge(claimed, event_id)
 
     async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
@@ -581,8 +607,8 @@ class MatrixDeliveryWorker:
                     if outcome.retry_required:
                         failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
-                    # The row was retired, or a FINAL superseded this INITIAL.
-                    # Nothing is owed and nothing failed.
+                    # The row was retired, permanently failed, or superseded.
+                    # Nothing remains for a later recovery pass.
                     continue
                 recovered += 1
 
@@ -590,6 +616,7 @@ class MatrixDeliveryWorker:
 __all__ = [
     "DeliveryStage",
     "MatrixDeliveryWorker",
+    "PermanentDeliveryError",
     "RecoveryOutcome",
     "ResolveDelivered",
     "SendDelivery",

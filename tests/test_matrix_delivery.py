@@ -31,6 +31,8 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
     client.olm = MagicMock() if encrypted else None
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 
@@ -251,6 +253,8 @@ def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
         encryption_state.status_code = "M_NOT_FOUND"
     client.room_get_state_event = AsyncMock(return_value=encryption_state)
     client.olm = MagicMock() if encrypted else None
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
 
@@ -304,12 +308,77 @@ async def test_send_message_outcome_maps_send_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_outcome_maps_an_unrepresentable_payload() -> None:
+    """Irreducible metadata is a typed refusal and never reaches Matrix."""
+    client = _mock_client()
+    client.upload.return_value = (
+        nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-message"}),
+        None,
+    )
+    content = {
+        "body": "x" * 70_000,
+        "msgtype": "m.text",
+        "io.mindroom.required_metadata": "m" * 70_000,
+    }
+
+    outcome = await send_message_outcome(client, "!room:localhost", content)
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_maps_unexpected_response() -> None:
     """A non-send response maps to the unexpected-response kind."""
     client = _mock_client()
     client.room_send.return_value = MagicMock(spec=nio.RoomSendError)
 
     outcome = await send_message_outcome(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_maps_server_too_large_response() -> None:
+    """A definite homeserver size refusal is distinguishable from retryable failures."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="event too large",
+        status_code="M_TOO_LARGE",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert outcome == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE,
+        "event too large",
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_keeps_other_server_refusals_retryable() -> None:
+    """A server refusal is not permanent merely because it is a client error."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
 
     assert isinstance(outcome, MatrixDeliveryFailure)
     assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE

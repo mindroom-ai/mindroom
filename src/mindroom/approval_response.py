@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.constants import (
-    DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -409,6 +408,9 @@ class ApprovalResponseCoordinator:
         manager = approval_manager.get_approval_store()
         if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
+        failed_delivery = await self.final_delivery(current)
+        if failed_delivery is not None and failed_delivery.permanently_failed:
+            return await self.store.finish_approval_continuation(current.approval_id)
         visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
@@ -433,14 +435,7 @@ class ApprovalResponseCoordinator:
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None:
             return None
-        payload = delivery.payload
-        nested = payload.get("m.new_content")
-        semantic = (
-            next((value for key, value in nested.items() if key == DURABLE_FINAL_OUTCOME_KEY), None)
-            if isinstance(nested, dict)
-            else payload.get(DURABLE_FINAL_OUTCOME_KEY)
-        )
-        return delivery if isinstance(semantic, dict) else None
+        return delivery if delivery.result is not None and not delivery.permanently_failed else None
 
     async def final_delivery(
         self,

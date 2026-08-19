@@ -48,6 +48,8 @@ class MockClient:
         self.messages_sent = []
         self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed
+        self.olm = None
+        self.device_id = "DEVICE"
 
     async def room_send(
         self,
@@ -132,7 +134,6 @@ async def test_regular_message_over_limit() -> None:
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
 
-    # Should be an m.file message
     assert sent_content["msgtype"] == "m.file"
     assert sent_content["filename"] == "message-content.json"
 
@@ -147,7 +148,8 @@ async def test_regular_message_over_limit() -> None:
     assert sent_content["io.mindroom.long_text"]["is_complete_content"] is True
 
     # Should have file URL
-    assert "url" in sent_content or "file" in sent_content
+    assert sent_content["url"].startswith("mxc://server/")
+    assert "file" not in sent_content
 
 
 @pytest.mark.asyncio
@@ -200,7 +202,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
         assert sent_content[key] == value
         assert sent_content["m.new_content"][key] == value
 
-    uploaded_payload = json.loads(client.uploads[0]["data"].read().decode("utf-8"))
+    uploaded_payload = json.loads(client.uploads[0]["data"].read())
     for key, value in extra_content.items():
         assert uploaded_payload["m.new_content"][key] == value
 

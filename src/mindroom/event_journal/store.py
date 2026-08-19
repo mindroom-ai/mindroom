@@ -572,9 +572,11 @@ class PrincipalStore:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent, or refuse it as an answer to a membership that ended.
 
@@ -601,8 +603,10 @@ class PrincipalStore:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             ),
         )
 
@@ -661,6 +665,24 @@ class PrincipalStore:
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
+            ),
+        )
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self._backend.write(
+            lambda transaction: outbox.record_permanent_failure(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                stage=stage,
+                reason=reason,
             ),
         )
 
@@ -1071,7 +1093,7 @@ class PrincipalStore:
         )
 
     async def finish_approval_continuation(self, approval_id: str) -> bool:
-        """Settle one paused run only after its FINAL delivery is acknowledged."""
+        """Settle one paused run after its FINAL delivery reaches a terminal outcome."""
         return await self._backend.write(
             lambda transaction: approval_continuations.finish(
                 transaction,
@@ -1181,8 +1203,10 @@ def _enqueue_matrix_delivery(
     room_id: str,
     thread_id: str | None,
     payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
+    permanent_failure_reason: str | None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1254,7 +1278,9 @@ def _enqueue_matrix_delivery(
         membership_epoch=membership_epoch,
         thread_id=thread_id,
         payload=payload,
+        result=result,
         edits_event_id=edits_event_id,
+        permanent_failure_reason=permanent_failure_reason,
     )
     if transaction_id is None:
         return None

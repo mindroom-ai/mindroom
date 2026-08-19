@@ -53,6 +53,7 @@ from .models import (
     UnreadableMatrixDelivery,
     VisibleMessage,
 )
+from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
@@ -123,6 +124,7 @@ __all__ = [
     "decode_thread_id",
     "delivery_transaction_id",
     "encode_thread_id",
+    "matrix_delivery_payload",
     "replacement_target",
     "thread_root",
     "visible_content",

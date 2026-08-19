@@ -14,12 +14,13 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
     ProjectedEvent,
     TerminalTurnWrite,
+    matrix_delivery_payload,
     replacement_target,
     thread_root,
 )
@@ -51,10 +52,11 @@ from mindroom.matrix.client_delivery import (
     build_edit_event_content,
     edit_message_outcome,
     edit_message_result,
+    resolve_room_encryption_outcome,
     send_message_outcome,
     send_message_result,
 )
-from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import (
@@ -63,6 +65,7 @@ from mindroom.matrix.room_history_reads import (
 from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
+    PermanentDeliveryError,
     RecoveryOutcome,
     SendDelivery,
     TurnHandoff,
@@ -257,6 +260,7 @@ class SendTextRequest:  # noqa: D101
     # whose duplication a reader would see, and it is the initial stage.
     delivery_stage: DeliveryStage = DeliveryStage.FINAL
     defer_source_handoff: bool = False
+    delivery_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +276,7 @@ class EditTextRequest:  # noqa: D101
     # whose loss leaves a user looking at "Thinking..." for good.
     delivery_turn_id: str | None = None
     defer_source_handoff: bool = False
+    delivery_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -409,6 +414,7 @@ class DeliveryGatewayDeps:
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
     MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
     MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
+    MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE: "matrix event exceeds the hard size limit",
     MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
     MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
 }
@@ -677,6 +683,8 @@ class DeliveryGateway:
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
+            if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                raise PermanentDeliveryError(detail)
             msg = f"Matrix refused delivery for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
         return outcome
@@ -852,20 +860,6 @@ class DeliveryGateway:
                 content,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
-        # Prepared before the row is written, so the frozen payload is the one
-        # that goes on the wire. Uploading the sidecar after the claim left the
-        # row holding the oversized original while Matrix received an MXC
-        # reference, and a recovery resend would upload again -- minting a new
-        # MXC, and new encrypted-file keys, under a transaction ID the
-        # homeserver had already accepted. An attempted row is already frozen,
-        # so preparation is skipped and `enqueue` leaves that stored payload
-        # untouched for the claimed send below.
-        content = await self._prepared_for_the_wire(
-            room_id,
-            content,
-            turn_id=request.delivery_turn_id,
-            stage=request.delivery_stage,
-        )
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -875,6 +869,28 @@ class DeliveryGateway:
                 requested_delivery = delivered
             return delivered.event_id
 
+        # Prepared before the row is written, so the frozen payload is the one
+        # that goes on the wire. Uploading the sidecar after the claim left the
+        # row holding the oversized original while Matrix received an MXC
+        # reference, and a recovery resend would upload again -- minting a new
+        # MXC, and new encrypted-file keys, under a transaction ID the
+        # homeserver had already accepted. An attempted row is already frozen,
+        # so preparation is skipped and `enqueue` leaves that stored payload
+        # untouched for the claimed send below.
+        prepared = await self._prepared_for_the_wire(
+            room_id,
+            content,
+            turn_id=request.delivery_turn_id,
+            stage=request.delivery_stage,
+        )
+        if isinstance(prepared, MatrixDeliveryFailure):
+            if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                return prepared
+            preparation_failure: MatrixDeliveryFailure | None = prepared
+        else:
+            preparation_failure = None
+            content = prepared
+
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
             event_id = await self._response_delivery(send, handoff=handoff).deliver(
@@ -883,14 +899,17 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
+                result=request.delivery_result,
+                permanent_failure_reason=(
+                    _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
+                ),
             )
         except _DeliveryRefusedError:
             return None
         if event_id is None:
-            # The membership this turn answered has ended. The room it was
-            # answering is not the room the bot is in now, so there is nothing
-            # to send and nothing to recover.
-            return None
+            # The delivery was withdrawn by membership or ended in an explicit
+            # permanent failure, so there is nothing left for recovery to send.
+            return preparation_failure
         if requested_delivery is not None and requested_delivery.event_id == event_id:
             return requested_delivery
         # The delivery was already acknowledged, so nothing was sent and the
@@ -982,30 +1001,6 @@ class DeliveryGateway:
                 request.new_text,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
-        # What is stored is the finished wire event, not the text it was built
-        # from. Recovery sends the row exactly as frozen and has no request to
-        # rebuild from, so anything reconstructed at send time -- the replace
-        # envelope, the fallback body -- would be missing on the one path that
-        # matters, and the answer would come back as a second message with the
-        # placeholder still above it.
-        envelope = build_edit_event_content(
-            event_id=request.event_id,
-            new_content=content,
-            new_text=request.new_text,
-        )
-        # Prepared before the row is written, for the same reason the envelope
-        # is built here: the row has to hold the finished wire event. A sidecar
-        # uploaded after the claim would leave the row holding the oversized
-        # original while Matrix received an MXC reference, and a resend would
-        # upload again under a transaction ID already accepted. An attempted
-        # row is already frozen, so preparation is skipped and
-        # `enqueue` leaves that stored envelope untouched for the claimed send.
-        envelope = await self._prepared_for_the_wire(
-            room_id,
-            envelope,
-            turn_id=request.delivery_turn_id,
-            stage=DeliveryStage.FINAL,
-        )
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1028,10 +1023,44 @@ class DeliveryGateway:
             )
             if isinstance(outcome, MatrixDeliveryFailure):
                 detail = _matrix_delivery_failure_reason(outcome)
+                if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                    raise PermanentDeliveryError(detail)
                 msg = f"Matrix refused the final edit for turn {claimed.delivery_id!r}: {detail}"
                 raise _DeliveryRefusedError(msg)
             delivered = outcome
             return outcome.event_id
+
+        # What is stored is the finished wire event, not the text it was built
+        # from. Recovery sends the row exactly as frozen and has no request to
+        # rebuild from, so anything reconstructed at send time -- the replace
+        # envelope, the fallback body -- would be missing on the one path that
+        # matters, and the answer would come back as a second message with the
+        # placeholder still above it.
+        envelope = build_edit_event_content(
+            event_id=request.event_id,
+            new_content=content,
+            new_text=request.new_text,
+        )
+        # Prepared before the row is written, for the same reason the envelope
+        # is built here: the row has to hold the finished wire event. A sidecar
+        # uploaded after the claim would leave the row holding the oversized
+        # original while Matrix received an MXC reference, and a resend would
+        # upload again under a transaction ID already accepted. An attempted
+        # row is already frozen, so preparation is skipped and
+        # `enqueue` leaves that stored envelope untouched for the claimed send.
+        prepared = await self._prepared_for_the_wire(
+            room_id,
+            envelope,
+            turn_id=request.delivery_turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+        if isinstance(prepared, MatrixDeliveryFailure):
+            if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                return prepared
+            preparation_failure = prepared
+        else:
+            preparation_failure = None
+            envelope = prepared
 
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
@@ -1041,14 +1070,18 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=envelope,
+                result=request.delivery_result,
                 edits_event_id=request.event_id,
+                permanent_failure_reason=(
+                    _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
+                ),
             )
         except _DeliveryRefusedError:
             return None
         if event_id is None:
-            # The membership this turn answered has ended, so its answer is
-            # not this bot's to give in the room it is in now.
-            return None
+            # The delivery was withdrawn by membership or ended in an explicit
+            # permanent failure, so there is nothing left for recovery to send.
+            return preparation_failure
         if delivered is not None:
             return delivered
         # Already acknowledged: this turn's answer reached the room on an
@@ -1222,9 +1255,14 @@ class DeliveryGateway:
                     source_event_id=request.identity.response_envelope.source_event_id,
                 ),
             )
+        delivery_result: dict[str, object] | None = None
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
-            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {
+            # Older readers recognize any mapping here as a successful FINAL.
+            # Keep that rolling-read signal bounded; the complete result is
+            # local outbox state and cannot make the Matrix event impossible.
+            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
+            delivery_result = {
                 "body": display_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
@@ -1240,6 +1278,7 @@ class DeliveryGateway:
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                     defer_source_handoff=request.defer_source_handoff,
+                    delivery_result=delivery_result,
                 ),
             )
             if edited:
@@ -1286,6 +1325,7 @@ class DeliveryGateway:
                 # value after a restart, which a generated ID would not.
                 delivery_turn_id=request.identity.response_envelope.source_event_id,
                 defer_source_handoff=request.defer_source_handoff,
+                delivery_result=delivery_result,
             ),
         )
         if event_id is None:
@@ -1636,7 +1676,7 @@ class DeliveryGateway:
         *,
         turn_id: str,
         stage: DeliveryStage,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | MatrixDeliveryFailure:
         """Prepare a payload for the wire, unless a frozen one already exists.
 
         Preparation can upload a sidecar, so it must not run for a turn whose
@@ -1644,11 +1684,37 @@ class DeliveryGateway:
         refuses to overwrite it, so preparing again would upload an attachment
         nothing can ever reference -- or fail before the durable payload gets
         another chance to reach Matrix.
+
+        Preparation uses the currently observed room encryption state. Once
+        attempted, retries and startup recovery send the same frozen bytes
+        without uploading or rebuilding anything.
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return content
-        return await prepare_large_message(self._client(), room_id, content)
+        client = self._client()
+        encryption_outcome = await resolve_room_encryption_outcome(
+            client,
+            room_id,
+            operation="prepare_durable_delivery",
+        )
+        if isinstance(encryption_outcome, MatrixDeliveryFailure):
+            return encryption_outcome
+        wire_content = matrix_delivery_payload(
+            self.deps.outbox.principal_id,
+            turn_id,
+            stage,
+            content,
+        )
+        try:
+            return await prepare_large_message(
+                client,
+                room_id,
+                wire_content,
+                room_encrypted=encryption_outcome,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
 
     def _final_text_transform(self, identity: ResponseIdentity) -> FinalTextTransform:
         """Return the hook that shapes the answer before its terminal payload is built.

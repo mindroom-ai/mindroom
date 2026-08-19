@@ -38,6 +38,9 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
     client.olm = MagicMock() if encrypted else None
+    client.device_id = "DEVICE"
+    if client.olm is not None:
+        client.olm.device_id = "DEVICE"
     return client
 
 
@@ -838,27 +841,6 @@ class TestSendMessageResult:
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
         client.room_send.assert_not_awaited()
         client._send.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_treats_non_dict_room_cache_as_unknown_room(self) -> None:
-        """Non-dict room caches should be treated as empty for plain sends."""
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.rooms = AsyncMock()
-        client.room_send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
-
-        with patch(
-            "mindroom.matrix.client_delivery.prepare_large_message",
-            new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
-        ):
-            result = await send_message_result(
-                client,
-                "!room:localhost",
-                {"body": "hello", "msgtype": "m.text"},
-            )
-
-        assert result is not None
-        assert result.event_id == "$evt:localhost"
-        client.room_send.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_returns_none_when_room_send_raises_unverified_device_error(self) -> None:

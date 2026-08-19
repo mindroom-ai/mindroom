@@ -19,6 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -33,7 +34,12 @@ from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
+from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
+    _calculate_delivery_event_size,
+    _calculate_event_size,
+)
+from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
@@ -133,7 +139,10 @@ def _gateway(
     )
     client = AsyncMock()
     client.user_id = _AGENT_USER_ID
-
+    room = MagicMock()
+    room.encrypted = False
+    client.rooms = {_ROOM_ID: room}
+    client.olm = None
     client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
     return DeliveryGateway(
         DeliveryGatewayDeps(
@@ -670,15 +679,198 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
 
-        frozen = outbox.rows["$cause", "final"].payload
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
         new_content = frozen["m.new_content"]
         prompt = new_content["io.mindroom.interactive"]
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
-        semantic = new_content["io.mindroom.final_delivery"]
+        assert new_content[DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
+        semantic = delivery.result
+        assert semantic is not None
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
         assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+
+    async def test_large_deferred_final_edit_freezes_a_sendable_semantic_payload(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A recoverable final edit must not leave an impossible outbox retry."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/final-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        answer = "final answer " + ("x" * 100_000)
+
+        outcome = await gateway.deliver_final(
+            replace(
+                self._final_request(answer),
+                existing_event_id="$placeholder",
+                defer_source_handoff=True,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
+        assert delivery.result == {"body": answer, "interactive": None}
+        assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_delivery_identity_is_included_in_the_validated_event_size(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The exact persisted and sent event must fit after identity is attached."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/identity-sized-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 20_500),
+            existing_event_id="$placeholder",
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.test_metadata": "m" * 10_500},
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Remote encryption state must shape the payload before the outbox freezes it."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+        client.room_get_state_event.return_value = MagicMock(spec=nio.RoomGetStateEventResponse)
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/encrypted-sidecar"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "preview"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request("x" * 50_000))
+
+        assert outcome.event_id == "$sent"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["msgtype"] == "m.file"
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+        client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
+
+    async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An unknown encryption state must not leave an ambiguously sized outbox row."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        encryption_error = MagicMock(spec=nio.RoomGetStateEventError)
+        encryption_error.status_code = "M_FORBIDDEN"
+        client.room_get_state_event.return_value = encryption_error
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outbox.rows == {}
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
+
+    @pytest.mark.parametrize("existing_event_id", [None, "$placeholder"], ids=("send", "edit"))
+    async def test_an_unrepresentable_final_is_recorded_without_a_send(
+        self,
+        tmp_path: Path,
+        existing_event_id: str | None,
+    ) -> None:
+        """Irreducible metadata becomes durable terminal state without network I/O."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-edit"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 70_000),
+            existing_event_id=existing_event_id,
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.required_metadata": "m" * 70_000},
+        )
+
+        outcome = await gateway.deliver_final(request)
+        frozen = outbox.rows["$cause", "final"]
+        repeated = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.failure_reason == "delivery_failed"
+        assert repeated.terminal_status == "error"
+        failed = outbox.rows["$cause", "final"]
+        assert failed.permanently_failed
+        assert not failed.attempted
+        assert failed.edits_event_id == existing_event_id
+        assert failed == frozen
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
@@ -840,6 +1032,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -901,6 +1094,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -937,6 +1131,53 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert delivered is not None
         assert client.upload.await_count == 1
         assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_a_definitive_oversized_refusal_stops_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The server's size refusal is inspectable and never replayed forever."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendError(
+            message="event too large",
+            status_code="M_TOO_LARGE",
+            room_id=_ROOM_ID,
+        )
+        gateway.deps.runtime.client = client
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+        answer = "x" * 125_000
+        content = {
+            "msgtype": "m.text",
+            "body": answer,
+            "io.mindroom.stream_status": "completed",
+        }
+
+        first = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+        second = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+
+        stored = outbox.rows["$cause", "final"]
+        assert first is None
+        assert second is None
+        assert stored.permanent_failure_reason is not None
+        assert client.room_send.await_count == 1
+        assert client.upload.await_count == 1
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,
@@ -2382,6 +2623,32 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert stored is not None
         assert stored.acknowledged_event_id == "$replacement"
 
+    async def test_permanent_refusal_is_not_returned_to_recovery(self, alice: PrincipalStore) -> None:
+        """A definitive refusal is terminal state, not another failed recovery pass."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "frozen"},
+        )
+        send = AsyncMock(side_effect=PermanentDeliveryError("matrix event exceeds the hard size limit"))
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            sending_device_id="DEVICE",
+        )
+
+        first = await worker.recover()
+        second = await worker.recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert first == RecoveryOutcome(recovered=0, failed=0)
+        assert second == RecoveryOutcome(recovered=0, failed=0)
+        send.assert_awaited_once()
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+
 
 class TestTurnDeliverySerialization:
     """The gateway shares one turn-scoped delivery order without leaking the lock."""
@@ -2546,8 +2813,10 @@ class TestTurnDeliverySerialization:
             room_id: str,
             thread_id: str | None,
             payload: Mapping[str, object],
+            result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
+            permanent_failure_reason: str | None = None,
         ) -> str | None:
             transaction_id = await original_enqueue(
                 delivery_id=delivery_id,
@@ -2556,8 +2825,10 @@ class TestTurnDeliverySerialization:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             )
             enqueue_committed.set()
             await return_from_enqueue.wait()

@@ -293,6 +293,11 @@ class MatrixDeliveryView(Protocol):
     delivery accounts for.
     """
 
+    @property
+    def principal_id(self) -> str:
+        """Return the principal whose delivery rows this view owns."""
+        ...
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         ...
@@ -305,9 +310,11 @@ class MatrixDeliveryView(Protocol):
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent and settle what it answers, or refuse both."""
         ...
@@ -338,6 +345,16 @@ class MatrixDeliveryView(Protocol):
 
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
+        ...
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
         ...
 
     async def retire_matrix_delivery(
