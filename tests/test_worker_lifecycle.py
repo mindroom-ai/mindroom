@@ -345,6 +345,177 @@ def test_local_backend_fsyncs_adopted_retirement_identity_before_canonical_unlin
     assert events.index("identity_fsync") < events.index("canonical_unlink")
 
 
+def test_local_backend_fsyncs_adopted_retirement_identity_name_before_canonical_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry must commit an uncommitted sidecar name before removing its canonical hard link."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'7' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    worker_parent = paths.root.parent.stat()
+    original_fsync = metadata_store_module.os.fsync
+    fail_parent_sync = True
+
+    def interrupt_first_parent_sync(descriptor: int) -> None:
+        nonlocal fail_parent_sync
+        metadata = os.fstat(descriptor)
+        if (
+            fail_parent_sync
+            and stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_dev == worker_parent.st_dev
+            and metadata.st_ino == worker_parent.st_ino
+        ):
+            fail_parent_sync = False
+            msg = "injected worker-parent sync failure"
+            raise OSError(msg)
+        original_fsync(descriptor)
+
+    with monkeypatch.context() as staging_fault:
+        staging_fault.setattr(metadata_store_module.os, "fsync", interrupt_first_parent_sync)
+        with pytest.raises(WorkerBackendError, match="worker-parent sync failure"):
+            backend.retire_worker(run_key)
+
+    assert fail_parent_sync is False
+    assert paths.metadata_file.is_file()
+    assert len(tuple(paths.root.parent.glob(f".{paths.root.name}.retirement-identity.*"))) == 1
+
+    events: list[str] = []
+    original_unlink = metadata_store_module.os.unlink
+
+    def track_fsync(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_dev == worker_parent.st_dev
+            and metadata.st_ino == worker_parent.st_ino
+        ):
+            events.append("worker_parent_fsync")
+        original_fsync(descriptor)
+
+    def track_unlink(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        if path == paths.metadata_file.name:
+            events.append("canonical_unlink")
+        original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metadata_store_module.os, "fsync", track_fsync)
+    monkeypatch.setattr(metadata_store_module.os, "unlink", track_unlink)
+    retry_backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+
+    retry_backend.retire_worker(run_key)
+
+    assert events.index("worker_parent_fsync") < events.index("canonical_unlink")
+
+
+def test_local_backend_binds_adopted_identity_validation_and_sync_for_fresh_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-inode overwrite at adoption cannot poison the sidecar retained by a late failure."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'6' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    original_unlink = metadata_store_module.os.unlink
+
+    def interrupt_after_staging(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        if path == paths.metadata_file.name:
+            msg = "injected interruption after retirement identity staging"
+            raise OSError(msg)
+        original_unlink(path, dir_fd=dir_fd)
+
+    with monkeypatch.context() as staging_fault:
+        staging_fault.setattr(metadata_store_module.os, "unlink", interrupt_after_staging)
+        with pytest.raises(WorkerBackendError, match="injected interruption"):
+            backend.retire_worker(run_key)
+
+    sidecar = next(paths.root.parent.glob(f".{paths.root.name}.retirement-identity.*"))
+    original_open = metadata_store_module.os.open
+    original_rmdir = metadata_store_module.os.rmdir
+    sidecar_opens = 0
+    fail_root_once = True
+
+    def mutate_same_inode_before_second_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal sidecar_opens
+        if path == sidecar.name:
+            sidecar_opens += 1
+            if sidecar_opens == 2:
+                before = sidecar.stat()
+                sidecar.write_text('{"worker_key":"substituted"}', encoding="utf-8")
+                after = sidecar.stat()
+                assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def fail_first_worker_root_rmdir(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        nonlocal fail_root_once
+        if path == paths.root.name and fail_root_once:
+            fail_root_once = False
+            msg = "injected final worker-root removal failure"
+            raise OSError(msg)
+        original_rmdir(path, dir_fd=dir_fd)
+
+    with monkeypatch.context() as retirement_faults:
+        retirement_faults.setattr(metadata_store_module.os, "open", mutate_same_inode_before_second_open)
+        retirement_faults.setattr(metadata_store_module.os, "rmdir", fail_first_worker_root_rmdir)
+        with pytest.raises(WorkerBackendError, match="final worker-root removal failure"):
+            backend.retire_worker(run_key)
+
+    assert fail_root_once is False
+    retry_backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+
+    retry_backend.retire_worker(run_key)
+
+    assert paths.root.exists() is False
+    assert tuple(paths.root.parent.iterdir()) == ()
+
+
 def test_local_backend_refuses_symlinked_run_root_with_malformed_target_metadata(tmp_path: Path) -> None:
     """Malformed metadata cannot turn a run-key symlink into authority to delete another worker root."""
     backend = local_module._LocalWorkerBackend(

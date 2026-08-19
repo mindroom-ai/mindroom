@@ -56,6 +56,8 @@ class _IdentityFileBinding:
 class _WorkerIdentity:
     path: tuple[str, ...]
     binding: _IdentityFileBinding
+    worker_key: str
+    field_path: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -312,6 +314,29 @@ def _open_identity_directory(worker_fd: int, directory_parts: tuple[str, ...]) -
             os.close(descriptor)
 
 
+def _read_bounded_identity_descriptor(identity_fd: int) -> tuple[bytes, _IdentityFileBinding]:
+    metadata = os.fstat(identity_fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_IDENTITY_METADATA_BYTES:
+        msg = "Worker identity metadata must be a bounded regular file."
+        raise ValueError(msg)
+    chunks: list[bytes] = []
+    remaining = _MAX_IDENTITY_METADATA_BYTES + 1
+    while remaining:
+        chunk = os.read(identity_fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw_payload = b"".join(chunks)
+    if len(raw_payload) > _MAX_IDENTITY_METADATA_BYTES:
+        msg = "Worker identity metadata must be a bounded regular file."
+        raise ValueError(msg)
+    return raw_payload, _IdentityFileBinding(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+
+
 def _read_bounded_identity_file(parent_fd: int, filename: str) -> tuple[bytes, _IdentityFileBinding]:
     _validate_segment(filename)
     try:
@@ -320,26 +345,7 @@ def _read_bounded_identity_file(parent_fd: int, filename: str) -> tuple[bytes, _
         msg = "Worker identity metadata is missing."
         raise ValueError(msg) from exc
     try:
-        metadata = os.fstat(identity_fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_IDENTITY_METADATA_BYTES:
-            msg = "Worker identity metadata must be a bounded regular file."
-            raise ValueError(msg)
-        chunks: list[bytes] = []
-        remaining = _MAX_IDENTITY_METADATA_BYTES + 1
-        while remaining:
-            chunk = os.read(identity_fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw_payload = b"".join(chunks)
-        if len(raw_payload) > _MAX_IDENTITY_METADATA_BYTES:
-            msg = "Worker identity metadata must be a bounded regular file."
-            raise ValueError(msg)
-        return raw_payload, _IdentityFileBinding(
-            device=metadata.st_dev,
-            inode=metadata.st_ino,
-        )
+        return _read_bounded_identity_descriptor(identity_fd)
     finally:
         os.close(identity_fd)
 
@@ -360,16 +366,13 @@ def _read_identity(
     worker_fd: int,
     *,
     identity_path: tuple[str, ...],
-) -> tuple[dict[str, object], _WorkerIdentity]:
+) -> tuple[dict[str, object], _IdentityFileBinding]:
     if not identity_path:
         msg = "Worker identity metadata path is missing."
         raise ValueError(msg)
     with _open_identity_directory(worker_fd, identity_path[:-1]) as identity_parent_fd:
         raw_payload, binding = _read_bounded_identity_file(identity_parent_fd, identity_path[-1])
-    return _decode_identity(raw_payload, description="Worker identity metadata"), _WorkerIdentity(
-        path=identity_path,
-        binding=binding,
-    )
+    return _decode_identity(raw_payload, description="Worker identity metadata"), binding
 
 
 def _identity_value(payload: dict[str, object], field_path: tuple[str, ...]) -> object:
@@ -527,12 +530,22 @@ def _validate_identity_file_binding(
         raise ValueError(msg)
 
 
-def _fsync_retirement_identity(
+def _validate_identity_descriptor_binding(identity_fd: int, binding: _IdentityFileBinding) -> None:
+    metadata = os.fstat(identity_fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != binding.device or metadata.st_ino != binding.inode:
+        msg = "Worker retirement identity metadata changed during retirement."
+        raise ValueError(msg)
+
+
+def _sync_retirement_identity(
     parent_fd: int,
     filename: str,
-    binding: _IdentityFileBinding,
-) -> None:
-    """Sync one exact bound retirement identity inode through its sidecar name."""
+    *,
+    expected_worker_key: str,
+    identity_field_path: tuple[str, ...],
+    expected_binding: _IdentityFileBinding | None = None,
+) -> _IdentityFileBinding:
+    """Validate and durably publish one retirement identity through one bound descriptor."""
     _validate_segment(filename)
     try:
         identity_fd = os.open(filename, _IDENTITY_FILE_OPEN_FLAGS, dir_fd=parent_fd)
@@ -540,16 +553,21 @@ def _fsync_retirement_identity(
         msg = "Worker retirement identity metadata changed during retirement."
         raise ValueError(msg) from exc
     try:
-        metadata = os.fstat(identity_fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != binding.device or metadata.st_ino != binding.inode:
+        raw_payload, binding = _read_bounded_identity_descriptor(identity_fd)
+        if expected_binding is not None and binding != expected_binding:
             msg = "Worker retirement identity metadata changed during retirement."
+            raise ValueError(msg)
+        payload = _decode_identity(raw_payload, description="Worker retirement identity metadata")
+        if _identity_value(payload, identity_field_path) != expected_worker_key:
+            msg = f"Worker retirement identity metadata does not match retirement key '{expected_worker_key}'."
             raise ValueError(msg)
         os.fsync(identity_fd)
-        metadata = os.fstat(identity_fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_dev != binding.device or metadata.st_ino != binding.inode:
-            msg = "Worker retirement identity metadata changed during retirement."
-            raise ValueError(msg)
+        _validate_identity_descriptor_binding(identity_fd, binding)
         _validate_identity_file_binding(parent_fd, filename, binding)
+        os.fsync(parent_fd)
+        _validate_identity_descriptor_binding(identity_fd, binding)
+        _validate_identity_file_binding(parent_fd, filename, binding)
+        return binding
     finally:
         os.close(identity_fd)
 
@@ -564,22 +582,6 @@ def _fsync_and_require_name_absent(parent_fd: int, name: str) -> None:
     raise ValueError(msg)
 
 
-def _read_retirement_identity(
-    parent_fd: int,
-    filename: str,
-    *,
-    expected_worker_key: str,
-    identity_field_path: tuple[str, ...],
-) -> _IdentityFileBinding:
-    raw_payload, binding = _read_bounded_identity_file(parent_fd, filename)
-    payload = _decode_identity(raw_payload, description="Worker retirement identity metadata")
-    if _identity_value(payload, identity_field_path) != expected_worker_key:
-        msg = f"Worker retirement identity metadata does not match retirement key '{expected_worker_key}'."
-        raise ValueError(msg)
-    _fsync_retirement_identity(parent_fd, filename, binding)
-    return binding
-
-
 def _load_retirement_identity(
     parent_fd: int,
     *,
@@ -592,11 +594,14 @@ def _load_retirement_identity(
     name = _find_retirement_identity_name(parent_fd, worker_name)
     if name is None:
         return None, None
-    return name, _read_retirement_identity(
-        parent_fd,
+    return (
         name,
-        expected_worker_key=expected_worker_key,
-        identity_field_path=identity_field_path,
+        _sync_retirement_identity(
+            parent_fd,
+            name,
+            expected_worker_key=expected_worker_key,
+            identity_field_path=identity_field_path,
+        ),
     )
 
 
@@ -607,11 +612,16 @@ def _load_canonical_identity(
     identity_path: tuple[str, ...],
     identity_field_path: tuple[str, ...],
 ) -> _WorkerIdentity:
-    payload, identity = _read_identity(worker_fd, identity_path=identity_path)
+    payload, binding = _read_identity(worker_fd, identity_path=identity_path)
     if _identity_value(payload, identity_field_path) != expected_worker_key:
         msg = f"Worker identity metadata does not match retirement key '{expected_worker_key}'."
         raise ValueError(msg)
-    return identity
+    return _WorkerIdentity(
+        path=identity_path,
+        binding=binding,
+        worker_key=expected_worker_key,
+        field_path=identity_field_path,
+    )
 
 
 def _stage_retirement_identity(
@@ -633,7 +643,7 @@ def _stage_retirement_identity(
             current_fd = child_fd
         identity_name = identity.path[-1]
         _validate_identity_file_binding(current_fd, identity_name, identity.binding)
-        try:
+        with suppress(FileExistsError):
             os.link(
                 identity_name,
                 retirement_name,
@@ -641,17 +651,13 @@ def _stage_retirement_identity(
                 dst_dir_fd=worker_parent_fd,
                 follow_symlinks=False,
             )
-        except FileExistsError:
-            existing = _read_bounded_identity_file(worker_parent_fd, retirement_name)[1]
-            if existing != identity.binding:
-                msg = "Worker retirement identity metadata changed during retirement."
-                raise ValueError(msg) from None
-        retirement_binding = _read_bounded_identity_file(worker_parent_fd, retirement_name)[1]
-        if retirement_binding != identity.binding:
-            msg = "Worker retirement identity metadata changed during retirement."
-            raise ValueError(msg)
-        _fsync_retirement_identity(worker_parent_fd, retirement_name, retirement_binding)
-        os.fsync(worker_parent_fd)
+        retirement_binding = _sync_retirement_identity(
+            worker_parent_fd,
+            retirement_name,
+            expected_worker_key=identity.worker_key,
+            identity_field_path=identity.field_path,
+            expected_binding=identity.binding,
+        )
         _validate_identity_file_binding(current_fd, identity_name, identity.binding)
         _validate_identity_file_binding(worker_parent_fd, retirement_name, retirement_binding)
         os.unlink(identity_name, dir_fd=current_fd)
@@ -724,6 +730,8 @@ def open_worker_state_root(
             expected_worker_key=expected_worker_key,
             identity_field_path=identity_field_path,
         )
+        _validate_trusted_root(trusted_root_binding)
+        _validate_bindings(tuple(bindings))
         try:
             worker_fd = _open_directory_at(worker_parent_fd, worker_name)
         except FileNotFoundError:
