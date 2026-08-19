@@ -883,6 +883,52 @@ async def test_prepare_terminal_edit_rejects_irreducible_metadata_before_repeate
 
 
 @pytest.mark.asyncio
+async def test_sidecar_locator_overflow_falls_back_without_repreparing() -> None:
+    """An unexpectedly large MXC URI must not turn preparation into a retry loop."""
+    huge_mxc_uri = f"mxc://server/{'x' * 70_000}"
+    encrypted_file = {
+        "url": huge_mxc_uri,
+        "key": {"kty": "oct", "k": "key"},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+        "v": "v2",
+        "mimetype": "application/json",
+        "size": 70_000,
+    }
+    upload_count = 0
+
+    async def upload_sidecar(*_args: object, **_kwargs: object) -> tuple[str, dict[str, object]]:
+        nonlocal upload_count
+        upload_count += 1
+        return huge_mxc_uri, encrypted_file
+
+    content = {"msgtype": "m.text", "body": "x" * 70_000}
+    with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=upload_sidecar):
+        result = await prepare_large_message(
+            _UploadClient(nio.UploadResponse("mxc://server/unused")),
+            "!room:server",
+            content,
+            room_encrypted=False,
+            transition_safe=True,
+        )
+
+    assert upload_count == 1
+    assert result["msgtype"] == "m.text"
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in result["body"]
+    for sidecar_key in ("url", "file", "filename", "info", "io.mindroom.long_text"):
+        assert sidecar_key not in result
+    assert (
+        _calculate_delivery_event_size(
+            result,
+            room_id="!room:server",
+            room_encrypted=True,
+            device_id="DEVICE",
+        )
+        <= _MATRIX_EVENT_HARD_LIMIT
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_oversized_file_edit_remains_parseable() -> None:
     """A sidecar-backed file edit must carry a valid outer fallback event."""
     client = _UploadClient(nio.UploadResponse("mxc://server/replacement-sidecar"))

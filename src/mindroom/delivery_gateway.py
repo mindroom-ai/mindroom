@@ -1665,6 +1665,14 @@ class DeliveryGateway:
         refuses to overwrite it, so preparing again would upload an attachment
         nothing can ever reference -- or fail before the durable payload gets
         another chance to reach Matrix.
+
+        A durable row can also outlive the room state observed here. Size it for
+        encrypted delivery even when the room is currently unencrypted, so
+        enabling encryption cannot make the frozen event too large. The sidecar
+        remains shaped for the current room: a plaintext ``m.file`` stays valid
+        inside a later encrypted event and is parseable before the transition too.
+        This conservative work happens once per durable row, before enqueue;
+        retries and startup recovery send the same frozen bytes without repeating it.
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
@@ -1692,6 +1700,7 @@ class DeliveryGateway:
                 room_id,
                 wire_content,
                 room_encrypted=room_encrypted,
+                transition_safe=True,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))

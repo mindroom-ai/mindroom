@@ -702,6 +702,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -741,6 +742,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -803,6 +805,68 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
 
+    async def test_unencrypted_durable_payload_remains_valid_after_encryption_is_enabled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A frozen payload must fit the stronger state a room can enter later."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/transition-safe-sidecar"}),
+            None,
+        )
+        client.room_send.side_effect = (
+            nio.RoomSendError(message="temporary refusal"),
+            nio.RoomSendResponse(event_id="$sent", room_id=_ROOM_ID),
+        )
+        gateway.deps.runtime.client = client
+        request = self._final_request("x" * 25_000)
+
+        first = await gateway.deliver_final(request)
+
+        assert first.terminal_status == "error"
+        frozen = dict(outbox.rows["$cause", "final"].payload)
+        assert frozen["msgtype"] == "m.file"
+        assert "url" in frozen
+        assert "file" not in frozen
+        event_source = {
+            "content": frozen,
+            "event_id": "$transition-safe",
+            "sender": _AGENT_USER_ID,
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+        }
+        assert isinstance(nio.Event.parse_event(event_source), nio.RoomMessageFile)
+        assert isinstance(nio.RoomMessage.parse_decrypted_event(event_source), nio.RoomMessageFile)
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+        room.encrypted = True
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+
+        replay = await gateway.deliver_final(request)
+
+        assert replay.terminal_status == "completed"
+        assert client.upload.await_count == 1
+        assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [frozen, frozen]
+
     async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
         self,
         tmp_path: Path,
@@ -836,6 +900,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         room = MagicMock()
         room.encrypted = False
         client.rooms = {_ROOM_ID: room}
@@ -857,6 +922,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "error"
         assert outcome.failure_reason == "delivery_failed"
         assert outbox.rows == {}
+        client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
@@ -1019,6 +1085,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -1080,6 +1147,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False

@@ -800,12 +800,77 @@ def _build_text_fallback_content(
         preview_limit = max(0, preview_limit // 2)
 
 
+def _ensure_minimum_preview_can_fit(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    *,
+    is_edit: bool,
+    room_id: str,
+    calculate_event_size: Callable[[dict[str, Any]], int],
+) -> None:
+    """Reject fixed metadata that cannot fit even with an empty text preview.
+
+    This is deliberately a lower-bound check before any sidecar upload. If the
+    smallest possible fallback cannot fit, uploading cannot make the event
+    deliverable and would only leave an unreferenced attachment behind.
+    """
+    preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
+    minimum_preview: dict[str, Any] = {"msgtype": preview_msgtype, "body": ""}
+    _copy_preview_metadata(source_content, minimum_preview)
+
+    if is_edit:
+        minimum_event = _wrap_large_edit(content, source_content, minimum_preview)
+        minimum_event["body"] = ""
+    else:
+        minimum_event = minimum_preview
+        if "m.relates_to" in content:
+            minimum_event["m.relates_to"] = content["m.relates_to"]
+
+    _ensure_event_fits(
+        minimum_event,
+        room_id=room_id,
+        calculate_event_size=calculate_event_size,
+    )
+
+
+def _fit_large_message_preview(
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    preview_content: dict[str, Any],
+    preview_text: str,
+    *,
+    is_edit: bool,
+    continuation_indicator: str,
+    calculate_event_size: Callable[[dict[str, Any]], int],
+) -> dict[str, Any]:
+    """Attach relations and fit one regular or replacement preview."""
+    if "m.relates_to" in content:
+        preview_content["m.relates_to"] = content["m.relates_to"]
+
+    if is_edit and "m.new_content" in content:
+        return _build_terminal_edit_preview(
+            content,
+            source_content,
+            preview_content,
+            preview_text,
+            continuation_indicator=continuation_indicator,
+            calculate_event_size=calculate_event_size,
+        )
+    return _fit_regular_preview(
+        preview_content,
+        preview_text,
+        continuation_indicator=continuation_indicator,
+        calculate_event_size=calculate_event_size,
+    )
+
+
 async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
     *,
     room_encrypted: bool | None = None,
+    transition_safe: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -820,6 +885,14 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
+        transition_safe: Size for the strongest room state the payload may encounter
+
+            Durable payloads can outlive the room state observed during preparation, while
+            room encryption can later change from disabled to enabled. Encrypted-envelope
+            sizing keeps their exact frozen bytes valid after that transition. The sidecar
+            still follows the current room state: a plaintext ``m.file`` remains valid inside
+            a later encrypted event, while an encrypted-file-only event cannot be parsed in a
+            plaintext room. Direct sends retain the default and use only the current state.
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -830,10 +903,11 @@ async def prepare_large_message(
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
+    size_for_encrypted_delivery = room_encrypted or transition_safe
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
-        room_encrypted=room_encrypted,
+        room_encrypted=size_for_encrypted_delivery,
     )
 
     current_size = _calculate_event_size(content)
@@ -842,6 +916,13 @@ async def prepare_large_message(
 
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
+    _ensure_minimum_preview_can_fit(
+        content,
+        source_content,
+        is_edit=is_edit,
+        room_id=room_id,
+        calculate_event_size=calculate_delivery_event_size,
+    )
     if is_edit and _is_nonterminal_stream_content(source_content):
         logger.info(
             "large_streaming_edit_sidecar_upload_started",
@@ -854,7 +935,11 @@ async def prepare_large_message(
             content,
             room_encrypted=room_encrypted,
         )
-        if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+        if not sidecar_upload_is_usable(
+            mxc_uri,
+            file_info,
+            room_encrypted=room_encrypted,
+        ):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
                 room_id=room_id,
@@ -903,7 +988,11 @@ async def prepare_large_message(
         room_encrypted=room_encrypted,
     )
 
-    sidecar_usable = sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted)
+    sidecar_usable = sidecar_upload_is_usable(
+        mxc_uri,
+        file_info,
+        room_encrypted=room_encrypted,
+    )
     if sidecar_usable:
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
@@ -924,23 +1013,36 @@ async def prepare_large_message(
         )
         modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
-    if "m.relates_to" in content:
-        modified_content["m.relates_to"] = content["m.relates_to"]
-
-    if is_edit and "m.new_content" in content:
-        modified_content = _build_terminal_edit_preview(
+    try:
+        modified_content = _fit_large_message_preview(
             content,
             source_content,
             modified_content,
             preview_text,
+            is_edit=is_edit,
             continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
             calculate_event_size=calculate_delivery_event_size,
         )
-    else:
-        modified_content = _fit_regular_preview(
-            modified_content,
+    except MatrixEventTooLargeError:
+        if not sidecar_usable:
+            raise
+        # The server chooses the final MXC URI, so its exact sidecar envelope
+        # cannot be proven before upload. The empty text envelope was proven
+        # above; fall back to it instead of failing and uploading again on the
+        # next delivery attempt.
+        logger.warning(
+            "large_message_sidecar_envelope_too_large_using_text_fallback",
+            room_id=room_id,
+            original_size_bytes=current_size,
+            is_edit=is_edit,
+        )
+        modified_content = _fit_large_message_preview(
+            content,
+            source_content,
+            _build_text_fallback_content(source_content, preview_text, size_limit),
             preview_text,
-            continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
+            is_edit=is_edit,
+            continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
             calculate_event_size=calculate_delivery_event_size,
         )
 
