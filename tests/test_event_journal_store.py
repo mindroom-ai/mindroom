@@ -5620,8 +5620,11 @@ class TestOutbox:
         assert stored is not None
         assert stored.result == {"body": "full result", "interactive": None}
 
-    async def test_claiming_freezes_the_payload(self, alice: PrincipalStore) -> None:
-        """Claiming freezes the payload.
+    async def test_claiming_freezes_the_payload_and_rejects_a_late_preflight_failure(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Claiming freezes the payload and its live delivery state.
 
         The case this closes: Matrix accepted the old text, and the regenerated
         text could never become visible under the same transaction ID.
@@ -5641,11 +5644,13 @@ class TestOutbox:
             room_id=ROOM,
             thread_id=None,
             payload=text("regenerated"),
+            permanent_failure_reason="regenerated payload cannot fit",
         )
 
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "sent"
+        assert not stored.permanently_failed
 
     async def test_claiming_freezes_the_local_result_with_the_payload(self, alice: PrincipalStore) -> None:
         """A regenerated turn cannot pair old wire bytes with new recovery facts."""
@@ -5818,6 +5823,45 @@ class TestOutbox:
         assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
         assert await alice.unacknowledged_matrix_deliveries() == ()
         assert await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+    async def test_preflight_failure_atomically_hands_sources_to_terminal_state(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A locally impossible payload and its source ownership commit together."""
+        await admit(alice, "$turn")
+
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("unrepresentable"),
+            settle_source_event_ids=("$turn",),
+            permanent_failure_reason="matrix event exceeds the hard size limit",
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert transaction_id is not None
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+        assert not stored.attempted
+        assert not await alice.is_pending("$turn")
+        assert await alice.unacknowledged_matrix_deliveries() == ()
+        assert await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL) is None
+
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated"),
+        )
+
+        retained = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert retained is not None
+        assert retained.payload["body"] == "unrepresentable"
+        assert retained.permanent_failure_reason == "matrix event exceeds the hard size limit"
 
     async def test_permanently_failed_initial_does_not_block_standalone_final(
         self,

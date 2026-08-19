@@ -860,6 +860,15 @@ class DeliveryGateway:
                 content,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
+        requested_delivery: DeliveredMatrixEvent | None = None
+
+        async def send(claimed: MatrixDelivery) -> str:
+            nonlocal requested_delivery
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
+            if claimed.stage is request.delivery_stage:
+                requested_delivery = delivered
+            return delivered.event_id
+
         # Prepared before the row is written, so the frozen payload is the one
         # that goes on the wire. Uploading the sidecar after the claim left the
         # row holding the oversized original while Matrix received an MXC
@@ -875,16 +884,12 @@ class DeliveryGateway:
             stage=request.delivery_stage,
         )
         if isinstance(prepared, MatrixDeliveryFailure):
-            return prepared
-        content = prepared
-        requested_delivery: DeliveredMatrixEvent | None = None
-
-        async def send(claimed: MatrixDelivery) -> str:
-            nonlocal requested_delivery
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=request.retry_sync_recovery)
-            if claimed.stage is request.delivery_stage:
-                requested_delivery = delivered
-            return delivered.event_id
+            if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                return prepared
+            preparation_failure: MatrixDeliveryFailure | None = prepared
+        else:
+            preparation_failure = None
+            content = prepared
 
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
@@ -895,13 +900,16 @@ class DeliveryGateway:
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
                 result=request.delivery_result,
+                permanent_failure_reason=(
+                    _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
+                ),
             )
         except _DeliveryRefusedError:
             return None
         if event_id is None:
             # The delivery was withdrawn by membership or ended in an explicit
             # permanent failure, so there is nothing left for recovery to send.
-            return None
+            return preparation_failure
         if requested_delivery is not None and requested_delivery.event_id == event_id:
             return requested_delivery
         # The delivery was already acknowledged, so nothing was sent and the
@@ -993,33 +1001,6 @@ class DeliveryGateway:
                 request.new_text,
                 retry_sync_recovery=request.retry_sync_recovery,
             )
-        # What is stored is the finished wire event, not the text it was built
-        # from. Recovery sends the row exactly as frozen and has no request to
-        # rebuild from, so anything reconstructed at send time -- the replace
-        # envelope, the fallback body -- would be missing on the one path that
-        # matters, and the answer would come back as a second message with the
-        # placeholder still above it.
-        envelope = build_edit_event_content(
-            event_id=request.event_id,
-            new_content=content,
-            new_text=request.new_text,
-        )
-        # Prepared before the row is written, for the same reason the envelope
-        # is built here: the row has to hold the finished wire event. A sidecar
-        # uploaded after the claim would leave the row holding the oversized
-        # original while Matrix received an MXC reference, and a resend would
-        # upload again under a transaction ID already accepted. An attempted
-        # row is already frozen, so preparation is skipped and
-        # `enqueue` leaves that stored envelope untouched for the claimed send.
-        prepared = await self._prepared_for_the_wire(
-            room_id,
-            envelope,
-            turn_id=request.delivery_turn_id,
-            stage=DeliveryStage.FINAL,
-        )
-        if isinstance(prepared, MatrixDeliveryFailure):
-            return prepared
-        envelope = prepared
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1049,6 +1030,38 @@ class DeliveryGateway:
             delivered = outcome
             return outcome.event_id
 
+        # What is stored is the finished wire event, not the text it was built
+        # from. Recovery sends the row exactly as frozen and has no request to
+        # rebuild from, so anything reconstructed at send time -- the replace
+        # envelope, the fallback body -- would be missing on the one path that
+        # matters, and the answer would come back as a second message with the
+        # placeholder still above it.
+        envelope = build_edit_event_content(
+            event_id=request.event_id,
+            new_content=content,
+            new_text=request.new_text,
+        )
+        # Prepared before the row is written, for the same reason the envelope
+        # is built here: the row has to hold the finished wire event. A sidecar
+        # uploaded after the claim would leave the row holding the oversized
+        # original while Matrix received an MXC reference, and a resend would
+        # upload again under a transaction ID already accepted. An attempted
+        # row is already frozen, so preparation is skipped and
+        # `enqueue` leaves that stored envelope untouched for the claimed send.
+        prepared = await self._prepared_for_the_wire(
+            room_id,
+            envelope,
+            turn_id=request.delivery_turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+        if isinstance(prepared, MatrixDeliveryFailure):
+            if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                return prepared
+            preparation_failure = prepared
+        else:
+            preparation_failure = None
+            envelope = prepared
+
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
             event_id = await self._response_delivery(send, handoff=handoff).deliver(
@@ -1059,13 +1072,16 @@ class DeliveryGateway:
                 payload=envelope,
                 result=request.delivery_result,
                 edits_event_id=request.event_id,
+                permanent_failure_reason=(
+                    _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
+                ),
             )
         except _DeliveryRefusedError:
             return None
         if event_id is None:
             # The delivery was withdrawn by membership or ended in an explicit
             # permanent failure, so there is nothing left for recovery to send.
-            return None
+            return preparation_failure
         if delivered is not None:
             return delivered
         # Already acknowledged: this turn's answer reached the room on an

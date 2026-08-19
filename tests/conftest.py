@@ -1309,6 +1309,7 @@ class FakeOutbox:
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
 
@@ -1349,7 +1350,7 @@ class FakeOutbox:
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if key in self.attempted:
+            if key in self.attempted or existing.permanently_failed:
                 return existing.transaction_id
             self.rows[key] = replace(
                 existing,
@@ -1359,6 +1360,7 @@ class FakeOutbox:
                 result=dict(result) if result is not None else _legacy_delivery_result(payload),
                 event_type=event_type,
                 edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
             )
             return existing.transaction_id
         if delivery_id in self.ended_membership_turn_ids:
@@ -1377,6 +1379,7 @@ class FakeOutbox:
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
+            permanent_failure_reason=permanent_failure_reason,
         )
         return transaction_id
 
@@ -1614,6 +1617,7 @@ class DiesAfterAcknowledgement:
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent."""
         return await self.inner.enqueue_matrix_delivery(
@@ -1626,6 +1630,7 @@ class DiesAfterAcknowledgement:
             event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:

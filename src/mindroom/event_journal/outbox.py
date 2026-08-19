@@ -156,9 +156,12 @@ def enqueue(
     edits_event_id: str | None,
     result: Mapping[str, object] | None = None,
     edit_target_pending: bool = False,
+    permanent_failure_reason: str | None = None,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
-    permanent_failure_reason: str | None = None
+    if permanent_failure_reason is not None and not permanent_failure_reason:
+        msg = "A permanent Matrix delivery failure requires a reason"
+        raise ValueError(msg)
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     existing_owner = transaction.fetchone(
         """
@@ -185,7 +188,9 @@ def enqueue(
         if initial is not None and initial["acknowledged_event_id"] is not None:
             edits_event_id = str(initial["acknowledged_event_id"])
             edit_target_pending = False
-        elif initial is not None and initial["permanent_failure_reason"] is not None:
+        elif (
+            permanent_failure_reason is None and initial is not None and initial["permanent_failure_reason"] is not None
+        ):
             permanent_failure_reason = "required edit target was permanently refused: " + str(
                 initial["permanent_failure_reason"],
             )
@@ -208,6 +213,7 @@ def enqueue(
             edit_target_pending = excluded.edit_target_pending,
             permanent_failure_reason = excluded.permanent_failure_reason
         WHERE matrix_delivery_outbox.attempted = 0
+          AND matrix_delivery_outbox.permanent_failure_reason IS NULL
         """,
         (
             principal_id,

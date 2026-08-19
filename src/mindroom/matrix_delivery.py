@@ -152,6 +152,7 @@ class MatrixDeliveryWorker:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Enqueue, claim, send, and acknowledge one delivery.
 
@@ -188,6 +189,7 @@ class MatrixDeliveryWorker:
                 payload=payload,
                 result=result,
                 edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
             )
         return await self._finish_flush(delivery_id, outcome)
 
@@ -201,6 +203,7 @@ class MatrixDeliveryWorker:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None,
         edits_event_id: str | None,
+        permanent_failure_reason: str | None,
     ) -> _FlushOutcome:
         """Finish a delivery whose durable handoff may already have committed."""
         completed: _FlushOutcome | None = None
@@ -219,6 +222,7 @@ class MatrixDeliveryWorker:
                 result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
+                permanent_failure_reason=permanent_failure_reason,
             )
             if transaction_id is None:
                 logger.info("matrix_delivery_refused_for_ended_membership", delivery_id=delivery_id, stage=stage.value)

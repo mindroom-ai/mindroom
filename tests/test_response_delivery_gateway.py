@@ -828,11 +828,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
 
-    async def test_an_unrepresentable_final_is_refused_before_enqueue_or_send(
+    @pytest.mark.parametrize("existing_event_id", [None, "$placeholder"], ids=("send", "edit"))
+    async def test_an_unrepresentable_final_is_recorded_without_a_send(
         self,
         tmp_path: Path,
+        existing_event_id: str | None,
     ) -> None:
-        """Irreducible metadata fails through the normal delivery outcome."""
+        """Irreducible metadata becomes durable terminal state without network I/O."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
@@ -850,16 +852,23 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway.deps.runtime.client = client
         request = replace(
             self._final_request("x" * 70_000),
-            existing_event_id="$placeholder",
+            existing_event_id=existing_event_id,
             defer_source_handoff=True,
             extra_content={"io.mindroom.required_metadata": "m" * 70_000},
         )
 
         outcome = await gateway.deliver_final(request)
+        frozen = outbox.rows["$cause", "final"]
+        repeated = await gateway.deliver_final(request)
 
         assert outcome.terminal_status == "error"
         assert outcome.failure_reason == "delivery_failed"
-        assert outbox.rows == {}
+        assert repeated.terminal_status == "error"
+        failed = outbox.rows["$cause", "final"]
+        assert failed.permanently_failed
+        assert not failed.attempted
+        assert failed.edits_event_id == existing_event_id
+        assert failed == frozen
         client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
 
@@ -2807,6 +2816,7 @@ class TestTurnDeliverySerialization:
             result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
+            permanent_failure_reason: str | None = None,
         ) -> str | None:
             transaction_id = await original_enqueue(
                 delivery_id=delivery_id,
@@ -2818,6 +2828,7 @@ class TestTurnDeliverySerialization:
                 result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             )
             enqueue_committed.set()
             await return_from_enqueue.wait()

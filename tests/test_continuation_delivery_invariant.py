@@ -111,6 +111,7 @@ class _WatchedOutbox:
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
@@ -124,6 +125,7 @@ class _WatchedOutbox:
             result=result,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def claim_matrix_delivery(

@@ -576,6 +576,7 @@ class PrincipalStore:
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent, or refuse it as an answer to a membership that ended.
 
@@ -605,6 +606,7 @@ class PrincipalStore:
                 result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             ),
         )
 
@@ -1204,6 +1206,7 @@ def _enqueue_matrix_delivery(
     result: Mapping[str, object] | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
+    permanent_failure_reason: str | None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1277,6 +1280,7 @@ def _enqueue_matrix_delivery(
         payload=payload,
         result=result,
         edits_event_id=edits_event_id,
+        permanent_failure_reason=permanent_failure_reason,
     )
     if transaction_id is None:
         return None

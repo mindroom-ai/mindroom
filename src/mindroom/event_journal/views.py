@@ -314,6 +314,7 @@ class MatrixDeliveryView(Protocol):
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent and settle what it answers, or refuse both."""
         ...
