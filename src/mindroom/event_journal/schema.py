@@ -242,6 +242,7 @@ _TABLES = (
         edit_target_pending INTEGER NOT NULL DEFAULT 0,
         attempted INTEGER NOT NULL DEFAULT 0,
         retired INTEGER NOT NULL DEFAULT 0,
+        permanent_failure_reason TEXT,
         -- The device whose transaction ID the homeserver may already hold. A
         -- transaction ID deduplicates within one device, so a row attempted by
         -- a device this process is no longer logged in as carries an ID that

@@ -166,6 +166,20 @@ class _WatchedOutbox:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
 
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
+
     async def retire_matrix_delivery(
         self,
         *,

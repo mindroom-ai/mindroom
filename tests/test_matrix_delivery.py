@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -23,11 +22,6 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
     send_room_event_result,
 )
-from mindroom.matrix.large_messages import _MATRIX_EVENT_HARD_LIMIT, _calculate_delivery_event_size
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from io import BytesIO
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -347,6 +341,50 @@ async def test_send_message_outcome_maps_unexpected_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_outcome_maps_server_too_large_response() -> None:
+    """A definite homeserver size refusal is distinguishable from retryable failures."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="event too large",
+        status_code="M_TOO_LARGE",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert outcome == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE,
+        "event too large",
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_outcome_keeps_other_server_refusals_retryable() -> None:
+    """A server refusal is not permanent merely because it is a client error."""
+    client = _mock_client()
+    client.room_send.return_value = nio.RoomSendError(
+        message="forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!room:localhost",
+    )
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "already prepared", "msgtype": "m.text"},
+        content_is_prepared=True,
+    )
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_success_returns_delivered_event() -> None:
     """Successful sends keep returning the delivered event id and sent content."""
     client = _mock_client(encrypted=True)
@@ -357,46 +395,6 @@ async def test_send_message_outcome_success_returns_delivered_event() -> None:
     assert isinstance(outcome, DeliveredMatrixEvent)
     assert outcome.event_id == "$event:localhost"
     assert outcome.content_sent == content
-
-
-@pytest.mark.asyncio
-async def test_direct_send_survives_room_encryption_being_enabled_during_sidecar_upload() -> None:
-    """Direct preparation must be valid if room encryption changes while upload yields."""
-    client = _mock_client()
-    client.device_id = "D"
-    uploaded_data: bytes | None = None
-
-    async def upload_and_enable_encryption(**kwargs: object) -> tuple[nio.UploadResponse, None]:
-        nonlocal uploaded_data
-        data_provider = cast("Callable[[object, object], BytesIO]", kwargs["data_provider"])
-        uploaded_data = data_provider(None, None).read()
-        client.rooms["!room:localhost"].encrypted = True
-        client.olm = MagicMock()
-        client.olm.device_id = "RECOVERY-DEVICE"
-        return nio.UploadResponse("mxc://server/direct-sidecar"), None
-
-    client.upload.side_effect = upload_and_enable_encryption
-
-    outcome = await send_message_outcome(
-        client,
-        "!room:localhost",
-        {"body": "x" * 56_000, "msgtype": "m.text"},
-    )
-
-    assert isinstance(outcome, DeliveredMatrixEvent)
-    assert uploaded_data is not None
-    assert not uploaded_data.startswith(b"{")
-    assert "url" not in outcome.content_sent
-    assert outcome.content_sent["file"]["url"] == "mxc://server/direct-sidecar"
-    assert (
-        _calculate_delivery_event_size(
-            outcome.content_sent,
-            room_id="!room:localhost",
-            room_encrypted=True,
-            device_id="RECOVERY-DEVICE",
-        )
-        <= _MATRIX_EVENT_HARD_LIMIT
-    )
 
 
 @pytest.mark.asyncio

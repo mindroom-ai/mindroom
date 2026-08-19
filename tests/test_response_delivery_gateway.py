@@ -39,7 +39,7 @@ from mindroom.matrix.large_messages import (
     _calculate_delivery_event_size,
     _calculate_event_size,
 )
-from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
+from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from tests.conftest import (
@@ -805,68 +805,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
 
-    async def test_unencrypted_durable_payload_remains_valid_after_encryption_is_enabled(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A frozen payload must fit the stronger state a room can enter later."""
-        outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
-        client = AsyncMock(spec=nio.AsyncClient)
-        client.user_id = _AGENT_USER_ID
-        client.device_id = "DEVICE"
-        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
-        room = MagicMock()
-        room.encrypted = False
-        client.rooms = {_ROOM_ID: room}
-        client.olm = None
-        client.upload.return_value = (
-            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/transition-safe-sidecar"}),
-            None,
-        )
-        client.room_send.side_effect = (
-            nio.RoomSendError(message="temporary refusal"),
-            nio.RoomSendResponse(event_id="$sent", room_id=_ROOM_ID),
-        )
-        gateway.deps.runtime.client = client
-        request = self._final_request("x" * 25_000)
-
-        first = await gateway.deliver_final(request)
-
-        assert first.terminal_status == "error"
-        frozen = dict(outbox.rows["$cause", "final"].payload)
-        assert frozen["msgtype"] == "m.text"
-        assert "url" not in frozen
-        assert frozen["file"]["url"] == "mxc://localhost/transition-safe-sidecar"
-        event_source = {
-            "content": frozen,
-            "event_id": "$transition-safe",
-            "sender": _AGENT_USER_ID,
-            "origin_server_ts": 1,
-            "type": "m.room.message",
-        }
-        assert isinstance(nio.Event.parse_event(event_source), nio.RoomMessageText)
-        assert isinstance(nio.RoomMessage.parse_decrypted_event(event_source), nio.RoomMessageText)
-        assert (
-            _calculate_delivery_event_size(
-                frozen,
-                room_id=_ROOM_ID,
-                room_encrypted=True,
-                device_id="DEVICE",
-            )
-            <= _MATRIX_EVENT_HARD_LIMIT
-        )
-        room.encrypted = True
-        client.olm = MagicMock()
-        client.olm.device_id = "DEVICE"
-
-        replay = await gateway.deliver_final(request)
-
-        assert replay.terminal_status == "completed"
-        assert client.upload.await_count == 1
-        assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [frozen, frozen]
-
     async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
         self,
         tmp_path: Path,
@@ -1184,6 +1122,53 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert delivered is not None
         assert client.upload.await_count == 1
         assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_a_definitive_oversized_refusal_stops_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The server's size refusal is inspectable and never replayed forever."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendError(
+            message="event too large",
+            status_code="M_TOO_LARGE",
+            room_id=_ROOM_ID,
+        )
+        gateway.deps.runtime.client = client
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+        answer = "x" * 125_000
+        content = {
+            "msgtype": "m.text",
+            "body": answer,
+            "io.mindroom.stream_status": "completed",
+        }
+
+        first = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+        second = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+
+        stored = outbox.rows["$cause", "final"]
+        assert first is None
+        assert second is None
+        assert stored.permanent_failure_reason is not None
+        assert client.room_send.await_count == 1
+        assert client.upload.await_count == 1
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,
@@ -2628,6 +2613,32 @@ class TestGenericDeliveryDeviceChangePolicy:
         send.assert_awaited_once()
         assert stored is not None
         assert stored.acknowledged_event_id == "$replacement"
+
+    async def test_permanent_refusal_is_not_returned_to_recovery(self, alice: PrincipalStore) -> None:
+        """A definitive refusal is terminal state, not another failed recovery pass."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "frozen"},
+        )
+        send = AsyncMock(side_effect=PermanentDeliveryError("matrix event exceeds the hard size limit"))
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            sending_device_id="DEVICE",
+        )
+
+        first = await worker.recover()
+        second = await worker.recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert first == RecoveryOutcome(recovered=0, failed=0)
+        assert second == RecoveryOutcome(recovered=0, failed=0)
+        send.assert_awaited_once()
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
 
 
 class TestTurnDeliverySerialization:

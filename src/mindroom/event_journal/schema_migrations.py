@@ -17,6 +17,8 @@ def pre_schema_migration_statements(
         )
     if matrix_delivery_outbox_columns and "result_json" not in matrix_delivery_outbox_columns:
         statements.append("ALTER TABLE matrix_delivery_outbox ADD COLUMN result_json TEXT")
+    if matrix_delivery_outbox_columns and "permanent_failure_reason" not in matrix_delivery_outbox_columns:
+        statements.append("ALTER TABLE matrix_delivery_outbox ADD COLUMN permanent_failure_reason TEXT")
     if "claimed_source_event_id" in interactive_question_columns:
         statements.extend(
             (

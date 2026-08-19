@@ -346,6 +346,16 @@ class MatrixDeliveryView(Protocol):
         """Return one delivery without claiming it."""
         ...
 
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        ...
+
     async def retire_matrix_delivery(
         self,
         *,

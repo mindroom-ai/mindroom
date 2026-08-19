@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -66,6 +65,7 @@ from mindroom.matrix.room_history_reads import (
 from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
+    PermanentDeliveryError,
     RecoveryOutcome,
     SendDelivery,
     TurnHandoff,
@@ -683,6 +683,8 @@ class DeliveryGateway:
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
+            if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                raise PermanentDeliveryError(detail)
             msg = f"Matrix refused delivery for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
         return outcome
@@ -897,9 +899,8 @@ class DeliveryGateway:
         except _DeliveryRefusedError:
             return None
         if event_id is None:
-            # The membership this turn answered has ended. The room it was
-            # answering is not the room the bot is in now, so there is nothing
-            # to send and nothing to recover.
+            # The delivery was withdrawn by membership or ended in an explicit
+            # permanent failure, so there is nothing left for recovery to send.
             return None
         if requested_delivery is not None and requested_delivery.event_id == event_id:
             return requested_delivery
@@ -1041,6 +1042,8 @@ class DeliveryGateway:
             )
             if isinstance(outcome, MatrixDeliveryFailure):
                 detail = _matrix_delivery_failure_reason(outcome)
+                if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                    raise PermanentDeliveryError(detail)
                 msg = f"Matrix refused the final edit for turn {claimed.delivery_id!r}: {detail}"
                 raise _DeliveryRefusedError(msg)
             delivered = outcome
@@ -1060,8 +1063,8 @@ class DeliveryGateway:
         except _DeliveryRefusedError:
             return None
         if event_id is None:
-            # The membership this turn answered has ended, so its answer is
-            # not this bot's to give in the room it is in now.
+            # The delivery was withdrawn by membership or ended in an explicit
+            # permanent failure, so there is nothing left for recovery to send.
             return None
         if delivered is not None:
             return delivered
@@ -1666,30 +1669,21 @@ class DeliveryGateway:
         nothing can ever reference -- or fail before the durable payload gets
         another chance to reach Matrix.
 
-        A durable row can also outlive the room state observed here. Size it for
-        encrypted delivery even when the room is currently unencrypted, so
-        enabling encryption cannot make the frozen event too large. Encrypt the
-        sidecar immediately and carry its descriptor on a normal text preview
-        while the room is still plaintext. That preview is parseable in either
-        room state, and a later encrypted send does not expose plaintext sidecar
-        bytes to the homeserver.
-        This conservative work happens once per durable row, before enqueue;
-        retries and startup recovery send the same frozen bytes without repeating it.
+        Preparation uses the currently observed room encryption state. Once
+        attempted, retries and startup recovery send the same frozen bytes
+        without uploading or rebuilding anything.
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return content
         client = self._client()
-        room_encrypted: bool | None = None
-        if isinstance(client.rooms, Mapping):
-            encryption_outcome = await resolve_room_encryption_outcome(
-                client,
-                room_id,
-                operation="prepare_durable_delivery",
-            )
-            if isinstance(encryption_outcome, MatrixDeliveryFailure):
-                return encryption_outcome
-            room_encrypted = encryption_outcome
+        encryption_outcome = await resolve_room_encryption_outcome(
+            client,
+            room_id,
+            operation="prepare_durable_delivery",
+        )
+        if isinstance(encryption_outcome, MatrixDeliveryFailure):
+            return encryption_outcome
         wire_content = matrix_delivery_payload(
             self.deps.outbox.principal_id,
             turn_id,
@@ -1701,8 +1695,7 @@ class DeliveryGateway:
                 client,
                 room_id,
                 wire_content,
-                room_encrypted=room_encrypted,
-                transition_safe=True,
+                room_encrypted=encryption_outcome,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))

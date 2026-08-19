@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _OUTBOX_COLUMNS = """
     delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id,
     payload_json, result_json, edits_event_id, acknowledged_event_id, created_at_ns,
-    attempted, retired, sending_device_id
+    attempted, retired, permanent_failure_reason, sending_device_id
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
 _LEGACY_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
@@ -272,12 +272,13 @@ def claim(
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     current = transaction.fetchone(
         """
-        SELECT attempted, retired, edits_event_id, edit_target_pending FROM matrix_delivery_outbox
+        SELECT attempted, retired, permanent_failure_reason, edits_event_id, edit_target_pending
+        FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
         """,
         (principal_id, delivery_id, stage.value),
     )
-    if current is None or bool(current["retired"]):
+    if current is None or bool(current["retired"]) or current["permanent_failure_reason"] is not None:
         return None
     if stage is DeliveryStage.INITIAL and not bool(current["attempted"]):
         final = transaction.fetchone(
@@ -409,7 +410,8 @@ def acknowledge(
     """
     bound = transaction.fetchone(
         """
-        UPDATE matrix_delivery_outbox SET acknowledged_event_id = ?
+        UPDATE matrix_delivery_outbox
+        SET acknowledged_event_id = ?, permanent_failure_reason = NULL
         WHERE principal_id = ? AND delivery_id = ? AND stage = ? AND acknowledged_event_id IS NULL
         RETURNING delivery_id
         """,
@@ -427,6 +429,39 @@ def acknowledge(
             (event_id, principal_id, delivery_id, DeliveryStage.FINAL.value),
         )
     return bound is not None
+
+
+def record_permanent_failure(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    delivery_id: str,
+    stage: DeliveryStage,
+    reason: str,
+) -> str | None:
+    """Stop retrying one refused immutable payload, or return its concurrent ACK."""
+    if not reason:
+        msg = "A permanent Matrix delivery failure requires a reason"
+        raise ValueError(msg)
+    transaction.execute(
+        """
+        UPDATE matrix_delivery_outbox SET permanent_failure_reason = ?
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+          AND acknowledged_event_id IS NULL AND retired = 0
+          AND permanent_failure_reason IS NULL
+        """,
+        (reason, principal_id, delivery_id, stage.value),
+    )
+    row = transaction.fetchone(
+        """
+        SELECT acknowledged_event_id FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+        """,
+        (principal_id, delivery_id, stage.value),
+    )
+    if row is None or row["acknowledged_event_id"] is None:
+        return None
+    return str(row["acknowledged_event_id"])
 
 
 def delivery_ownership(
@@ -608,7 +643,8 @@ def unacknowledged(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox
         WHERE principal_id = ? AND event_type = ?
-          AND acknowledged_event_id IS NULL AND retired = 0{cursor_clause}
+          AND acknowledged_event_id IS NULL AND retired = 0
+          AND permanent_failure_reason IS NULL{cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/, stage/*bytes*/
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and a fixed clause, not input
@@ -631,6 +667,7 @@ def has_attempted_unacknowledged_prompt_delivery(
         WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
           AND event_type = 'm.room.message'
           AND attempted = 1 AND retired = 0 AND acknowledged_event_id IS NULL
+          AND permanent_failure_reason IS NULL
           AND (
               edits_event_id IS NOT NULL
               OR payload_json LIKE ?
@@ -726,6 +763,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         result=result,
         attempted=bool(row["attempted"]),
         retired=bool(row["retired"]),
+        permanent_failure_reason=row["permanent_failure_reason"],
         sending_device_id=row["sending_device_id"],
     )
 

@@ -1394,7 +1394,7 @@ class FakeOutbox:
         """
         key = (delivery_id, stage.value)
         row = self.rows.get(key)
-        if row is None or row.retired:
+        if row is None or row.retired or row.permanently_failed:
             return None
         if (
             stage is DeliveryStage.INITIAL
@@ -1435,6 +1435,25 @@ class FakeOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return self.rows.get((delivery_id, stage.value))
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        if not reason:
+            msg = "A permanent Matrix delivery failure requires a reason"
+            raise ValueError(msg)
+        key = (delivery_id, stage.value)
+        row = self.rows.get(key)
+        if row is None or row.acknowledged_event_id is not None:
+            return None if row is None else row.acknowledged_event_id
+        if not row.retired and not row.permanently_failed:
+            self.rows[key] = replace(row, permanent_failure_reason=reason)
+        return None
 
     async def retire_matrix_delivery(
         self,
@@ -1477,7 +1496,11 @@ class FakeOutbox:
             # the row already names rather than its own, and told it bound
             # nothing -- which stays true even when the two events are equal.
             return DeliveryAcknowledgement(settled_event_id=already, bound=False)
-        self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
+        self.rows[key] = replace(
+            self.rows[key],
+            acknowledged_event_id=event_id,
+            permanent_failure_reason=None,
+        )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
@@ -1500,7 +1523,12 @@ class FakeOutbox:
             (
                 row
                 for row in self.rows.values()
-                if row.event_type == event_type and row.acknowledged_event_id is None and not row.retired
+                if (
+                    row.event_type == event_type
+                    and row.acknowledged_event_id is None
+                    and not row.retired
+                    and not row.permanently_failed
+                )
             ),
             key=lambda row: (row.created_at_ns, row.delivery_id, row.stage.value),
         )
@@ -1635,6 +1663,20 @@ class DiesAfterAcknowledgement:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
 
     async def retire_matrix_delivery(
         self,

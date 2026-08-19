@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
+class PermanentDeliveryError(RuntimeError):
+    """A definitive refusal that must not remain ordinary recovery work."""
+
+
 type SendDelivery = Callable[[MatrixDelivery], Awaitable[str]]
 type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[ProjectedEvent, ...]]]
 
@@ -315,7 +320,12 @@ class MatrixDeliveryWorker:
                 if stage is DeliveryStage.FINAL
                 else None
             )
-            blocked_final = stage is DeliveryStage.FINAL and stored is not None and not stored.retired
+            blocked_final = (
+                stage is DeliveryStage.FINAL
+                and stored is not None
+                and not stored.retired
+                and not stored.permanently_failed
+            )
             logger.info(
                 "matrix_delivery_stage_blocked" if blocked_final else "matrix_delivery_row_withdrawn",
                 delivery_id=delivery_id,
@@ -391,7 +401,15 @@ class MatrixDeliveryWorker:
             stage=claimed.stage,
             device_id=self.sending_device_id,
         )
-        event_id = await self.send(claimed)
+        try:
+            event_id = await self.send(claimed)
+        except PermanentDeliveryError as error:
+            acknowledged_event_id = await self.store.record_permanent_matrix_delivery_failure(
+                delivery_id=claimed.delivery_id,
+                stage=claimed.stage,
+                reason=str(error),
+            )
+            return _FlushOutcome(event_id=acknowledged_event_id)
         return await self._acknowledge(claimed, event_id)
 
     async def _acknowledge(self, claimed: MatrixDelivery, event_id: str) -> _FlushOutcome:
@@ -585,8 +603,8 @@ class MatrixDeliveryWorker:
                     if outcome.retry_required:
                         failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
-                    # The row was retired, or a FINAL superseded this INITIAL.
-                    # Nothing is owed and nothing failed.
+                    # The row was retired, permanently failed, or superseded.
+                    # Nothing remains for a later recovery pass.
                     continue
                 recovered += 1
 
@@ -594,6 +612,7 @@ class MatrixDeliveryWorker:
 __all__ = [
     "DeliveryStage",
     "MatrixDeliveryWorker",
+    "PermanentDeliveryError",
     "RecoveryOutcome",
     "ResolveDelivered",
     "SendDelivery",

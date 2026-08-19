@@ -347,11 +347,19 @@ class MatrixDelivery:
     # An obsolete delivery stays as an identity tombstone so late work cannot
     # cross into a newer membership, but recovery never sends it again.
     retired: bool = False
+    # A definitive refusal of this immutable payload. Unlike retirement, this
+    # records a delivery failure rather than an obsolete membership identity.
+    permanent_failure_reason: str | None = None
     # The device that offered it, or None when none is recorded. A Matrix
     # transaction ID deduplicates within one device, so a row attempted by a
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+
+    @property
+    def permanently_failed(self) -> bool:
+        """Return whether this immutable payload has a terminal refusal."""
+        return self.permanent_failure_reason is not None
 
     @property
     def has_interactive_prompt(self) -> bool:

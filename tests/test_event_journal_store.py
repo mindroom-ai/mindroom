@@ -5795,6 +5795,58 @@ class TestOutbox:
 
         assert await alice.unacknowledged_matrix_deliveries() == ()
 
+    async def test_permanently_failed_matrix_delivery_is_not_replayable(self, alice: PrincipalStore) -> None:
+        """A deterministic refusal remains inspectable without becoming recovery work."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        acknowledged_event_id = await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert acknowledged_event_id is None
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+        assert await alice.unacknowledged_matrix_deliveries() == ()
+        assert await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+    async def test_acknowledgement_supersedes_a_concurrent_permanent_failure(self, alice: PrincipalStore) -> None:
+        """A visible event is stronger evidence than a racing refusal."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$sent",
+            delivered_projections=(),
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$sent"
+        assert stored.permanent_failure_reason is None
+
     async def test_acknowledgement_keeps_the_first_event_id(self, alice: PrincipalStore) -> None:
         """Acknowledgement keeps the first event id."""
         await alice.enqueue_matrix_delivery(
@@ -8325,6 +8377,7 @@ class TestSchemaUpgrades:
         with sqlite3.connect(database_path) as connection:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")}
         assert "result_json" in columns
+        assert "permanent_failure_reason" in columns
 
     async def test_postgres_adds_local_results_to_an_existing_delivery_outbox(
         self,
@@ -8350,7 +8403,9 @@ class TestSchemaUpgrades:
                   AND table_name = 'matrix_delivery_outbox'
                 """,
             ).fetchall()
-        assert "result_json" in {str(row[0]) for row in rows}
+        columns = {str(row[0]) for row in rows}
+        assert "result_json" in columns
+        assert "permanent_failure_reason" in columns
 
     @staticmethod
     async def _assert_legacy_approval_call_provenance_is_unknown(backend: Backend) -> None:

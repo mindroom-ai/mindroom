@@ -666,6 +666,24 @@ class PrincipalStore:
             ),
         )
 
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self._backend.write(
+            lambda transaction: outbox.record_permanent_failure(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                stage=stage,
+                reason=reason,
+            ),
+        )
+
     async def retire_matrix_delivery(
         self,
         *,
