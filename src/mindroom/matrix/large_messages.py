@@ -289,8 +289,8 @@ def _delivery_event_size_calculator(
     """Bind the currently observed delivery fields for size estimation."""
     device_id: str | None = None
     if room_encrypted:
-        olm = getattr(client, "olm", None)
-        raw_device_id = getattr(olm, "device_id", None) if olm is not None else getattr(client, "device_id", None)
+        olm = client.olm
+        raw_device_id = olm.device_id if olm is not None else client.device_id
         device_id = raw_device_id if isinstance(raw_device_id, str) else None
 
     def calculate(candidate: dict[str, Any]) -> int:

@@ -37,6 +37,7 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
     client.olm = MagicMock() if encrypted else None
+    client.device_id = "DEVICE"
     if client.olm is not None:
         client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
@@ -435,6 +436,43 @@ async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_u
         )
         <= _MATRIX_EVENT_HARD_LIMIT
     )
+
+
+@pytest.mark.asyncio
+async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() -> None:
+    """An uncached room enabling encryption during upload must not use the plaintext fallback."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.rooms = {}
+    client.olm = MagicMock()
+    client.olm.device_id = "D"
+    client.device_id = "D"
+    client.access_token = "token"  # noqa: S105
+    client.room_get_state_event = AsyncMock(
+        side_effect=[
+            nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+            nio.RoomGetStateEventResponse(
+                {"algorithm": "m.megolm.v1.aes-sha2"},
+                "m.room.encryption",
+                "",
+                "!room:localhost",
+            ),
+        ],
+    )
+    client.upload.return_value = nio.UploadResponse("mxc://server/uncached-sidecar"), None
+    client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
+    client.room_send.return_value = nio.RoomSendResponse("$encrypted", "!room:localhost")
+
+    outcome = await send_message_outcome(
+        client,
+        "!room:localhost",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+    )
+
+    assert isinstance(outcome, DeliveredMatrixEvent)
+    assert outcome.event_id == "$encrypted"
+    assert client.room_get_state_event.await_count == 2
+    client.room_send.assert_awaited_once()
+    client._send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

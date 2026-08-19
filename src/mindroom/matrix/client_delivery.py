@@ -387,17 +387,15 @@ async def _prepare_matrix_message(
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
-        current_room = rooms.get(room_id)
-        if current_room is not None:
-            encryption_outcome = await resolve_room_encryption_outcome(
-                client,
-                room_id,
-                operation=operation,
-            )
-            if isinstance(encryption_outcome, MatrixDeliveryFailure):
-                return encryption_outcome
-            room_encrypted = encryption_outcome
-            cache_bypass = False
+        encryption_outcome = await resolve_room_encryption_outcome(
+            client,
+            room_id,
+            operation=operation,
+        )
+        if isinstance(encryption_outcome, MatrixDeliveryFailure):
+            return encryption_outcome
+        room_encrypted = encryption_outcome
+        cache_bypass = rooms.get(room_id) is None and not room_encrypted
 
     try:
         ensure_prepared_message_fits_delivery(
