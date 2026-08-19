@@ -168,6 +168,7 @@ class _LocalWorkerBackend:
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,

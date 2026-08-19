@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
+    ScriptRuntimeUnavailableError,
     ScriptToolCallRequest,
 )
 from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
@@ -154,6 +155,8 @@ async def submit_script_call(
         receipt = await broker.accept_authenticated(payload.to_domain(), authorization)
     except (ScriptBrokerAuthenticationError, ScriptCapabilityError) as exc:
         raise _unavailable() from exc
+    except ScriptRuntimeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ScriptCallConflictError as exc:
         raise HTTPException(status_code=409, detail="Stable call ID conflicts with its accepted request.") from exc
     except ScriptCallRateLimitError as exc:
@@ -176,6 +179,8 @@ async def get_script_call(
         receipt = await broker.get_authenticated(run_id, call_id, authorization)
     except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError) as exc:
         raise _unavailable() from exc
+    except ScriptRuntimeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ScriptCallPreparationPendingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ScriptCallReceiptResponse.from_domain(receipt)

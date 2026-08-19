@@ -2627,6 +2627,40 @@ def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(
     assert sync_calls == [frozenset()]
 
 
+def test_kubernetes_script_worker_profile_mirrors_no_global_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script-specific Kubernetes worker denies automatic credential mirroring."""
+    backend, _apps_api, _core_api = _backend(
+        worker_grantable_credentials=frozenset({"openai", "github_private"}),
+    )
+    sync_calls: list[frozenset[str] | None] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        allowed_services: frozenset[str] | None = None,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del worker_key, credentials_manager
+        sync_calls.append(allowed_services)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(
+        WorkerSpec(
+            "v1:tenant-123:user:@alice:example.org",
+            mirrored_credential_services=frozenset(),
+        ),
+        now=10.0,
+    )
+
+    assert sync_calls == [frozenset()]
+
+
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     """Idle cleanup should scale dedicated workers to zero while keeping their metadata."""
     backend, apps_api, core_api = _backend(idle_timeout_seconds=5.0)

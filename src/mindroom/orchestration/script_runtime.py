@@ -112,9 +112,6 @@ class _WorkerManagerLease(Protocol):
     @property
     def manager(self) -> WorkerBackend: ...
 
-    @property
-    def generation_id(self) -> str: ...
-
     def release(self) -> None: ...
 
 
@@ -128,10 +125,11 @@ class _WorkerLeaseDelivery:
 
     def acquire(
         self,
-        provider: Callable[[], _WorkerManagerLease | None],
+        provider: Callable[[str | None], _WorkerManagerLease | None],
+        required_backend_locator: str | None,
     ) -> _WorkerManagerLease | None:
         """Acquire in the executor and release there if delivery was abandoned."""
-        lease = provider()
+        lease = provider(required_backend_locator)
         if lease is None:
             return None
         with self._lock:
@@ -357,7 +355,7 @@ class ScriptRuntimeLifecycle:
     manager: ScriptRunManager
     resolver: _LiveScriptRuntimeResolver
     config_provider: Callable[[], Config | None]
-    worker_lease_provider: Callable[[], _WorkerManagerLease | None]
+    worker_lease_provider: Callable[[str | None], _WorkerManagerLease | None]
     api_enabled: bool = True
     retention_seconds: float = _DEFAULT_SCRIPT_RETENTION_SECONDS
     pass_timeout_seconds: float = 30.0
@@ -380,6 +378,7 @@ class ScriptRuntimeLifecycle:
     )
     _pending_worker_lease_delivery: _WorkerLeaseDelivery | None = field(default=None, init=False, repr=False)
     _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
+    _pending_worker_backend_locator: str | None = field(default=None, init=False, repr=False)
     _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
@@ -396,9 +395,7 @@ class ScriptRuntimeLifecycle:
     async def start(self) -> None:
         """Bind tools and reconcile after both API and live agent registries exist."""
         self._start_requested = True
-        if not self.api_enabled:
-            return
-        if not self._api_ready.is_set():
+        if self.api_enabled and not self._api_ready.is_set():
             return
         await self._activate()
 
@@ -407,11 +404,12 @@ class ScriptRuntimeLifecycle:
         async with self._activation_lock:
             if self._started:
                 return
-            if not self._start_requested or not self._api_ready.is_set():
+            if not self._start_requested or (self.api_enabled and not self._api_ready.is_set()):
                 return
             self.broker.close_call_admission()
             await self.manager.begin_startup_reconciliation()
-            bind_script_run_manager(self.manager)
+            if self.api_enabled:
+                bind_script_run_manager(self.manager)
             self._started = True
             self._activated_once = True
             self._startup_cleanup_pending = True
@@ -455,17 +453,36 @@ class ScriptRuntimeLifecycle:
             except Exception:
                 logger.exception("script_maintenance_cycle_failed")
 
-    async def _refresh_worker_backend(self) -> WorkerBackend | None:
+    async def _refresh_worker_backend(
+        self,
+        *,
+        required_backend_locator: str | None = None,
+    ) -> WorkerBackend | None:
         async with self._worker_refresh_lock:
-            return await self._refresh_worker_backend_locked()
+            return await self._refresh_worker_backend_locked(
+                required_backend_locator=required_backend_locator,
+            )
 
-    async def _refresh_worker_backend_locked(self) -> WorkerBackend | None:
+    async def _refresh_worker_backend_locked(
+        self,
+        *,
+        required_backend_locator: str | None = None,
+    ) -> WorkerBackend | None:
         current = self._current_worker_lease
-        if current is not None:
+        if current is not None and (
+            required_backend_locator is None or current.manager.cleanup_locator == required_backend_locator
+        ):
             self.manager.worker_backend = current.manager
             return current.manager
-        lease = await self._acquire_current_worker_lease()
+        if current is not None:
+            self._clear_current_worker_backend()
+            await asyncio.to_thread(current.release)
+        lease = await self._acquire_current_worker_lease(required_backend_locator)
         if lease is None:
+            self._clear_current_worker_backend()
+            return None
+        if required_backend_locator is not None and lease.manager.cleanup_locator != required_backend_locator:
+            await asyncio.to_thread(lease.release)
             self._clear_current_worker_backend()
             return None
         self._current_worker_lease = lease
@@ -473,9 +490,12 @@ class ScriptRuntimeLifecycle:
         self.manager.worker_backend = backend
         return backend
 
-    async def _acquire_current_worker_lease(self) -> _WorkerManagerLease | None:
+    async def _acquire_current_worker_lease(
+        self,
+        required_backend_locator: str | None,
+    ) -> _WorkerManagerLease | None:
         while True:
-            task, delivery, task_epoch = self._get_or_create_worker_lease_acquisition()
+            task, delivery, task_epoch = self._get_or_create_worker_lease_acquisition(required_backend_locator)
             try:
                 lease = await asyncio.shield(task)
             except asyncio.CancelledError:
@@ -485,11 +505,13 @@ class ScriptRuntimeLifecycle:
                     self._pending_worker_lease_task = None
                     self._pending_worker_lease_delivery = None
                     self._pending_worker_lease_epoch = -1
+                    self._pending_worker_backend_locator = None
                 raise
             if self._pending_worker_lease_task is task:
                 self._pending_worker_lease_task = None
                 self._pending_worker_lease_delivery = None
                 self._pending_worker_lease_epoch = -1
+                self._pending_worker_backend_locator = None
             if lease is not None and not delivery.acknowledge(lease):
                 return None
             if task_epoch == self._worker_config_epoch:
@@ -499,9 +521,13 @@ class ScriptRuntimeLifecycle:
 
     def _get_or_create_worker_lease_acquisition(
         self,
+        required_backend_locator: str | None,
     ) -> tuple[asyncio.Task[_WorkerManagerLease | None], _WorkerLeaseDelivery, int]:
         task = self._pending_worker_lease_task
         if task is not None:
+            if self._pending_worker_backend_locator != required_backend_locator:
+                msg = "Concurrent worker lease acquisitions require the same durable cleanup locator."
+                raise RuntimeError(msg)
             delivery = self._pending_worker_lease_delivery
             if delivery is None:
                 msg = "Pending worker lease acquisition has no delivery owner."
@@ -510,13 +536,14 @@ class ScriptRuntimeLifecycle:
 
         delivery = _WorkerLeaseDelivery()
         task = asyncio.create_task(
-            asyncio.to_thread(delivery.acquire, self.worker_lease_provider),
+            asyncio.to_thread(delivery.acquire, self.worker_lease_provider, required_backend_locator),
             name="script_worker_backend_acquire",
         )
         task.add_done_callback(delivery.settle_task)
         self._pending_worker_lease_task = task
         self._pending_worker_lease_delivery = delivery
         self._pending_worker_lease_epoch = self._worker_config_epoch
+        self._pending_worker_backend_locator = required_backend_locator
         return task, delivery, self._pending_worker_lease_epoch
 
     async def complete_worker_replacement(self) -> None:
@@ -556,10 +583,15 @@ class ScriptRuntimeLifecycle:
         self.manager.worker_backend = None
 
     def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
-        """Resolve every active worker-backed run through the current lease."""
-        del run
+        """Resolve a durable run only through its exact owning cleanup backend."""
         current = self._current_worker_lease
-        return None if current is None else current.manager
+        if current is None:
+            return None
+        if run is not None and (
+            run.worker_backend_locator is None or current.manager.cleanup_locator != run.worker_backend_locator
+        ):
+            return None
+        return current.manager
 
     async def _release_current_worker_lease(self) -> None:
         lease = self._current_worker_lease
@@ -877,12 +909,8 @@ class ScriptRuntimeLifecycle:
             inherited,
             reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
         )
-        try:
-            await self._refresh_worker_backend()
-        except WorkerBackendError:
-            logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         if durably_revoked:
-            await self._interrupt_durably_revoked_runs(
+            await self._interrupt_runs_through_owning_backends(
                 durably_revoked,
                 reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
                 require_worker_success=False,
@@ -890,9 +918,49 @@ class ScriptRuntimeLifecycle:
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         if unfinished:
             return
+        await self._release_current_worker_lease()
+        if self.api_enabled:
+            try:
+                await self._refresh_worker_backend()
+            except WorkerBackendError:
+                logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         await self.manager.end_startup_reconciliation()
-        self.broker.open_call_admission()
+        if self.api_enabled and self._api_ready.is_set():
+            self.broker.open_call_admission()
         self._startup_cleanup_pending = False
+
+    async def _interrupt_runs_through_owning_backends(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        reason_for: Callable[[ScriptRunRecord], str],
+        require_worker_success: bool,
+    ) -> None:
+        """Reconcile each worker-backed run only through its durable cleanup locator."""
+        local_runs = [run for run in runs if run.local_unsafe]
+        if local_runs:
+            await self._interrupt_durably_revoked_runs(
+                local_runs,
+                reason_for=reason_for,
+                require_worker_success=require_worker_success,
+            )
+        grouped: dict[str | None, list[ScriptRunRecord]] = {}
+        for run in runs:
+            if not run.local_unsafe:
+                grouped.setdefault(run.worker_backend_locator, []).append(run)
+        for locator, backend_runs in grouped.items():
+            try:
+                await self._refresh_worker_backend(
+                    required_backend_locator=locator,
+                )
+            except WorkerBackendError:
+                self._clear_current_worker_backend()
+                logger.warning("script_worker_backend_owner_refresh_pending", exc_info=True)
+            await self._interrupt_durably_revoked_runs(
+                backend_runs,
+                reason_for=reason_for,
+                require_worker_success=require_worker_success,
+            )
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
         try:
@@ -1032,7 +1100,7 @@ class ScriptRuntimeLifecycle:
             logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
 
     async def _interrupt_and_prune_for_shutdown(self, runs: Sequence[ScriptRunRecord]) -> None:
-        await self._interrupt_durably_revoked_runs(
+        await self._interrupt_runs_through_owning_backends(
             runs,
             reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
             require_worker_success=False,
@@ -1056,6 +1124,7 @@ class ScriptRuntimeLifecycle:
         self._pending_worker_lease_task = None
         self._pending_worker_lease_delivery = None
         self._pending_worker_lease_epoch = -1
+        self._pending_worker_backend_locator = None
         self._current_worker_lease = None
         self.manager.worker_backend = None
         return leases
@@ -1090,7 +1159,7 @@ def build_script_runtime(
     *,
     config_provider: Callable[[], Config | None],
     bot_provider: Callable[[str], AgentBot | None],
-    worker_lease_provider: Callable[[], _WorkerManagerLease | None],
+    worker_lease_provider: Callable[[str | None], _WorkerManagerLease | None],
     api_enabled: bool,
 ) -> ScriptRuntimeLifecycle:
     """Construct the one process-local script store, resolver, broker, and manager."""

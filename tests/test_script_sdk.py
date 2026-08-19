@@ -199,21 +199,22 @@ def test_script_sdk_rejects_cyclic_arguments_before_post(
     assert requests == []
 
 
-def test_script_sdk_ambiguous_submit_polls_without_resubmitting(
+def test_script_sdk_retries_same_submit_after_transport_loss_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A transport failure after POST may mean accepted, so retry must switch to GET for the same ID."""
+    """A POST lost before dispatch is retried with the same stable call identity."""
     _configure(monkeypatch, tmp_path)
     methods: list[str] = []
+    payloads: list[bytes | None] = []
 
     def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
         del timeout
         methods.append(request.method)
-        if request.method == "POST":
+        payloads.append(request.data)
+        if len(methods) == 1:
             reason = "connection reset"
             raise urllib.error.URLError(reason)
-        assert request.full_url.endswith("/runs/run-1/calls/stable-call")
         return io.BytesIO(_receipt("completed", result="page body"))
 
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
@@ -222,21 +223,52 @@ def test_script_sdk_ambiguous_submit_polls_without_resubmitting(
     result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
 
     assert result == "page body"
-    assert methods == ["POST", "GET"]
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
 
 
-def test_script_sdk_retryable_submit_http_failure_polls_without_resubmitting(
+def test_script_sdk_retries_same_submit_after_accepted_response_is_lost(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A gateway failure after POST dispatch is ambiguous and may only be resolved by polling its call ID."""
+    """An accepted POST with a lost response is safely replayed under its original call ID."""
     _configure(monkeypatch, tmp_path)
     methods: list[str] = []
+    payloads: list[bytes | None] = []
 
     def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
         del timeout
         methods.append(request.method)
-        if request.method == "POST":
+        payloads.append(request.data)
+        if len(methods) == 1:
+            reason = "connection reset after acceptance"
+            raise urllib.error.URLError(reason)
+        return io.BytesIO(_receipt("completed", result="accepted earlier"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+
+    assert result == "accepted earlier"
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
+
+
+def test_script_sdk_retries_same_submit_while_owner_runtime_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transient owner-runtime 503 retries the same POST instead of losing the call."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        payloads.append(request.data)
+        if len(methods) == 1:
             raise urllib.error.HTTPError(
                 request.full_url,
                 503,
@@ -252,7 +284,8 @@ def test_script_sdk_retryable_submit_http_failure_polls_without_resubmitting(
     result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
 
     assert result == "accepted earlier"
-    assert methods == ["POST", "GET"]
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
 
 
 @pytest.mark.parametrize(
@@ -270,14 +303,14 @@ def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
     receipt_function: str,
     receipt_arguments: dict[str, object],
 ) -> None:
-    """Polling after ambiguous acceptance cannot consume a different call identity."""
+    """Replaying an ambiguous submit cannot consume a different call identity."""
     _configure(monkeypatch, tmp_path)
     methods: list[str] = []
 
     def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
         del timeout
         methods.append(request.method)
-        if request.method == "POST":
+        if len(methods) == 1:
             raise urllib.error.HTTPError(
                 request.full_url,
                 503,
@@ -307,7 +340,7 @@ def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
 
     assert exc_info.value.kind == "stable_call_conflict"
     assert exc_info.value.retryable is False
-    assert methods == ["POST", "GET"]
+    assert methods == ["POST", "POST"]
 
 
 def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

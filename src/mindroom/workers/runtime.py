@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Never, cast
 
@@ -17,6 +17,16 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend, docker_backend_config_signature
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
+from mindroom.workers.cleanup_locator import (
+    DockerWorkerCleanupLocator,
+    KubernetesWorkerCleanupLocator,
+    docker_cleanup_runtime_paths,
+    docker_worker_cleanup_locator,
+    kubernetes_cleanup_runtime_paths,
+    kubernetes_worker_cleanup_locator,
+    parse_worker_cleanup_locator,
+    serialize_worker_cleanup_locator,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,10 +67,6 @@ class _WorkerManagerEntry:
     config_signature: tuple[str, ...]
     active_leases: int = 0
     shutdown_requested: bool = False
-    generation_id: str = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.generation_id = _stable_json_digest(self.config_signature)
 
 
 @dataclass(slots=True)
@@ -74,11 +80,6 @@ class PrimaryWorkerManagerLease:
     def manager(self) -> WorkerBackend:
         """Return the leased worker manager."""
         return self._entry.manager
-
-    @property
-    def generation_id(self) -> str:
-        """Return the stable opaque identity of this manager's configuration."""
-        return self._entry.generation_id
 
     def __enter__(self) -> WorkerBackend:
         """Enter the lease context and return the borrowed manager."""
@@ -95,6 +96,27 @@ class PrimaryWorkerManagerLease:
             return
         self._released = True
         _release_primary_worker_manager_entry(self._entry)
+
+
+@dataclass(slots=True)
+class _ReconstructedWorkerManagerLease:
+    """Detached lease for one exact durable cleanup locator."""
+
+    manager: WorkerBackend
+    _released: bool = False
+
+    def __enter__(self) -> WorkerBackend:
+        """Enter the detached lease context and return its cleanup manager."""
+        return self.manager
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+        """Release the detached lease when its context exits."""
+        self.release()
+        return False
+
+    def release(self) -> None:
+        """Drop the detached cleanup manager without broad backend shutdown."""
+        self._released = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,11 +283,32 @@ def lease_configured_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
     runtime_config: Config | None,
-) -> PrimaryWorkerManagerLease | None:
-    """Lease the config-aware primary manager shared by runtime maintenance."""
+    required_backend_locator: str | None = None,
+) -> PrimaryWorkerManagerLease | _ReconstructedWorkerManagerLease | None:
+    """Lease the current or one exactly reconstructible durable worker manager."""
+    if required_backend_locator is not None:
+        from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
+
+        proxy_token = sandbox_proxy_config(runtime_paths).proxy_token
+        if not proxy_token:
+            return None
+        return _reconstruct_worker_manager_lease(
+            runtime_paths,
+            serialized_locator=required_backend_locator,
+            proxy_token=proxy_token,
+        )
+
     inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
     if inputs is None:
         return None
+    return _lease_configured_primary_worker_manager(runtime_paths, inputs)
+
+
+def _lease_configured_primary_worker_manager(
+    runtime_paths: RuntimePaths,
+    inputs: _ConfiguredPrimaryWorkerManagerInputs,
+) -> PrimaryWorkerManagerLease:
+    """Lease one already-resolved exact worker-manager configuration."""
     return lease_primary_worker_manager(
         runtime_paths,
         proxy_url=inputs.proxy_url,
@@ -275,6 +318,39 @@ def lease_configured_primary_worker_manager(
         kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
         worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
+
+
+def _reconstruct_worker_manager_lease(
+    runtime_paths: RuntimePaths,
+    *,
+    serialized_locator: str,
+    proxy_token: str,
+) -> _ReconstructedWorkerManagerLease | None:
+    """Recreate only the backend client and selectors needed for exact cleanup."""
+    locator = parse_worker_cleanup_locator(serialized_locator)
+    if isinstance(locator, DockerWorkerCleanupLocator):
+        cleanup_paths = docker_cleanup_runtime_paths(runtime_paths, locator)
+        manager: WorkerBackend = DockerWorkerBackend.from_runtime(
+            cleanup_paths,
+            auth_token=proxy_token,
+            storage_path=cleanup_paths.storage_root,
+            worker_grantable_credentials=frozenset(),
+        )
+    elif isinstance(locator, KubernetesWorkerCleanupLocator):
+        cleanup_paths = kubernetes_cleanup_runtime_paths(runtime_paths, locator)
+        manager = KubernetesWorkerBackend.from_runtime(
+            cleanup_paths,
+            auth_token=proxy_token,
+            storage_root=cleanup_paths.storage_root,
+            tool_validation_snapshot={},
+            config_snapshot={},
+            worker_grantable_credentials=frozenset(),
+            cleanup_client_locator=locator,
+        )
+    else:
+        return None
+    manager.cleanup_locator = serialized_locator
+    return _ReconstructedWorkerManagerLease(manager=manager)
 
 
 def configured_primary_worker_manager_identity(
@@ -437,12 +513,12 @@ def _build_primary_worker_manager(
     backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
     if backend_name == "static_runner":
-        return StaticSandboxRunnerBackend(
+        manager = StaticSandboxRunnerBackend(
             api_root=normalize_static_runner_api_root(proxy_url or ""),
             auth_token=proxy_token,
         )
-    if backend_name == "docker":
-        return cast(
+    elif backend_name == "docker":
+        manager = cast(
             "WorkerBackend",
             DockerWorkerBackend.from_runtime(
                 runtime_paths,
@@ -453,11 +529,11 @@ def _build_primary_worker_manager(
                 ),
             ),
         )
-    if backend_name == "kubernetes":
+    elif backend_name == "kubernetes":
         if storage_root is None:
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
-        return KubernetesWorkerBackend.from_runtime(
+        manager = KubernetesWorkerBackend.from_runtime(
             runtime_paths,
             auth_token=proxy_token,
             storage_root=resolved_storage_root,
@@ -469,8 +545,29 @@ def _build_primary_worker_manager(
                 worker_grantable_credentials,
             ),
         )
-    msg = f"Unsupported worker backend: {backend_name}"
-    raise WorkerBackendError(msg)
+    else:
+        msg = f"Unsupported worker backend: {backend_name}"
+        raise WorkerBackendError(msg)
+    locator = _worker_cleanup_locator_for_runtime(
+        runtime_paths,
+        backend_name=backend_name,
+        storage_root=resolved_storage_root,
+    )
+    manager.cleanup_locator = serialize_worker_cleanup_locator(locator) if locator is not None else None
+    return manager
+
+
+def _worker_cleanup_locator_for_runtime(
+    runtime_paths: RuntimePaths,
+    *,
+    backend_name: str,
+    storage_root: Path,
+) -> DockerWorkerCleanupLocator | KubernetesWorkerCleanupLocator | None:
+    if backend_name == "docker":
+        return docker_worker_cleanup_locator(runtime_paths, storage_root=storage_root)
+    if backend_name == "kubernetes":
+        return kubernetes_worker_cleanup_locator(runtime_paths, storage_root=storage_root)
+    return None
 
 
 def _shutdown_worker_manager_now(

@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="script",
     display_name="Background Scripts",
-    description="Run and control requester-scoped background Python scripts",
+    description=(
+        "Run trusted arbitrary Python code with scoped worker filesystem and environment access plus "
+        "deployment-policy network access"
+    ),
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -34,7 +37,10 @@ if TYPE_CHECKING:
             type="string[]",
             required=False,
             default=[],
-            description="Optional toolkit names that background scripts may call; empty uses the agent's tool surface.",
+            description=(
+                "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, "
+                "filesystem, environment, or network access."
+            ),
         ),
         ConfigField(
             name="max_concurrent_runs",

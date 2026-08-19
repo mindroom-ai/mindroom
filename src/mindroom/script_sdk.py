@@ -95,20 +95,23 @@ class MindRoomTools:
         call_id = uuid.uuid4().hex
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
         arguments_digest = _digest_arguments(wire_arguments)
-        try:
-            receipt = self._submit(
-                call_id,
-                toolkit_name,
-                function_name,
-                wire_arguments,
-                arguments_digest=arguments_digest,
-            )
-        except MindRoomToolCallError as exc:
-            if not exc.retryable:
-                raise
-            receipt = None
+        receipt: _Receipt | None = None
+        while receipt is None:
+            try:
+                receipt = self._submit(
+                    call_id,
+                    toolkit_name,
+                    function_name,
+                    wire_arguments,
+                    arguments_digest=arguments_digest,
+                )
+            except MindRoomToolCallError as exc:
+                if not exc.retryable:
+                    raise
+                if self._poll_interval_seconds > 0:
+                    time.sleep(self._poll_interval_seconds)
 
-        while receipt is None or receipt.state == "pending":
+        while receipt.state == "pending":
             if self._poll_interval_seconds > 0:
                 time.sleep(self._poll_interval_seconds)
             try:
@@ -121,7 +124,6 @@ class MindRoomTools:
             except MindRoomToolCallError as exc:
                 if not exc.retryable:
                     raise
-                receipt = None
 
         if receipt.state == "completed":
             return receipt.result

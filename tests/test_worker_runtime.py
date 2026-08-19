@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -11,6 +13,13 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.metadata import ToolValidationInfo
 from mindroom.workers import runtime as workers_runtime_module
+from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.cleanup_locator import (
+    DockerWorkerCleanupLocator,
+    kubernetes_cleanup_runtime_paths,
+    kubernetes_worker_cleanup_locator,
+    serialize_worker_cleanup_locator,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -360,6 +369,108 @@ def test_configured_primary_worker_manager_identity_uses_the_lease_signature_wit
     assert identity == "645b967075b7e04dcf2484456e24e777ae602b20c0bf8b0414bd06d9aaffaed6"
     assert signature.call_args.kwargs["storage_root"] == runtime_paths.storage_root
     build_manager.assert_not_called()
+
+
+def test_configured_worker_lease_reconstructs_the_exact_durable_cleanup_locator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An offline selector change reconstructs the old backend directly from its durable locator."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_token="worker-token"),  # noqa: S106
+    )
+    manager = MagicMock()
+    from_runtime = MagicMock(return_value=manager)
+    monkeypatch.setattr(
+        workers_runtime_module.DockerWorkerBackend,
+        "from_runtime",
+        from_runtime,
+    )
+    locator = serialize_worker_cleanup_locator(
+        DockerWorkerCleanupLocator(
+            version=1,
+            backend="docker",
+            storage_root=str(runtime_paths.storage_root),
+            name_prefix="old-prefix",
+            docker_host="unix:///run/old-docker.sock",
+            docker_tls_verify=None,
+            docker_cert_path=None,
+        ),
+    )
+
+    resolved = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=Config(),
+        required_backend_locator=locator,
+    )
+
+    assert resolved is not None
+    assert resolved.manager is manager
+    assert resolved.manager.cleanup_locator == locator
+    leased_paths = from_runtime.call_args.args[0]
+    assert workers_runtime_module.primary_worker_backend_name(leased_paths) == "docker"
+    assert leased_paths.env_value("DOCKER_HOST") == "unix:///run/old-docker.sock"
+    assert leased_paths.env_value("MINDROOM_DOCKER_WORKER_NAME_PREFIX") == "old-prefix"
+
+
+def test_configured_worker_lease_rejects_noncanonical_cleanup_locator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Durable cleanup routing never guesses from malformed or rewritten locator data."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_token="worker-token"),  # noqa: S106
+    )
+
+    with pytest.raises(WorkerBackendError, match="Invalid durable worker cleanup locator"):
+        workers_runtime_module.lease_configured_primary_worker_manager(
+            runtime_paths,
+            runtime_config=Config(),
+            required_backend_locator='{"backend":"docker", "version":1}',
+        )
+
+
+def test_kubernetes_cleanup_locator_preserves_ordered_multi_file_context(
+    tmp_path: Path,
+) -> None:
+    """Cleanup reuses every kubeconfig file and the context selected by their merge order."""
+    first = tmp_path / "first-kubeconfig.yaml"
+    second = tmp_path / "second-kubeconfig.yaml"
+    first.write_text(
+        "clusters:\n- name: cluster\n  cluster:\n    server: https://cluster.test\n"
+        "users:\n- name: user\n  user:\n    token: test\n"
+        "contexts:\n- name: first\n  context:\n    cluster: cluster\n    user: user\n"
+        "current-context: first\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "contexts:\n- name: second\n  context:\n    cluster: cluster\n    user: user\ncurrent-context: second\n",
+        encoding="utf-8",
+    )
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "KUBECONFIG": os.pathsep.join((str(first), str(second))),
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "worker-pvc",
+        },
+    )
+
+    locator = kubernetes_worker_cleanup_locator(runtime_paths, storage_root=runtime_paths.storage_root)
+
+    assert locator is not None
+    assert locator.kubeconfig_paths == (str(first.resolve()), str(second.resolve()))
+    assert locator.kube_context == "second"
+    cleanup_paths = kubernetes_cleanup_runtime_paths(runtime_paths, locator)
+    assert cleanup_paths.env_value("KUBECONFIG") == os.pathsep.join(locator.kubeconfig_paths)
 
 
 def test_configured_primary_worker_manager_lease_skips_kubernetes_without_runtime_config(

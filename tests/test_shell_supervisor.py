@@ -144,6 +144,21 @@ async def _assert_pid_dead(pid: int) -> None:
     raise AssertionError(message)
 
 
+async def _assert_linux_pid_not_running(pid: int) -> None:
+    """Wait until a Linux process exits, allowing an unreaped zombie."""
+    stat_path = Path(f"/proc/{pid}/stat")
+    for _ in range(40):
+        try:
+            state = stat_path.read_text(encoding="utf-8").split()[2]
+        except FileNotFoundError:
+            return
+        if state == "Z":
+            return
+        await asyncio.sleep(0.05)
+    message = f"Process {pid} is still running"
+    raise AssertionError(message)
+
+
 # ---------------------------------------------------------------------------
 # Server protocol
 # ---------------------------------------------------------------------------
@@ -715,6 +730,85 @@ async def test_supervisor_terminate_kills_children_and_invalidates_handles(
     new_socket_path = manager.ensure()
     assert new_socket_path != socket_path
     assert "Unknown handle" in await _check(new_socket_path, handle)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux parent-death signal regression")
+@pytest.mark.asyncio
+async def test_supervisor_sigkill_terminates_supervised_process_group(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A hard-crashed supervisor must not leave a script or its child running."""
+    socket_path = manager.ensure()
+    ready_path = tmp_path / "child-ready"
+    child = (
+        "import os, pathlib, subprocess, sys, time; "
+        "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
+        "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {descendant.pid}', encoding='utf-8'); "
+        "time.sleep(300)"
+    )
+    result = await _run(socket_path, [sys.executable, "-c", child, str(ready_path)], timeout=0)
+    supervised_pid = int(result.split("PID ")[1].split(")")[0])
+    for _ in range(40):
+        if ready_path.exists():
+            break
+        await asyncio.sleep(0.05)
+    script_pid, descendant_pid = map(int, ready_path.read_text(encoding="utf-8").split())
+
+    supervisor = manager._supervisor
+    assert supervisor is not None
+    try:
+        supervisor.process.kill()
+        supervisor.process.wait(timeout=10)
+
+        await _assert_linux_pid_not_running(supervised_pid)
+        await _assert_linux_pid_not_running(script_pid)
+        await _assert_linux_pid_not_running(descendant_pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(supervised_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_sigterm_preserves_target_graceful_exit(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A normal group SIGTERM must let the target report its graceful exit."""
+    socket_path = manager.ensure()
+    ready_path = tmp_path / "ready"
+    handled_path = tmp_path / "handled"
+    child = (
+        "import pathlib, signal, sys, time\n"
+        "ready = pathlib.Path(sys.argv[1])\n"
+        "handled = pathlib.Path(sys.argv[2])\n"
+        "def stop(_signum, _frame):\n"
+        "    handled.write_text('handled', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "ready.write_text('ready', encoding='utf-8')\n"
+        "time.sleep(300)\n"
+    )
+    result = await _run(
+        socket_path,
+        [sys.executable, "-c", child, str(ready_path), str(handled_path)],
+        timeout=0,
+    )
+    handle = _extract_handle(result)
+    for _ in range(40):
+        if ready_path.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert ready_path.exists()
+
+    try:
+        assert "Terminated" in await _kill(socket_path, handle)
+        status = await _wait_for_finished(socket_path, handle)
+
+        assert "exit code 0" in status
+        assert handled_path.read_text(encoding="utf-8") == "handled"
+    finally:
+        await _kill(socket_path, handle, force=True)
 
 
 @pytest.mark.asyncio

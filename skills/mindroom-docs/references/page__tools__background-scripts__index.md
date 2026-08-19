@@ -38,6 +38,8 @@ defaults:
 ```
 
 `allowed_tools` contains toolkit names, not function names.
+It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
+Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
 MindRoom captures it when the script launches.
 A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
 An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
@@ -194,7 +196,13 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 
 Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
 The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
-The worker root exposes only that run's script snapshot, and sibling worker roots and snapshots are not mounted into it.
+The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
+The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
+MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.
+This credential rule is not a general secret boundary because operators can deliberately expose values through worker storage or environment configuration.
+Worker mode is process and filesystem isolation, not an independent network sandbox.
+Direct network access follows the Docker, Kubernetes, host, and configured egress policy of the worker, and `allowed_tools` does not govern that traffic.
+Sibling run-specific worker roots and snapshots are not mounted into the script worker.
 Brokered tool calls still use the durable requester-and-agent execution identity and each tool's current primary-or-worker execution target rather than the arbitrary script process's run-specific worker.
 
 Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` permits local execution instead of a worker.

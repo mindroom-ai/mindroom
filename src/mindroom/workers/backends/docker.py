@@ -20,6 +20,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     RuntimePaths,
     resolve_primary_runtime_paths,
+    runtime_env_values,
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     serialize_runtime_paths,
@@ -268,9 +269,13 @@ def _load_docker_client_and_errors(
         msg = "The Docker worker backend could not import the Docker SDK after ensuring the optional 'docker' extra."
         raise WorkerBackendError(msg) from exc
 
-    docker_from_env = cast("Callable[[], _DockerClient]", docker_module.from_env)
+    docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)
     try:
-        client = docker_from_env()
+        client = (
+            docker_from_env(environment=runtime_env_values(runtime_paths))
+            if runtime_paths is not None
+            else docker_from_env()
+        )
     except docker_errors.DockerException as exc:
         msg = f"Failed to initialize Docker client: {exc}"
         raise WorkerBackendError(msg) from exc
@@ -309,6 +314,7 @@ class DockerWorkerBackend:
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
     backend_name = "docker"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,
@@ -462,7 +468,11 @@ class DockerWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 spec.worker_key,
-                allowed_services=self.worker_grantable_credentials,
+                allowed_services=(
+                    self.worker_grantable_credentials
+                    if spec.mirrored_credential_services is None
+                    else spec.mirrored_credential_services
+                ),
                 credentials_manager=self._credentials_manager,
             )
 

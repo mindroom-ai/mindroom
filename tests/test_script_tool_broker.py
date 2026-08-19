@@ -37,6 +37,7 @@ from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
+    ScriptRuntimeUnavailableError,
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
     ScriptToolCallRequest,
@@ -192,7 +193,7 @@ class _RuntimeResolver:
         private_agent_names: frozenset[str] | None = None,
         local_unsafe: bool = False,
         resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
-        authorized: bool = True,
+        authorized: bool | None = True,
     ) -> None:
         self.context = context
         self.approval_events = approval_events
@@ -207,7 +208,7 @@ class _RuntimeResolver:
         self.settled_approvals: list[tuple[BackgroundScriptToolOrigin, str]] = []
         self.settled_runs: list[tuple[str, str]] = []
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
         del run, config
         return self.authorized
 
@@ -397,6 +398,17 @@ async def test_script_broker_rejects_owner_without_current_reply_authorization(t
     broker, token = _broker(tmp_path, events=[], authorized=False)
 
     with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        await broker.accept_authenticated(_request(), f"Bearer {token}")
+
+    assert broker.store.pending_calls("run-1") == []
+
+
+@pytest.mark.asyncio
+async def test_script_broker_keeps_valid_capability_retryable_while_bot_is_unavailable(tmp_path: Path) -> None:
+    """A hot-restarting bot is transiently unavailable, not a permanent authorization denial."""
+    broker, token = _broker(tmp_path, events=[], authorized=None)
+
+    with pytest.raises(ScriptRuntimeUnavailableError, match="temporarily unavailable"):
         await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert broker.store.pending_calls("run-1") == []
@@ -738,133 +750,40 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
 
 
 @pytest.mark.asyncio
-async def test_script_broker_keeps_toolkit_connected_while_materializing_generator(
+async def test_script_broker_rejects_generator_entrypoint_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A generator result may still depend on its toolkit connection while it is consumed."""
+    """Unsupported generators must not execute before the broker rejects the call."""
     lifecycle: list[str] = []
 
     class ConnectedToolkit(Toolkit):
         _requires_connect = True
 
         def __init__(self) -> None:
-            self.connected = False
             super().__init__(name="calculator", tools=[self.add])
 
         def connect(self) -> None:
-            self.connected = True
             lifecycle.append("connect")
 
         def close(self) -> None:
-            self.connected = False
             lifecycle.append("close")
 
         def add(self, a: int, b: int) -> object:
-            assert self.connected
+            del a, b
             lifecycle.append("body")
-            yield a
-            yield b
+            yield "never"
 
     _replace_calculator_toolkit(monkeypatch, ConnectedToolkit)
     broker, token = _broker(tmp_path, events=[])
 
     receipt = await _call_through_gateway(broker, _request(call_id="stream-call"), token)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == [1, 2]
-    assert lifecycle == ["connect", "body", "close"]
-
-
-def test_append_bounded_result_tracks_exact_incremental_json_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stream accounting includes UTF-8 bytes, brackets, and separators exactly once."""
-    monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", 10)
-    items: list[object] = []
-
-    encoded_bytes = broker_module._append_bounded_result(items, "é", 2)
-    encoded_bytes = broker_module._append_bounded_result(items, "x", encoded_bytes)
-
-    assert encoded_bytes == 10
-    assert items == ["é", "x"]
-    with pytest.raises(ValueError, match="bounded result byte limit"):
-        broker_module._append_bounded_result(items, "z", encoded_bytes)
-
-
-@pytest.mark.asyncio
-async def test_materialize_result_enforces_exact_stream_item_limit() -> None:
-    """Exactly 1,000 stream items fit while item 1,001 is rejected."""
-    expected = list(range(1_000))
-
-    assert await broker_module._materialize_result(iter(expected)) == expected
-    with pytest.raises(ValueError, match="bounded result item limit"):
-        await broker_module._materialize_result(iter(range(1_001)))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("maximum_bytes", "expected_state", "expected_error_kind"),
-    [
-        (10, ScriptCallState.COMPLETED, None),
-        (9, ScriptCallState.FAILED, "call_rejected"),
-    ],
-)
-async def test_script_broker_enforces_exact_stream_json_byte_boundary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    maximum_bytes: int,
-    expected_state: ScriptCallState,
-    expected_error_kind: str | None,
-) -> None:
-    """The stream byte limit is exact for UTF-8 data and JSON list punctuation."""
-
-    class BoundedToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def add(self, a: int, b: int) -> object:
-            del a, b
-            yield "é"
-            yield "x"
-
-    _replace_calculator_toolkit(monkeypatch, BoundedToolkit)
-    monkeypatch.setattr(broker_module, "_MAX_MATERIALIZED_RESULT_BYTES", maximum_bytes)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id=f"stream-bytes-{maximum_bytes}"), token)
-
-    assert receipt.state is expected_state
-    if expected_error_kind is None:
-        assert receipt.result == ["é", "x"]
-    else:
-        assert isinstance(receipt.error, dict)
-        assert receipt.error["kind"] == expected_error_kind
-
-
-@pytest.mark.asyncio
-async def test_script_broker_rejects_nonfinite_stream_item(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Incremental stream encoding must retain strict non-finite rejection."""
-
-    class NonFiniteStreamToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-
-        def add(self, a: int, b: int) -> object:
-            del a, b
-            yield float("nan")
-
-    _replace_calculator_toolkit(monkeypatch, NonFiniteStreamToolkit)
-    broker, token = _broker(tmp_path, events=[])
-
-    receipt = await _call_through_gateway(broker, _request(call_id="nonfinite-stream"), token)
-
     assert receipt.state is ScriptCallState.FAILED
     assert isinstance(receipt.error, dict)
     assert receipt.error["kind"] == "call_rejected"
+    assert "Generator tool entrypoints" in str(receipt.error["message"])
+    assert lifecycle == ["close"]
 
 
 @pytest.mark.asyncio

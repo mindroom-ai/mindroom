@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import runtime_env_values
@@ -30,7 +32,6 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
@@ -362,6 +363,7 @@ def kubernetes_backend_config_signature(
     extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = stable_signature_json(config.resource_requests)
     resource_limits_json = stable_signature_json(config.resource_limits)
+    client_identity = _kubernetes_client_identity(runtime_paths)
     return (
         "kubernetes",
         config.namespace,
@@ -378,6 +380,7 @@ def kubernetes_backend_config_signature(
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
+        client_identity,
         config.node_name or "",
         str(config.colocate_with_control_plane_node),
         extra_env_json,
@@ -396,6 +399,30 @@ def kubernetes_backend_config_signature(
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+
+
+def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
+    """Return a non-secret cache fingerprint for the selected Kubernetes control plane."""
+    env = runtime_env_values(runtime_paths)
+    service_host = env.get("KUBERNETES_SERVICE_HOST")
+    service_port = env.get("KUBERNETES_SERVICE_PORT")
+    if service_host and service_port:
+        return f"in-cluster:{service_host}:{service_port}"
+    identities: list[str] = []
+    for kubeconfig_path in resolve_kubeconfig_paths(runtime_paths):
+        try:
+            kubeconfig_digest = hashlib.sha256(kubeconfig_path.read_bytes()).hexdigest()
+        except OSError:
+            kubeconfig_digest = "unavailable"
+        identities.append(f"{kubeconfig_path}:{kubeconfig_digest}")
+    return "kubeconfig:" + os.pathsep.join(identities)
+
+
+def resolve_kubeconfig_paths(runtime_paths: RuntimePaths) -> tuple[Path, ...]:
+    """Resolve the ordered files selected by the Kubernetes client."""
+    raw_paths = runtime_env_values(runtime_paths).get("KUBECONFIG")
+    configured_paths = raw_paths.split(os.pathsep) if raw_paths else [str(Path.home() / ".kube" / "config")]
+    return tuple(Path(path).expanduser().resolve() for path in configured_paths if path)
 
 
 def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:

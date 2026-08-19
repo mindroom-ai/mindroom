@@ -114,11 +114,20 @@ async def _handle_run(
     if handle_payload is not None and not isinstance(handle_payload, str):
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
+    command_argv = [str(item) for item in argv_payload]
+    if sys.platform.startswith("linux"):
+        command_argv = [
+            sys.executable,
+            "-m",
+            "mindroom.parent_death_exec",
+            str(os.getpid()),
+            *command_argv,
+        ]
     run_task = asyncio.create_task(
         run_command(
             registry,
             namespace=str(payload["namespace"]),
-            argv=[str(item) for item in argv_payload],
+            argv=command_argv,
             env={str(key): str(value) for key, value in env_payload.items()},
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]

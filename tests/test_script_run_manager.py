@@ -136,6 +136,7 @@ class _Broker:
 class _WorkerBackend:
     store: ScriptRunStore
     runtime_paths: RuntimePaths
+    cleanup_locator: str | None = "locator-a"
     handles: dict[str, WorkerHandle] = field(default_factory=dict)
     specs: list[WorkerSpec] = field(default_factory=list)
     saw_starting: bool = False
@@ -295,6 +296,11 @@ def _manager(
     return manager, backend, client
 
 
+async def _wait_for_cancel_request(manager: ScriptRunManager, run_id: str) -> None:
+    while manager.store.get_run(run_id).cancel_requested_at is None:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: Path) -> None:
     """Worker allocation sees durable intent, then the launch sees private snapshotted files."""
@@ -311,6 +317,14 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
     assert run.state is ScriptRunState.RUNNING
     assert run.worker_key is not None
     assert run.worker_id == "worker-1"
+    assert run.worker_backend_locator == backend.cleanup_locator
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key,
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+        ),
+    ]
     assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
     assert run.max_tool_calls_per_minute == 4
     assert run.max_runtime_seconds == 3600
@@ -350,6 +364,40 @@ async def test_worker_replacement_waits_for_admitted_launch_and_rejects_racing_l
     await admitted_launch
     await boundary
     await manager.end_worker_replacement()
+
+
+@pytest.mark.asyncio
+async def test_launch_persists_backend_admitted_after_replacement_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend swap before gate admission cannot leave the run pinned to the stale owner."""
+    manager, stale_backend, _client = _manager(tmp_path)
+    replacement_backend = _WorkerBackend(
+        store=manager.store,
+        runtime_paths=stale_backend.runtime_paths,
+        cleanup_locator="locator-b",
+    )
+    gate_entered = asyncio.Event()
+    release_gate = asyncio.Event()
+    admit_worker_launch = ScriptRunManager._admit_worker_launch
+
+    async def block_before_admission(self: ScriptRunManager) -> None:
+        gate_entered.set()
+        await release_gate.wait()
+        await admit_worker_launch(self)
+
+    monkeypatch.setattr(ScriptRunManager, "_admit_worker_launch", block_before_admission)
+    launch = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
+    await gate_entered.wait()
+    manager.worker_backend = replacement_backend
+    release_gate.set()
+
+    run = await launch
+
+    assert run.worker_backend_locator == replacement_backend.cleanup_locator
+    assert stale_backend.specs == []
+    assert len(replacement_backend.specs) == 1
 
 
 @pytest.mark.asyncio
@@ -632,9 +680,9 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_worker_launch_failure_remains_retryable_until_exit(tmp_path: Path) -> None:
-    """An unconfirmed launch owner stays nonterminal so reconciliation can signal it again."""
-    manager, _backend, client = _manager(tmp_path)
+async def test_ambiguous_worker_launch_failure_retires_exact_worker_when_runner_is_unavailable(tmp_path: Path) -> None:
+    """An unavailable runner falls back to exact worker retirement after an ambiguous launch."""
+    manager, backend, client = _manager(tmp_path)
     client.launch_failure = RuntimeError("launch response lost")
     client.cancel_failures.append(RuntimeError("worker unavailable"))
     client.next_status = WorkerScriptStatus(state="running")
@@ -643,25 +691,21 @@ async def test_ambiguous_worker_launch_failure_remains_retryable_until_exit(tmp_
         await manager.run(_context(tmp_path), source="print('ok')\n")
 
     stored = manager.store.list_runs()[0]
-    assert stored.state is ScriptRunState.STARTING
+    assert stored.state is ScriptRunState.INTERRUPTED
     assert stored.cancel_requested_at is not None
     assert client.cancel_forces == [True]
     assert client.cancel_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
-
-    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
-    reconciled = await manager.reconcile(_context(tmp_path), run_id=stored.run_id)
-
-    assert reconciled.state is ScriptRunState.CANCELLED
-    assert client.cancel_forces == [True, False]
+    assert backend.handles == {}
+    assert len(backend.retired_worker_keys) == 2
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_worker_running_persistence_remains_retryable(
+async def test_ambiguous_running_persistence_retires_exact_worker_when_runner_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-spawn durable update failure keeps ownership retryable until exit."""
-    manager, _backend, client = _manager(tmp_path)
+    """A post-spawn durable update failure still retires the exact unreachable runner owner."""
+    manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     original_transition = manager.store.transition_run
 
@@ -692,8 +736,10 @@ async def test_ambiguous_worker_running_persistence_remains_retryable(
         await manager.run(context, source="print('ok')\n")
 
     stored = manager.store.list_runs()[0]
-    assert stored.state is ScriptRunState.STARTING
+    assert stored.state is ScriptRunState.INTERRUPTED
     assert stored.cancel_requested_at is not None
+    assert backend.handles == {}
+    assert len(backend.retired_worker_keys) == 2
 
 
 @pytest.mark.asyncio
@@ -707,9 +753,11 @@ async def test_launch_adopts_cancellation_that_finishes_before_running_transitio
     await client.launch_entered.wait()
     [starting] = manager.store.list_runs(include_finished=False)
 
-    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    assert cancellation.done() is False
     client.launch_release.set()
-    launch_result = await launch
+    launch_result, cancelled = await asyncio.gather(launch, cancellation)
 
     assert cancelled.state is ScriptRunState.CANCELLED
     assert launch_result.state is ScriptRunState.CANCELLED
@@ -751,17 +799,20 @@ async def test_worker_launch_does_not_publish_running_after_unconfirmed_cancel(t
     [starting] = manager.store.list_runs(include_finished=False)
     client.next_status = WorkerScriptStatus(state="running")
 
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    assert cancellation.done() is False
     client.launch_release.set()
     launch_result = await launch
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await cancellation
 
     assert launch_result.state is ScriptRunState.STARTING
     assert launch_result.cancel_requested_at is not None
     assert manager.store.get_run(starting.run_id).state is ScriptRunState.STARTING
 
     client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
-    reconciled = await manager.reconcile(context, run_id=starting.run_id)
+    reconciled = await manager.reconcile_durable(run_id=starting.run_id)
     assert reconciled.state is ScriptRunState.CANCELLED
 
 
@@ -787,13 +838,168 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
     assert await asyncio.to_thread(created.wait, 5)
     [starting] = manager.store.list_runs(include_finished=False)
 
-    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
-    assert cancelled.state is ScriptRunState.CANCELLED
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    maintenance = asyncio.create_task(manager.reconcile_durable(run_id=starting.run_id))
+    await asyncio.sleep(0)
+    assert cancellation.done() is False
+    assert maintenance.done() is False
     release_create.set()
-    launch_result = await launch
+    launch_result, cancelled, reconciled = await asyncio.gather(launch, cancellation, maintenance)
 
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert reconciled.state is ScriptRunState.CANCELLED
     assert launch_result.state is ScriptRunState.CANCELLED
     assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_waits_for_blocked_worker_allocation_then_retires_returned_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot terminalize before a concurrent allocator publishes and cleans its worker."""
+    manager, backend, _client = _manager(tmp_path)
+    context = _context(tmp_path)
+    allocation_started = threading.Event()
+    release_allocation = threading.Event()
+    original_ensure_worker = backend.ensure_worker
+
+    def blocked_ensure_worker(*args: object, **kwargs: object) -> WorkerHandle:
+        allocation_started.set()
+        assert release_allocation.wait(timeout=5)
+        return original_ensure_worker(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "ensure_worker", blocked_ensure_worker)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(allocation_started.wait, 5)
+    [starting] = manager.store.list_runs(include_finished=False)
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await asyncio.sleep(0)
+    assert cancellation.done() is False
+
+    release_allocation.set()
+    await launch
+    cancelled = await cancellation
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert cancelled.worker_key is None
+    assert backend.handles == {}
+    assert backend.retired_worker_keys == [starting.worker_key]
+
+
+@pytest.mark.asyncio
+async def test_status_and_maintenance_wait_for_worker_allocation_before_reconciling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary observation cannot use a stale pre-allocation record to retire a live run."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    allocation_started = threading.Event()
+    release_allocation = threading.Event()
+    original_ensure_worker = backend.ensure_worker
+
+    def blocked_ensure_worker(*args: object, **kwargs: object) -> WorkerHandle:
+        allocation_started.set()
+        assert release_allocation.wait(timeout=5)
+        return original_ensure_worker(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "ensure_worker", blocked_ensure_worker)
+    client.next_status = WorkerScriptStatus(state="running")
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(allocation_started.wait, 5)
+    [starting] = manager.store.list_runs(include_finished=False)
+    status = asyncio.create_task(manager.status(context, run_id=starting.run_id))
+    maintenance = asyncio.create_task(manager.reconcile_durable(run_id=starting.run_id))
+    await asyncio.sleep(0)
+
+    assert status.done() is False
+    assert maintenance.done() is False
+    release_allocation.set()
+    launched, observed, reconciled = await asyncio.gather(launch, status, maintenance)
+
+    assert launched.state is ScriptRunState.RUNNING
+    assert observed.run.state is ScriptRunState.RUNNING
+    assert reconciled.state is ScriptRunState.RUNNING
+    assert backend.retired_worker_keys == []
+    assert starting.worker_key in backend.handles
+
+
+@pytest.mark.asyncio
+async def test_rotated_worker_token_falls_back_to_exact_worker_retirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old runner auth failure cannot keep its durably revoked dedicated worker alive."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+
+    async def rejected_by_old_runner(*_args: object, **_kwargs: object) -> WorkerScriptStatus:
+        message = "worker runner rejected the rotated token"
+        raise RuntimeError(message)
+
+    client.cancel_failures.append(RuntimeError("worker runner rejected the rotated token"))
+    monkeypatch.setattr(client, "status", rejected_by_old_runner)
+
+    cancelled = await manager.cancel(context, run_id=run.run_id, force=True)
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert backend.handles == {}
+    assert run.worker_key is not None
+    assert backend.retired_worker_keys == [run.worker_key, run.worker_key]
+    assert cancelled.error == "Background script worker was retired after its runner became unavailable."
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel after locator commit cannot leave a later-written local capability snapshot."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_write_snapshot = manager_module._write_snapshot
+
+    def blocked_write_snapshot(*args: object, **kwargs: object) -> tuple[Path, Path]:
+        write_started.set()
+        assert release_write.wait(timeout=5)
+        return original_write_snapshot(*args, **kwargs)
+
+    async def launch_local(*_args: object, **kwargs: object) -> str:
+        return f"Started background process\nHandle: {kwargs['handle']}"
+
+    monkeypatch.setattr(manager_module, "_write_snapshot", blocked_write_snapshot)
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(
+        manager_module,
+        "kill_command_via_supervisor",
+        lambda *_args, **_kwargs: "Terminated process shell:test",
+    )
+    monkeypatch.setattr(
+        manager_module,
+        "check_command_via_supervisor",
+        lambda *_args, **_kwargs: "Status: FINISHED (exit code -15)",
+    )
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(write_started.wait, 5)
+    [starting] = manager.store.list_runs(include_finished=False)
+    assert starting.snapshot_locator is not None
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await asyncio.sleep(0)
+    assert cancellation.done() is False
+
+    release_write.set()
+    await launch
+    cancelled = await cancellation
+
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert cancelled.snapshot_locator is None
+    assert not (context.runtime_paths.storage_root / starting.snapshot_locator).exists()
 
 
 @pytest.mark.asyncio
@@ -909,10 +1115,13 @@ async def test_preallocation_cancel_releases_capacity(
     assert await asyncio.to_thread(created.wait, 5)
     [starting] = manager.store.list_runs(include_finished=False)
 
-    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
-    assert cancelled.state is ScriptRunState.CANCELLED
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    assert cancellation.done() is False
     release_create.set()
-    assert (await launch).state is ScriptRunState.CANCELLED
+    launch_result, cancelled = await asyncio.gather(launch, cancellation)
+    assert cancelled.state is ScriptRunState.CANCELLED
+    assert launch_result.state is ScriptRunState.CANCELLED
 
     assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
     assert client.requested_handles == []
@@ -1152,26 +1361,20 @@ async def test_status_preserves_durable_authorization_interruption_state(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_signal_failure_stays_nonterminal_and_repeat_cancel_retries(tmp_path: Path) -> None:
-    """An unconfirmed failed signal preserves cancellation intent for a later retry."""
-    manager, _backend, client = _manager(tmp_path)
+async def test_signal_failure_retires_exact_worker_and_confirms_cancellation(tmp_path: Path) -> None:
+    """An unavailable runner falls back to exact dedicated-worker retirement."""
+    manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
     client.cancel_failures.append(RuntimeError("worker unavailable"))
     client.next_status = WorkerScriptStatus(state="running")
 
-    with pytest.raises(RuntimeError, match="worker unavailable"):
-        await manager.cancel(context, run_id=run.run_id, force=True)
-
-    pending = manager.store.get_run(run.run_id)
-    assert pending.state is ScriptRunState.RUNNING
-    assert pending.cancel_requested_at is not None
-
-    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
     cancelled = await manager.cancel(context, run_id=run.run_id, force=True)
 
     assert cancelled.state is ScriptRunState.CANCELLED
-    assert client.cancel_forces == [True, True]
+    assert backend.handles == {}
+    assert client.cancel_forces == [True]
+    assert len(backend.retired_worker_keys) == 2
 
 
 @pytest.mark.asyncio
@@ -1238,7 +1441,7 @@ async def test_worker_retirement_failure_leaves_observed_exit_nonterminal_for_re
 
     monkeypatch.setattr(backend, "retire_worker", fail_retirement)
     with pytest.raises(RuntimeError, match="retirement unavailable"):
-        await manager.reconcile(context, run_id=run.run_id)
+        await manager.reconcile_durable(run_id=run.run_id)
 
     pending = manager.store.get_run(run.run_id)
     assert pending.state is ScriptRunState.RUNNING
@@ -1297,11 +1500,19 @@ def test_snapshot_cleanup_does_not_follow_parent_swap(
     assert outside_token.read_text(encoding="utf-8") == "outside"
 
 
-def test_snapshot_cleanup_retries_directory_mutation_and_removes_partial_snapshot(tmp_path: Path) -> None:
-    """Unexpected content defers cleanup while an empty partial snapshot is removable."""
+def test_snapshot_cleanup_removes_nested_content_and_partial_snapshot_without_following_symlinks(
+    tmp_path: Path,
+) -> None:
+    """Run-owned nested content is removed without traversing a symlink outside the snapshot."""
     workspace = tmp_path / "workspace"
     directory_token = workspace / ".mindroom" / "script-runs" / "run-directory" / "capability"
     directory_token.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "keep.txt"
+    outside_file.write_text("keep", encoding="utf-8")
+    (directory_token / "outside-link").symlink_to(outside, target_is_directory=True)
+    (directory_token / "nested.txt").write_text("remove", encoding="utf-8")
     partial_run = workspace / ".mindroom" / "script-runs" / "run-partial"
     partial_run.mkdir()
 
@@ -1314,10 +1525,11 @@ def test_snapshot_cleanup_retries_directory_mutation_and_removes_partial_snapsho
         "workspace/.mindroom/script-runs/run-partial",
     )
 
-    assert directory_cleaned is False
+    assert directory_cleaned is True
     assert partial_cleaned is True
-    assert directory_token.is_dir()
+    assert not directory_token.parent.exists()
     assert not partial_run.exists()
+    assert outside_file.read_text(encoding="utf-8") == "keep"
 
 
 def test_snapshot_cleanup_ignores_descriptor_close_failure(
@@ -1499,7 +1711,7 @@ async def test_reconcile_records_exit_and_retires_exact_worker(tmp_path: Path) -
     run = await manager.run(context, source="print('ok')\n")
     client.next_status = WorkerScriptStatus(state="exited", output="done", exit_code=0)
 
-    reconciled = await manager.reconcile(context, run_id=run.run_id)
+    reconciled = await manager.reconcile_durable(run_id=run.run_id)
     later_status = await manager.status(context, run_id=run.run_id)
 
     assert reconciled.state is ScriptRunState.EXITED
@@ -1525,7 +1737,7 @@ async def test_terminal_output_is_bounded_to_the_latest_utf8_tail(tmp_path: Path
         exit_code=0,
     )
 
-    reconciled = await manager.reconcile(context, run_id=run.run_id)
+    reconciled = await manager.reconcile_durable(run_id=run.run_id)
     later_status = await manager.status(context, run_id=run.run_id)
 
     assert len(reconciled.output.encode("utf-8")) <= 64 * 1024
@@ -1549,9 +1761,9 @@ async def test_reconcile_enforces_runtime_limit_through_revocation_path(
     )
     monkeypatch.setattr(manager_module, "_runtime_expired", lambda _run: True)
 
-    reconciled = await manager.reconcile(context, run_id=run.run_id)
+    reconciled = await manager.reconcile_durable(run_id=run.run_id)
 
-    assert reconciled.state is ScriptRunState.CANCELLED
+    assert reconciled.state is ScriptRunState.INTERRUPTED
     assert reconciled.cancellation_reason == "Background script maximum runtime exceeded."
     assert manager.broker.cancelled_runs == [run.run_id]
     assert client.cancel_forces == [False]
@@ -1712,9 +1924,9 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
 
     termination_confirmed = True
-    reconciled = await manager.reconcile(context, run_id=stored.run_id)
+    reconciled = await manager.reconcile_durable(run_id=stored.run_id)
 
-    assert reconciled.state is ScriptRunState.CANCELLED
+    assert reconciled.state is ScriptRunState.INTERRUPTED
     assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"] * 2
 
 
@@ -1773,10 +1985,12 @@ async def test_local_launch_adopts_cancellation_before_running_transition(
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
     [starting] = manager.store.list_runs(include_finished=False)
-    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    assert cancellation.done() is False
     launch_release.set()
 
-    launch_result = await launch
+    launch_result, cancelled = await asyncio.gather(launch, cancellation)
     assert cancelled.state is ScriptRunState.CANCELLED
     assert launch_result.state is ScriptRunState.CANCELLED
     assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
@@ -1840,14 +2054,17 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
     [starting] = manager.store.list_runs(include_finished=False)
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancellation = asyncio.create_task(manager.cancel(context, run_id=starting.run_id, force=True))
+    await _wait_for_cancel_request(manager, starting.run_id)
+    assert cancellation.done() is False
     launch_release.set()
     launch_result = await launch
+    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
+        await cancellation
 
     assert launch_result.state is ScriptRunState.STARTING
     assert launch_result.cancel_requested_at is not None
 
     process_exited = True
-    reconciled = await manager.reconcile(context, run_id=starting.run_id)
+    reconciled = await manager.reconcile_durable(run_id=starting.run_id)
     assert reconciled.state is ScriptRunState.CANCELLED

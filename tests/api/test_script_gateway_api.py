@@ -20,6 +20,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptRuntimeResolver,
+    ScriptRuntimeUnavailableError,
     ScriptToolBroker,
     digest_arguments,
 )
@@ -335,6 +336,52 @@ async def test_script_gateway_unknown_and_revoked_capabilities_are_indistinguish
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Background script call is unavailable."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["post", "get"])
+async def test_script_gateway_reports_transient_owner_runtime_unavailability(method: str) -> None:
+    """A valid capability whose live bot is restarting remains retryable."""
+
+    class UnavailableBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del request, authorization
+            message = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(message)
+
+        async def get_authenticated(
+            self,
+            run_id: str,
+            call_id: str,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del run_id, call_id, authorization
+            message = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(message)
+
+    broker = UnavailableBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        if method == "post":
+            response = await client.post(
+                "/api/script-gateway/calls",
+                json=_payload(),
+                headers={"Authorization": "Bearer secret-token"},
+            )
+        else:
+            response = await client.get(
+                "/api/script-gateway/runs/run-1/calls/call-1",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Background script owner runtime is temporarily unavailable."}
 
 
 @pytest.mark.asyncio

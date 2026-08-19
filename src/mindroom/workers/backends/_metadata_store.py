@@ -487,6 +487,22 @@ def _remove_directory_contents(directory_fd: int, *, preserved_path: tuple[str, 
                 os.close(frame.descriptor)
 
 
+def remove_directory_tree_at(parent_fd: int, name: str) -> None:
+    """Remove one descriptor-bound child tree without following symlinks."""
+    _validate_segment(name)
+    descriptor = _open_directory_at(parent_fd, name)
+    binding = _binding(parent_fd, name, descriptor)
+    try:
+        _remove_directory_contents(descriptor, preserved_path=())
+        if not _binding_is_current(binding):
+            msg = "Directory tree changed during removal."
+            raise ValueError(msg)
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+
+
 def _retirement_identity_prefix(worker_name: str) -> str:
     return f".{worker_name}{_RETIREMENT_IDENTITY_MARKER}"
 

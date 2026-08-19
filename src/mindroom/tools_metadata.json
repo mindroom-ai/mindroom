@@ -5806,7 +5806,7 @@
         {
           "authored_override": true,
           "default": [],
-          "description": "Optional toolkit names that background scripts may call; empty uses the agent's tool surface.",
+          "description": "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, filesystem, environment, or network access.",
           "label": "Allowed Tools",
           "name": "allowed_tools",
           "options": null,
@@ -5863,7 +5863,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Run and control requester-scoped background Python scripts",
+      "description": "Run trusted arbitrary Python code with scoped worker filesystem and environment access plus deployment-policy network access",
       "display_name": "Background Scripts",
       "docs_url": null,
       "function_names": [

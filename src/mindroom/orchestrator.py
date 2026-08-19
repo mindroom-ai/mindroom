@@ -315,9 +315,10 @@ class _MultiAgentOrchestrator:
             self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
-            worker_lease_provider=lambda: lease_configured_primary_worker_manager(
+            worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
                 self.runtime_paths,
                 runtime_config=self.config,
+                required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
         )

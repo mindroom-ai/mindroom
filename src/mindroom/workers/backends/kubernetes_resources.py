@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.workers.cleanup_locator import KubernetesWorkerCleanupLocator
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
@@ -684,6 +685,7 @@ class KubernetesResourceManager:
         tool_validation_snapshot: dict[str, dict[str, object]],
         config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
+        cleanup_client_locator: KubernetesWorkerCleanupLocator | None = None,
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
@@ -693,6 +695,7 @@ class KubernetesResourceManager:
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
         self.config_snapshot = config_snapshot
+        self.cleanup_client_locator = cleanup_client_locator
         self.resolved_agent_policies = resolved_agent_policies_from_config_data(config_snapshot)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
@@ -1078,10 +1081,30 @@ class KubernetesResourceManager:
             msg = "The 'kubernetes' package is required for the Kubernetes worker backend."
             raise WorkerBackendError(msg) from exc
 
-        try:
+        locator = self.cleanup_client_locator
+        if locator is None:
+            try:
+                kubernetes_config.load_incluster_config()
+            except Exception:
+                kubernetes_config.load_kube_config()
+        elif locator.client_mode == "in_cluster":
+            if (
+                os.environ.get("KUBERNETES_SERVICE_HOST") != locator.service_host
+                or os.environ.get("KUBERNETES_SERVICE_PORT") != locator.service_port
+            ):
+                msg = "Original in-cluster Kubernetes control plane is unavailable for worker cleanup."
+                raise WorkerBackendError(msg)
             kubernetes_config.load_incluster_config()
-        except Exception:
-            kubernetes_config.load_kube_config()
+        else:
+            assert locator.kubeconfig_paths is not None
+            assert locator.kube_context is not None
+            if not all(Path(path).is_file() for path in locator.kubeconfig_paths):
+                msg = "Original Kubernetes kubeconfig is unavailable for worker cleanup."
+                raise WorkerBackendError(msg)
+            kubernetes_config.load_kube_config(
+                config_file=os.pathsep.join(locator.kubeconfig_paths),
+                context=locator.kube_context,
+            )
 
         self.apps_api = cast("_AppsApiProtocol", kubernetes_client.AppsV1Api())
         self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())

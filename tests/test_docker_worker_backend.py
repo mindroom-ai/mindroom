@@ -1325,6 +1325,25 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert metadata["startup_count"] == 1
 
 
+def test_docker_script_worker_profile_mirrors_no_global_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A script-specific Docker worker denies automatic credential mirroring."""
+    backend, _fake_client, sync_calls = _backend(monkeypatch, tmp_path)
+    backend.worker_grantable_credentials = frozenset({"openai", "github_private"})
+
+    backend.ensure_worker(
+        WorkerSpec(
+            _TEST_UNSCOPED_WORKER_KEY,
+            mirrored_credential_services=frozenset(),
+        ),
+        now=10.0,
+    )
+
+    assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, frozenset())]
+
+
 def test_docker_backend_keeps_run_pinned_worker_roots_out_of_sibling_containers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

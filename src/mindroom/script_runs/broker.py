@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import inspect
 import json
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from threading import Event
 from typing import TYPE_CHECKING, Protocol
@@ -60,6 +59,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from agno.tools import Toolkit
 
     from mindroom.config.main import Config
@@ -68,6 +69,7 @@ __all__ = [
     "ScriptBrokerAuthenticationError",
     "ScriptCallPreparationPendingError",
     "ScriptRuntimeResolver",
+    "ScriptRuntimeUnavailableError",
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
     "ScriptToolCallRequest",
@@ -90,8 +92,6 @@ _INVALID_RESULT_ERROR = {
     "message": "The tool returned a result that cannot be represented as strict JSON.",
     "retryable": False,
 }
-_MAX_MATERIALIZED_RESULT_BYTES = 64 * 1024
-_MAX_MATERIALIZED_RESULT_ITEMS = 1_000
 _NEVER_PREAPPROVE_TOOLKITS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 _ACTIVE_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING})
 
@@ -102,6 +102,10 @@ class ScriptBrokerAuthenticationError(ValueError):
 
 class ScriptCallPreparationPendingError(RuntimeError):
     """Raised when a call is still authenticating and has no durable claim yet."""
+
+
+class ScriptRuntimeUnavailableError(RuntimeError):
+    """Raised when valid durable authority cannot be checked against a live bot yet."""
 
 
 class ScriptRuntimeResolver(Protocol):
@@ -372,13 +376,14 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
-        if (
-            run is None
-            or not matches
-            or run.cancel_requested_at is not None
-            or run.state not in _ACTIVE_RUN_STATES
-            or self.runtime_resolver.is_authorized(run) is not True
-        ):
+        if run is None or not matches or run.cancel_requested_at is not None or run.state not in _ACTIVE_RUN_STATES:
+            msg = "Background script call is unavailable."
+            raise ScriptBrokerAuthenticationError(msg)
+        authorization_state = self.runtime_resolver.is_authorized(run)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if authorization_state is False:
             msg = "Background script call is unavailable."
             raise ScriptBrokerAuthenticationError(msg)
         return token
@@ -486,7 +491,7 @@ class ScriptToolBroker:
             toolkit = prepared.toolkit
             await self._connect_toolkit(toolkit)
             execution_started = True
-            execution, materialized = await self._run_prepared_execution(
+            execution = await self._run_prepared_execution(
                 prepared,
                 run=run,
                 call=call,
@@ -504,7 +509,7 @@ class ScriptToolBroker:
                         "retryable": False,
                     },
                 )
-            result = _strict_json_result(materialized)
+            result = _strict_json_result(execution.result)
             return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=result)
         except asyncio.CancelledError:
             raise
@@ -549,14 +554,14 @@ class ScriptToolBroker:
         call: ScriptCallRecord,
         origin: BackgroundScriptToolOrigin,
         arguments: dict[str, object],
-    ) -> tuple[FunctionExecutionResult, object]:
+    ) -> FunctionExecutionResult:
         context = prepared.context
         toolkit = prepared.toolkit
         function = prepared.function
         completion_tracker = SyncToolCompletionTracker()
         cleanup_transferred = False
 
-        async def execute_function() -> tuple[FunctionExecutionResult, object]:
+        async def execute_function() -> FunctionExecutionResult:
             with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
                 authored_decision = await _request_authored_confirmation(
                     runtime_resolver=self.runtime_resolver,
@@ -591,13 +596,11 @@ class ScriptToolBroker:
                 prepend_tool_hook_bridge(toolkit, bridge)
                 if authored_decision is not None:
                     function.cache_results = function.cache_results and authored_decision.approved
-                execution_result = await FunctionCall(
+                return await FunctionCall(
                     function=function,
                     arguments=arguments,
                     call_id=call.call_id,
                 ).aexecute()
-                materialized_result = await _materialize_successful_result(execution_result)
-            return execution_result, materialized_result
 
         try:
             return await run_with_tool_execution_identity(
@@ -688,6 +691,10 @@ class ScriptToolBroker:
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
         execution_identity = _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
+        if inspect.isgeneratorfunction(function.entrypoint) or inspect.isasyncgenfunction(function.entrypoint):
+            self._close_rejected_toolkit(toolkit)
+            msg = "Generator tool entrypoints are not supported for background scripts."
+            raise ScriptCapabilityError(msg)
         return _PreparedExecution(
             context=context,
             execution_identity=execution_identity,
@@ -941,30 +948,6 @@ async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
     await _maybe_await(result)
 
 
-async def _materialize_result(result: object) -> object:
-    if inspect.isasyncgen(result) or isinstance(result, AsyncIterator):
-        items: list[object] = []
-        encoded_bytes = 2
-        async for item in result:
-            encoded_bytes = _append_bounded_result(items, item, encoded_bytes)
-        return items
-    if inspect.isgenerator(result) or isinstance(result, Iterator):
-        items = []
-        encoded_bytes = 2
-        for item in result:
-            encoded_bytes = _append_bounded_result(items, item, encoded_bytes)
-        return items
-    return result
-
-
-async def _materialize_successful_result(
-    execution: FunctionExecutionResult,
-) -> object:
-    if execution.status != "success":
-        return None
-    return await _materialize_result(execution.result)
-
-
 def _strict_json_result(result: object) -> object:
     normalized = to_json_compatible(result)
     try:
@@ -972,19 +955,3 @@ def _strict_json_result(result: object) -> object:
     except (TypeError, ValueError) as exc:
         raise _InvalidToolResultError from exc
     return normalized
-
-
-def _append_bounded_result(items: list[object], item: object, encoded_bytes: int) -> int:
-    if len(items) >= _MAX_MATERIALIZED_RESULT_ITEMS:
-        msg = "Tool stream exceeded the bounded result item limit."
-        raise ValueError(msg)
-    normalized = to_json_compatible(item)
-    item_bytes = len(
-        json.dumps(normalized, allow_nan=False, ensure_ascii=False, separators=(",", ":")).encode(),
-    )
-    next_encoded_bytes = encoded_bytes + item_bytes + int(bool(items))
-    if next_encoded_bytes > _MAX_MATERIALIZED_RESULT_BYTES:
-        msg = "Tool stream exceeded the bounded result byte limit."
-        raise ValueError(msg)
-    items.append(normalized)
-    return next_encoded_bytes

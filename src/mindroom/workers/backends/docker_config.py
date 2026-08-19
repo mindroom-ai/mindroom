@@ -259,6 +259,7 @@ def docker_backend_config_signature(
     )
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
+    runtime_env = runtime_env_values(effective_runtime_paths)
     return build_backend_config_signature(
         prefix_parts=(
             "docker",
@@ -277,6 +278,9 @@ def docker_backend_config_signature(
             str(credentials_key.shared_base_path),
             credentials_key.current_worker_key or "",
             str(credentials_key.current_worker_root or ""),
+            runtime_env.get("DOCKER_HOST", ""),
+            runtime_env.get("DOCKER_TLS_VERIFY", ""),
+            runtime_env.get("DOCKER_CERT_PATH", ""),
             *sorted(worker_grantable_credentials or frozenset()),
         ),
         runtime_paths=effective_runtime_paths,

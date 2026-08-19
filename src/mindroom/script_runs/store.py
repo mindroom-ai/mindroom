@@ -140,12 +140,12 @@ class ScriptRunStore:
                     INSERT INTO script_runs (
                         run_id, agent_name, owner_user_id, room_id, thread_root_event_id,
                         execution_identity_json, source_digest, grants_json, token_hash, preapprove_launch_grants,
-                        worker_key, worker_id,
+                        worker_key, worker_id, worker_backend_locator,
                         snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, output,
                         cancel_requested_at, cancellation_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -476,6 +476,32 @@ class ScriptRunStore:
             )
         return updated
 
+    def clear_cleanup_ownership(self, run_id: str) -> ScriptRunRecord:
+        """Clear durable snapshot and worker ownership only after exact cleanup succeeds."""
+        with self._write_transaction() as connection:
+            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ScriptRunNotFoundError(run_id)
+            run = _run_from_row(row)
+            updated = replace(
+                run,
+                worker_key=None,
+                worker_id=None,
+                worker_backend_locator=None,
+                snapshot_locator=None,
+            )
+            connection.execute(
+                """
+                UPDATE script_runs
+                SET worker_key = NULL, worker_id = NULL,
+                    worker_backend_locator = NULL,
+                    snapshot_locator = NULL
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            )
+        return updated
+
     def transition_run(  # noqa: Vulture
         self,
         run_id: str,
@@ -546,6 +572,9 @@ class ScriptRunStore:
                 DELETE FROM script_runs
                 WHERE run_id = ? AND finished_at IS NOT NULL AND finished_at <= ?
                   AND state IN (?, ?, ?, ?)
+                  AND worker_key IS NULL AND worker_id IS NULL
+                  AND worker_backend_locator IS NULL
+                  AND snapshot_locator IS NULL
                 """,
                 (
                     run_id,
@@ -568,6 +597,8 @@ class ScriptRunStore:
                 )
             if "output" not in columns:
                 connection.execute("ALTER TABLE script_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''")
+            if "worker_backend_locator" not in columns:
+                connection.execute("ALTER TABLE script_runs ADD COLUMN worker_backend_locator TEXT")
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -607,6 +638,7 @@ _SCHEMA_STATEMENTS = (
                     preapprove_launch_grants INTEGER NOT NULL,
                     worker_key TEXT,
                     worker_id TEXT,
+                    worker_backend_locator TEXT,
                     snapshot_locator TEXT,
                     name TEXT,
                     local_unsafe INTEGER NOT NULL,
@@ -678,6 +710,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         int(run.preapprove_launch_grants),
         run.worker_key,
         run.worker_id,
+        run.worker_backend_locator,
         run.snapshot_locator,
         run.name,
         int(run.local_unsafe),
@@ -713,6 +746,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         execution_identity=cast("dict[str, object]", execution_identity),
         worker_key=_nullable_string(row["worker_key"]),
         worker_id=_nullable_string(row["worker_id"]),
+        worker_backend_locator=_nullable_string(row["worker_backend_locator"]),
         snapshot_locator=_nullable_string(row["snapshot_locator"]),
         name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),

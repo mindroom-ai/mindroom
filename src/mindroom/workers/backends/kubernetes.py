@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.workers.cleanup_locator import KubernetesWorkerCleanupLocator
 
 __all__ = [
     "KubernetesWorkerBackend",
@@ -275,6 +276,7 @@ class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = "kubernetes"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,
@@ -286,6 +288,7 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
+        cleanup_client_locator: KubernetesWorkerCleanupLocator | None = None,
     ) -> None:
         unsupported_services = sorted(
             {
@@ -314,6 +317,7 @@ class KubernetesWorkerBackend:
             tool_validation_snapshot=tool_validation_snapshot,
             config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
+            cleanup_client_locator=cleanup_client_locator,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -333,6 +337,7 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
+        cleanup_client_locator: KubernetesWorkerCleanupLocator | None = None,
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
@@ -343,6 +348,7 @@ class KubernetesWorkerBackend:
             tool_validation_snapshot=tool_validation_snapshot,
             config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
+            cleanup_client_locator=cleanup_client_locator,
         )
 
     def shutdown(self) -> None:
@@ -467,7 +473,10 @@ class KubernetesWorkerBackend:
                             status="starting",
                         )
                         self._resources.patch_deployment(worker_id, annotations=annotations)
-                    self._sync_shared_credentials(worker_key)
+                    self._sync_shared_credentials(
+                        worker_key,
+                        mirrored_credential_services=spec.mirrored_credential_services,
+                    )
                     self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
@@ -794,10 +803,19 @@ class KubernetesWorkerBackend:
             replicas_override=0,
         )
 
-    def _sync_shared_credentials(self, worker_key: str) -> None:
+    def _sync_shared_credentials(
+        self,
+        worker_key: str,
+        *,
+        mirrored_credential_services: frozenset[str] | None,
+    ) -> None:
         sync_shared_credentials_to_worker(
             worker_key,
-            allowed_services=self.worker_grantable_credentials,
+            allowed_services=(
+                self.worker_grantable_credentials
+                if mirrored_credential_services is None
+                else mirrored_credential_services
+            ),
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
@@ -809,7 +827,10 @@ class KubernetesWorkerBackend:
             handle = self._patch_cached_worker_usage(entry, now=now)
             if handle is None:
                 return None
-            self._sync_shared_credentials(spec.worker_key)
+            self._sync_shared_credentials(
+                spec.worker_key,
+                mirrored_credential_services=spec.mirrored_credential_services,
+            )
         except WorkerBackendError:
             self._invalidate_ready_worker(spec.worker_key)
             raise

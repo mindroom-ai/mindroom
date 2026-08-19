@@ -52,6 +52,7 @@ class ScriptRunRecord:
     execution_identity: dict[str, object] = field(default_factory=dict)
     worker_key: str | None = None
     worker_id: str | None = None
+    worker_backend_locator: str | None = None
     snapshot_locator: str | None = None
     name: str | None = None
     local_unsafe: bool = False

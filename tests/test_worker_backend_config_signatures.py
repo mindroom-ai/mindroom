@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -143,26 +144,31 @@ def _legacy_kubernetes_backend_config_signature(
 @pytest.mark.parametrize("env", [_MINIMAL_KUBERNETES_ENV, _FULL_KUBERNETES_ENV])
 @pytest.mark.parametrize("auth_token", [None, _TEST_AUTH_TOKEN])
 @pytest.mark.parametrize("with_storage_root", [False, True])
-def test_kubernetes_signature_matches_legacy_hand_assembly(
+def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
     tmp_path: Path,
     env: dict[str, str],
     auth_token: str | None,
     *,
     with_storage_root: bool,
 ) -> None:
-    """The refactored Kubernetes assembly must reproduce the pre-refactor tuple values exactly."""
+    """The cache key preserves configured fields and also selects the concrete control plane."""
     runtime_paths = _runtime_paths(tmp_path, env)
     storage_root = runtime_paths.storage_root if with_storage_root else None
 
-    assert kubernetes_backend_config_signature(
-        runtime_paths,
-        auth_token=auth_token,
-        storage_root=storage_root,
-    ) == _legacy_kubernetes_backend_config_signature(
+    signature = kubernetes_backend_config_signature(
         runtime_paths,
         auth_token=auth_token,
         storage_root=storage_root,
     )
+    legacy_signature = _legacy_kubernetes_backend_config_signature(
+        runtime_paths,
+        auth_token=auth_token,
+        storage_root=storage_root,
+    )
+
+    assert signature[:15] == legacy_signature[:15]
+    assert signature[16:] == legacy_signature[15:]
+    assert signature[15].startswith(("in-cluster:", "kubeconfig:"))
 
 
 def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
@@ -179,6 +185,32 @@ def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> 
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
     )
+
+
+def test_kubernetes_signature_tracks_each_ordered_kubeconfig_file(tmp_path: Path) -> None:
+    """Manager replacement notices a content or ordering change in a multi-file kubeconfig."""
+    first = tmp_path / "first-kubeconfig.yaml"
+    second = tmp_path / "second-kubeconfig.yaml"
+    first.write_text("current-context: first\n", encoding="utf-8")
+    second.write_text("current-context: second\n", encoding="utf-8")
+    env = {
+        **_MINIMAL_KUBERNETES_ENV,
+        "KUBECONFIG": os.pathsep.join((str(first), str(second))),
+    }
+
+    initial = kubernetes_backend_config_signature(_runtime_paths(tmp_path, env), auth_token=None)
+    first.write_text("current-context: changed\n", encoding="utf-8")
+    content_changed = kubernetes_backend_config_signature(_runtime_paths(tmp_path, env), auth_token=None)
+    reversed_order = kubernetes_backend_config_signature(
+        _runtime_paths(
+            tmp_path,
+            {**env, "KUBECONFIG": os.pathsep.join((str(second), str(first)))},
+        ),
+        auth_token=None,
+    )
+
+    assert content_changed != initial
+    assert reversed_order != content_changed
 
 
 @pytest.mark.parametrize(
@@ -274,6 +306,26 @@ def test_kubernetes_signature_changes_with_auth_token_and_storage_root(tmp_path:
     )
 
 
+def test_kubernetes_signature_changes_with_cluster_context(tmp_path: Path) -> None:
+    """The same namespace on a different Kubernetes control plane is not the same cleanup owner."""
+    first_config = tmp_path / "kube-a.yaml"
+    second_config = tmp_path / "kube-b.yaml"
+    first_config.write_text("current-context: cluster-a\n", encoding="utf-8")
+    second_config.write_text("current-context: cluster-b\n", encoding="utf-8")
+    first = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(first_config)})
+    second = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(second_config)})
+
+    assert kubernetes_backend_config_signature(
+        first,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=first.storage_root,
+    ) != kubernetes_backend_config_signature(
+        second,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=second.storage_root,
+    )
+
+
 def test_docker_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
     """Resolving the same Docker env twice must yield identical cache signatures."""
     first = _runtime_paths(tmp_path, _MINIMAL_DOCKER_ENV)
@@ -284,6 +336,22 @@ def test_docker_signature_is_stable_for_identical_config(tmp_path: Path) -> None
         auth_token=_TEST_AUTH_TOKEN,
         storage_path=first.storage_root,
     ) == docker_backend_config_signature(
+        second,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=second.storage_root,
+    )
+
+
+def test_docker_signature_changes_with_daemon_transport(tmp_path: Path) -> None:
+    """The same worker prefix on a different Docker daemon is not the same cleanup owner."""
+    first = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV, "DOCKER_HOST": "unix:///run/docker-a.sock"})
+    second = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV, "DOCKER_HOST": "unix:///run/docker-b.sock"})
+
+    assert docker_backend_config_signature(
+        first,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=first.storage_root,
+    ) != docker_backend_config_signature(
         second,
         auth_token=_TEST_AUTH_TOKEN,
         storage_path=second.storage_root,
