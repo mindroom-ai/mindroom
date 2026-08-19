@@ -203,6 +203,7 @@ Compaction rewrites the live session so compacted history moves into `session.su
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
 - **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
+- **script**: Supervised background Python controls configured as an inline tool entry with `allowed_tools`, concurrency, call-rate, and runtime limits; see [Background Python Scripts](../tools/background-scripts.md)
 - **delegate_to**: List of agent names this agent can delegate tasks to via tool calls
 - **private**: Optional requester-private state config for per-requester materialized instances
 
