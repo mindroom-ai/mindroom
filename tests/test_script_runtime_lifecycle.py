@@ -36,7 +36,6 @@ from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore
 from mindroom.script_runs.worker_client import (
     ScriptWorkerError,
     WorkerScriptCancel,
-    WorkerScriptLaunch,
     WorkerScriptStatus,
 )
 from mindroom.tool_approval import BackgroundScriptToolOrigin
@@ -125,7 +124,6 @@ def _run(
         token_hash="capability",  # noqa: S106
         worker_key=target.worker_key,
         worker_id="worker-1",
-        supervisor_handle="shell:0123456789abcdef0123456789abcdef",
         state=state,
     )
 
@@ -169,9 +167,8 @@ class _TerminatingWorkerClient:
         _worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
     ) -> WorkerScriptStatus:
-        del run_id, supervisor_handle
+        del run_id
         if self.exited:
             return WorkerScriptStatus(state="exited", exit_code=143)
         return WorkerScriptStatus(state="running")
@@ -181,10 +178,9 @@ class _TerminatingWorkerClient:
         _worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
         force: bool = False,
     ) -> WorkerScriptCancel:
-        del run_id, supervisor_handle, force
+        del run_id, force
         self.exited = True
         return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
 
@@ -198,9 +194,8 @@ class _FailingStatusWorkerClient:
         _worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
     ) -> WorkerScriptStatus:
-        del run_id, supervisor_handle
+        del run_id
         message = "worker status unavailable"
         raise ScriptWorkerError(message, failure_kind="worker")
 
@@ -209,10 +204,9 @@ class _FailingStatusWorkerClient:
         _worker: WorkerHandle,
         *,
         run_id: str,
-        supervisor_handle: str,
         force: bool = False,
     ) -> WorkerScriptCancel:
-        del run_id, supervisor_handle, force
+        del run_id, force
         return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
 
 
@@ -228,18 +222,13 @@ class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
         _worker: WorkerHandle,
         *,
         run_id: str,
-        source_path: str,
         source_digest: str,
-        token_path: str,
         gateway_url: str,
-        supervisor_handle: str,
         private_agent_names: tuple[str, ...] | None = None,
-        tail_lines: int = 200,
-    ) -> WorkerScriptLaunch:
-        del run_id, source_path, source_digest, token_path, gateway_url, private_agent_names, tail_lines
+    ) -> None:
+        del run_id, source_digest, gateway_url, private_agent_names
         self.launch_entered.set()
         await self.release_launch.wait()
-        return WorkerScriptLaunch(supervisor_handle=supervisor_handle)
 
 
 @dataclass
@@ -726,7 +715,7 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
     """Changing worker identity revokes, closes, and confirms a process before lease replacement."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
+    run = _stored_run(store, runtime_paths, run_id=f"script-{'a' * 32}")
     store.claim_call(
         run_id=run.run_id,
         call_id="call-1",
@@ -923,7 +912,7 @@ async def test_generation_replacement_aborts_when_process_reconciliation_fails(
     """An immediate worker-status failure cannot let the replacement commit."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
+    run = _stored_run(store, runtime_paths, run_id=f"script-{'b' * 32}")
     resolver = _ApprovalSettlementResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
     lease = _Lease(_Backend([_worker(run)]))

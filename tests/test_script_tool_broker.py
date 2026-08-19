@@ -1387,7 +1387,6 @@ async def test_queued_starting_call_dispatches_with_fresh_durable_worker_identit
         request.run_id,
         state=ScriptRunState.RUNNING,
         worker_id="worker-after-launch",
-        supervisor_handle="shell:1234abcd",
     )
     run_lock.release()
     [execution] = broker._tasks.values()
