@@ -97,6 +97,18 @@ class PrimaryWorkerManagerLease:
         _release_primary_worker_manager_entry(self._entry)
 
 
+@dataclass(frozen=True, slots=True)
+class _ConfiguredPrimaryWorkerManagerInputs:
+    """One committed input projection shared by manager construction and identity."""
+
+    proxy_url: str | None
+    proxy_token: str | None
+    storage_root: Path
+    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None
+    kubernetes_config_snapshot: dict[str, object] | None
+    worker_grantable_credentials: frozenset[str] | None
+
+
 _PRIMARY_WORKER_MANAGER_ENTRY: _WorkerManagerEntry | None = None
 _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES: list[_WorkerManagerEntry] = []
 _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
@@ -251,37 +263,17 @@ def lease_configured_primary_worker_manager(
     runtime_config: Config | None,
 ) -> PrimaryWorkerManagerLease | None:
     """Lease the config-aware primary manager shared by runtime maintenance."""
-    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
-
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    if not primary_worker_backend_available(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
+    inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
+    if inputs is None:
         return None
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if runtime_config is None and backend_name == "kubernetes":
-        return None
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    worker_grantable_credentials: frozenset[str] | None = None
-    if runtime_config is not None:
-        worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-        if backend_name == "kubernetes":
-            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-                runtime_paths,
-                runtime_config=runtime_config,
-            )
-            kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
     return lease_primary_worker_manager(
         runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
+        proxy_url=inputs.proxy_url,
+        proxy_token=inputs.proxy_token,
+        storage_root=inputs.storage_root,
+        kubernetes_tool_validation_snapshot=inputs.kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
+        worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
 
 
@@ -290,6 +282,26 @@ def configured_primary_worker_manager_identity(
     runtime_config: Config | None,
 ) -> str | None:
     """Return the opaque identity of the currently configured primary worker manager."""
+    inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
+    if inputs is None:
+        return None
+    signature = _primary_worker_backend_config_signature(
+        runtime_paths,
+        proxy_url=inputs.proxy_url,
+        proxy_token=inputs.proxy_token,
+        storage_root=inputs.storage_root,
+        kubernetes_tool_validation_snapshot=inputs.kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
+        worker_grantable_credentials=inputs.worker_grantable_credentials,
+    )
+    return _stable_json_digest(signature)
+
+
+def _configured_primary_worker_manager_inputs(
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+) -> _ConfiguredPrimaryWorkerManagerInputs | None:
+    """Resolve the exact committed inputs required to construct the primary manager."""
     from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
 
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -313,8 +325,7 @@ def configured_primary_worker_manager_identity(
                 runtime_config=runtime_config,
             )
             kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
-    signature = _primary_worker_backend_config_signature(
-        runtime_paths,
+    return _ConfiguredPrimaryWorkerManagerInputs(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
@@ -322,7 +333,6 @@ def configured_primary_worker_manager_identity(
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    return _stable_json_digest(signature)
 
 
 def _require_kubernetes_tool_validation_snapshot(

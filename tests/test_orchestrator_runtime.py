@@ -3066,6 +3066,7 @@ class TestMultiAgentOrchestrator:
 
         apply_update_plan.assert_awaited_once_with(plan)
         assert orchestrator.script_runtime is runtime
+        assert orchestrator.config is current_config
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:

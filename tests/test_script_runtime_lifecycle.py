@@ -645,6 +645,7 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
         agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
         defaults={"tools": []},
     )
+    committed_config = old_config
     identities: list[str | None] = []
 
     def worker_identity(_paths: RuntimePaths, config: Config | None) -> str | None:
@@ -664,12 +665,15 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
         broker=broker,
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock()),
-        config_provider=lambda: old_config,
+        config_provider=lambda: committed_config,
         worker_lease_provider=lambda: next(leases),
     )
 
     await runtime.reconcile_once()
     await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    committed_config = new_config
+    await runtime.install_committed_worker_generation()
 
     durable = store.get_run(run.run_id)
     assert durable.cancel_requested_at is not None
@@ -681,8 +685,68 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
     assert settlement_resolver.settled_runs == [run.run_id]
     assert release_observations == [durable]
     assert first.released is True
-    assert runtime._current_worker_lease is None
-    assert identities == ["backend-generation-a", "backend-generation-b"]
+    assert runtime._current_worker_lease is second
+    assert manager._worker_replacement_in_progress is False
+    assert identities == ["backend-generation-a", "backend-generation-b", "backend-generation-b"]
+
+
+@pytest.mark.asyncio
+async def test_generation_replacement_timeout_aborts_before_every_run_has_durable_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A timed-out replacement cannot let the caller commit an update with unrevoked runs."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    first = _stored_run(store, runtime_paths)
+    second = _stored_run(store, runtime_paths, run_id="run-2")
+    first_revocation_started = threading.Event()
+    release_revocation = threading.Event()
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        if run_id == first.run_id:
+            first_revocation_started.set()
+            assert release_revocation.wait(timeout=5)
+        return store.request_cancel(run_id, reason=reason)
+
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
+        defaults={"tools": []},
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "next" if config is new_config else "current",
+    )
+    manager = SimpleNamespace(
+        request_revocation=request_revocation,
+        revoke=AsyncMock(),
+        reconcile_durable=AsyncMock(),
+        begin_worker_replacement=AsyncMock(),
+        end_worker_replacement=AsyncMock(),
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+        pass_timeout_seconds=0.01,
+        pass_concurrency=1,
+    )
+
+    update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
+    try:
+        assert await asyncio.to_thread(first_revocation_started.wait, 1)
+        with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
+            await update
+    finally:
+        release_revocation.set()
+
+    assert store.get_run(first.run_id).cancel_requested_at is None
+    assert store.get_run(second.run_id).cancel_requested_at is not None
 
 
 @pytest.mark.asyncio
@@ -1300,8 +1364,8 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp_path: Path) -> None:
-    """One stuck signal path cannot prevent durable revocation of another removed-owner run."""
+async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_runs(tmp_path: Path) -> None:
+    """A stuck process confirmation aborts the reload after durable revocation has completed."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     first = _stored_run(store, runtime_paths)
@@ -1339,7 +1403,8 @@ async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp
         pass_timeout_seconds=0.2,
     )
 
-    await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+    with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
+        await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
 
     assert store.get_run(first.run_id).cancel_requested_at is not None
     assert store.get_run(second.run_id).cancel_requested_at is not None
@@ -1347,8 +1412,8 @@ async def test_reload_revokes_all_runs_before_bounded_process_reconciliation(tmp
 
 
 @pytest.mark.asyncio
-async def test_reload_durable_revocation_is_inside_the_overall_deadline(tmp_path: Path) -> None:
-    """Slow SQLite revocations do not escape the pass bound or permit early broker closure."""
+async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(tmp_path: Path) -> None:
+    """Slow durable revocation aborts the reload without early broker closure."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     _stored_run(store, runtime_paths)
@@ -1380,7 +1445,8 @@ async def test_reload_durable_revocation_is_inside_the_overall_deadline(tmp_path
     )
     started = asyncio.get_running_loop().time()
 
-    await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+    with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
+        await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
 
     assert asyncio.get_running_loop().time() - started < 0.1
     assert broker_revocations == []

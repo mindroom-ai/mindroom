@@ -302,6 +302,39 @@ async def test_launch_persists_starting_before_worker_and_private_snapshot(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_worker_replacement_waits_for_admitted_launch_and_rejects_racing_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement drains an admitted launch before rejecting scripts that race its boundary."""
+    manager, backend, _client = _manager(tmp_path)
+    worker_allocation_started = threading.Event()
+    release_worker_allocation = threading.Event()
+    original_ensure_worker = backend.ensure_worker
+
+    def block_worker_allocation(*args: object, **kwargs: object) -> WorkerHandle:
+        worker_allocation_started.set()
+        assert release_worker_allocation.wait(timeout=5)
+        return original_ensure_worker(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "ensure_worker", block_worker_allocation)
+    admitted_launch = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
+    assert await asyncio.to_thread(worker_allocation_started.wait, 1)
+    boundary = asyncio.create_task(manager.begin_worker_replacement())
+    await asyncio.sleep(0)
+
+    with pytest.raises(ScriptRunManagerError, match="worker replacement is in progress"):
+        await manager.run(_context(tmp_path), source="print('blocked')\n")
+
+    assert len(manager.store.list_runs()) == 1
+    assert boundary.done() is False
+    release_worker_allocation.set()
+    await admitted_launch
+    await boundary
+    await manager.end_worker_replacement()
+
+
+@pytest.mark.asyncio
 async def test_worker_launch_requires_primary_visible_state_before_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

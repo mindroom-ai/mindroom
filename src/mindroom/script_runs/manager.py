@@ -161,6 +161,41 @@ class ScriptRunManager:
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _worker_launch_gate_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _worker_launches_drained: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _worker_launches_in_progress: int = field(default=0, init=False)
+    _worker_replacement_in_progress: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Mark the empty admission set as drained before any worker launch begins."""
+        self._worker_launches_drained.set()
+
+    async def begin_worker_replacement(self) -> None:
+        """Reject new worker launches and wait for already-admitted launches to finish."""
+        async with self._worker_launch_gate_lock:
+            self._worker_replacement_in_progress = True
+            if self._worker_launches_in_progress == 0:
+                self._worker_launches_drained.set()
+        await self._worker_launches_drained.wait()
+
+    async def end_worker_replacement(self) -> None:
+        """Allow worker launches after the committed replacement is ready or aborted."""
+        async with self._worker_launch_gate_lock:
+            self._worker_replacement_in_progress = False
+
+    async def _admit_worker_launch(self) -> None:
+        async with self._worker_launch_gate_lock:
+            if self._worker_replacement_in_progress:
+                msg = "Background script worker replacement is in progress."
+                raise ScriptRunManagerError(msg)
+            self._worker_launches_in_progress += 1
+            self._worker_launches_drained.clear()
+
+    async def _release_worker_launch_admission(self) -> None:
+        async with self._worker_launch_gate_lock:
+            self._worker_launches_in_progress -= 1
+            if self._worker_launches_in_progress == 0:
+                self._worker_launches_drained.set()
 
     async def run(
         self,
@@ -232,14 +267,27 @@ class ScriptRunManager:
                 private_agent_names=worker_target.private_agent_names,
             )
         )
-        return await self._create_and_launch(
-            context,
-            run=run,
-            source=source_bytes,
-            token=token,
-            max_concurrent_runs=effective_limits.max_concurrent_runs,
-            worker_spec=worker_spec,
-        )
+        if local_unsafe:
+            return await self._create_and_launch(
+                context,
+                run=run,
+                source=source_bytes,
+                token=token,
+                max_concurrent_runs=effective_limits.max_concurrent_runs,
+                worker_spec=worker_spec,
+            )
+        await self._admit_worker_launch()
+        try:
+            return await self._create_and_launch(
+                context,
+                run=run,
+                source=source_bytes,
+                token=token,
+                max_concurrent_runs=effective_limits.max_concurrent_runs,
+                worker_spec=worker_spec,
+            )
+        finally:
+            await self._release_worker_launch_admission()
 
     async def _create_and_launch(
         self,
