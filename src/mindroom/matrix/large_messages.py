@@ -17,6 +17,7 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
+    DURABLE_FINAL_OUTCOME_VERSION,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -114,6 +115,32 @@ def _copy_edit_wrapper_metadata(source_content: dict[str, Any], target_content: 
 def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
     """Copy metadata that should remain inline on rich streaming previews."""
     _copy_preview_metadata(source_content, target_content)
+
+
+def _without_local_recovery_data(content: dict[str, Any]) -> dict[str, Any]:
+    """Return event content without semantic results that belong only in the outbox."""
+    replacement = content.get("m.new_content")
+    compatibility_marker = {"version": DURABLE_FINAL_OUTCOME_VERSION}
+    outer_has_result = (
+        DURABLE_FINAL_OUTCOME_KEY in content and content[DURABLE_FINAL_OUTCOME_KEY] != compatibility_marker
+    )
+    nested_has_result = (
+        isinstance(replacement, dict)
+        and DURABLE_FINAL_OUTCOME_KEY in replacement
+        and replacement[DURABLE_FINAL_OUTCOME_KEY] != compatibility_marker
+    )
+    if not outer_has_result and not nested_has_result:
+        return content
+
+    sanitized = dict(content)
+    if outer_has_result:
+        sanitized.pop(DURABLE_FINAL_OUTCOME_KEY, None)
+    if isinstance(replacement, dict):
+        sanitized_replacement = dict(replacement)
+        if nested_has_result:
+            sanitized_replacement.pop(DURABLE_FINAL_OUTCOME_KEY, None)
+        sanitized["m.new_content"] = sanitized_replacement
+    return sanitized
 
 
 def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
@@ -647,6 +674,7 @@ async def prepare_large_message(
         Original content (if small) or modified content with preview and MXC reference
 
     """
+    content = _without_local_recovery_data(content)
     is_edit = _is_edit_message(content)
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
 

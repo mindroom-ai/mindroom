@@ -108,6 +108,7 @@ class _WatchedOutbox:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
     ) -> str | None:
@@ -120,6 +121,7 @@ class _WatchedOutbox:
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
         )

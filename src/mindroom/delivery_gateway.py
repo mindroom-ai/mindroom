@@ -14,12 +14,13 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
     ProjectedEvent,
     TerminalTurnWrite,
+    matrix_delivery_payload,
     replacement_target,
     thread_root,
 )
@@ -1229,6 +1230,10 @@ class DeliveryGateway:
         delivery_result: dict[str, object] | None = None
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
+            # Older readers recognize any mapping here as a successful FINAL.
+            # Keep that rolling-read signal bounded; the complete result is
+            # local outbox state and cannot make the Matrix event impossible.
+            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
             delivery_result = {
                 "body": display_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
@@ -1655,7 +1660,13 @@ class DeliveryGateway:
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
             return content
-        return await prepare_large_message(self._client(), room_id, content)
+        wire_content = matrix_delivery_payload(
+            self.deps.outbox.principal_id,
+            turn_id,
+            stage,
+            content,
+        )
+        return await prepare_large_message(self._client(), room_id, wire_content)
 
     def _final_text_transform(self, identity: ResponseIdentity) -> FinalTextTransform:
         """Return the hook that shapes the answer before its terminal payload is built.

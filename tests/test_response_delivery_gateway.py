@@ -678,8 +678,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         prompt = new_content["io.mindroom.interactive"]
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
-        assert DURABLE_FINAL_OUTCOME_KEY not in frozen
-        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
+        assert new_content[DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
         semantic = delivery.result
         assert semantic is not None
         assert semantic["body"] == outcome.final_visible_body
@@ -721,9 +720,43 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         delivery = outbox.rows["$cause", "final"]
         frozen = delivery.payload
         assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
-        assert DURABLE_FINAL_OUTCOME_KEY not in frozen
-        assert DURABLE_FINAL_OUTCOME_KEY not in frozen["m.new_content"]
+        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
         assert delivery.result == {"body": answer, "interactive": None}
+        assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_delivery_identity_is_included_in_the_validated_event_size(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The exact persisted and sent event must fit after identity is attached."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/identity-sized-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 20_500),
+            existing_event_id="$placeholder",
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.test_metadata": "m" * 10_500},
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert _calculate_event_size(frozen) <= 64_000
         assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(

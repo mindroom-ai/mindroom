@@ -5595,6 +5595,29 @@ class TestOutbox:
         assert claimed.payload["body"] == "final preview"
         assert claimed.result == {"body": "final full result"}
 
+    async def test_a_compatibility_marker_does_not_replace_the_local_result(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The bounded old-reader sentinel is not itself the semantic result."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={
+                "msgtype": "m.text",
+                "body": "preview",
+                DURABLE_FINAL_OUTCOME_KEY: {"version": 2},
+            },
+            result={"body": "full result", "interactive": None},
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.result == {"body": "full result", "interactive": None}
+
     async def test_claiming_freezes_the_payload(self, alice: PrincipalStore) -> None:
         """Claiming freezes the payload.
 
@@ -5671,6 +5694,43 @@ class TestOutbox:
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
 
         assert stored is not None
+        assert stored.result == legacy_result
+
+    async def test_a_legacy_reenqueue_replaces_a_new_writers_local_result(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The result read after a rolling-version rewrite belongs to its payload."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("new-writer preview"),
+            result={"body": "new-writer full result", "interactive": None},
+        )
+        legacy_result = {"body": "legacy-writer full result", "interactive": None}
+        legacy_payload = {
+            "msgtype": "m.text",
+            "body": "legacy-writer preview",
+            DURABLE_FINAL_OUTCOME_KEY: legacy_result,
+        }
+
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE matrix_delivery_outbox
+                SET payload_json = ?
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+                """,
+                (json.dumps(legacy_payload), "agent@alice", "turn-1", "final"),
+            ),
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.payload["body"] == "legacy-writer preview"
         assert stored.result == legacy_result
 
     async def test_reclaiming_sends_the_identical_delivery(self, alice: PrincipalStore) -> None:
@@ -8263,6 +8323,32 @@ class TestSchemaUpgrades:
         with sqlite3.connect(database_path) as connection:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")}
         assert "result_json" in columns
+
+    async def test_postgres_adds_local_results_to_an_existing_delivery_outbox(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL discovers and upgrades the same shipped outbox schema."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as connection:
+            connection.execute(_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL)
+            connection.commit()
+
+        store = EventJournalStore.open_postgres(database_url)
+        await store.close()
+
+        with psycopg.connect(database_url) as connection:
+            rows = connection.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'matrix_delivery_outbox'
+                """,
+            ).fetchall()
+        assert "result_json" in {str(row[0]) for row in rows}
 
     @staticmethod
     async def _assert_legacy_approval_call_provenance_is_unknown(backend: Backend) -> None:

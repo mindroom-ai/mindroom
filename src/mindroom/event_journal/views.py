@@ -293,6 +293,11 @@ class MatrixDeliveryView(Protocol):
     delivery accounts for.
     """
 
+    @property
+    def principal_id(self) -> str:
+        """Return the principal whose delivery rows this view owns."""
+        ...
+
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         ...

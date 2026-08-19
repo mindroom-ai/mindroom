@@ -45,9 +45,13 @@ _OUTBOX_COLUMNS = """
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
 _LEGACY_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
+# New writers retain only this old-reader success signal on the wire. Any
+# richer value came from a legacy writer and is the semantic result belonging
+# to that writer's current payload, even when a stale result_json also exists.
+_LOCAL_RESULT_COMPATIBILITY_MARKER = {"version": 2}
 
 
-def _delivery_payload(
+def matrix_delivery_payload(
     principal_id: str,
     delivery_id: str,
     stage: DeliveryStage,
@@ -77,7 +81,7 @@ def delivery_payload_json(
 ) -> str:
     """Return the canonical stored Matrix payload, including its identity."""
     return json.dumps(
-        _delivery_payload(principal_id, delivery_id, stage, payload),
+        matrix_delivery_payload(principal_id, delivery_id, stage, payload),
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
@@ -695,9 +699,10 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
+    legacy_result = _legacy_delivery_result(payload)
     raw_result = row["result_json"]
-    if raw_result is None:
-        result = _legacy_delivery_result(payload)
+    if (legacy_result is not None and legacy_result != _LOCAL_RESULT_COMPATIBILITY_MARKER) or raw_result is None:
+        result = legacy_result
     else:
         decoded_result = json.loads(raw_result)
         if not isinstance(decoded_result, dict):
