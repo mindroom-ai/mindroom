@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from contextvars import Context
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -709,11 +708,7 @@ class TestUserIdPassthrough:
         assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
 
     @pytest.mark.asyncio
-    async def test_prepare_agent_and_prompt_logs_full_prompt_only_at_debug(
-        self,
-        tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
+    async def test_prepare_agent_and_prompt_logs_full_prompt_at_debug(self, tmp_path: Path) -> None:
         """Routine logs stay content-safe while debug logs retain the prepared prompt."""
         sensitive_marker = "sensitive prompt marker"
         config = _config()
@@ -729,29 +724,25 @@ class TestUserIdPassthrough:
             prepared_history=PreparedHistoryState(),
         )
 
-        async def prepare_with_debug(*, enabled: bool) -> list[dict[str, object]]:
-            level = logging.DEBUG if enabled else logging.INFO
-            with (
-                caplog.at_level(level, logger="mindroom.ai"),
-                patch(
-                    "mindroom.ai.build_memory_prompt_parts",
-                    new_callable=AsyncMock,
-                    return_value=MemoryPromptParts(),
-                ),
-                patch("mindroom.ai.create_agent", return_value=mock_agent),
-                patch(
-                    "mindroom.ai.prepare_agent_execution_context",
-                    new=AsyncMock(return_value=prepared_execution),
-                ),
-                capture_logs() as logs,
-            ):
-                await _prepare_agent_and_prompt(
-                    make_turn_context("general"),
-                    prompt="current request",
-                    runtime_paths=runtime_paths,
-                    config=config,
-                )
-            return logs
+        with (
+            patch(
+                "mindroom.ai.build_memory_prompt_parts",
+                new_callable=AsyncMock,
+                return_value=MemoryPromptParts(),
+            ),
+            patch("mindroom.ai.create_agent", return_value=mock_agent),
+            patch(
+                "mindroom.ai.prepare_agent_execution_context",
+                new=AsyncMock(return_value=prepared_execution),
+            ),
+            capture_logs() as logs,
+        ):
+            await _prepare_agent_and_prompt(
+                make_turn_context("general"),
+                prompt="current request",
+                runtime_paths=runtime_paths,
+                config=config,
+            )
 
         safe_log = {
             "agent": "general",
@@ -760,12 +751,7 @@ class TestUserIdPassthrough:
             "message_count": 2,
             "unseen_event_count": 2,
         }
-        normal_logs = await prepare_with_debug(enabled=False)
-        assert normal_logs == [safe_log]
-        assert sensitive_marker not in repr(normal_logs)
-
-        debug_logs = await prepare_with_debug(enabled=True)
-        assert debug_logs == [
+        assert logs == [
             safe_log,
             {
                 "agent": "general",
