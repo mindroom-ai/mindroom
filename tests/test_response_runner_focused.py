@@ -3376,14 +3376,14 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         payload={
             "body": "plain fallback",
             "formatted_body": "<strong>rendered html</strong>",
-            "io.mindroom.final_delivery": {
-                "body": "plain final",
-                "interactive": {
-                    "question_text": "Pick",
-                    "option_map": {"1": "yes", "✅": "yes"},
-                    "option_labels": {"1": "Yes", "✅": "Yes"},
-                    "options_list": [{"emoji": "✅", "label": "Yes", "value": "yes"}],
-                },
+        },
+        result={
+            "body": "plain final",
+            "interactive": {
+                "question_text": "Pick",
+                "option_map": {"1": "yes", "✅": "yes"},
+                "option_labels": {"1": "Yes", "✅": "Yes"},
+                "options_list": [{"emoji": "✅", "label": "Yes", "value": "yes"}],
             },
         },
         edits_event_id="$waiting",

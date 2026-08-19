@@ -84,6 +84,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import (
     _delivery_payload,
+    _legacy_delivery_result,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
@@ -1306,6 +1307,7 @@ class FakeOutbox:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -1356,6 +1358,7 @@ class FakeOutbox:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
+                result=dict(result) if result is not None else _legacy_delivery_result(payload),
                 event_type=event_type,
                 edits_event_id=edits_event_id,
             )
@@ -1372,6 +1375,7 @@ class FakeOutbox:
             thread_id=thread_id,
             transaction_id=transaction_id,
             payload=_delivery_payload(self.principal_id, delivery_id, stage, payload),
+            result=dict(result) if result is not None else _legacy_delivery_result(payload),
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
@@ -1580,6 +1584,7 @@ class DiesAfterAcknowledgement:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -1591,6 +1596,7 @@ class DiesAfterAcknowledgement:
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
             event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,

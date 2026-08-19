@@ -672,12 +672,16 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
 
-        frozen = outbox.rows["$cause", "final"].payload
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
         new_content = frozen["m.new_content"]
         prompt = new_content["io.mindroom.interactive"]
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
-        semantic = new_content["io.mindroom.final_delivery"]
+        assert DURABLE_FINAL_OUTCOME_KEY not in frozen
+        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
+        semantic = delivery.result
+        assert semantic is not None
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
         assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
@@ -703,7 +707,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
         gateway.deps.runtime.client = client
-        answer = "final answer " + ("x" * 20_000)
+        answer = "final answer " + ("x" * 100_000)
 
         outcome = await gateway.deliver_final(
             replace(
@@ -714,10 +718,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         assert outcome.terminal_status == "completed"
-        frozen = outbox.rows["$cause", "final"].payload
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
         assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert DURABLE_FINAL_OUTCOME_KEY not in frozen
-        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY]["body"] == answer
+        assert DURABLE_FINAL_OUTCOME_KEY not in frozen["m.new_content"]
+        assert delivery.result == {"body": answer, "interactive": None}
         assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
@@ -2586,6 +2592,7 @@ class TestTurnDeliverySerialization:
             room_id: str,
             thread_id: str | None,
             payload: Mapping[str, object],
+            result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
         ) -> str | None:
@@ -2596,6 +2603,7 @@ class TestTurnDeliverySerialization:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
             )

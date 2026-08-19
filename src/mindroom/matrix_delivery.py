@@ -145,6 +145,7 @@ class MatrixDeliveryWorker:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
     ) -> str | None:
         """Enqueue, claim, send, and acknowledge one delivery.
@@ -180,6 +181,7 @@ class MatrixDeliveryWorker:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
             )
         return await self._finish_flush(delivery_id, outcome)
@@ -192,6 +194,7 @@ class MatrixDeliveryWorker:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None,
         edits_event_id: str | None,
     ) -> _FlushOutcome:
         """Finish a delivery whose durable handoff may already have committed."""
@@ -208,6 +211,7 @@ class MatrixDeliveryWorker:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
             )

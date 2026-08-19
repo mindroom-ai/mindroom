@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
 from mindroom.constants import (
-    DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -433,14 +432,7 @@ class ApprovalResponseCoordinator:
         delivery = await self.final_delivery(continuation, recover=recover)
         if delivery is None:
             return None
-        payload = delivery.payload
-        nested = payload.get("m.new_content")
-        semantic = (
-            next((value for key, value in nested.items() if key == DURABLE_FINAL_OUTCOME_KEY), None)
-            if isinstance(nested, dict)
-            else payload.get(DURABLE_FINAL_OUTCOME_KEY)
-        )
-        return delivery if isinstance(semantic, dict) else None
+        return delivery if delivery.result is not None else None
 
     async def final_delivery(
         self,

@@ -28,7 +28,6 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
@@ -1151,7 +1150,7 @@ class ResponseRunner:
         payload = dict(delivery.payload)
         nested = payload.get("m.new_content")
         visible = cast("dict[str, Any]", nested) if isinstance(nested, dict) else payload
-        semantic = visible.get(DURABLE_FINAL_OUTCOME_KEY)
+        semantic = delivery.result
         semantic_body: object = None
         interactive_metadata = None
         if isinstance(semantic, dict):

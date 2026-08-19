@@ -14,7 +14,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
@@ -257,6 +257,7 @@ class SendTextRequest:  # noqa: D101
     # whose duplication a reader would see, and it is the initial stage.
     delivery_stage: DeliveryStage = DeliveryStage.FINAL
     defer_source_handoff: bool = False
+    delivery_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +273,7 @@ class EditTextRequest:  # noqa: D101
     # whose loss leaves a user looking at "Thinking..." for good.
     delivery_turn_id: str | None = None
     defer_source_handoff: bool = False
+    delivery_result: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -883,6 +885,7 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
+                result=request.delivery_result,
             )
         except _DeliveryRefusedError:
             return None
@@ -1041,6 +1044,7 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=envelope,
+                result=request.delivery_result,
                 edits_event_id=request.event_id,
             )
         except _DeliveryRefusedError:
@@ -1222,9 +1226,10 @@ class DeliveryGateway:
                     source_event_id=request.identity.response_envelope.source_event_id,
                 ),
             )
+        delivery_result: dict[str, object] | None = None
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
-            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {
+            delivery_result = {
                 "body": display_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
@@ -1240,6 +1245,7 @@ class DeliveryGateway:
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
                     retry_sync_recovery=True,
                     defer_source_handoff=request.defer_source_handoff,
+                    delivery_result=delivery_result,
                 ),
             )
             if edited:
@@ -1286,6 +1292,7 @@ class DeliveryGateway:
                 # value after a restart, which a generated ID would not.
                 delivery_turn_id=request.identity.response_envelope.source_event_id,
                 defer_source_handoff=request.defer_source_handoff,
+                delivery_result=delivery_result,
             ),
         )
         if event_id is None:

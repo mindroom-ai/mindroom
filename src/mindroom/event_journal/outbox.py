@@ -91,6 +91,17 @@ def _delivery_result_json(result: Mapping[str, object] | None) -> str | None:
     return json.dumps(dict(result), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
+def _legacy_delivery_result(payload: Mapping[str, object]) -> dict[str, object] | None:
+    """Read the local result older writers placed inside Matrix content."""
+    replacement = payload.get("m.new_content")
+    legacy_result = (
+        cast("Mapping[str, object]", replacement).get(_LEGACY_FINAL_OUTCOME_KEY)
+        if isinstance(replacement, dict)
+        else payload.get(_LEGACY_FINAL_OUTCOME_KEY)
+    )
+    return dict(cast("Mapping[str, object]", legacy_result)) if isinstance(legacy_result, dict) else None
+
+
 def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
     """Return the stable outbox identity carried by one Matrix payload."""
     if content is None:
@@ -686,13 +697,7 @@ def _delivery(row: Row) -> MatrixDelivery:
         raise TypeError(msg)
     raw_result = row["result_json"]
     if raw_result is None:
-        replacement = payload.get("m.new_content")
-        legacy_result = (
-            replacement.get(_LEGACY_FINAL_OUTCOME_KEY)
-            if isinstance(replacement, dict)
-            else payload.get(_LEGACY_FINAL_OUTCOME_KEY)
-        )
-        result = dict(legacy_result) if isinstance(legacy_result, dict) else None
+        result = _legacy_delivery_result(payload)
     else:
         decoded_result = json.loads(raw_result)
         if not isinstance(decoded_result, dict):
