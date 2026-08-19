@@ -13,7 +13,11 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, credential_service_policy
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    credential_service_policy,
+)
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials, scoped_credentials_path
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
@@ -193,6 +197,7 @@ class _FakeDiscoveryClient:
             {
                 "client_id": "registered-client-id",
                 "client_id_issued_at": 123,
+                "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                 "registration_client_uri": "https://auth.example.test/register/registered-client-id",
                 "registration_access_token": "registration-token",
                 "token_endpoint_auth_method": "none",
@@ -313,6 +318,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     assert stored_client == {
         "client_id": "registered-client-id",
         "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
         "client_id_issued_at": 123,
         "registration_client_uri": "https://auth.example.test/register/registered-client-id",
         "registration_access_token": "registration-token",
@@ -413,6 +419,7 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
                 {
                     "client_id": "registered-client-id",
                     "client_id_issued_at": 123,
+                    "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                     "token_endpoint_auth_method": "none",
                 },
                 status_code=201,

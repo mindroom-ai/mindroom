@@ -30,6 +30,7 @@ from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
+from mindroom.credential_policy import OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.mcp.errors import MCPConnectionError
 from mindroom.mcp.manager import MCPServerManager
@@ -865,6 +866,9 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
             "client_id": "provisioned-client-id",
             "client_secret": "provisioned-client-secret",
             "redirect_uri": "https://mindroom.example.test/api/oauth/public_mail/callback",
+            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: (
+                "https://mindroom.example.test/api/oauth/public_mail/callback"
+            ),
             "_source": "oauth_dynamic_client_registration",
             RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
         },
@@ -934,21 +938,30 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
 
 
 @pytest.mark.parametrize(
-    ("public_url", "stored_redirect_uri", "request_base_url"),
+    ("public_url", "stored_redirect_uri", "registered_redirect_uri", "request_base_url"),
     [
         (
             "https://mindroom.example.test",
+            "https://mindroom.example.test/api/oauth/public_mail/callback",
+            None,
+            "https://mindroom.example.test",
+        ),
+        (
+            "https://mindroom.example.test",
+            "https://other.example.test/api/oauth/public_mail/callback",
             "https://other.example.test/api/oauth/public_mail/callback",
             "https://mindroom.example.test",
         ),
-        ("https://mindroom.example.test", None, "https://mindroom.example.test"),
+        ("https://mindroom.example.test", None, None, "https://mindroom.example.test"),
         (
             "http://mindroom.example.test",
+            "http://mindroom.example.test/api/oauth/public_mail/callback",
             "http://mindroom.example.test/api/oauth/public_mail/callback",
             "http://mindroom.example.test",
         ),
         (
             "https://localhost:8000",
+            "https://localhost:8000/api/oauth/public_mail/callback",
             "https://localhost:8000/api/oauth/public_mail/callback",
             "https://mindroom.example.test",
         ),
@@ -965,6 +978,7 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
     tmp_path: Path,
     public_url: str,
     stored_redirect_uri: str | None,
+    registered_redirect_uri: str | None,
     request_base_url: str,
     method: str,
     path: str,
@@ -985,6 +999,8 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
     }
     if stored_redirect_uri is not None:
         client_credentials["redirect_uri"] = stored_redirect_uri
+    if registered_redirect_uri is not None:
+        client_credentials[OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY] = registered_redirect_uri
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "public_mail_oauth_client",
         client_credentials,

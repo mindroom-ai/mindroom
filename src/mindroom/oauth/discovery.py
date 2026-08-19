@@ -13,6 +13,7 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 import httpx
 
 from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
 )
@@ -349,9 +350,15 @@ def _stored_registration(
     ):
         msg = f"{provider.display_name} OAuth dynamic client registration did not return client_secret"
         raise OAuthProviderError(msg)
+    redirect_uri = provider.default_redirect_uri(runtime_paths)
+    registered_redirect_uris = registration.get("redirect_uris")
+    if not isinstance(registered_redirect_uris, list) or redirect_uri not in registered_redirect_uris:
+        msg = f"{provider.display_name} OAuth dynamic client registration did not confirm redirect_uri"
+        raise OAuthProviderError(msg)
     stored: dict[str, Any] = {
         "client_id": client_id.strip(),
-        "redirect_uri": provider.default_redirect_uri(runtime_paths),
+        "redirect_uri": redirect_uri,
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
         "_source": OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
         "_oauth_provider": provider.id,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
