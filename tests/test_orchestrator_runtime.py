@@ -3069,6 +3069,47 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.config is current_config
 
     @pytest.mark.asyncio
+    async def test_config_update_aborts_the_worker_handoff_when_startup_maintenance_cancellation_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A post-boundary reload failure must reopen worker admission before it escapes."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch(
+                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+                side_effect=lambda _paths, config: "new" if config is new_config else "current",
+            ),
+            patch.object(
+                orchestrator._startup_maintenance,
+                "cancel",
+                new=AsyncMock(side_effect=RuntimeError("maintenance cancellation failed")),
+            ),
+            pytest.raises(RuntimeError, match="maintenance cancellation failed"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert runtime.manager._worker_replacement_in_progress is False
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()

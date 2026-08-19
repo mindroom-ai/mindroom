@@ -589,6 +589,10 @@ class ScriptRuntimeLifecycle:
         self._pending_worker_configuration_identity = None
         await self.manager.end_worker_replacement()
 
+    async def abort_update_handoff(self) -> None:
+        """Reopen worker admission when config application cannot finish its handoff."""
+        await self._abort_worker_replacement()
+
     async def _apply_update_pass(
         self,
         *,

@@ -19,6 +19,7 @@ import mindroom.workers.runtime as workers_runtime_module
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.script_runtime import (
     ScriptRuntimeLifecycle,
@@ -28,12 +29,13 @@ from mindroom.orchestration.script_runtime import (
     script_gateway_url,
 )
 from mindroom.script_runs.broker import ScriptToolBroker
-from mindroom.script_runs.manager import ScriptRunManager
+from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore
 from mindroom.script_runs.worker_client import (
     ScriptWorkerError,
     WorkerScriptCancel,
+    WorkerScriptLaunch,
     WorkerScriptStatus,
 )
 from mindroom.tool_approval import BackgroundScriptToolOrigin
@@ -41,9 +43,12 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     build_tool_execution_identity,
     serialize_tool_execution_identity,
+    worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerHandle
+from mindroom.workers.models import WorkerHandle, WorkerSpec
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -181,6 +186,72 @@ class _TerminatingWorkerClient:
         del run_id, supervisor_handle, force
         self.exited = True
         return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
+
+
+@dataclass
+class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
+    """Hold one admitted launch open until the replacement boundary observes it."""
+
+    launch_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_launch: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def launch(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        source_path: str,
+        source_digest: str,
+        token_path: str,
+        gateway_url: str,
+        supervisor_handle: str,
+        private_agent_names: tuple[str, ...] | None = None,
+        tail_lines: int = 200,
+    ) -> WorkerScriptLaunch:
+        del run_id, source_path, source_digest, token_path, gateway_url, private_agent_names, tail_lines
+        self.launch_entered.set()
+        await self.release_launch.wait()
+        return WorkerScriptLaunch(supervisor_handle=supervisor_handle)
+
+
+@dataclass
+class _LaunchingBackend:
+    """Provide the shared-state worker required by a real manager launch."""
+
+    runtime_paths: RuntimePaths
+    handles: list[WorkerHandle] = field(default_factory=list)
+
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: object | None = None,
+    ) -> WorkerHandle:
+        del now, progress_sink
+        root = worker_root_path(self.runtime_paths.storage_root, spec.worker_key)
+        (root / "workspace").mkdir(parents=True, exist_ok=True)
+        handle = WorkerHandle(
+            worker_id="worker-1",
+            worker_key=spec.worker_key,
+            endpoint="http://worker.test/api/sandbox-runner/execute",
+            auth_token="worker-token",  # noqa: S106
+            status="ready",
+            backend_name="test",
+            last_used_at=1.0,
+            created_at=1.0,
+            debug_metadata={"state_root": str(root), "api_root": "http://worker.test/api/sandbox-runner"},
+        )
+        self.handles = [handle]
+        return handle
+
+    def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
+        del include_idle, now
+        return list(self.handles)
+
+    def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+        del now
+        return next((handle for handle in self.handles if handle.worker_key == worker_key), None)
 
 
 @dataclass
@@ -691,22 +762,20 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
 
 
 @pytest.mark.asyncio
-async def test_generation_replacement_timeout_aborts_before_every_run_has_durable_revocation(
+async def test_generation_replacement_aborts_before_every_run_has_durable_revocation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A timed-out replacement cannot let the caller commit an update with unrevoked runs."""
+    """A failed durable write cannot let the caller commit an update with an unrevoked run."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     first = _stored_run(store, runtime_paths)
     second = _stored_run(store, runtime_paths, run_id="run-2")
-    first_revocation_started = threading.Event()
-    release_revocation = threading.Event()
 
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         if run_id == first.run_id:
-            first_revocation_started.set()
-            assert release_revocation.wait(timeout=5)
+            msg = "durable store unavailable"
+            raise ScriptRunManagerError(msg)
         return store.request_cancel(run_id, reason=reason)
 
     old_config = _config()
@@ -733,20 +802,96 @@ async def test_generation_replacement_timeout_aborts_before_every_run_has_durabl
         resolver=SimpleNamespace(resolve=MagicMock()),
         config_provider=lambda: old_config,
         worker_lease_provider=lambda: None,
-        pass_timeout_seconds=0.01,
         pass_concurrency=1,
     )
 
-    update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
-    try:
-        assert await asyncio.to_thread(first_revocation_started.wait, 1)
-        with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
-            await update
-    finally:
-        release_revocation.set()
+    with pytest.raises(RuntimeError, match="Worker replacement did not durably revoke every active run"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
 
     assert store.get_run(first.run_id).cancel_requested_at is None
     assert store.get_run(second.run_id).cancel_requested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_generation_replacement_drains_an_admitted_launch_before_snapshotting_affected_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The lifecycle drains a real launch, then revokes the run it made durable."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
+        defaults={"tools": []},
+    )
+    committed_config = old_config
+    backend = _LaunchingBackend(runtime_paths)
+    client = _BlockingLaunchWorkerClient()
+    settlement_resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=settlement_resolver)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=client,  # type: ignore[arg-type]
+        worker_backend=backend,
+        gateway_url="http://primary.test/api/script-gateway",
+        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    lease = _Lease(backend)
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: committed_config,
+        worker_lease_provider=lambda: lease,
+    )
+    context = make_test_tool_runtime_context(
+        agent_name="watcher",
+        target=MessageTarget.resolve(
+            room_id="!room:example.test",
+            thread_id="$thread:example.test",
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.test",
+        client=SimpleNamespace(),
+        config=old_config,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_paths.storage_root,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    await runtime.reconcile_once()
+
+    admitted_launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    await asyncio.wait_for(client.launch_entered.wait(), timeout=1)
+    replacement = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
+    await asyncio.sleep(0)
+
+    assert replacement.done() is False
+    with pytest.raises(ScriptRunManagerError, match="worker replacement is in progress"):
+        await manager.run(context, source="print('blocked')\n")
+
+    client.release_launch.set()
+    run = await admitted_launch
+    await replacement
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.INTERRUPTED
+    assert settlement_resolver.settled_runs == [run.run_id]
+    assert manager._worker_replacement_in_progress is True
+
+    await runtime.abort_update_handoff()
+    assert manager._worker_replacement_in_progress is False
 
 
 @pytest.mark.asyncio
