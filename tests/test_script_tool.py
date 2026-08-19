@@ -65,7 +65,6 @@ def _run(*, state: ScriptRunState = ScriptRunState.RUNNING) -> ScriptRunRecord:
         execution_identity={"requester_id": "must-not-leak"},
         worker_key="v1:default:user_agent:@alice:example.test:watcher",
         worker_id="worker-private",
-        worker_backend_generation="backend-private",
         supervisor_handle=f"shell:{'a' * 32}",
         snapshot_locator="workers/private/.mindroom/script-runs/script-1",
         state=state,

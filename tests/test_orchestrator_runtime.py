@@ -3069,6 +3069,76 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.config is current_config
 
     @pytest.mark.asyncio
+    async def test_config_update_reopens_worker_admission_when_apply_boundary_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A gate-closing apply failure completes against the still-visible old config."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        old_backend = MagicMock()
+        release_started = asyncio.Event()
+        allow_release = asyncio.Event()
+        release_finished = asyncio.Event()
+
+        class _BlockingLease:
+            manager = old_backend
+            generation_id = "old"
+
+            async def _release(self) -> None:
+                release_started.set()
+                await allow_release.wait()
+                release_finished.set()
+
+            def release(self) -> None:
+                asyncio.run_coroutine_threadsafe(self._release(), loop).result(timeout=5)
+
+        loop = asyncio.get_running_loop()
+        lease = _BlockingLease()
+        runtime._current_worker_lease = lease
+        runtime.manager.worker_backend = old_backend
+
+        async def fail_after_closing_gate(_runtime: object, _plan: ConfigUpdatePlan) -> None:
+            await runtime.manager.begin_worker_replacement()
+            msg = "script reload boundary"
+            raise RuntimeError(msg)
+
+        update = asyncio.create_task(orchestrator._apply_config_update_plan(current_config, plan, ()))
+        try:
+            with (
+                patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+                patch.object(type(runtime), "apply_update_plan", new=fail_after_closing_gate),
+            ):
+                await release_started.wait()
+                update.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await update
+
+            assert orchestrator.config is current_config
+            assert runtime.manager.worker_replacement_in_progress is False
+            assert runtime.manager.worker_backend is None
+            assert runtime._current_worker_lease is None
+        finally:
+            allow_release.set()
+
+        await release_finished.wait()
+
+    @pytest.mark.asyncio
     async def test_config_update_aborts_the_worker_handoff_when_startup_maintenance_cancellation_fails(
         self,
         tmp_path: Path,

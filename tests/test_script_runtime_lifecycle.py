@@ -24,6 +24,7 @@ from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config
 from mindroom.orchestration.script_runtime import (
     ScriptRuntimeLifecycle,
     _release_worker_leases_before_deadline,
+    _ScriptRuntimeLifecycleError,
     _ScriptRuntimeUnavailableError,
     build_script_runtime,
     script_gateway_url,
@@ -189,6 +190,33 @@ class _TerminatingWorkerClient:
 
 
 @dataclass
+class _FailingStatusWorkerClient:
+    """Accept cancellation but fail the immediate process-status reconciliation."""
+
+    async def status(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        supervisor_handle: str,
+    ) -> WorkerScriptStatus:
+        del run_id, supervisor_handle
+        message = "worker status unavailable"
+        raise ScriptWorkerError(message, failure_kind="worker")
+
+    async def cancel(
+        self,
+        _worker: WorkerHandle,
+        *,
+        run_id: str,
+        supervisor_handle: str,
+        force: bool = False,
+    ) -> WorkerScriptCancel:
+        del run_id, supervisor_handle, force
+        return WorkerScriptCancel(cancel_requested=True, already_finished=False, unknown_handle=False)
+
+
+@dataclass
 class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
     """Hold one admitted launch open until the replacement boundary observes it."""
 
@@ -263,6 +291,19 @@ class _ApprovalSettlementResolver:
     async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
         del reason
         self.settled_runs.append(run_id)
+
+
+@dataclass
+class _FailingApprovalSettlementResolver:
+    """Expose a broker-close failure after durable call ownership is retired."""
+
+    settlement_attempts: list[str] = field(default_factory=list)
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del reason
+        self.settlement_attempts.append(run_id)
+        msg = "approval settlement unavailable"
+        raise _ScriptRuntimeUnavailableError(msg)
 
 
 def _worker(run: ScriptRunRecord) -> WorkerHandle:
@@ -815,6 +856,181 @@ async def test_generation_replacement_aborts_before_every_run_has_durable_revoca
 
 
 @pytest.mark.asyncio
+async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A broker-close failure cannot publish a replacement over a revoked live process."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    store.claim_call(
+        run_id=run.run_id,
+        call_id="call-1",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="arguments-digest",
+    )
+    resolver = _FailingApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    lease = _Lease(_Backend([_worker(run)]))
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=_TerminatingWorkerClient(),  # type: ignore[arg-type]
+        worker_backend=lease.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script"]}},
+        defaults={"tools": []},
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._current_worker_lease = lease
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="broker ownership"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.RUNNING
+    assert store.pending_calls(run.run_id) == []
+    assert resolver.settlement_attempts == [run.run_id]
+    assert runtime._current_worker_lease is lease
+    assert lease.released is False
+    assert manager.worker_replacement_in_progress is True
+
+
+@pytest.mark.asyncio
+async def test_generation_replacement_aborts_when_process_reconciliation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An immediate worker-status failure cannot let the replacement commit."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    lease = _Lease(_Backend([_worker(run)]))
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=_FailingStatusWorkerClient(),  # type: ignore[arg-type]
+        worker_backend=lease.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script"]}},
+        defaults={"tools": []},
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._current_worker_lease = lease
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="process reconciliation"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.RUNNING
+    assert resolver.settled_runs == [run.run_id]
+    assert runtime._current_worker_lease is lease
+    assert lease.released is False
+    assert manager.worker_replacement_in_progress is True
+
+
+@pytest.mark.asyncio
+async def test_generation_replacement_aborts_when_reconciliation_leaves_a_worker_run_unfinished(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful reconciliation call must still publish a terminal durable worker state."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    lease = _Lease(_Backend([_worker(run)]))
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=_TerminatingWorkerClient(),  # type: ignore[arg-type]
+        worker_backend=lease.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+    )
+
+    async def leave_unfinished(
+        _manager: ScriptRunManager,
+        *,
+        run_id: str,
+        broker_revoked: bool = False,
+    ) -> ScriptRunRecord:
+        del broker_revoked
+        return store.get_run(run_id)
+
+    monkeypatch.setattr(ScriptRunManager, "reconcile_durable", leave_unfinished)
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script"]}},
+        defaults={"tools": []},
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._current_worker_lease = lease
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="terminal durable state"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.RUNNING
+    assert resolver.settled_runs == [run.run_id]
+    assert runtime._current_worker_lease is lease
+    assert lease.released is False
+    assert manager.worker_replacement_in_progress is True
+
+
+@pytest.mark.asyncio
 async def test_generation_replacement_drains_an_admitted_launch_before_snapshotting_affected_runs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -900,6 +1116,81 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
         await manager.run(context, source="print('unavailable')\n")
     assert [stored.run_id for stored in store.list_runs()] == [run.run_id]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_release(
+    tmp_path: Path,
+) -> None:
+    """Cancellation cannot strand the gate behind disposal of an unpublished old lease."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    lease = _Lease(_Backend([]))
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    release_finished = threading.Event()
+
+    def blocking_release() -> None:
+        release_started.set()
+        assert allow_release.wait(timeout=5)
+        lease.released = True
+        release_finished.set()
+
+    lease.release = blocking_release  # type: ignore[method-assign]
+    manager = ScriptRunManager(
+        store=store,
+        broker=MagicMock(),
+        worker_client=MagicMock(),
+        worker_backend=lease.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._current_worker_lease = lease
+    await manager.begin_worker_replacement()
+
+    completion = asyncio.create_task(runtime.complete_worker_replacement())
+    try:
+        assert await asyncio.to_thread(release_started.wait, 1)
+        completion.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await completion
+
+        assert manager.worker_replacement_in_progress is False
+        assert manager.worker_backend is None
+        assert runtime._current_worker_lease is None
+        with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
+            await manager.run(
+                make_test_tool_runtime_context(
+                    agent_name="watcher",
+                    target=MessageTarget.resolve(
+                        room_id="!room:example.test",
+                        thread_id="$thread:example.test",
+                        reply_to_event_id=None,
+                    ),
+                    requester_id="@alice:example.test",
+                    client=SimpleNamespace(),
+                    config=_config(),
+                    runtime_paths=runtime_paths,
+                    storage_path=runtime_paths.storage_root,
+                    relations=make_relation_lookup(),
+                    conversation_reader=make_conversation_reader_mock(),
+                ),
+                source="print('unavailable')\n",
+            )
+        assert store.list_runs() == []
+    finally:
+        allow_release.set()
+
+    assert await asyncio.to_thread(release_finished.wait, 1)
+    assert lease.released is True
 
 
 @pytest.mark.asyncio

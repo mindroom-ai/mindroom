@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 
 from mindroom import approval_manager
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
@@ -43,7 +44,7 @@ from mindroom.workers.runtime import (
 from .runtime import cancel_task, create_logged_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.config.agent import AgentConfig
@@ -68,7 +69,7 @@ class _ScriptRuntimeUnavailableError(RuntimeError):
     """The durable script owner has no live runtime generation yet."""
 
 
-class ScriptRuntimeLifecycleError(RuntimeError):
+class _ScriptRuntimeLifecycleError(RuntimeError):
     """A configuration update cannot safely cross the script runtime boundary."""
 
 
@@ -474,12 +475,19 @@ class ScriptRuntimeLifecycle:
         return task, delivery, self._pending_worker_lease_epoch
 
     async def complete_worker_replacement(self) -> None:
-        """Publish the backend for the config visible when a replacement completes."""
+        """Reopen safely, then publish the backend for the config visible now."""
         if not self.manager.worker_replacement_in_progress:
             return
+
+        retired_lease = self._current_worker_lease
+        self._clear_current_worker_backend()
+        self._worker_config_epoch += 1
+        release_task = None if retired_lease is None else _release_worker_lease_later(retired_lease)
+        await run_coroutine_until_complete(self.manager.end_worker_replacement())
+        if release_task is not None:
+            await asyncio.shield(release_task)
+
         async with self._worker_refresh_lock:
-            await self._release_current_worker_lease()
-            self._worker_config_epoch += 1
             try:
                 if self.config_provider() is None:
                     self._clear_current_worker_backend()
@@ -497,8 +505,6 @@ class ScriptRuntimeLifecycle:
             except Exception:
                 self._clear_current_worker_backend()
                 logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
-            finally:
-                await self.manager.end_worker_replacement()
 
     def _clear_current_worker_backend(self) -> None:
         self._current_worker_lease = None
@@ -567,7 +573,7 @@ class ScriptRuntimeLifecycle:
             )
         except TimeoutError:
             msg = "Background script reload did not durably revoke every active run before the reload deadline."
-            raise ScriptRuntimeLifecycleError(msg) from None
+            raise _ScriptRuntimeLifecycleError(msg) from None
 
     async def _apply_update_pass(
         self,
@@ -612,7 +618,7 @@ class ScriptRuntimeLifecycle:
         durable_results = await asyncio.gather(*(persist_revocation(run) for run in affected))
         if not all(durable_results):
             msg = "Worker replacement did not durably revoke every active run."
-            raise ScriptRuntimeLifecycleError(msg)
+            raise _ScriptRuntimeLifecycleError(msg)
         durably_revoked = [run for run, persisted in zip(affected, durable_results, strict=True) if persisted]
 
         async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
@@ -646,8 +652,14 @@ class ScriptRuntimeLifecycle:
             *(revoke_broker_ownership(run) for run in durably_revoked),
         )
         broker_revoked = [run for run, revoked in zip(durably_revoked, broker_results, strict=True) if revoked]
+        _require_successful_worker_replacement_stage(
+            durably_revoked,
+            broker_results,
+            worker_configuration_changed=worker_configuration_changed,
+            error="Worker replacement did not close broker ownership for every active worker run.",
+        )
 
-        async def reconcile_run(run: ScriptRunRecord) -> None:
+        async def reconcile_run(run: ScriptRunRecord) -> bool:
             async with semaphore:
                 try:
                     await self.manager.reconcile_durable(run_id=run.run_id, broker_revoked=True)
@@ -663,10 +675,23 @@ class ScriptRuntimeLifecycle:
                         agent_name=run.agent_name,
                         exc_info=True,
                     )
+                    return False
+                return True
 
-        await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
+        reconciliation_results = await asyncio.gather(*(reconcile_run(run) for run in broker_revoked))
+        _require_successful_worker_replacement_stage(
+            broker_revoked,
+            reconciliation_results,
+            worker_configuration_changed=worker_configuration_changed,
+            error="Worker replacement did not complete process reconciliation for every active worker run.",
+        )
+
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        if worker_configuration_changed and not any(not run.local_unsafe for run in unfinished):
+        _require_terminal_worker_replacement(
+            unfinished,
+            worker_configuration_changed=worker_configuration_changed,
+        )
+        if worker_configuration_changed:
             await self._release_current_worker_lease()
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
@@ -918,6 +943,30 @@ def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool
 def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent's effective tool surface includes script controls."""
     return any(entry.name == "script" for entry in config.resolve_entity(agent_name).tool_configs)
+
+
+def _require_successful_worker_replacement_stage(
+    runs: Sequence[ScriptRunRecord],
+    results: Sequence[bool],
+    *,
+    worker_configuration_changed: bool,
+    error: str,
+) -> None:
+    worker_run_failed = any(
+        not succeeded and not run.local_unsafe for run, succeeded in zip(runs, results, strict=True)
+    )
+    if worker_configuration_changed and worker_run_failed:
+        raise _ScriptRuntimeLifecycleError(error)
+
+
+def _require_terminal_worker_replacement(
+    unfinished: Sequence[ScriptRunRecord],
+    *,
+    worker_configuration_changed: bool,
+) -> None:
+    if worker_configuration_changed and any(not run.local_unsafe for run in unfinished):
+        msg = "Worker replacement did not publish terminal durable state for every active worker run."
+        raise _ScriptRuntimeLifecycleError(msg)
 
 
 def _reload_reason_for(
