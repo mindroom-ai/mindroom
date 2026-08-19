@@ -120,6 +120,24 @@ async def test_script_worker_client_exposes_unknown_handle_as_status() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_state", [[], {}])
+async def test_script_worker_client_rejects_unhashable_status_state(invalid_state: object) -> None:
+    """Malformed authenticated status payloads must produce stable worker errors."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "state": invalid_state, "output": ""})
+
+    with pytest.raises(ScriptWorkerError, match="invalid script status receipt") as exc_info:
+        await _client(handler).status(
+            _handle(),
+            run_id="run-1",
+            supervisor_handle=_SUPERVISOR_HANDLE,
+        )
+
+    assert exc_info.value.failure_kind == "worker"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "expected_kind"),
     [

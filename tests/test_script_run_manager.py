@@ -190,6 +190,7 @@ class _WorkerClient:
     cancel_failures: list[BaseException] = field(default_factory=list)
     launch_failure: BaseException | None = None
     launch_entered: asyncio.Event | None = None
+    second_launch_entered: asyncio.Event | None = None
     launch_release: asyncio.Event | None = None
 
     async def launch(
@@ -212,6 +213,8 @@ class _WorkerClient:
         assert starting.supervisor_handle == supervisor_handle
         assert len(supervisor_handle) == len("shell:") + 32
         self.requested_handles.append(supervisor_handle)
+        if len(self.requested_handles) == 2 and self.second_launch_entered is not None:
+            self.second_launch_entered.set()
         workspace = Path(worker.debug_metadata["state_root"]) / "workspace"
         source = workspace / source_path
         token = workspace / token_path
@@ -588,6 +591,45 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
     launch_result = await launch
 
     assert launch_result.state is ScriptRunState.CANCELLED
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_during_durable_reservation_finishes_as_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot abandon a reservation whose durable write is still running."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    create_entered = threading.Event()
+    release_create = threading.Event()
+    create_finished = threading.Event()
+    original_create = manager.store.create_run
+
+    def blocked_create(run: ScriptRunRecord) -> None:
+        create_entered.set()
+        assert release_create.wait(timeout=5)
+        original_create(run)
+        create_finished.set()
+
+    monkeypatch.setattr(manager.store, "create_run", blocked_create)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(create_entered.wait, 5)
+
+    launch.cancel()
+    await asyncio.sleep(0)
+    cancellation_retained_ownership = not launch.done()
+    release_create.set()
+    assert await asyncio.to_thread(create_finished.wait, 5)
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+
+    [stored] = manager.store.list_runs()
+    assert cancellation_retained_ownership is True
+    assert stored.state is ScriptRunState.INTERRUPTED
+    assert manager.broker.cancelled_runs == [stored.run_id]
     assert client.requested_handles == []
 
 
@@ -1136,6 +1178,7 @@ async def test_slow_worker_launch_does_not_block_an_independent_reservation(tmp_
     """Remote launch latency should not hold the process-wide capacity lock."""
     manager, _backend, client = _manager(tmp_path)
     client.launch_entered = asyncio.Event()
+    client.second_launch_entered = asyncio.Event()
     client.launch_release = asyncio.Event()
     first = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
     await client.launch_entered.wait()
@@ -1146,10 +1189,7 @@ async def test_slow_worker_launch_does_not_block_an_independent_reservation(tmp_
             source="print('ok')\n",
         ),
     )
-    for _ in range(50):
-        if len(client.requested_handles) == 2:
-            break
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(client.second_launch_entered.wait(), timeout=5)
 
     try:
         assert len(client.requested_handles) == 2

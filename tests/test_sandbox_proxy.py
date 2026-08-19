@@ -3502,6 +3502,52 @@ def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
+def test_duplicate_published_primary_worker_manager_is_retained_until_final_shutdown() -> None:
+    """A defensive duplicate build must remain owned without disrupting the active generation."""
+    workers_runtime_module._reset_primary_worker_manager()
+    shutdown_calls: list[str] = []
+
+    class _FakeWorkerManager:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def shutdown(self) -> None:
+            shutdown_calls.append(self.name)
+
+    signature = ("duplicate-generation",)
+    active_manager = _FakeWorkerManager("active")
+    duplicate_manager = _FakeWorkerManager("duplicate")
+    active_entry = workers_runtime_module._WorkerManagerEntry(
+        manager=active_manager,
+        config_signature=signature,
+    )
+    workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY = active_entry
+    workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.add(signature)
+
+    try:
+        published = workers_runtime_module._publish_primary_worker_manager_build(
+            duplicate_manager,
+            signature,
+            acquisition_epoch=workers_runtime_module._PRIMARY_WORKER_MANAGER_EPOCH,
+            acquire_lease=False,
+        )
+
+        assert published is not None
+        published_entry, _managers_to_shutdown = published
+        assert published_entry is active_entry
+        assert shutdown_calls == []
+        assert [entry.manager for entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES] == [
+            duplicate_manager,
+        ]
+
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+
+        assert sorted(shutdown_calls) == ["active", "duplicate"]
+        assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
 def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

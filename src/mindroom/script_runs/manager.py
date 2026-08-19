@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -264,7 +265,11 @@ class ScriptRunManager:
             if len(scoped_active) >= max_concurrent_runs:
                 msg = "Background script concurrent-run limit exceeded."
                 raise ScriptRunManagerError(msg)
-            await asyncio.to_thread(self.store.create_run, run)
+            try:
+                await run_blocking_until_complete(self.store.create_run, run)
+            except asyncio.CancelledError as exc:
+                await self._finalize_failed_launch(run, exc)
+                raise
         try:
             created = await asyncio.to_thread(self.store.get_run, run.run_id)
             if created.cancel_requested_at is not None:
@@ -282,27 +287,30 @@ class ScriptRunManager:
             await self._cleanup_token(run)
             raise exc.cause from None
         except BaseException as exc:
-            durable: ScriptRunRecord | None = None
-            with suppress(Exception):
-                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-            if durable is not None and durable.cancel_requested_at is not None:
-                await self._cleanup_token(durable)
-                raise
-            if isinstance(exc, asyncio.CancelledError):
-                failure_state = ScriptRunState.INTERRUPTED
-            else:
-                failure_state = ScriptRunState.FAILED
-            await asyncio.to_thread(
-                self.store.transition_run,
-                run.run_id,
-                state=failure_state,
-                error=_bounded_error(exc),
-            )
-            try:
-                await self.broker.cancel_run(run.run_id)
-            finally:
-                await self._cleanup_token(durable or run)
+            await self._finalize_failed_launch(run, exc)
             raise
+
+    async def _finalize_failed_launch(self, run: ScriptRunRecord, failure: BaseException) -> None:
+        try:
+            durable = await asyncio.to_thread(self.store.get_run, run.run_id)
+        except ScriptRunNotFoundError:
+            return
+        if durable.cancel_requested_at is not None:
+            await self._cleanup_token(durable)
+            return
+        failure_state = (
+            ScriptRunState.INTERRUPTED if isinstance(failure, asyncio.CancelledError) else ScriptRunState.FAILED
+        )
+        await asyncio.to_thread(
+            self.store.transition_run,
+            run.run_id,
+            state=failure_state,
+            error=_bounded_error(failure),
+        )
+        try:
+            await self.broker.cancel_run(run.run_id)
+        finally:
+            await self._cleanup_token(durable)
 
     async def _complete_cancel_before_spawn(
         self,

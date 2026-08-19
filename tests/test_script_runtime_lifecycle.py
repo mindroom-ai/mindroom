@@ -1181,6 +1181,31 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_path: Path) -> None:
+    """A committed generation must not survive shutdown just because activation never ran."""
+    lease = _Lease(_Backend([]))
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=_runtime_paths(tmp_path),
+        store=ScriptRunStore(_runtime_paths(tmp_path)),
+        broker=SimpleNamespace(_cleanup_tasks=set()),
+        manager=SimpleNamespace(worker_backend=lease.manager, worker_backend_generation=lease.generation_id),
+        resolver=SimpleNamespace(),
+        config_provider=_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._worker_leases.append(lease)
+    runtime._current_worker_lease = lease
+
+    await runtime.shutdown()
+
+    assert lease.released is True
+    assert runtime._worker_leases == []
+    assert runtime._current_worker_lease is None
+    assert runtime.manager.worker_backend is None
+    assert runtime.manager.worker_backend_generation is None
+
+
+@pytest.mark.asyncio
 async def test_expired_shutdown_deadline_retains_lease_release_owner() -> None:
     """An exhausted shutdown budget returns without cancelling lease release."""
     release_lease = threading.Event()

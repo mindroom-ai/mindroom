@@ -131,7 +131,7 @@ class ScriptWorkerClient:
         state = data.get("state")
         output = data.get("output", "")
         exit_code = data.get("exit_code")
-        if state not in {"running", "exited", "unknown"} or not isinstance(output, str):
+        if not isinstance(state, str) or state not in {"running", "exited", "unknown"} or not isinstance(output, str):
             message = "Worker returned an invalid script status receipt."
             raise ScriptWorkerError(message, failure_kind="worker")
         if exit_code is not None and type(exit_code) is not int:

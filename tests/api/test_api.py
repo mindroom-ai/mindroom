@@ -1164,15 +1164,6 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
 
-def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kubernetes cleanup should skip the cycle when no committed runtime config is available."""
-    monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
-
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
-
-
 def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should delegate to the configured worker manager."""
 

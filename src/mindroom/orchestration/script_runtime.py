@@ -768,33 +768,34 @@ class ScriptRuntimeLifecycle:
     async def shutdown(self, *, timeout_seconds: float = 5.0) -> None:
         """Run bounded final reconciliation, then clear the process-local tool binding."""
         shutdown_deadline = asyncio.get_running_loop().time() + timeout_seconds
+        was_activated = self._activated_once
         self._start_requested = False
         startup_task, self._startup_task = self._startup_task, None
         await cancel_task(startup_task)
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
-        if not self._activated_once:
-            return
 
         async def _cleanup() -> None:
             await self._complete_pass()
 
         try:
-            try:
-                await asyncio.wait_for(
-                    _cleanup(),
-                    timeout=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
+            if was_activated:
+                try:
+                    await asyncio.wait_for(
+                        _cleanup(),
+                        timeout=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
+                    )
+                except TimeoutError:
+                    logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
+                cleanup_drained = await drain_script_tool_cleanup(
+                    self.broker,
+                    timeout_seconds=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
                 )
-            except TimeoutError:
-                logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
-            cleanup_drained = await drain_script_tool_cleanup(
-                self.broker,
-                timeout_seconds=max(0.0, shutdown_deadline - asyncio.get_running_loop().time()),
-            )
-            if not cleanup_drained:
-                logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
+                if not cleanup_drained:
+                    logger.warning("script_shutdown_tool_cleanup_timeout", timeout_seconds=timeout_seconds)
         finally:
-            bind_script_run_manager(None)
+            if was_activated:
+                bind_script_run_manager(None)
             self._started = False
             self._activated_once = False
             leases = list(self._worker_leases)

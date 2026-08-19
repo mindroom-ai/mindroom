@@ -492,7 +492,7 @@ def _publish_primary_worker_manager_build(
     *,
     acquisition_epoch: int,
     acquire_lease: bool,
-) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None] | None:
+) -> tuple[_WorkerManagerEntry, list[WorkerBackend]] | None:
     global _PRIMARY_WORKER_MANAGER_ENTRY
 
     with _PRIMARY_WORKER_MANAGER_CONDITION:
@@ -503,8 +503,14 @@ def _publish_primary_worker_manager_build(
         if active_entry is not None and active_entry.config_signature == config_signature:
             if acquire_lease:
                 active_entry.active_leases += 1
+            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(
+                _WorkerManagerEntry(
+                    manager=built_manager,
+                    config_signature=config_signature,
+                ),
+            )
             _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-            return active_entry, [], built_manager
+            return active_entry, []
         previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         new_entry = _WorkerManagerEntry(
             manager=built_manager,
@@ -516,7 +522,7 @@ def _publish_primary_worker_manager_build(
             _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-        return new_entry, managers_to_shutdown, None
+        return new_entry, managers_to_shutdown
 
 
 def _dispose_fenced_primary_worker_manager(
@@ -549,7 +555,7 @@ def _resolve_primary_worker_manager_entry(
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
-) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None]:
+) -> tuple[_WorkerManagerEntry, list[WorkerBackend]]:
     acquisition_epoch = _capture_primary_worker_manager_epoch()
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,
@@ -566,7 +572,7 @@ def _resolve_primary_worker_manager_entry(
         acquire_lease=acquire_lease,
     )
     if active_entry is not None:
-        return active_entry, [], None
+        return active_entry, []
 
     try:
         built_manager = _build_primary_worker_manager(
@@ -622,7 +628,7 @@ def get_primary_worker_manager(
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> WorkerBackend:
     """Return the current primary worker manager snapshot for the current backend config."""
-    entry, managers_to_shutdown, discarded_manager = _resolve_primary_worker_manager_entry(
+    entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
         runtime_paths,
         proxy_url=proxy_url,
         proxy_token=proxy_token,
@@ -632,8 +638,6 @@ def get_primary_worker_manager(
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    if discarded_manager is not None:
-        del discarded_manager
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(
             manager,
@@ -654,7 +658,7 @@ def lease_primary_worker_manager(
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> PrimaryWorkerManagerLease:
     """Borrow the active primary worker manager for one request-scoped operation."""
-    entry, managers_to_shutdown, discarded_manager = _resolve_primary_worker_manager_entry(
+    entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
         runtime_paths,
         proxy_url=proxy_url,
         proxy_token=proxy_token,
@@ -664,8 +668,6 @@ def lease_primary_worker_manager(
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    if discarded_manager is not None:
-        del discarded_manager
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(
             manager,

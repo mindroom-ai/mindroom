@@ -306,3 +306,27 @@ def test_configured_primary_worker_manager_lease_uses_one_committed_config_snaps
     assert lease_manager.call_args.kwargs["worker_grantable_credentials"] == (
         runtime_config.get_worker_grantable_credentials()
     )
+
+
+def test_configured_primary_worker_manager_lease_skips_kubernetes_without_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Kubernetes maintenance must wait for a committed config snapshot."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "kubernetes")
+    lease_manager = MagicMock()
+    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
+
+    resolved = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=None,
+    )
+
+    assert resolved is None
+    lease_manager.assert_not_called()
