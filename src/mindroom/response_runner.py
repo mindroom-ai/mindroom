@@ -1897,6 +1897,7 @@ class ResponseRunner:
         *,
         response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+        signal_queued_message: bool = True,
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
         admission_deferred = False
@@ -1930,7 +1931,9 @@ class ResponseRunner:
                         early_placeholder=early_placeholder,
                         locked_operation=locked_operation,
                     ),
-                    signal_queued_message=request.sync_restart_retry_source_event_id is None,
+                    signal_queued_message=(
+                        signal_queued_message and request.sync_restart_retry_source_event_id is None
+                    ),
                 )
             except asyncio.CancelledError as error:
                 if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
@@ -2078,6 +2081,7 @@ class ResponseRunner:
             request,
             response_kind="team" if continuation.entity_kind == "team" else "ai",
             locked_operation=ownership_disappeared,
+            signal_queued_message=False,
         )
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
