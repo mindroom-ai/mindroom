@@ -338,6 +338,15 @@ class _LiveScriptRuntimeResolver:
         return await approvals.prune_background_approvals(run_id)
 
 
+@dataclass(frozen=True, slots=True)
+class _InterruptedRunResult:
+    """Track the final status of one run's independent interruption obligations."""
+
+    broker_revoked: bool
+    process_reconciled: bool
+    finalized: bool
+
+
 @dataclass(slots=True)
 class ScriptRuntimeLifecycle:
     """Keep one broker/manager pair stable across runtime configuration updates."""
@@ -724,74 +733,95 @@ class ScriptRuntimeLifecycle:
         reason_for: Callable[[ScriptRunRecord], str],
         require_worker_success: bool,
     ) -> None:
-        """Close broker work and reconcile processes after durable revocation."""
+        """Run independent broker/process obligations before exact resource finalization."""
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
-        async def revoke_broker_ownership(run: ScriptRunRecord) -> bool:
+        async def interrupt_run(run: ScriptRunRecord) -> _InterruptedRunResult:
             async with semaphore:
-                try:
-                    await self.manager.revoke(
+                broker_result, process_result = await asyncio.gather(
+                    self.manager.revoke(
                         run.run_id,
                         reason=reason_for(run),
+                    ),
+                    self.manager.reconcile_revoked_process(run_id=run.run_id),
+                    return_exceptions=True,
+                )
+                process_reconciled = not isinstance(process_result, BaseException)
+                if not process_reconciled:
+                    logger.warning(
+                        "script_reload_process_reconciliation_pending",
+                        run_id=run.run_id,
+                        agent_name=run.agent_name,
+                        exc_info=(type(process_result), process_result, process_result.__traceback__),
                     )
-                except (
-                    ScriptRunManagerError,
-                    ScriptWorkerError,
-                    WorkerBackendError,
-                    _ScriptRuntimeUnavailableError,
-                ):
+                final_broker_result = broker_result
+                if process_reconciled and isinstance(broker_result, BaseException):
+                    (final_broker_result,) = await asyncio.gather(
+                        self.manager.revoke(run.run_id, reason=reason_for(run)),
+                        return_exceptions=True,
+                    )
+                broker_revoked = not isinstance(final_broker_result, BaseException)
+                if isinstance(final_broker_result, BaseException):
                     logger.warning(
                         "script_reload_broker_revocation_pending",
                         run_id=run.run_id,
                         agent_name=run.agent_name,
-                        exc_info=True,
+                        exc_info=(
+                            type(final_broker_result),
+                            final_broker_result,
+                            final_broker_result.__traceback__,
+                        ),
                     )
-                    return False
-                return True
-
-        broker_results = await asyncio.gather(
-            *(revoke_broker_ownership(run) for run in runs),
-        )
-
-        async def reconcile_run(run: ScriptRunRecord, *, broker_revoked: bool) -> bool:
-            async with semaphore:
-                try:
-                    await self.manager.reconcile_durable(
-                        run_id=run.run_id,
-                        broker_revoked=broker_revoked,
+                    if final_broker_result is not broker_result and isinstance(broker_result, BaseException):
+                        logger.warning(
+                            "script_reload_initial_broker_revocation_failed",
+                            run_id=run.run_id,
+                            agent_name=run.agent_name,
+                            exc_info=(type(broker_result), broker_result, broker_result.__traceback__),
+                        )
+                finalized = False
+                if broker_revoked and process_reconciled:
+                    (finalization_result,) = await asyncio.gather(
+                        self.manager.reconcile_durable(run_id=run.run_id, broker_revoked=True),
+                        return_exceptions=True,
                     )
-                except (
-                    ScriptRunManagerError,
-                    ScriptWorkerError,
-                    WorkerBackendError,
-                    _ScriptRuntimeUnavailableError,
-                ):
-                    logger.warning(
-                        "script_reload_reconciliation_pending",
-                        run_id=run.run_id,
-                        agent_name=run.agent_name,
-                        exc_info=True,
-                    )
-                    return False
-                return True
+                    if isinstance(finalization_result, BaseException):
+                        logger.warning(
+                            "script_reload_resource_finalization_pending",
+                            run_id=run.run_id,
+                            agent_name=run.agent_name,
+                            exc_info=(
+                                type(finalization_result),
+                                finalization_result,
+                                finalization_result.__traceback__,
+                            ),
+                        )
+                    else:
+                        finalized = True
+                return _InterruptedRunResult(
+                    broker_revoked=broker_revoked,
+                    process_reconciled=process_reconciled,
+                    finalized=finalized,
+                )
 
-        reconciliation_results = await asyncio.gather(
-            *(
-                reconcile_run(run, broker_revoked=broker_revoked)
-                for run, broker_revoked in zip(runs, broker_results, strict=True)
-            ),
-        )
+        results = await asyncio.gather(*(interrupt_run(run) for run in runs))
         _require_successful_worker_replacement_stage(
             runs,
-            broker_results,
+            [result.broker_revoked for result in results],
             worker_configuration_changed=require_worker_success,
             error="Worker replacement did not close broker ownership for every active worker run.",
         )
         _require_successful_worker_replacement_stage(
             runs,
-            reconciliation_results,
+            [result.process_reconciled for result in results],
             worker_configuration_changed=require_worker_success,
             error="Worker replacement did not complete process reconciliation for every active worker run.",
+        )
+        _require_successful_worker_replacement_stage(
+            runs,
+            [result.finalized for result in results],
+            worker_configuration_changed=require_worker_success,
+            error="Worker replacement did not finalize durable ownership for every active worker run.",
         )
 
     async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.

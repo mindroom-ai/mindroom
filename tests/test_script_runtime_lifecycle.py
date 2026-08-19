@@ -168,10 +168,12 @@ class _Lease:
     manager: WorkerBackend
     generation_id: str = "backend-generation-a"
     released: bool = False
+    release_event: threading.Event = field(default_factory=threading.Event)
     on_release: Callable[[], None] | None = None
 
     def release(self) -> None:
         self.released = True
+        self.release_event.set()
         if self.on_release is not None:
             self.on_release()
 
@@ -350,6 +352,46 @@ class _FailingApprovalSettlementResolver:
 
 
 @dataclass
+class _HangingApprovalSettlementResolver:
+    """Hold broker cleanup open until process reconciliation is observable."""
+
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+        self.entered.set()
+        await self.release.wait()
+
+
+@dataclass
+class _UnexpectedFailingApprovalSettlementResolver:
+    """Raise outside the lifecycle's historical broker exception allowlist."""
+
+    settlement_attempts: int = 0
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+        self.settlement_attempts += 1
+        msg = "unexpected approval settlement failure"
+        raise RuntimeError(msg)
+
+
+@dataclass
+class _TransientApprovalSettlementResolver:
+    """Fail the first broker obligation and settle its retry."""
+
+    settlement_attempts: int = 0
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+        self.settlement_attempts += 1
+        if self.settlement_attempts == 1:
+            msg = "transient approval settlement failure"
+            raise RuntimeError(msg)
+
+
+@dataclass
 class _StartupAdmissionResolver:
     """Expose any inherited call that reaches execution during startup cleanup."""
 
@@ -428,6 +470,59 @@ def _stored_run_pinned_to_worker(
         state=ScriptRunState.RUNNING,
         worker_id="worker-1",
     )
+
+
+def _worker_replacement_scenario(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    approval_resolver: object,
+) -> tuple[
+    ScriptRuntimeLifecycle,
+    ScriptRunStore,
+    ScriptRunRecord,
+    _Lease,
+    _TermThenKillWorkerClient,
+    Config,
+    Config,
+]:
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id)
+    store.claim_call(
+        run_id=run.run_id,
+        call_id="call-1",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="arguments-digest",
+    )
+    broker = ScriptToolBroker(store=store, runtime_resolver=approval_resolver)  # type: ignore[arg-type]
+    lease = _Lease(_Backend([_worker(run)]))
+    worker_client = _TermThenKillWorkerClient()
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=worker_client,  # type: ignore[arg-type]
+        worker_backend=lease.manager,
+        gateway_url="http://primary.test/api/script-gateway",
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script"]}},
+        defaults={"tools": []},
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+    )
+    runtime._current_worker_lease = lease
+    return runtime, store, run, lease, worker_client, old_config, new_config
 
 
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
@@ -786,6 +881,7 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
         worker_backend=None,
         request_revocation=request_revocation,
         revoke=AsyncMock(side_effect=lambda run_id, **_kwargs: store.get_run(run_id)),
+        reconcile_revoked_process=AsyncMock(side_effect=lambda run_id: store.get_run(run_id)),
         reconcile_durable=AsyncMock(side_effect=lambda run_id, **_kwargs: store.get_run(run_id)),
     )
     acquisition_started = threading.Event()
@@ -849,6 +945,7 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
     manager = SimpleNamespace(
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(),
     )
     resolver = SimpleNamespace(resolve=MagicMock(side_effect=_ScriptRuntimeUnavailableError("bot is gone")))
@@ -890,6 +987,7 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
     manager = SimpleNamespace(
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(return_value=run),
     )
     old_config = _config()
@@ -931,6 +1029,7 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
     manager = SimpleNamespace(
         request_revocation=MagicMock(return_value=run),
         revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(return_value=run),
     )
     resolver = SimpleNamespace(resolve=MagicMock(return_value=context))
@@ -1042,6 +1141,7 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
         worker_backend=None,
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(side_effect=reconcile_durable),
     )
     resolver = SimpleNamespace(is_authorized=MagicMock(return_value=False))
@@ -1123,6 +1223,7 @@ async def test_authorization_config_change_interrupts_before_commit(tmp_path: Pa
     manager = SimpleNamespace(
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(return_value=run),
     )
     resolver = SimpleNamespace(is_authorized=MagicMock(return_value=False))
@@ -1350,6 +1451,103 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
 
 
 @pytest.mark.asyncio
+async def test_hung_broker_cleanup_cannot_delay_process_exit_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A broker obligation may hang while TERM/KILL and durable process truth complete."""
+    resolver = _HangingApprovalSettlementResolver()
+    runtime, store, run, lease, worker_client, old_config, new_config = _worker_replacement_scenario(
+        tmp_path,
+        run_id=f"script-{'1' * 32}",
+        approval_resolver=resolver,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+    exit_recorded = threading.Event()
+    record_process_exit = store.record_process_exit
+
+    def record_process_exit_then_notify(*args: object, **kwargs: object) -> ScriptRunRecord:
+        recorded = record_process_exit(*args, **kwargs)  # type: ignore[arg-type]
+        exit_recorded.set()
+        return recorded
+
+    monkeypatch.setattr(store, "record_process_exit", record_process_exit_then_notify)
+    update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
+
+    try:
+        await asyncio.wait_for(resolver.entered.wait(), timeout=1)
+        assert await asyncio.to_thread(exit_recorded.wait, 1)
+        durable = store.get_run(run.run_id)
+        assert durable.state is ScriptRunState.RUNNING
+        assert durable.finished_at is not None
+        assert durable.output == "terminated output"
+        assert worker_client.cancel_forces == [False, True]
+        assert lease.manager.actions == []
+        assert update.done() is False
+    finally:
+        resolver.release.set()
+        await asyncio.wait_for(update, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_broker_failure_still_records_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unexpected broker exception cannot bypass TERM/KILL and durable exit evidence."""
+    resolver = _UnexpectedFailingApprovalSettlementResolver()
+    runtime, store, run, lease, worker_client, old_config, new_config = _worker_replacement_scenario(
+        tmp_path,
+        run_id=f"script-{'2' * 32}",
+        approval_resolver=resolver,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+
+    with pytest.raises(_ScriptRuntimeLifecycleError, match="broker ownership"):
+        await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.finished_at is not None
+    assert durable.output == "terminated output"
+    assert worker_client.cancel_forces == [False, True]
+    assert resolver.settlement_attempts == 2
+    assert lease.released is False
+
+
+@pytest.mark.asyncio
+async def test_transient_broker_failure_uses_successful_retry_for_worker_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful current-state broker retry permits cleanup and worker replacement."""
+    resolver = _TransientApprovalSettlementResolver()
+    runtime, store, run, lease, worker_client, old_config, new_config = _worker_replacement_scenario(
+        tmp_path,
+        run_id=f"script-{'3' * 32}",
+        approval_resolver=resolver,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+        lambda _paths, config: "new" if config is new_config else "old",
+    )
+
+    await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    durable = store.get_run(run.run_id)
+    assert durable.state is ScriptRunState.INTERRUPTED
+    assert durable.output == "terminated output"
+    assert worker_client.cancel_forces == [False, True]
+    assert resolver.settlement_attempts == 2
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
 async def test_generation_replacement_aborts_when_process_reconciliation_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1410,7 +1608,7 @@ async def test_generation_replacement_aborts_when_reconciliation_leaves_a_worker
     """A successful reconciliation call must still publish a terminal durable worker state."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
-    run = _stored_run(store, runtime_paths)
+    run = _stored_run_pinned_to_worker(store, runtime_paths, run_id=f"script-{'4' * 32}")
     resolver = _ApprovalSettlementResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
     lease = _Lease(_Backend([_worker(run)]))
@@ -2442,8 +2640,6 @@ async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(
             force: bool = False,
         ) -> WorkerScriptCancel:
             assert store.get_run(run_id).cancel_requested_at is not None
-            assert store.get_call(run_id, "call-1").state.value == "indeterminate"
-            assert broker_task.cancelled()
             actions.append("signal")
             return await super().cancel(_worker, run_id=run_id, force=force)
 
@@ -2498,7 +2694,8 @@ async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(
     assert store.get_call(run.run_id, "call-1").state.value == "indeterminate"
     assert resolver.settled_runs == [run.run_id]
     assert actions.index("cancel-broker-call") < actions.index("settle-approval")
-    assert actions.index("settle-approval") < actions.index("signal")
+    assert actions.index("settle-approval") < actions.index("release")
+    assert actions.index("signal") < actions.index("release")
     assert actions[-1] == "release"
 
 
@@ -2550,6 +2747,8 @@ async def test_shutdown_deadline_leaves_revoked_run_nonterminal(tmp_path: Path) 
     durable = store.get_run(run.run_id)
     assert durable.cancel_requested_at is not None
     assert durable.state is ScriptRunState.RUNNING
+
+    assert await asyncio.to_thread(lease.release_event.wait, 1)
     assert lease.released is True
 
 
@@ -2659,11 +2858,13 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
         broker_revocations.append(run_id)
         return store.request_cancel(run_id, reason=reason)
 
-    async def reconcile_durable(*, run_id: str, broker_revoked: bool = False) -> ScriptRunRecord:
-        assert broker_revoked is True
-        assert set(broker_revocations) == {first.run_id, second.run_id}
+    async def reconcile_revoked_process(*, run_id: str) -> ScriptRunRecord:
         if run_id == first.run_id:
             await never.wait()
+        return store.get_run(run_id)
+
+    async def reconcile_durable(*, run_id: str, broker_revoked: bool = False) -> ScriptRunRecord:
+        assert broker_revoked is True
         return store.get_run(run_id)
 
     current = _config()
@@ -2674,6 +2875,7 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
         manager=SimpleNamespace(
             request_revocation=request_revocation,
             revoke=revoke,
+            reconcile_revoked_process=reconcile_revoked_process,
             reconcile_durable=reconcile_durable,
         ),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),

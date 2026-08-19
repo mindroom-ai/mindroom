@@ -717,6 +717,29 @@ async def test_launch_adopts_cancellation_that_finishes_before_running_transitio
 
 
 @pytest.mark.asyncio
+async def test_post_spawn_ambiguous_launch_preserves_authorization_interruption(tmp_path: Path) -> None:
+    """Post-spawn cleanup derives terminal state from the earlier durable revocation reason."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    client.launch_entered = asyncio.Event()
+    client.launch_release = asyncio.Event()
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    await client.launch_entered.wait()
+    [starting] = manager.store.list_runs(include_finished=False)
+    manager.request_revocation(
+        starting.run_id,
+        reason="Script owner no longer has room-and-agent reply authorization.",
+    )
+
+    client.launch_release.set()
+    launch_result = await launch
+
+    assert launch_result.state is ScriptRunState.INTERRUPTED
+    assert launch_result.cancellation_reason == "Script owner no longer has room-and-agent reply authorization."
+    assert manager.store.get_run(starting.run_id).state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
 async def test_worker_launch_does_not_publish_running_after_unconfirmed_cancel(tmp_path: Path) -> None:
     """A spawned process with cancellation intent remains retryable instead of becoming running."""
     manager, _backend, client = _manager(tmp_path)
@@ -1107,6 +1130,25 @@ async def test_broker_failure_does_not_skip_signal_and_status_retries_cancel(tmp
 
     assert status.run.state is ScriptRunState.CANCELLED
     assert client.cancel_forces == [False]
+
+
+@pytest.mark.asyncio
+async def test_status_preserves_durable_authorization_interruption_state(tmp_path: Path) -> None:
+    """Status cannot rewrite an existing authorization revocation as owner cancellation."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    manager.request_revocation(
+        run.run_id,
+        reason="Script owner no longer has room-and-agent reply authorization.",
+    )
+    client.next_status = WorkerScriptStatus(state="exited", output="revoked", exit_code=-15)
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.state is ScriptRunState.INTERRUPTED
+    assert status.run.cancellation_reason == "Script owner no longer has room-and-agent reply authorization."
+    assert status.output == "revoked"
 
 
 @pytest.mark.asyncio

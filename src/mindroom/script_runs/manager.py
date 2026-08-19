@@ -431,7 +431,7 @@ class ScriptRunManager:
         if durable.state in _TERMINAL_STATES:
             return
         if durable.cancel_requested_at is not None:
-            failure_state = _cancelled_state_for(durable)
+            failure_state = _terminal_state_for(durable)
         else:
             failure_state = (
                 ScriptRunState.INTERRUPTED if isinstance(failure, asyncio.CancelledError) else ScriptRunState.FAILED
@@ -461,7 +461,7 @@ class ScriptRunManager:
         return await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
-            state=_cancelled_state_for(run),
+            state=_terminal_state_for(run),
         )
 
     async def status(
@@ -512,7 +512,6 @@ class ScriptRunManager:
             run_id=run_id,
             force=force,
             reason=reason,
-            terminal_state=ScriptRunState.CANCELLED,
         )
 
     async def revoke(self, run_id: str, *, reason: str) -> ScriptRunRecord:
@@ -536,7 +535,6 @@ class ScriptRunManager:
         run_id: str,
         force: bool,
         reason: str,
-        terminal_state: ScriptRunState,
     ) -> ScriptRunRecord:
         """Revoke, signal, and publish one confirmed terminal process outcome."""
         run = await self._owned_run(context, run_id)
@@ -544,7 +542,6 @@ class ScriptRunManager:
             run,
             force=force,
             reason=reason,
-            terminal_state=terminal_state,
         )
 
     async def _terminate_durable_run(
@@ -553,7 +550,6 @@ class ScriptRunManager:
         *,
         force: bool,
         reason: str,
-        terminal_state: ScriptRunState,
         broker_revoked: bool = False,
     ) -> ScriptRunRecord:
         if run.state in _TERMINAL_STATES:
@@ -563,37 +559,20 @@ class ScriptRunManager:
         revoked = await asyncio.to_thread(self.store.request_cancel, run.run_id, reason=reason)
         broker_error: BaseException | None = None
         process_error: BaseException | None = None
-        process_status: WorkerScriptStatus | None = None
         if not broker_revoked:
             try:
                 await self.broker.cancel_run(run.run_id)
             except BaseException as exc:
                 broker_error = exc
         try:
-            process_status = await self._terminate_and_confirm(revoked, force=force)
+            revoked = await self._reconcile_revoked_process_run(revoked, force=force)
         except BaseException as exc:
             process_error = exc
-        if process_status is not None and process_status.state != "running":
-            revoked = await asyncio.to_thread(
-                self.store.record_process_exit,
-                run.run_id,
-                exit_code=process_status.exit_code,
-                error=(_SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON if process_status.state == "unknown" else None),
-                output=_bounded_output(process_status.output),
-                cancellation_reason=reason,
-            )
         if process_error is not None:
             raise process_error
-        if process_status is None or process_status.state == "running":
-            msg = "Background script termination is not yet confirmed; retry cancellation."
-            raise ScriptRunManagerError(msg)
         if broker_error is not None:
             raise broker_error
-        return await self._finalize_observed_exit(
-            revoked,
-            broker_revoked=True,
-            terminal_state=terminal_state,
-        )
+        return await self._finalize_observed_exit(revoked, broker_revoked=True)
 
     async def list(
         self,
@@ -629,6 +608,16 @@ class ScriptRunManager:
         run = await asyncio.to_thread(self.store.get_run, run_id)
         return await self._reconcile_durable_run(run, broker_revoked=broker_revoked)
 
+    async def reconcile_revoked_process(self, *, run_id: str) -> ScriptRunRecord:
+        """Record process truth for one already-revoked run without broker or resource cleanup."""
+        run = await asyncio.to_thread(self.store.get_run, run_id)
+        if run.state in _TERMINAL_STATES or run.finished_at is not None:
+            return run
+        if run.cancel_requested_at is None:
+            msg = "Background script process-only reconciliation requires durable revocation."
+            raise ScriptRunManagerError(msg)
+        return await self._reconcile_revoked_process_run(run, force=False)
+
     async def _reconcile_durable_run(
         self,
         run: ScriptRunRecord,
@@ -644,7 +633,6 @@ class ScriptRunManager:
                 run,
                 force=False,
                 reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
-                terminal_state=_cancelled_state_for(run),
                 broker_revoked=broker_revoked,
             )
         if _runtime_expired(run):
@@ -652,7 +640,6 @@ class ScriptRunManager:
                 run,
                 force=False,
                 reason="Background script maximum runtime exceeded.",
-                terminal_state=ScriptRunState.CANCELLED,
             )
         status = await self._process_status(run)
         return await self._apply_process_status(run, status)
@@ -883,12 +870,35 @@ class ScriptRunManager:
         )
         return await self._finalize_observed_exit(observed)
 
+    async def _reconcile_revoked_process_run(
+        self,
+        run: ScriptRunRecord,
+        *,
+        force: bool,
+    ) -> ScriptRunRecord:
+        """Confirm and record process exit without satisfying broker or cleanup obligations."""
+        if run.finished_at is not None:
+            return run
+        process_status = await self._terminate_and_confirm(run, force=force)
+        if process_status is None or process_status.state == "running":
+            msg = "Background script termination is not yet confirmed; retry cancellation."
+            raise ScriptRunManagerError(msg)
+        return await run_coroutine_until_complete(
+            asyncio.to_thread(
+                self.store.record_process_exit,
+                run.run_id,
+                exit_code=process_status.exit_code,
+                error=(_SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON if process_status.state == "unknown" else None),
+                output=_bounded_output(process_status.output),
+                cancellation_reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
+            ),
+        )
+
     async def _finalize_observed_exit(
         self,
         run: ScriptRunRecord,
         *,
         broker_revoked: bool = False,
-        terminal_state: ScriptRunState | None = None,
     ) -> ScriptRunRecord:
         """Clean exact durable ownership before publishing an observed terminal outcome."""
         if run.finished_at is None:
@@ -900,7 +910,7 @@ class ScriptRunManager:
         return await asyncio.to_thread(
             self.store.transition_run,
             run.run_id,
-            state=terminal_state or _terminal_state_for_observed_exit(run),
+            state=_terminal_state_for(run),
         )
 
     async def _terminate_and_confirm(
@@ -1198,14 +1208,10 @@ def _bounded_output(output: str) -> str:
     return encoded[-_MAX_OUTPUT_BYTES:].decode("utf-8", errors="ignore")
 
 
-def _cancelled_state_for(run: ScriptRunRecord) -> ScriptRunState:
-    return ScriptRunState.INTERRUPTED if run.cancellation_reason in _INTERRUPTION_REASONS else ScriptRunState.CANCELLED
-
-
-def _terminal_state_for_observed_exit(run: ScriptRunRecord) -> ScriptRunState:
+def _terminal_state_for(run: ScriptRunRecord) -> ScriptRunState:
     if run.cancellation_reason in _INTERRUPTION_REASONS:
         return ScriptRunState.INTERRUPTED
-    if run.cancellation_reason != _PROCESS_EXIT_OBSERVED_REASON:
+    if run.finished_at is None or run.cancellation_reason != _PROCESS_EXIT_OBSERVED_REASON:
         return ScriptRunState.CANCELLED
     return ScriptRunState.EXITED if run.exit_code == 0 else ScriptRunState.FAILED
 
