@@ -4341,6 +4341,7 @@ expose = [
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "fetch_latest_bundled_edit_body",
     "is_visible_room_message",
     "message_preview",
     "room_message_fallback_body",

@@ -394,8 +394,15 @@ class ApprovalResponseCoordinator:
         continuation = await self.store.approval_continuation(approval_id)
         return None if continuation is None else await self.request_failure(continuation, reason)
 
-    async def settle_failure(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """Settle cards and one durable failure edit from the owning source worker."""
+    async def settle_failure(
+        self,
+        continuation: ApprovalContinuation,
+        reason: str,
+        *,
+        visible_text: str | None = None,
+        stream_status: str = STREAM_STATUS_COMPLETED,
+    ) -> bool:
+        """Settle cards and the failure outcome from the owning source worker."""
         current = await self.store.approval_continuation(continuation.approval_id)
         if current is None:
             return True
@@ -411,14 +418,14 @@ class ApprovalResponseCoordinator:
         failed_delivery = await self.final_delivery(current)
         if failed_delivery is not None and failed_delivery.permanently_failed:
             return await self.store.finish_approval_continuation(current.approval_id)
-        visible_reason = _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason
+        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason)
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
                 new_text=visible_reason,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                extra_content={STREAM_STATUS_KEY: stream_status},
                 delivery_turn_id=current.source_event_ids[0],
                 defer_source_handoff=True,
             ),

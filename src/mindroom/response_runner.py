@@ -34,6 +34,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -52,7 +53,11 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
+from mindroom.matrix.client_visible_messages import (
+    ResolvedVisibleMessage,
+    fetch_latest_bundled_edit_body,
+    replace_visible_message,
+)
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
@@ -63,6 +68,7 @@ from mindroom.memory import (
 )
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     log_cancelled_response,
     log_cancelled_response_source,
@@ -84,6 +90,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    build_restart_interrupted_body,
     clean_partial_reply_text,
     strip_visible_tool_markers,
 )
@@ -130,6 +137,10 @@ from .response_lifecycle import (
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
     ResponseLifecycleReservation,
+)
+
+_INTERRUPTED_APPROVAL_RECOVERY_REASON = (
+    "Tool approval continuation was interrupted before final delivery and denied safely."
 )
 
 if TYPE_CHECKING:
@@ -1060,6 +1071,7 @@ class ResponseRunner:
         """Run one claimed pause through the normal stoppable response lifecycle."""
         request = self._approval_response_request(claimed, target=target)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
+        progress.note_delivery_started(claimed.response_event_id)
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(
                 request,
@@ -1135,9 +1147,20 @@ class ResponseRunner:
                 msg = "Approval continuation final delivery was not durably acknowledged"
                 raise RuntimeError(msg)
         elif outcome.terminal_status != "suspended":
-            reason = outcome.failure_reason or "Tool approval continuation failed safely."
-            await self._approval_responses.settle_failure(post_effect_continuation, reason)
+            await self._settle_failed_approval_outcome(post_effect_continuation, outcome)
         return outcome
+
+    async def _settle_failed_approval_outcome(
+        self,
+        continuation: ApprovalContinuation,
+        outcome: FinalDeliveryOutcome,
+    ) -> None:
+        """Preserve partial text for interrupted continuations, but not explicit stops."""
+        reason = outcome.failure_reason or "Tool approval continuation failed safely."
+        if outcome.terminal_status == "cancelled" and cancel_source_from_failure_reason(reason) != "user_stop":
+            await self._settle_interrupted_approval_recovery(continuation)
+        else:
+            await self._approval_responses.settle_failure(continuation, reason)
 
     @staticmethod
     def _approval_outcome_from_delivery(delivery: MatrixDelivery) -> FinalDeliveryOutcome:
@@ -1180,9 +1203,67 @@ class ResponseRunner:
         owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
         if owns_final:
             return event_id
-        reason = "Tool approval continuation was interrupted before final delivery and denied safely."
-        settled = await self._approval_responses.settle_failure(claimed, reason)
+        final_delivery = await self._approval_responses.final_delivery(claimed)
+        if final_delivery is not None and final_delivery.permanently_failed:
+            settled = await self._approval_responses.settle_failure(
+                claimed,
+                _INTERRUPTED_APPROVAL_RECOVERY_REASON,
+            )
+            return claimed.response_event_id if settled else None
+        settled = await self._settle_interrupted_approval_recovery(claimed)
         return claimed.response_event_id if settled else None
+
+    async def _settle_interrupted_approval_recovery(self, continuation: ApprovalContinuation) -> bool:
+        """Fence an uncertain stale claim and settle it with the committed visible body."""
+        failing = continuation
+        if failing.state != "failing":
+            requested = await self._approval_responses.request_failure(
+                failing,
+                _INTERRUPTED_APPROVAL_RECOVERY_REASON,
+            )
+            if requested is None:
+                return False
+            failing = requested
+        update = await self._approval_restart_interruption_update(failing)
+        if update is None:
+            return False
+        visible_text = update
+        return await self._approval_responses.settle_failure(
+            failing,
+            _INTERRUPTED_APPROVAL_RECOVERY_REASON,
+            visible_text=visible_text,
+            stream_status=STREAM_STATUS_ERROR,
+        )
+
+    async def _approval_restart_interruption_update(
+        self,
+        continuation: ApprovalContinuation,
+    ) -> str | None:
+        """Read the latest committed edit and build its restart terminalization."""
+        try:
+            body = await fetch_latest_bundled_edit_body(
+                self._client(),
+                room_id=continuation.room_id,
+                event_id=continuation.response_event_id,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                trusted_sender_ids=current_internal_sender_ids(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                ),
+            )
+            if body is None:
+                return None
+        except Exception as error:
+            self.deps.logger.warning(
+                "approval_restart_interruption_read_failed",
+                approval_id=continuation.approval_id,
+                error=str(error),
+            )
+            return None
+        return (
+            body if body.rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE) else build_restart_interrupted_body(body)
+        )
 
     async def _recover_frozen_approval_final(
         self,
@@ -2162,7 +2243,11 @@ class ResponseRunner:
                 owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
                 return True, event_id if owns_final else None
             reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
-            settled = await self._approval_responses.settle_failure(owned, reason)
+            settled = (
+                await self._settle_interrupted_approval_recovery(owned)
+                if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON
+                else await self._approval_responses.settle_failure(owned, reason)
+            )
             return True, owned.response_event_id if settled else None
         return False, None
 

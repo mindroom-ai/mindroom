@@ -39,6 +39,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -68,6 +69,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_visible_messages import fetch_latest_bundled_edit_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
@@ -1152,6 +1154,133 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     assert event_id == "$waiting"
     lifecycle.finalize.assert_awaited_once()
     assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Path) -> None:
+    """Restart recovery retires an uncertain claim without replacing its streamed body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stale-claim",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="previous-runtime",
+    )
+    assert claimed is not None
+    interrupted_body = f"committed partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+
+    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={"body": request.new_text},
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$waiting",
+            delivered_projections=(),
+        )
+        return True
+
+    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.response_runner.fetch_latest_bundled_edit_body",
+            new=AsyncMock(return_value="committed partial"),
+        ),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    edit_request = edit_text.await_args.args[0]
+    assert edit_request.new_text == interrupted_body
+    assert edit_request.extra_content == {
+        STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+    }
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_claimed_approval_user_stop_keeps_user_stop_settlement(tmp_path: Path) -> None:
+    """Explicit user cancellation must not be relabeled as a service restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = MagicMock(spec=ApprovalContinuation)
+    settle_failure = AsyncMock()
+    restart_recovery = AsyncMock()
+    outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$waiting",
+        failure_reason="cancelled_by_user",
+        is_visible_response=True,
+    )
+
+    with (
+        patch.object(runner._approval_responses, "settle_failure", new=settle_failure),
+        patch.object(runner, "_settle_interrupted_approval_recovery", new=restart_recovery),
+    ):
+        await runner._settle_failed_approval_outcome(continuation, outcome)
+
+    settle_failure.assert_awaited_once_with(continuation, "cancelled_by_user")
+    restart_recovery.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(tmp_path: Path) -> None:
+    """An unreadable authoritative edit is retryable, not permission to use stale text."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    response = nio.RoomGetEventResponse()
+    response.event = MagicMock(source={})
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    extract_body = AsyncMock(side_effect=[(None, None), ("older partial", {})])
+
+    with (
+        patch(
+            "mindroom.matrix.client_visible_messages.bundled_replacement_candidates",
+            return_value=[{"new": 1}, {"old": 1}],
+        ),
+        patch("mindroom.matrix.client_visible_messages.extract_visible_edit_body", new=extract_body),
+    ):
+        update = await fetch_latest_bundled_edit_body(
+            client,
+            room_id="!room:localhost",
+            event_id="$waiting",
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
+        )
+
+    assert update is None
+    assert extract_body.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -248,6 +248,35 @@ async def extract_visible_edit_body(
     )
 
 
+async def fetch_latest_bundled_edit_body(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    event_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    trusted_sender_ids: Collection[str] | None = None,
+) -> str | None:
+    """Fetch an event's authoritative bundled edit body, failing closed."""
+    response = await client.room_get_event(room_id, event_id)
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    event_source = response.event.source if isinstance(response.event.source, dict) else None
+    if event_source is None:
+        return None
+    replacements = bundled_replacement_candidates(event_source)
+    if not replacements:
+        return None
+    body, _content = await extract_visible_edit_body(
+        replacements[0],
+        client,
+        config=config,
+        runtime_paths=runtime_paths,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    return body
+
+
 async def resolve_visible_event_source(
     event_source: Mapping[str, Any],
     client: nio.AsyncClient | None = None,
@@ -648,6 +677,7 @@ __all__ = [
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "fetch_latest_bundled_edit_body",
     "is_visible_room_message",
     "message_preview",
     "replace_visible_message",
