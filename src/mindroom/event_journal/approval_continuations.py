@@ -702,6 +702,7 @@ def request_failure(
                   AND source.source_ordinal = 0
               )
               AND final.stage = 'final'
+              AND final.permanent_failure_reason IS NULL
           )
         RETURNING approval_id
         """,
@@ -723,7 +724,7 @@ def finish(
     *,
     approval_id: str,
 ) -> bool:
-    """Release sources only after the continuation's FINAL delivery is acknowledged."""
+    """Release sources after the continuation's FINAL reaches a terminal outcome."""
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
@@ -731,7 +732,7 @@ def finish(
         """
         SELECT 1 AS present FROM matrix_delivery_outbox
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-          AND acknowledged_event_id IS NOT NULL
+          AND (acknowledged_event_id IS NOT NULL OR permanent_failure_reason IS NOT NULL)
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )

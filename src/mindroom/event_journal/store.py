@@ -1091,7 +1091,7 @@ class PrincipalStore:
         )
 
     async def finish_approval_continuation(self, approval_id: str) -> bool:
-        """Settle one paused run only after its FINAL delivery is acknowledged."""
+        """Settle one paused run after its FINAL delivery reaches a terminal outcome."""
         return await self._backend.write(
             lambda transaction: approval_continuations.finish(
                 transaction,

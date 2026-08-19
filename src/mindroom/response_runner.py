@@ -1194,6 +1194,8 @@ class ResponseRunner:
         delivery = await self._approval_responses.final_delivery(claimed, recover=True)
         if delivery is None:
             return False, None
+        if delivery.permanently_failed:
+            return False, None
         if delivery.acknowledged_event_id is None:
             return True, None
         recovered_outcome = self._approval_outcome_from_delivery(delivery)
@@ -2115,7 +2117,12 @@ class ResponseRunner:
 
         async def recover(_target: MessageTarget) -> bool:
             delivery = await self._approval_responses.final_delivery(continuation, recover=True)
-            if delivery is None or delivery.acknowledged_event_id is None:
+            if delivery is None:
+                return False
+            if delivery.permanently_failed:
+                reason = delivery.permanent_failure_reason or "Final Matrix delivery was permanently refused."
+                return await self._approval_responses.settle_failure(continuation, reason)
+            if delivery.acknowledged_event_id is None:
                 return False
             if await self._approval_responses.successful_final_delivery(continuation) is None:
                 return await self.deps.approval_store.finish_approval_continuation(continuation.approval_id)

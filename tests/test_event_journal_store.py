@@ -5819,6 +5819,37 @@ class TestOutbox:
         assert await alice.unacknowledged_matrix_deliveries() == ()
         assert await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
 
+    async def test_permanently_failed_initial_does_not_block_standalone_final(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A refused placeholder cannot strand a final that does not need it."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.INITIAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.INITIAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("finished"),
+        )
+
+        final = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert final is not None
+        assert final.edits_event_id is None
+
     async def test_acknowledgement_supersedes_a_concurrent_permanent_failure(self, alice: PrincipalStore) -> None:
         """A visible event is stronger evidence than a racing refusal."""
         await alice.enqueue_matrix_delivery(
@@ -6729,6 +6760,41 @@ class TestApprovalContinuations:
         assert retained is not None
         assert retained.state == "claimed"
 
+    async def test_permanently_failed_final_can_settle_approval_ownership(self, alice: PrincipalStore) -> None:
+        """A definitive Matrix refusal is terminal for its paused-run owner too."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"msgtype": "m.text", "body": "finished"},
+        )
+        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "final Matrix delivery was permanently refused",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+
+        assert failing is not None
+        assert failing.state == "failing"
+        assert await alice.finish_approval_continuation("approval-1")
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
+
     async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
         """The card and final call decision become durable in one transaction."""
         await self.admit_sources(alice)
@@ -7634,12 +7700,12 @@ class TestApprovalContinuations:
             is None
         )
 
-    async def test_initial_acknowledgement_binds_a_precommitted_terminal_edit(
+    async def test_initial_acknowledgement_revives_a_target_dependent_final(
         self,
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """A decision committed during an unknown send outcome still edits that exact card."""
+        """A late visible card outranks its refusal and restores its terminal edit."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
@@ -7674,6 +7740,11 @@ class TestApprovalContinuations:
             stage=DeliveryStage.INITIAL,
             device_id=DEVICE,
         )
+        await router.record_permanent_matrix_delivery_failure(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            reason="matrix event exceeds the hard size limit",
+        )
 
         await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
 
@@ -7683,6 +7754,14 @@ class TestApprovalContinuations:
         )
         assert terminal is not None
         assert terminal.edits_event_id is None
+        assert terminal.permanently_failed
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
 
         await router.acknowledge_matrix_delivery(
             delivery_id="approval-card-1",
@@ -7697,6 +7776,11 @@ class TestApprovalContinuations:
         )
         assert bound is not None
         assert bound.edits_event_id == "$approval"
+        assert not bound.permanently_failed
+        assert await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
 
     async def test_router_departure_wakes_the_responder_continuation_to_fail_closed(
         self,

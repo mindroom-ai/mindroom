@@ -158,6 +158,7 @@ def enqueue(
     edit_target_pending: bool = False,
 ) -> str | None:
     """Record delivery intent without changing its durable membership owner."""
+    permanent_failure_reason: str | None = None
     _lock_delivery_stages(transaction, principal_id, delivery_id)
     existing_owner = transaction.fetchone(
         """
@@ -176,7 +177,7 @@ def enqueue(
     if stage is DeliveryStage.FINAL and edit_target_pending:
         initial = transaction.fetchone(
             """
-            SELECT acknowledged_event_id FROM matrix_delivery_outbox
+            SELECT acknowledged_event_id, permanent_failure_reason FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
@@ -184,14 +185,18 @@ def enqueue(
         if initial is not None and initial["acknowledged_event_id"] is not None:
             edits_event_id = str(initial["acknowledged_event_id"])
             edit_target_pending = False
+        elif initial is not None and initial["permanent_failure_reason"] is not None:
+            permanent_failure_reason = "required edit target was permanently refused: " + str(
+                initial["permanent_failure_reason"],
+            )
     transaction_id = delivery_transaction_id(principal_id, delivery_id, stage.value)
     transaction.execute(
         """
         INSERT INTO matrix_delivery_outbox (
             principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
             thread_id, transaction_id, payload_json, result_json, edits_event_id,
-            edit_target_pending, attempted, created_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            edit_target_pending, attempted, permanent_failure_reason, created_at_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT (principal_id, delivery_id, stage) DO UPDATE SET
             room_id = excluded.room_id,
             membership_epoch = excluded.membership_epoch,
@@ -200,7 +205,8 @@ def enqueue(
             payload_json = excluded.payload_json,
             result_json = excluded.result_json,
             edits_event_id = excluded.edits_event_id,
-            edit_target_pending = excluded.edit_target_pending
+            edit_target_pending = excluded.edit_target_pending,
+            permanent_failure_reason = excluded.permanent_failure_reason
         WHERE matrix_delivery_outbox.attempted = 0
         """,
         (
@@ -216,6 +222,7 @@ def enqueue(
             _delivery_result_json(result),
             edits_event_id,
             int(edit_target_pending),
+            permanent_failure_reason,
             time.time_ns(),
         ),
     )
@@ -323,7 +330,7 @@ def claim(
             SELECT 1 AS present FROM matrix_delivery_outbox
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 1 AND acknowledged_event_id IS NULL
-              AND retired = 0
+              AND retired = 0 AND permanent_failure_reason IS NULL
             """,
             (principal_id, delivery_id, DeliveryStage.INITIAL.value),
         )
@@ -421,7 +428,7 @@ def acknowledge(
         transaction.execute(
             """
             UPDATE matrix_delivery_outbox
-            SET edits_event_id = ?, edit_target_pending = 0
+            SET edits_event_id = ?, edit_target_pending = 0, permanent_failure_reason = NULL
             WHERE principal_id = ? AND delivery_id = ? AND stage = ?
               AND attempted = 0
               AND edit_target_pending = 1
@@ -443,15 +450,32 @@ def record_permanent_failure(
     if not reason:
         msg = "A permanent Matrix delivery failure requires a reason"
         raise ValueError(msg)
-    transaction.execute(
+    failed = transaction.fetchone(
         """
         UPDATE matrix_delivery_outbox SET permanent_failure_reason = ?
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND acknowledged_event_id IS NULL AND retired = 0
           AND permanent_failure_reason IS NULL
+        RETURNING delivery_id
         """,
         (reason, principal_id, delivery_id, stage.value),
     )
+    if failed is not None and stage is DeliveryStage.INITIAL:
+        transaction.execute(
+            """
+            UPDATE matrix_delivery_outbox
+            SET permanent_failure_reason = ?
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+              AND acknowledged_event_id IS NULL AND retired = 0
+              AND edit_target_pending = 1 AND permanent_failure_reason IS NULL
+            """,
+            (
+                f"required edit target was permanently refused: {reason}",
+                principal_id,
+                delivery_id,
+                DeliveryStage.FINAL.value,
+            ),
+        )
     row = transaction.fetchone(
         """
         SELECT acknowledged_event_id FROM matrix_delivery_outbox

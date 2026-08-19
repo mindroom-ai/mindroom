@@ -3459,6 +3459,71 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
 
 
 @pytest.mark.asyncio
+async def test_permanently_refused_approval_final_releases_its_sources(tmp_path: Path) -> None:
+    """An oversized frozen FINAL is terminal failure, not immortal approval debt."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-oversized-final",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        source_event_ids=("$source",),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "oversized final"},
+        result={"body": "oversized final"},
+        edits_event_id="$waiting",
+    )
+    assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+    await store.record_permanent_matrix_delivery_failure(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        reason="matrix event exceeds the hard size limit",
+    )
+    edit_text = AsyncMock(side_effect=AssertionError("a failed frozen row must not be reused"))
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    edit_text.assert_not_awaited()
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+    failed = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert failed is not None
+    assert failed.permanently_failed
+
+
+@pytest.mark.asyncio
 async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_path: Path) -> None:
     """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
