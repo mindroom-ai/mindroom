@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import sys
 import threading
@@ -2635,11 +2636,13 @@ async def test_worker_retirement_failure_keeps_terminal_run_for_retry(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_late_worker_root_failure_restores_identity_for_next_prune(
+@pytest.mark.parametrize("reconstruction_failure", ["create", "write"])
+async def test_late_worker_root_failure_preserves_durable_identity_without_reconstruction(  # noqa: PLR0915 - full process-retry boundary
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reconstruction_failure: str,
 ) -> None:
-    """A late root-removal failure keeps exact identity so the next retention pass can finish."""
+    """A process-like retry proves ownership without recreating deleted identity metadata."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     running = _stored_run_pinned_to_worker(
@@ -2670,9 +2673,25 @@ async def test_late_worker_root_failure_restores_identity_for_next_prune(
             status="idle",
         ),
     )
-    exact_identity = paths.metadata_file.read_bytes()
+    original_open = metadata_store_module.os.open
     original_rmdir = metadata_store_module.os.rmdir
+    original_write = metadata_store_module.os.write
     fail_root_once = True
+    reconstruction_attempts = 0
+
+    def runtime_for(worker_backend: local_module._LocalWorkerBackend) -> ScriptRuntimeLifecycle:
+        lifecycle = ScriptRuntimeLifecycle(
+            runtime_paths=runtime_paths,
+            store=store,
+            broker=MagicMock(),
+            manager=SimpleNamespace(worker_backend=worker_backend, cleanup_snapshot=AsyncMock(return_value=True)),
+            resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
+            config_provider=_config,
+            worker_lease_provider=lambda: None,
+            retention_seconds=0.0,
+        )
+        lifecycle._current_worker_lease = _Lease(worker_backend)
+        return lifecycle
 
     def fail_first_worker_root_rmdir(path: str | bytes, *, dir_fd: int | None = None) -> None:
         nonlocal fail_root_once
@@ -2682,29 +2701,50 @@ async def test_late_worker_root_failure_restores_identity_for_next_prune(
             raise OSError(msg)
         original_rmdir(path, dir_fd=dir_fd)
 
-    monkeypatch.setattr(metadata_store_module.os, "rmdir", fail_first_worker_root_rmdir)
-    runtime = ScriptRuntimeLifecycle(
-        runtime_paths=runtime_paths,
-        store=store,
-        broker=MagicMock(),
-        manager=SimpleNamespace(worker_backend=backend, cleanup_snapshot=AsyncMock(return_value=True)),
-        resolver=SimpleNamespace(prune_approvals=AsyncMock(return_value=True)),
-        config_provider=_config,
-        worker_lease_provider=lambda: None,
-        retention_seconds=0.0,
-    )
-    runtime._current_worker_lease = _Lease(backend)
-    now = datetime.fromisoformat(terminal.finished_at) + timedelta(seconds=1)
+    def fail_identity_recreation(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal reconstruction_attempts
+        if reconstruction_failure == "create" and path == paths.metadata_file.name and flags & os.O_CREAT:
+            reconstruction_attempts += 1
+            msg = "injected identity recreation failure"
+            raise OSError(msg)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    await runtime.prune_once(now=now)
+    def fail_identity_rewrite(descriptor: int, data: bytes | bytearray | memoryview) -> int:
+        nonlocal reconstruction_attempts
+        descriptor_path = Path(f"/proc/self/fd/{descriptor}").resolve()
+        if reconstruction_failure == "write" and descriptor_path == paths.metadata_file:
+            reconstruction_attempts += 1
+            msg = "injected identity rewrite failure"
+            raise OSError(msg)
+        return original_write(descriptor, data)
+
+    now = datetime.fromisoformat(terminal.finished_at) + timedelta(seconds=1)
+    with monkeypatch.context() as retirement_faults:
+        retirement_faults.setattr(metadata_store_module.os, "open", fail_identity_recreation)
+        retirement_faults.setattr(metadata_store_module.os, "rmdir", fail_first_worker_root_rmdir)
+        retirement_faults.setattr(metadata_store_module.os, "write", fail_identity_rewrite)
+        await runtime_for(backend).prune_once(now=now)
 
     assert store.get_run(terminal.run_id).state is ScriptRunState.EXITED
-    assert paths.metadata_file.read_bytes() == exact_identity
+    assert fail_root_once is False
     assert paths.workspace.exists() is False
+    assert reconstruction_attempts == 0
 
-    await runtime.prune_once(now=now)
+    retry_backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    await runtime_for(retry_backend).prune_once(now=now)
 
     assert paths.root.exists() is False
+    assert tuple(paths.root.parent.iterdir()) == ()
     with pytest.raises(ScriptRunNotFoundError):
         store.get_run(terminal.run_id)
 
