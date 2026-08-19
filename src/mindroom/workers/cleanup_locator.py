@@ -77,7 +77,11 @@ def parse_worker_cleanup_locator(serialized_locator: str) -> _WorkerCleanupLocat
         elif backend == "kubernetes":
             raw_paths = payload.get("kubeconfig_paths")
             if raw_paths is not None:
-                if not isinstance(raw_paths, list) or not raw_paths or not all(isinstance(path, str) for path in raw_paths):
+                if (
+                    not isinstance(raw_paths, list)
+                    or not raw_paths
+                    or not all(isinstance(path, str) for path in raw_paths)
+                ):
                     msg = "invalid Kubernetes kubeconfig paths"
                     raise ValueError(msg)  # noqa: TRY301
                 payload["kubeconfig_paths"] = tuple(raw_paths)
