@@ -106,6 +106,10 @@ class ScriptCallPreparationPendingError(RuntimeError):
 class ScriptRuntimeResolver(Protocol):
     """Resolve live runtime and approval services for one durable script owner."""
 
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+        """Return whether the durable owner still has live room-and-agent authority."""
+        ...
+
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild the live context for the durable run owner."""
         ...
@@ -352,7 +356,13 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
-        if run is None or not matches or run.cancel_requested_at is not None or run.state not in _ACTIVE_RUN_STATES:
+        if (
+            run is None
+            or not matches
+            or run.cancel_requested_at is not None
+            or run.state not in _ACTIVE_RUN_STATES
+            or not self.runtime_resolver.is_authorized(run)
+        ):
             msg = "Background script call is unavailable."
             raise ScriptBrokerAuthenticationError(msg)
         return token
@@ -647,6 +657,8 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
+        if not self.runtime_resolver.is_authorized(run, config=context.current_config):
+            raise _CurrentGrantRevokedError
         if call.grant not in run.grants:
             raise _CurrentGrantRevokedError
         toolkit = resolve_current_script_tool(

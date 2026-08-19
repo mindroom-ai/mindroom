@@ -34,6 +34,35 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
+def test_duplicate_worker_manager_build_is_immediately_disposable() -> None:
+    """A losing same-signature build does not wait for application shutdown."""
+    signature = ("test", "same")
+    active_manager = MagicMock()
+    duplicate_manager = MagicMock()
+    active = workers_runtime_module._WorkerManagerEntry(active_manager, signature)
+    previous_active = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
+    previous_retired = workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES
+    previous_building = workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES
+    try:
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY = active
+        workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES = []
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = {signature}
+
+        published = workers_runtime_module._publish_primary_worker_manager_build(
+            duplicate_manager,
+            signature,
+            acquisition_epoch=workers_runtime_module._PRIMARY_WORKER_MANAGER_EPOCH,
+            acquire_lease=False,
+        )
+
+        assert published == (active, [duplicate_manager])
+        assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
+    finally:
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY = previous_active
+        workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES = previous_retired
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = previous_building
+
+
 def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

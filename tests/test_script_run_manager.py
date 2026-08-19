@@ -6,7 +6,7 @@ import asyncio
 import stat
 import sys
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -140,6 +140,7 @@ class _WorkerBackend:
     specs: list[WorkerSpec] = field(default_factory=list)
     saw_starting: bool = False
     list_worker_thread_ids: list[int] = field(default_factory=list)
+    retired_worker_keys: list[str] = field(default_factory=list)
 
     def ensure_worker(
         self,
@@ -184,6 +185,10 @@ class _WorkerBackend:
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         del failure_reason, now
         return self.handles[worker_key]
+
+    def retire_worker(self, worker_key: str) -> None:
+        self.retired_worker_keys.append(worker_key)
+        self.handles.pop(worker_key, None)
 
     def shutdown(self) -> None:
         return None
@@ -627,30 +632,6 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_starting_run_with_durable_handle_can_be_reconciled_and_signalled(tmp_path: Path) -> None:
-    """Restart reconciliation can observe and control a pre-spawn persisted handle."""
-    manager, _backend, client = _manager(tmp_path)
-    context = _context(tmp_path)
-    launched = await manager.run(context, source="print('ok')\n")
-    orphan = replace(
-        launched,
-        run_id=f"script-{'b' * 32}",
-        state=ScriptRunState.STARTING,
-        started_at=None,
-    )
-    manager.store.create_run(orphan)
-    client.status_results = [WorkerScriptStatus(state="running")]
-
-    observed = await manager.reconcile(context, run_id=orphan.run_id)
-
-    assert observed.state is ScriptRunState.STARTING
-    client.next_status = WorkerScriptStatus(state="exited", exit_code=-9)
-    cancelled = await manager.cancel(context, run_id=orphan.run_id, force=True)
-    assert cancelled.state is ScriptRunState.CANCELLED
-    assert client.cancel_handles[-1] == f"shell:{orphan.run_id.removeprefix('script-')}"
-
-
-@pytest.mark.asyncio
 async def test_ambiguous_worker_launch_failure_remains_retryable_until_exit(tmp_path: Path) -> None:
     """An unconfirmed launch owner stays nonterminal so reconciliation can signal it again."""
     manager, _backend, client = _manager(tmp_path)
@@ -783,8 +764,8 @@ async def test_worker_launch_stops_when_cancelled_before_worker_allocation(
     assert await asyncio.to_thread(created.wait, 5)
     [starting] = manager.store.list_runs(include_finished=False)
 
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    assert cancelled.state is ScriptRunState.CANCELLED
     release_create.set()
     launch_result = await launch
 
@@ -883,11 +864,11 @@ async def test_repeated_cancellation_cannot_abandon_durable_reservation_finaliza
 
 
 @pytest.mark.asyncio
-async def test_preallocation_cancel_releases_capacity_when_broker_fails(
+async def test_preallocation_cancel_releases_capacity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A known-no-child cancellation is terminal even when broker coordination fails."""
+    """A known-no-child cancellation terminalizes and releases run capacity."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     limits = ScriptRunLimits(max_concurrent_runs=1)
@@ -905,13 +886,10 @@ async def test_preallocation_cancel_releases_capacity_when_broker_fails(
     assert await asyncio.to_thread(created.wait, 5)
     [starting] = manager.store.list_runs(include_finished=False)
 
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
-    manager.broker.failures.append(RuntimeError("broker unavailable"))
+    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    assert cancelled.state is ScriptRunState.CANCELLED
     release_create.set()
-
-    with pytest.raises(RuntimeError, match="broker unavailable"):
-        await launch
+    assert (await launch).state is ScriptRunState.CANCELLED
 
     assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
     assert client.requested_handles == []
@@ -957,66 +935,13 @@ async def test_worker_launch_rechecks_cancellation_after_worker_assignment(
     [starting] = manager.store.list_runs(include_finished=False)
     client.next_status = WorkerScriptStatus.unknown_handle()
 
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
+    cancelled = await manager.cancel(context, run_id=starting.run_id, force=True)
+    assert cancelled.state is ScriptRunState.CANCELLED
     release_assignment.set()
     launch_result = await launch
 
     assert launch_result.state is ScriptRunState.CANCELLED
     assert client.requested_handles == []
-
-
-@pytest.mark.asyncio
-async def test_assigned_prespawn_cancel_retries_broker_after_terminalizing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A terminal control retries broker cancellation after a known-no-child broker failure."""
-    manager, _backend, client = _manager(tmp_path)
-    context = _context(tmp_path)
-    worker_assigned = threading.Event()
-    release_assignment = threading.Event()
-    original_transition = manager.store.transition_run
-
-    def transition_then_pause(
-        run_id: str,
-        *,
-        state: ScriptRunState,
-        worker_id: str | None = None,
-        exit_code: int | None = None,
-        error: str | None = None,
-    ) -> ScriptRunRecord:
-        result = original_transition(
-            run_id,
-            state=state,
-            worker_id=worker_id,
-            exit_code=exit_code,
-            error=error,
-        )
-        if state is ScriptRunState.STARTING and worker_id is not None:
-            worker_assigned.set()
-            assert release_assignment.wait(timeout=5)
-        return result
-
-    monkeypatch.setattr(manager.store, "transition_run", transition_then_pause)
-    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
-    assert await asyncio.to_thread(worker_assigned.wait, 5)
-    [starting] = manager.store.list_runs(include_finished=False)
-    client.next_status = WorkerScriptStatus.unknown_handle()
-
-    with pytest.raises(ScriptRunManagerError, match="not yet confirmed"):
-        await manager.cancel(context, run_id=starting.run_id, force=True)
-    manager.broker.failures.append(RuntimeError("broker unavailable"))
-    release_assignment.set()
-
-    with pytest.raises(RuntimeError, match="broker unavailable"):
-        await launch
-
-    assert manager.store.get_run(starting.run_id).state is ScriptRunState.CANCELLED
-    assert client.requested_handles == []
-    status = await manager.status(context, run_id=starting.run_id)
-    assert status.run.state is ScriptRunState.CANCELLED
-    assert manager.broker.cancelled_states[-1] is ScriptRunState.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -1164,7 +1089,7 @@ async def test_broker_failure_does_not_skip_signal_and_status_retries_cancel(tmp
     status = await manager.status(context, run_id=run.run_id)
 
     assert status.run.state is ScriptRunState.CANCELLED
-    assert client.cancel_forces == [False, False]
+    assert client.cancel_forces == [False]
 
 
 @pytest.mark.asyncio
@@ -1209,27 +1134,66 @@ async def test_status_reports_pending_cancellation_with_recent_output(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_token_cleanup_failure_does_not_mask_cancel_result(
+async def test_snapshot_cleanup_failure_leaves_observed_exit_nonterminal_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Best-effort capability cleanup cannot replace a confirmed cancellation result."""
-    manager, _backend, _client = _manager(tmp_path)
+    """A confirmed exit remains durable and revoked until snapshot cleanup succeeds."""
+    manager, backend, _client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
 
-    def deny_cleanup(_workspace: Path, _run_id: str) -> None:
-        message = "cleanup denied"
-        raise PermissionError(message)
+    original_cleanup = manager_module._remove_snapshot
+    monkeypatch.setattr(manager_module, "_remove_snapshot", lambda _root, _locator: False)
 
-    monkeypatch.setattr(manager_module, "_remove_snapshot_token", deny_cleanup)
+    with pytest.raises(ScriptRunManagerError, match="cleanup is pending"):
+        await manager.cancel(context, run_id=run.run_id, force=True)
 
-    cancelled = await manager.cancel(context, run_id=run.run_id, force=True)
+    pending = manager.store.get_run(run.run_id)
+    assert pending.state is ScriptRunState.RUNNING
+    assert pending.cancel_requested_at is not None
+    assert pending.finished_at is not None
+    assert backend.retired_worker_keys == []
 
-    assert cancelled.state is ScriptRunState.CANCELLED
+    monkeypatch.setattr(manager_module, "_remove_snapshot", original_cleanup)
+    completed = await manager.reconcile_durable(run_id=run.run_id)
+    assert completed.state is ScriptRunState.CANCELLED
+    assert backend.retired_worker_keys == [run.worker_key]
 
 
-def test_token_cleanup_does_not_follow_parent_swap(
+@pytest.mark.asyncio
+async def test_worker_retirement_failure_leaves_observed_exit_nonterminal_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed exit cannot become terminal until exact worker retirement succeeds."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(state="exited", output="finished", exit_code=0)
+    original_retire = backend.retire_worker
+
+    def fail_retirement(_worker_key: str) -> None:
+        message = "retirement unavailable"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(backend, "retire_worker", fail_retirement)
+    with pytest.raises(RuntimeError, match="retirement unavailable"):
+        await manager.reconcile(context, run_id=run.run_id)
+
+    pending = manager.store.get_run(run.run_id)
+    assert pending.state is ScriptRunState.RUNNING
+    assert pending.cancel_requested_at is not None
+    assert pending.finished_at is not None
+    assert pending.output == "finished"
+
+    monkeypatch.setattr(backend, "retire_worker", original_retire)
+    completed = await manager.reconcile_durable(run_id=run.run_id)
+    assert completed.state is ScriptRunState.EXITED
+    assert backend.retired_worker_keys == [run.worker_key]
+
+
+def test_snapshot_cleanup_does_not_follow_parent_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1264,36 +1228,40 @@ def test_token_cleanup_does_not_follow_parent_swap(
 
     monkeypatch.setattr(manager_module.os, "stat", swap_before_descriptor_stat)
 
-    manager_module._remove_snapshot_token(
+    cleaned = manager_module._remove_snapshot(
         tmp_path,
         "workspace/.mindroom/script-runs/run-race",
     )
 
+    assert cleaned is False
     assert swapped is True
     assert outside_token.read_text(encoding="utf-8") == "outside"
 
 
-def test_token_cleanup_ignores_directory_and_partial_snapshot(tmp_path: Path) -> None:
-    """Directory mutation and an absent token are harmless cleanup outcomes."""
+def test_snapshot_cleanup_retries_directory_mutation_and_removes_partial_snapshot(tmp_path: Path) -> None:
+    """Unexpected content defers cleanup while an empty partial snapshot is removable."""
     workspace = tmp_path / "workspace"
     directory_token = workspace / ".mindroom" / "script-runs" / "run-directory" / "capability"
     directory_token.mkdir(parents=True)
     partial_run = workspace / ".mindroom" / "script-runs" / "run-partial"
     partial_run.mkdir()
 
-    manager_module._remove_snapshot_token(
+    directory_cleaned = manager_module._remove_snapshot(
         tmp_path,
         "workspace/.mindroom/script-runs/run-directory",
     )
-    manager_module._remove_snapshot_token(
+    partial_cleaned = manager_module._remove_snapshot(
         tmp_path,
         "workspace/.mindroom/script-runs/run-partial",
     )
 
+    assert directory_cleaned is False
+    assert partial_cleaned is True
     assert directory_token.is_dir()
+    assert not partial_run.exists()
 
 
-def test_token_cleanup_ignores_descriptor_close_failure(
+def test_snapshot_cleanup_ignores_descriptor_close_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1311,12 +1279,13 @@ def test_token_cleanup_ignores_descriptor_close_failure(
 
     monkeypatch.setattr(manager_module.os, "close", close_then_fail)
 
-    manager_module._remove_snapshot_token(
+    cleaned = manager_module._remove_snapshot(
         tmp_path,
         "workspace/.mindroom/script-runs/run-close",
     )
 
-    assert not token.exists()
+    assert cleaned is True
+    assert not token.parent.exists()
 
 
 @pytest.mark.asyncio
@@ -1464,19 +1433,46 @@ async def test_owned_run_lookup_runs_off_the_event_loop(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_reconcile_records_exit_and_removes_raw_token(tmp_path: Path) -> None:
-    """Terminal reconciliation records process outcome and cleans capability material."""
-    manager, _backend, client = _manager(tmp_path)
+async def test_reconcile_records_exit_and_retires_exact_worker(tmp_path: Path) -> None:
+    """Terminal reconciliation retains output and cleans all exact process ownership."""
+    manager, backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
     client.next_status = WorkerScriptStatus(state="exited", output="done", exit_code=0)
 
     reconciled = await manager.reconcile(context, run_id=run.run_id)
+    later_status = await manager.status(context, run_id=run.run_id)
 
     assert reconciled.state is ScriptRunState.EXITED
+    assert reconciled.output == "done"
+    assert later_status.output == "done"
     assert manager.broker.cancelled_runs == [run.run_id]
-    assert manager.broker.cancelled_states == [ScriptRunState.EXITED]
-    assert not client.launch_paths[run.run_id][1].exists()
+    assert manager.broker.cancelled_states == [ScriptRunState.RUNNING]
+    snapshot, token = client.launch_paths[run.run_id]
+    assert not snapshot.parent.exists()
+    assert not token.exists()
+    assert backend.retired_worker_keys == [run.worker_key]
+
+
+@pytest.mark.asyncio
+async def test_terminal_output_is_bounded_to_the_latest_utf8_tail(tmp_path: Path) -> None:
+    """Durable terminal output retains a bounded, valid UTF-8 tail for later status reads."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(
+        state="exited",
+        output=f"discard-me:{'x' * (64 * 1024)}:tail",
+        exit_code=0,
+    )
+
+    reconciled = await manager.reconcile(context, run_id=run.run_id)
+    later_status = await manager.status(context, run_id=run.run_id)
+
+    assert len(reconciled.output.encode("utf-8")) <= 64 * 1024
+    assert reconciled.output.endswith(":tail")
+    assert "discard-me" not in reconciled.output
+    assert later_status.output == reconciled.output
 
 
 @pytest.mark.asyncio
@@ -1512,7 +1508,7 @@ async def test_process_only_reconciliation_does_not_rescan_broker_after_trusted_
     await manager.revoke(run.run_id, reason="Owning agent was removed by configuration reload.")
     reconciled = await manager.reconcile_durable(run_id=run.run_id, broker_revoked=True)
 
-    assert reconciled.state is ScriptRunState.CANCELLED
+    assert reconciled.state is ScriptRunState.INTERRUPTED
     assert manager.broker.cancelled_runs == [run.run_id]
 
 

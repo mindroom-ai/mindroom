@@ -53,7 +53,10 @@ def runner_client(
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: _WORKER_KEY,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "dedicated-worker"),
+        },
     )
     monkeypatch.setattr(local_workers_module.venv.EnvBuilder, "create", _fake_local_worker_venv_create)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
@@ -278,6 +281,45 @@ async def test_worker_script_endpoint_stops_reading_chunked_body_over_limit(
 
     assert consumed_chunks == [0, 1]
     assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_shared_runner_rejects_script_route_before_reading_body(tmp_path: Path) -> None:
+    """A shared runner cannot parse or execute any background-script request."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    shared_app = FastAPI()
+    shared_app.include_router(sandbox_runner_scripts_router)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        shared_app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=_TOKEN,
+    )
+    body_started = False
+
+    async def forbidden_body() -> AsyncIterator[bytes]:
+        nonlocal body_started
+        body_started = True
+        yield b"not-json"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=shared_app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/api/sandbox-runner/scripts/run",
+            headers={**_HEADERS, "content-type": "application/json"},
+            content=forbidden_body(),
+        )
+
+    assert response.status_code == 404
+    assert body_started is False
 
 
 @pytest.mark.asyncio

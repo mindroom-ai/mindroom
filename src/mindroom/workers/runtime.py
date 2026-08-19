@@ -554,14 +554,15 @@ def _publish_primary_worker_manager_build(
         if active_entry is not None and active_entry.config_signature == config_signature:
             if acquire_lease:
                 active_entry.active_leases += 1
-            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(
-                _WorkerManagerEntry(
-                    manager=built_manager,
-                    config_signature=config_signature,
-                ),
+            duplicate_entry = _WorkerManagerEntry(
+                manager=built_manager,
+                config_signature=config_signature,
+                shutdown_requested=True,
             )
+            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(duplicate_entry)
+            managers_to_shutdown = _drain_retired_entries_locked()
             _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-            return active_entry, []
+            return active_entry, managers_to_shutdown
         previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         new_entry = _WorkerManagerEntry(
             manager=built_manager,
@@ -570,6 +571,7 @@ def _publish_primary_worker_manager_build(
         )
         _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
         if previous_entry is not None:
+            previous_entry.shutdown_requested = True
             _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()

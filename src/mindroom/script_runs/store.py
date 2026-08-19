@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 _MAX_RECEIPT_BYTES = 64 * 1024
 _MAX_RUN_ERROR_BYTES = 64 * 1024
+_MAX_RUN_OUTPUT_BYTES = 64 * 1024
 _CONTROL_STATE_UNAVAILABLE = "Background script control state is unavailable."
 _INVALID_CAPABILITY = "Background script capability is invalid."
 _REVOKED_CAPABILITY = "Background script capability has been revoked."
@@ -142,9 +143,9 @@ class ScriptRunStore:
                         worker_key, worker_id,
                         snapshot_locator, name, local_unsafe,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
-                        started_at, finished_at, exit_code, error, cancel_requested_at,
-                        cancellation_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        started_at, finished_at, exit_code, error, output,
+                        cancel_requested_at, cancellation_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -427,6 +428,54 @@ class ScriptRunStore:
             )
         return replace(run, snapshot_locator=normalized)
 
+    def record_process_exit(
+        self,
+        run_id: str,
+        *,
+        exit_code: int | None,
+        error: str | None,
+        output: str,
+        cancellation_reason: str,
+    ) -> ScriptRunRecord:
+        """Durably revoke a run and retain one observed process outcome before cleanup."""
+        _validate_run_error(error)
+        _validate_run_output(output)
+        with self._write_transaction() as connection:
+            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ScriptRunNotFoundError(run_id)
+            run = _run_from_row(row)
+            if run.state in _TERMINAL_RUN_STATES or run.finished_at is not None:
+                return run
+            now = _utc_now()
+            updated = replace(
+                run,
+                finished_at=now,
+                exit_code=exit_code,
+                error=error,
+                output=output,
+                cancel_requested_at=run.cancel_requested_at or now,
+                cancellation_reason=run.cancellation_reason or cancellation_reason,
+            )
+            connection.execute(
+                """
+                UPDATE script_runs
+                SET finished_at = ?, exit_code = ?, error = ?, output = ?,
+                    cancel_requested_at = ?, cancellation_reason = ?
+                WHERE run_id = ?
+                """,
+                (
+                    updated.finished_at,
+                    updated.exit_code,
+                    updated.error,
+                    updated.output,
+                    updated.cancel_requested_at,
+                    updated.cancellation_reason,
+                    run_id,
+                ),
+            )
+        return updated
+
     def transition_run(  # noqa: Vulture
         self,
         run_id: str,
@@ -517,6 +566,8 @@ class ScriptRunStore:
                 connection.execute(
                     "ALTER TABLE script_runs ADD COLUMN preapprove_launch_grants INTEGER NOT NULL DEFAULT 0",
                 )
+            if "output" not in columns:
+                connection.execute("ALTER TABLE script_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -567,6 +618,7 @@ _SCHEMA_STATEMENTS = (
                     finished_at TEXT,
                     exit_code INTEGER,
                     error TEXT,
+                    output TEXT NOT NULL,
                     cancel_requested_at TEXT,
                     cancellation_reason TEXT
                 )
@@ -637,6 +689,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         run.finished_at,
         run.exit_code,
         run.error,
+        run.output,
         run.cancel_requested_at,
         run.cancellation_reason,
     )
@@ -671,6 +724,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         finished_at=_nullable_string(row["finished_at"]),
         exit_code=cast("int | None", row["exit_code"]),
         error=_nullable_string(row["error"]),
+        output=str(row["output"]) if "output" in column_names else "",
         cancel_requested_at=_nullable_string(row["cancel_requested_at"]),
         cancellation_reason=_nullable_string(row["cancellation_reason"]),
     )
@@ -731,6 +785,12 @@ def _grants_from_json(grants_json: str) -> tuple[ScriptToolGrant, ...]:
 def _validate_run_error(error: str | None) -> None:
     if error is not None and len(error.encode("utf-8")) > _MAX_RUN_ERROR_BYTES:
         msg = f"Script run error exceeds the {_MAX_RUN_ERROR_BYTES}-byte limit."
+        raise ScriptRunStoreError(msg)
+
+
+def _validate_run_output(output: str) -> None:
+    if len(output.encode("utf-8")) > _MAX_RUN_OUTPUT_BYTES:
+        msg = f"Script run output exceeds the {_MAX_RUN_OUTPUT_BYTES}-byte limit."
         raise ScriptRunStoreError(msg)
 
 

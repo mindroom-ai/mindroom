@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -730,3 +731,126 @@ def test_local_backend_normalizes_retirement_recursion_failure(
         backend.retire_worker(run_key)
 
     assert paths.metadata_file.read_bytes() == exact_identity
+
+
+@pytest.mark.parametrize("reconstruction_failure", ["create", "write"])
+def test_local_backend_late_root_failure_retries_without_reconstructing_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reconstruction_failure: str,
+) -> None:
+    """A late removal retry uses its durable sidecar without recreating canonical identity."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'a' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    (paths.workspace / "remove-before-late-failure.txt").write_text("remove", encoding="utf-8")
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    original_open = metadata_store_module.os.open
+    original_rmdir = metadata_store_module.os.rmdir
+    original_write = metadata_store_module.os.write
+    fail_root_once = True
+    reconstruction_attempts = 0
+
+    def fail_first_worker_root_rmdir(path: str | bytes, *, dir_fd: int | None = None) -> None:
+        nonlocal fail_root_once
+        if path == paths.root.name and fail_root_once:
+            fail_root_once = False
+            message = "injected final worker-root removal failure"
+            raise OSError(message)
+        original_rmdir(path, dir_fd=dir_fd)
+
+    def fail_identity_recreation(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal reconstruction_attempts
+        if reconstruction_failure == "create" and path == paths.metadata_file.name and flags & os.O_CREAT:
+            reconstruction_attempts += 1
+            message = "injected identity recreation failure"
+            raise OSError(message)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def fail_identity_rewrite(descriptor: int, data: bytes | bytearray | memoryview) -> int:
+        nonlocal reconstruction_attempts
+        descriptor_path = Path(f"/proc/self/fd/{descriptor}").resolve()
+        if reconstruction_failure == "write" and descriptor_path == paths.metadata_file:
+            reconstruction_attempts += 1
+            message = "injected identity rewrite failure"
+            raise OSError(message)
+        return original_write(descriptor, data)
+
+    with monkeypatch.context() as retirement_faults:
+        retirement_faults.setattr(metadata_store_module.os, "open", fail_identity_recreation)
+        retirement_faults.setattr(metadata_store_module.os, "rmdir", fail_first_worker_root_rmdir)
+        retirement_faults.setattr(metadata_store_module.os, "write", fail_identity_rewrite)
+        with pytest.raises(WorkerBackendError, match="final worker-root removal failure"):
+            backend.retire_worker(run_key)
+
+    assert fail_root_once is False
+    assert paths.workspace.exists() is False
+    assert reconstruction_attempts == 0
+
+    retry_backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    retry_backend.retire_worker(run_key)
+
+    assert paths.root.exists() is False
+    assert tuple(paths.root.parent.iterdir()) == ()
+
+
+def test_local_backend_retires_tree_deeper_than_python_recursion_without_fd_leak(tmp_path: Path) -> None:
+    """Descriptor traversal removes a deeply nested exact worker without recursive stack or FD leaks."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'c' * 32}")
+    paths = local_module._local_worker_state_paths(run_key, worker_root=backend.worker_root)
+    paths.workspace.mkdir(parents=True)
+    save_worker_metadata(
+        paths,
+        local_module._LocalWorkerMetadata(
+            worker_id=paths.root.name,
+            worker_key=run_key,
+            endpoint="/api/sandbox-runner/execute",
+            backend_name=backend.backend_name,
+            created_at=0.0,
+            last_used_at=0.0,
+            status="idle",
+        ),
+    )
+    deepest = paths.workspace
+    for _index in range(sys.getrecursionlimit() + 50):
+        deepest /= "d"
+        deepest.mkdir()
+    (deepest / "leaf.txt").write_text("deep", encoding="utf-8")
+    fd_root = Path("/proc/self/fd")
+    descriptors_before = len(tuple(fd_root.iterdir()))
+
+    backend.retire_worker(run_key)
+
+    assert len(tuple(fd_root.iterdir())) == descriptors_before
+    assert paths.root.exists() is False

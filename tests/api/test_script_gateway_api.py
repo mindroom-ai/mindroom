@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -18,6 +19,7 @@ from mindroom.api.script_gateway import bind_script_tool_broker, router
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
+    ScriptRuntimeResolver,
     ScriptToolBroker,
     digest_arguments,
 )
@@ -260,7 +262,9 @@ async def test_script_gateway_returns_the_durable_conflict_after_slow_claim_reso
             assert (run_id, call_id) == ("run-1", "call-1")
             return call
 
-    broker = ScriptToolBroker(store=BlockingStore(), runtime_resolver=SimpleNamespace())  # type: ignore[arg-type]
+    runtime_resolver = MagicMock(spec=ScriptRuntimeResolver)
+    runtime_resolver.is_authorized.return_value = True
+    broker = ScriptToolBroker(store=BlockingStore(), runtime_resolver=runtime_resolver)  # type: ignore[arg-type]
 
     async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
         response = await client.post(

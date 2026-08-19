@@ -63,6 +63,7 @@ class ScriptRunRecord:
     finished_at: str | None = None
     exit_code: int | None = None
     error: str | None = None
+    output: str = ""
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
 

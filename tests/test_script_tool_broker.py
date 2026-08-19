@@ -35,6 +35,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
 from mindroom.script_runs import broker as broker_module
 from mindroom.script_runs.broker import (
+    ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
     ScriptRuntimeWorkerAuthority,
     ScriptToolBroker,
@@ -191,6 +192,7 @@ class _RuntimeResolver:
         private_agent_names: frozenset[str] | None = None,
         local_unsafe: bool = False,
         resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
+        authorized: bool = True,
     ) -> None:
         self.context = context
         self.approval_events = approval_events
@@ -199,10 +201,15 @@ class _RuntimeResolver:
         self.private_agent_names = private_agent_names
         self.local_unsafe = local_unsafe
         self.resolved_worker_targets = resolved_worker_targets
+        self.authorized = authorized
         self.approval_wait: asyncio.Event | None = None
         self.approval_started: asyncio.Event | None = None
         self.settled_approvals: list[tuple[BackgroundScriptToolOrigin, str]] = []
         self.settled_runs: list[tuple[str, str]] = []
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+        del run, config
+        return self.authorized
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         assert run.agent_name == "watcher"
@@ -277,6 +284,7 @@ def _broker(
     worker_scope: WorkerScope | None = None,
     resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
     run_id: str = "run-1",
+    authorized: bool = True,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -323,6 +331,7 @@ def _broker(
                 private_agent_names=live_private_agent_names,
                 local_unsafe=resolved_live_local_unsafe,
                 resolved_worker_targets=resolved_worker_targets,
+                authorized=authorized,
             ),
         ),
         token,
@@ -359,6 +368,17 @@ async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path
     accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert isinstance(accepted, ScriptCallRecord)
+
+
+@pytest.mark.asyncio
+async def test_script_broker_rejects_owner_without_current_reply_authorization(tmp_path: Path) -> None:
+    """A durable capability cannot outlive its requester's live room-and-agent authorization."""
+    broker, token = _broker(tmp_path, events=[], authorized=False)
+
+    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        await broker.accept_authenticated(_request(), f"Bearer {token}")
+
+    assert broker.store.pending_calls("run-1") == []
 
 
 def _replace_calculator_toolkit(

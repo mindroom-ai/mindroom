@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 
 from mindroom import approval_manager
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
@@ -27,7 +28,6 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
-    script_worker_key_belongs_to_run,
 )
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
@@ -67,6 +67,8 @@ _ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload.
 _SCRIPT_TOOL_REMOVED_REASON = "Background script tool was removed by configuration reload."
 _WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
 _RUNTIME_SHUTDOWN_INTERRUPTION_REASON = "MindRoom runtime shut down."
+_RUNTIME_STARTUP_INTERRUPTION_REASON = "MindRoom runtime restarted."
+_AUTHORIZATION_REVOKED_REASON = "Script owner no longer has room-and-agent reply authorization."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -181,6 +183,21 @@ class _LiveScriptRuntimeResolver:
     bot_provider: Callable[[str], AgentBot | None]
     worker_backend_provider: Callable[[ScriptRunRecord | None], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+        """Check the durable owner against current room, reply, and membership authority."""
+        bot = self.bot_provider(run.agent_name)
+        if bot is None or not bot.running:
+            return False
+        current_config = bot.config if config is None else config
+        return is_sender_allowed_for_agent_reply_in_room(
+            run.owner_user_id,
+            run.agent_name,
+            current_config,
+            run.room_id,
+            self.runtime_paths,
+            bot._runtime_view.agent_reply_memberships,
+        )
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild a context only from the exact durable Matrix execution identity."""
@@ -354,6 +371,7 @@ class ScriptRuntimeLifecycle:
     )
     _pending_worker_lease_delivery: _WorkerLeaseDelivery | None = field(default=None, init=False, repr=False)
     _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
+    _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -382,10 +400,20 @@ class ScriptRuntimeLifecycle:
                 return
             if not self._start_requested or not self._api_ready.is_set():
                 return
+            await self.manager.begin_startup_reconciliation()
             bind_script_run_manager(self.manager)
             self._started = True
             self._activated_once = True
-            await self._run_complete_pass(timeout_event="script_startup_pass_timeout")
+            self._startup_cleanup_pending = True
+            try:
+                await asyncio.wait_for(
+                    self._startup_cleanup_pass(),
+                    timeout=self.pass_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning("script_startup_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
+            except Exception:
+                logger.warning("script_startup_cleanup_pending", exc_info=True)
             self._maintenance_task = create_logged_task(
                 self._maintenance_loop(),
                 name="script_runtime_maintenance",
@@ -554,11 +582,13 @@ class ScriptRuntimeLifecycle:
             if _agent_has_script_tool(current_config, agent_name)
             and not _agent_has_script_tool(plan.new_config, agent_name)
         }
+        authorization_changed = current_config.authorization != plan.new_config.authorization
         if (
             not removed_agents
             and not isolation_changes
             and not script_tool_removals
             and not worker_configuration_changed
+            and not authorization_changed
         ):
             return
 
@@ -574,6 +604,7 @@ class ScriptRuntimeLifecycle:
                 isolation_changes=isolation_changes,
                 script_tool_removals=script_tool_removals,
                 worker_configuration_changed=worker_configuration_changed,
+                authorization_config=plan.new_config if authorization_changed else None,
             )
 
         try:
@@ -596,21 +627,33 @@ class ScriptRuntimeLifecycle:
         isolation_changes: set[str],
         script_tool_removals: set[str],
         worker_configuration_changed: bool,
+        authorization_config: Config | None,
     ) -> None:
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        unauthorized_ids = {
+            run.run_id
+            for run in runs
+            if authorization_config is not None and not self.resolver.is_authorized(run, config=authorization_config)
+        }
         affected_agents = removed_agents | isolation_changes | script_tool_removals
         affected = [
             run
             for run in runs
-            if run.agent_name in affected_agents or (worker_configuration_changed and not run.local_unsafe)
+            if run.run_id in unauthorized_ids
+            or run.agent_name in affected_agents
+            or (worker_configuration_changed and not run.local_unsafe)
         ]
         await self._interrupt_runs(
             affected,
-            reason_for=lambda run: _reload_reason_for(
-                run,
-                removed_agents=removed_agents,
-                isolation_changes=isolation_changes,
-                worker_configuration_changed=worker_configuration_changed,
+            reason_for=lambda run: (
+                _AUTHORIZATION_REVOKED_REASON
+                if run.run_id in unauthorized_ids
+                else _reload_reason_for(
+                    run,
+                    removed_agents=removed_agents,
+                    isolation_changes=isolation_changes,
+                    worker_configuration_changed=worker_configuration_changed,
+                )
             ),
             require_worker_success=worker_configuration_changed,
         )
@@ -754,6 +797,15 @@ class ScriptRuntimeLifecycle:
         except WorkerBackendError:
             logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        unauthorized = [run for run in runs if not self.resolver.is_authorized(run)]
+        if unauthorized:
+            await self._interrupt_runs(
+                unauthorized,
+                reason_for=lambda _run: _AUTHORIZATION_REVOKED_REASON,
+                require_worker_success=False,
+            )
+            unauthorized_ids = {run.run_id for run in unauthorized}
+            runs = [run for run in runs if run.run_id not in unauthorized_ids]
         touch_targets: dict[tuple[int, str], tuple[WorkerBackend, str]] = {}
         for run in runs:
             run_backend = self._worker_backend_for(run)
@@ -777,6 +829,25 @@ class ScriptRuntimeLifecycle:
                     )
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
+
+    async def _startup_cleanup_pass(self) -> None:
+        """Revoke and retire every inherited nonterminal run before reopening launches."""
+        try:
+            await self._refresh_worker_backend()
+        except WorkerBackendError:
+            logger.warning("script_worker_backend_refresh_pending", exc_info=True)
+        inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        if inherited:
+            await self._interrupt_runs(
+                inherited,
+                reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
+                require_worker_success=False,
+            )
+        unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        if unfinished:
+            return
+        await self.manager.end_startup_reconciliation()
+        self._startup_cleanup_pending = False
 
     async def _touch_worker(self, backend: WorkerBackend, worker_key: str) -> None:
         try:
@@ -803,7 +874,7 @@ class ScriptRuntimeLifecycle:
         *,
         now: datetime | None = None,
     ) -> None:
-        """Prune terminal snapshots, receipts, and run rows after retention."""
+        """Prune terminal approvals, receipts, and run rows after retention."""
         try:
             await asyncio.wait_for(self._prune_pass(now=now), timeout=self.pass_timeout_seconds)
         except TimeoutError:
@@ -831,12 +902,6 @@ class ScriptRuntimeLifecycle:
                 approvals_pruned = await self.resolver.prune_approvals(run.run_id)
                 if not approvals_pruned:
                     continue
-                cleaned = await self.manager.cleanup_snapshot(run)
-                if cleaned is False:
-                    continue
-                worker_retired = await self._retire_run_worker(run)
-                if not worker_retired:
-                    continue
                 await asyncio.to_thread(
                     self.store.prune_terminal_run,
                     run.run_id,
@@ -850,30 +915,11 @@ class ScriptRuntimeLifecycle:
                     exc_info=True,
                 )
 
-    async def _retire_run_worker(self, run: ScriptRunRecord) -> bool:
-        """Retire only the exact one-shot worker durably pinned to *run*."""
-        if run.local_unsafe:
-            return run.worker_key is None and run.worker_id is None
-        worker_key = run.worker_key
-        if worker_key is None or not script_worker_key_belongs_to_run(worker_key, run.run_id):
-            logger.warning(
-                "script_run_worker_retirement_rejected",
-                run_id=run.run_id,
-                agent_name=run.agent_name,
-            )
-            return False
-        backend = self._worker_backend_for(run)
-        if backend is None:
-            logger.warning(
-                "script_run_worker_retirement_pending",
-                run_id=run.run_id,
-                agent_name=run.agent_name,
-            )
-            return False
-        await asyncio.to_thread(backend.retire_worker, worker_key)
-        return True
-
     async def _complete_pass(self) -> None:
+        if self._startup_cleanup_pending:
+            await self._startup_cleanup_pass()
+            if self._startup_cleanup_pending:
+                return
         await self._reconcile_pass()
         await self._prune_pass()
 

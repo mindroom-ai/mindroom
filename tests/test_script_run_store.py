@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -93,6 +94,55 @@ def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths:
     assert store.get_run(run.run_id).snapshot_locator == updated.snapshot_locator
     with pytest.raises(ScriptRunStoreError, match="snapshot locator"):
         store.record_snapshot_locator(run.run_id, "../outside/run-1")
+
+
+def test_observed_exit_revokes_and_retains_output_before_terminal_transition(runtime_paths: RuntimePaths) -> None:
+    """One atomic durable mutation preserves process truth while cleanup remains pending."""
+    store = ScriptRunStore(runtime_paths)
+    created = store.create_run(_new_run())
+    run = store.transition_run(created.run_id, state=ScriptRunState.RUNNING)
+
+    observed = store.record_process_exit(
+        run.run_id,
+        exit_code=0,
+        error=None,
+        output="finished",
+        cancellation_reason="Background script process exited.",
+    )
+
+    assert observed.state is ScriptRunState.RUNNING
+    assert observed.cancel_requested_at is not None
+    assert observed.finished_at is not None
+    assert observed.output == "finished"
+    terminal = store.transition_run(run.run_id, state=ScriptRunState.EXITED)
+    assert terminal.output == "finished"
+
+
+def test_run_store_rejects_oversized_terminal_output(runtime_paths: RuntimePaths) -> None:
+    """Observed process output cannot exceed the durable control-state bound."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+
+    with pytest.raises(ScriptRunStoreError, match="output exceeds"):
+        store.record_process_exit(
+            run.run_id,
+            exit_code=0,
+            error=None,
+            output="x" * (128 * 1024),
+            cancellation_reason="Background script process exited.",
+        )
+
+
+def test_run_store_migrates_existing_database_without_output_column(runtime_paths: RuntimePaths) -> None:
+    """Opening a pre-output database adds the bounded terminal-output column conservatively."""
+    initial = ScriptRunStore(runtime_paths)
+    with sqlite3.connect(initial.database_path) as connection:
+        connection.execute("ALTER TABLE script_runs DROP COLUMN output")
+
+    migrated = ScriptRunStore(runtime_paths)
+    created = migrated.create_run(_new_run())
+
+    assert migrated.get_run(created.run_id).output == ""
 
 
 def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_paths: RuntimePaths) -> None:

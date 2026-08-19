@@ -92,6 +92,7 @@ class _BoundedScriptRoute(APIRoute):
         route_handler = super().get_route_handler()
 
         async def bounded_route_handler(request: Request) -> Response:
+            _require_dedicated_runner(request)
             if request.method == "POST":
                 request = await _bounded_replay_request(request)
             return await route_handler(request)
@@ -172,13 +173,20 @@ def _script_namespace(worker_key: str, run_id: str) -> str:
     return f"script:{len(worker_key)}:{worker_key}:{run_id}"
 
 
+def _require_dedicated_runner(request: Request) -> str:
+    dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(app_runtime_paths(request.app))
+    if dedicated_worker_key is None:
+        raise HTTPException(status_code=404, detail="Script runner routes require a dedicated worker.")
+    return dedicated_worker_key
+
+
 def _normalized_worker_key(request: Request, worker_key: str) -> str:
     runtime_paths = app_runtime_paths(request.app)
     normalized_worker_key = sandbox_worker_prep.normalize_request_worker_key(worker_key, runtime_paths)
     if normalized_worker_key is None:
         raise HTTPException(status_code=400, detail="Script worker key is required.")
-    dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
-    if dedicated_worker_key is not None and not secrets.compare_digest(normalized_worker_key, dedicated_worker_key):
+    dedicated_worker_key = _require_dedicated_runner(request)
+    if not secrets.compare_digest(normalized_worker_key, dedicated_worker_key):
         raise HTTPException(status_code=400, detail="Worker key does not match this dedicated worker.")
     return normalized_worker_key
 

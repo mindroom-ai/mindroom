@@ -10484,8 +10484,9 @@ Normal Matrix authorization is still enforced when a script supplies another roo
 
 MindRoom captures the run's permitted toolkit-and-function pairs and unattended approval authority at launch.
 Every call intersects that launch grant with the agent's current live tool surface, so removing a tool or function revokes it without restarting the script.
+Every call also rechecks the requester's current room access and agent reply authorization, including joined-room membership grants.
 Adding toolkits or functions to the live surface, including through a later `allowed_tools` expansion, does not grant a running script new unattended authority.
-Configuration reloads that remove the agent, remove the `script` tool, or change requester isolation durably revoke affected runs before process reconciliation.
+Authorization changes, agent removal, `script` tool removal, and requester-isolation changes durably revoke affected runs before process reconciliation.
 
 Background calls use the same tool hooks, approval scripts, function-authored confirmation, execution identity, worker routing, result normalization, and audit events as an ordinary agent tool call.
 An approval card is tied to the exact run, call ID, function, arguments, requester, room, and thread.
@@ -10537,18 +10538,19 @@ Call states are `pending`, `completed`, `failed`, and `indeterminate`.
 Call receipts are durable so a script can poll one accepted call without replaying it.
 Calls are serialized within one run to keep approval and side-effect order predictable.
 
-Scripts do not survive worker loss in the first release, and MindRoom does not automatically restart the Python source after an `interrupted` run.
-A primary-runtime restart can reconcile a still-live worker process, but worker eviction, restart, or migration may end it.
-Worker configuration replacement, primary-runtime shutdown, and full upgrades do not preserve or relaunch active scripts.
+Scripts do not survive primary-runtime restart, upgrade, worker loss, or worker replacement, and MindRoom never adopts, resumes, or automatically relaunches their Python source.
+Startup fences new launches, durably revokes every inherited nonterminal run, terminates reachable processes, removes private snapshots, and retires exact dedicated workers before reopening.
 MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
 
-Process output is bounded, and cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
+Terminal process output is retained durably with a 64 KiB bound and remains available from `script(action="status")` after maintenance observes the exit.
+Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
 When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
 
 Terminal runs are retained for 30 days by default.
-After that window, lifecycle maintenance removes the private source and capability snapshot, background approval rows, durable tool-call receipts, and the terminal run row.
+Private source and capability snapshots and exact dedicated workers are removed before terminal state is published.
+After the retention window, lifecycle maintenance removes background approval rows, durable tool-call receipts, and the terminal run row without selecting a worker backend.
 Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to a finite positive number of seconds to change the window; zero, negative, nonnumeric, and non-finite values are rejected at startup.
 
 # Automation & Platforms
