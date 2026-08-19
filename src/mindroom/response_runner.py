@@ -2273,7 +2273,7 @@ class ResponseRunner:
             if await self._approval_responses.successful_final_delivery(owned, recover=True) is not None:
                 owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
                 return True, event_id if owns_final else None
-            reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
+            reason = owned.failure_reason or "Tool approval continuation failed safely."
             cancel_source = _approval_interruption_cancel_source(reason)
             settled = (
                 await self._settle_interrupted_approval_recovery(

@@ -1442,6 +1442,30 @@ def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.Ro
     return event
 
 
+def _sidecar_preview_content() -> dict[str, Any]:
+    """Return one unresolved v2 long-text preview."""
+    return {
+        "msgtype": "m.file",
+        "body": "Preview partial...",
+        "info": {"mimetype": "application/json"},
+        "io.mindroom.long_text": {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        },
+        "url": "mxc://server/recovery-sidecar",
+    }
+
+
+def _sidecar_edit(*, sender: str) -> nio.RoomMessage:
+    """Return one replacement whose full body lives in a v2 sidecar."""
+    source = _decrypted_edit(sender=sender).source
+    source["content"]["body"] = "* Preview partial..."
+    source["content"]["m.new_content"] = _sidecar_preview_content()
+    event = nio.Event.parse_event(source)
+    assert isinstance(event, nio.RoomMessage)
+    return event
+
+
 async def _relations(*events: nio.Event) -> AsyncIterator[nio.Event]:
     """Yield relation fixtures in server order."""
     for event in events:
@@ -1620,6 +1644,89 @@ async def test_restart_recovery_uses_original_body_when_no_edit_exists(tmp_path:
     )
 
     assert body == "original partial"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["original", "bundled", "relation"])
+async def test_restart_recovery_waits_for_unresolved_long_text(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """A failed sidecar fetch cannot replace the committed full response with its preview."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
+    replacement = _sidecar_edit(sender=sender)
+    relations: tuple[nio.Event, ...] = ()
+    if source_kind == "original":
+        response = nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$waiting",
+                "sender": sender,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": _sidecar_preview_content(),
+            },
+        )
+        assert isinstance(response, nio.RoomGetEventResponse)
+    elif source_kind == "bundled":
+        response.event.source["unsigned"] = {
+            "m.relations": {"m.replace": {"latest_event": replacement.source}},
+        }
+    else:
+        relations = (replacement,)
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    client.room_get_event_relations = MagicMock(return_value=_relations(*relations))
+    client.download = AsyncMock(return_value=nio.DownloadError("missing"))
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body is None
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_skips_redacted_replacement(tmp_path: Path) -> None:
+    """A redacted latest edit cannot permanently hide an older visible edit."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    redacted = nio.Event.parse_event(
+        {
+            "event_id": "$redacted-edit",
+            "sender": sender,
+            "origin_server_ts": 3_000,
+            "type": "m.room.message",
+            "content": {},
+            "unsigned": {
+                "redacted_because": {
+                    "sender": "@moderator:localhost",
+                    "content": {},
+                },
+            },
+        },
+    )
+    assert isinstance(redacted, nio.RedactedEvent)
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(
+        return_value=_relations(redacted, _decrypted_edit(sender=sender)),
+    )
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "latest partial"
 
 
 @pytest.mark.asyncio

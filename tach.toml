@@ -2536,6 +2536,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",
 ]
 visibility = [
@@ -4187,6 +4188,7 @@ expose = ["holds_unresolved_sidecar", "sidecar_content_to_resolve", "sidecar_mxc
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.event_journal",
+    "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.message_content",
 ]

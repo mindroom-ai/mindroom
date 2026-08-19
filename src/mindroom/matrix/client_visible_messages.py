@@ -21,6 +21,7 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
 )
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
@@ -243,11 +244,14 @@ async def extract_visible_edit_body(
     trusted_sender_ids: Collection[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract one visible edit body using runtime-derived sender trust."""
-    return await extract_edit_body(
+    body, content = await extract_edit_body(
         event_source,
         client,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
     )
+    if content is not None and holds_unresolved_sidecar(content):
+        return None, None
+    return body, content
 
 
 def _is_replacement_for_event(
@@ -290,6 +294,8 @@ async def _latest_relation_or_original_body(
                     replacement = client.decrypt_event(replacement)
                 except nio.EncryptionError:
                     return None
+            if isinstance(replacement, nio.RedactedEvent):
+                continue
             if not is_visible_room_message(replacement):
                 return None
             if not _is_replacement_for_event(
@@ -307,7 +313,7 @@ async def _latest_relation_or_original_body(
             )
             return body
 
-    _resolved_source, body = await resolve_visible_event_source(
+    resolved_source, body = await resolve_visible_event_source(
         event.source,
         client,
         fallback_body=room_message_fallback_body(event),
@@ -315,6 +321,9 @@ async def _latest_relation_or_original_body(
         runtime_paths=runtime_paths,
         trusted_sender_ids=trusted_sender_ids,
     )
+    resolved_content = resolved_source.get("content")
+    if not isinstance(resolved_content, Mapping) or holds_unresolved_sidecar(resolved_content):
+        return None
     return body
 
 
