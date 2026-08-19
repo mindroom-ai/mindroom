@@ -12,7 +12,10 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import httpx
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+)
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 from mindroom.server_fetch_url import (
@@ -30,7 +33,6 @@ _DISCOVERY_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_CACHE_TTL_SECONDS = 3600.0
 _CROSS_LOOP_LOCK_RETRY_SECONDS = 0.01
 _JSON_CONTENT_TYPE = "application/json"
-_DYNAMIC_CLIENT_SOURCE = "oauth_dynamic_client_registration"
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 
@@ -350,7 +352,7 @@ def _stored_registration(
     stored: dict[str, Any] = {
         "client_id": client_id.strip(),
         "redirect_uri": provider.default_redirect_uri(runtime_paths),
-        "_source": _DYNAMIC_CLIENT_SOURCE,
+        "_source": OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
         "_oauth_provider": provider.id,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }

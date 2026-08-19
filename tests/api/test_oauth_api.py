@@ -839,13 +839,63 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("method", "path", "expected_status"),
+    [
+        ("POST", "/api/oauth/public_mail/connect?agent_name=general", 200),
+        ("GET", "/api/oauth/public_mail/authorize?agent_name=general", 307),
+    ],
+)
+def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
+    tmp_path: Path,
+    method: str,
+    path: str,
+    expected_status: int,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            "redirect_uri": "https://mindroom.example.test/api/oauth/public_mail/callback",
+            "_source": "oauth_dynamic_client_registration",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+            _login(client)
+            response = client.request(method, path, follow_redirects=False)
+
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
     ("method", "path"),
     [
         ("POST", "/api/oauth/public_mail/connect?agent_name=general"),
         ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
     ],
 )
-def test_oauth_entrypoints_reject_runtime_bootstrapped_client_from_remote_request(
+def test_oauth_entrypoints_reject_paired_client_from_remote_request(
     tmp_path: Path,
     method: str,
     path: str,
@@ -876,6 +926,82 @@ def test_oauth_entrypoints_reject_runtime_bootstrapped_client_from_remote_reques
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+            _login(client)
+            response = client.request(method, path)
+
+    assert response.status_code == 503
+    assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("public_url", "stored_redirect_uri", "request_base_url"),
+    [
+        (
+            "https://mindroom.example.test",
+            "https://other.example.test/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+        ("https://mindroom.example.test", None, "https://mindroom.example.test"),
+        (
+            "http://mindroom.example.test",
+            "http://mindroom.example.test/api/oauth/public_mail/callback",
+            "http://mindroom.example.test",
+        ),
+        (
+            "https://localhost:8000",
+            "https://localhost:8000/api/oauth/public_mail/callback",
+            "https://mindroom.example.test",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/oauth/public_mail/connect?agent_name=general"),
+        ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
+    ],
+)
+def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
+    tmp_path: Path,
+    public_url: str,
+    stored_redirect_uri: str | None,
+    request_base_url: str,
+    method: str,
+    path: str,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_PUBLIC_URL": public_url,
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    client_credentials = {
+        "client_id": "provisioned-client-id",
+        "client_secret": "provisioned-client-secret",
+        "_source": "oauth_dynamic_client_registration",
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+    }
+    if stored_redirect_uri is not None:
+        client_credentials["redirect_uri"] = stored_redirect_uri
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        client_credentials,
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=request_base_url) as client:
             _login(client)
             response = client.request(method, path)
 

@@ -132,6 +132,24 @@ async def _require_oauth_browser_user(request: Request) -> RedirectResponse | No
     return None
 
 
+def _dynamic_client_matches_hosted_callback(
+    resolution: OAuthClientConfigResolution,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a dynamically registered client has its exact configured HTTPS callback."""
+    if not resolution.dynamically_registered:
+        return False
+    expected_redirect_uri = provider.default_redirect_uri(runtime_paths)
+    expected_callback = urlparse(expected_redirect_uri)
+    return (
+        expected_callback.scheme.casefold() == "https"
+        and expected_callback.hostname is not None
+        and not is_oauth_loopback_hostname(expected_callback.hostname)
+        and resolution.stored_redirect_uri == expected_redirect_uri
+    )
+
+
 async def _client_config_resolution_for_request(
     request: Request,
     provider: OAuthProvider,
@@ -149,7 +167,12 @@ async def _client_config_resolution_for_request(
             error_type=type(exc).__name__,
         )
         raise HTTPException(status_code=503, detail="OAuth client configuration could not be resolved") from exc
-    if resolution is None or resolution.custom or is_oauth_loopback_hostname(request.url.hostname):
+    if (
+        resolution is None
+        or resolution.custom
+        or is_oauth_loopback_hostname(request.url.hostname)
+        or _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths)
+    ):
         return resolution
     if reject_remote_provisioned:
         detail = (

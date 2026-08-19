@@ -20,6 +20,7 @@ from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError, HTTPStatusError
 
 from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     is_oauth_client_config_service,
     is_oauth_token_service,
@@ -159,6 +160,8 @@ class OAuthClientConfigResolution:
     config: OAuthClientConfig
     service: str
     custom: bool = True
+    dynamically_registered: bool = False
+    stored_redirect_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,10 +514,17 @@ class OAuthProvider:
             credentials = manager.load_credentials(service)
             config = self._stored_client_config_from_service(runtime_paths, credentials, True)
             if config is not None:
+                credentials = credentials or {}
+                runtime_bootstrapped = credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is True
+                stored_redirect_uri = credentials.get("redirect_uri")
                 return OAuthClientConfigResolution(
                     config=config,
                     service=service,
-                    custom=(credentials or {}).get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True,
+                    custom=not runtime_bootstrapped,
+                    dynamically_registered=(
+                        runtime_bootstrapped and credentials.get("_source") == OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE
+                    ),
+                    stored_redirect_uri=stored_redirect_uri if isinstance(stored_redirect_uri, str) else None,
                 )
         for service in self.shared_client_config_services:
             credentials = manager.load_credentials(service)
