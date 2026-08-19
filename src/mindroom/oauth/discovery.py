@@ -12,7 +12,11 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import httpx
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+)
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 from mindroom.server_fetch_url import (
@@ -30,7 +34,6 @@ _DISCOVERY_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_CACHE_TTL_SECONDS = 3600.0
 _CROSS_LOOP_LOCK_RETRY_SECONDS = 0.01
 _JSON_CONTENT_TYPE = "application/json"
-_DYNAMIC_CLIENT_SOURCE = "oauth_dynamic_client_registration"
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 
@@ -347,10 +350,16 @@ def _stored_registration(
     ):
         msg = f"{provider.display_name} OAuth dynamic client registration did not return client_secret"
         raise OAuthProviderError(msg)
+    redirect_uri = provider.default_redirect_uri(runtime_paths)
+    registered_redirect_uris = registration.get("redirect_uris")
+    if not isinstance(registered_redirect_uris, list) or redirect_uri not in registered_redirect_uris:
+        msg = f"{provider.display_name} OAuth dynamic client registration did not confirm redirect_uri"
+        raise OAuthProviderError(msg)
     stored: dict[str, Any] = {
         "client_id": client_id.strip(),
-        "redirect_uri": provider.default_redirect_uri(runtime_paths),
-        "_source": _DYNAMIC_CLIENT_SOURCE,
+        "redirect_uri": redirect_uri,
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+        "_source": OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
         "_oauth_provider": provider.id,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }

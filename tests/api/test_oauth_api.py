@@ -30,6 +30,7 @@ from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
+from mindroom.credential_policy import OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.mcp.errors import MCPConnectionError
 from mindroom.mcp.manager import MCPServerManager
@@ -53,6 +54,7 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     OAuthTokenResult,
     _OAuthClaimValidationContext,
+    is_valid_hosted_oauth_callback_for_request,
 )
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system import plugin_imports
@@ -839,13 +841,124 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    ("method", "path", "expected_status"),
+    [
+        ("POST", "/api/oauth/public_mail/connect?agent_name=general", 200),
+        ("GET", "/api/oauth/public_mail/authorize?agent_name=general", 307),
+    ],
+)
+@pytest.mark.parametrize(
+    "public_url",
+    [
+        "https://oauth.mindroom.chat",
+        "https://xn--mnchen-3ya.mindroom.chat",
+        "https://xn--fa-hia.de",
+    ],
+)
+def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
+    tmp_path: Path,
+    method: str,
+    path: str,
+    expected_status: int,
+    public_url: str,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_PUBLIC_URL": public_url,
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    redirect_uri = f"{public_url}/api/oauth/public_mail/callback"
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            "redirect_uri": redirect_uri,
+            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+            "_source": "oauth_dynamic_client_registration",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=public_url) as client:
+            _login(client)
+            response = client.request(method, path, follow_redirects=False)
+
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("callback_uri", "request_hostname"),
+    [
+        ("https://m\u00fcnchen.mindroom.chat/api/oauth/demo/callback", "m\u00fcnchen.mindroom.chat"),
+        ("https://fa\u00df.de/api/oauth/demo/callback", "fa\u00df.de"),
+        ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
+        ("https://xn--a.com/api/oauth/demo/callback", "xn--a.com"),
+        ("https://[v1.foo]/api/oauth/demo/callback", "v1.foo"),
+        ("https://0127.0.0.1/api/oauth/demo/callback", "0127.0.0.1"),
+        ("https://127.0.0.0x/api/oauth/demo/callback", "127.0.0.0x"),
+        ("https://mindroom.chat/api/oauth/demo/callback", "mindroom.chat."),
+        ("https://mindroom.chat./api/oauth/demo/callback", "mindroom.chat"),
+        ("https://oauth.mindroom.chat/api/oauth/demo/callback?", "oauth.mindroom.chat"),
+        ("https://oauth.mindroom.chat/api/oauth/demo/callback#", "oauth.mindroom.chat"),
+        ("https://oauth.mindroom.chat/api/oauth/demo/callback?#", "oauth.mindroom.chat"),
+        ("https://8.8.8.8/api/oauth/demo/callback", "8.8.8.8"),
+        (
+            "https://[2001:4860:0000:0000:0000:0000:0000:8888]/api/oauth/demo/callback",
+            "2001:4860::8888",
+        ),
+        ("https://224.0.0.1/api/oauth/demo/callback", "224.0.0.1"),
+        ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
+        ("https://[fec0::1]/api/oauth/demo/callback", "fec0::1"),
+        ("https://192.0.0.8/api/oauth/demo/callback", "192.0.0.8"),
+        ("https://[64:ff9b::7f00:1]/api/oauth/demo/callback", "64:ff9b::7f00:1"),
+        ("https://[64:ff9b::c0a8:101]/api/oauth/demo/callback", "64:ff9b::c0a8:101"),
+        ("https://service.local/api/oauth/demo/callback", "service.local"),
+        ("https://service.example/api/oauth/demo/callback", "service.example"),
+        ("https://service.example.com/api/oauth/demo/callback", "service.example.com"),
+        ("https://service.example.net/api/oauth/demo/callback", "service.example.net"),
+        ("https://service.example.org/api/oauth/demo/callback", "service.example.org"),
+        ("https://service.invalid/api/oauth/demo/callback", "service.invalid"),
+        ("https://service.test/api/oauth/demo/callback", "service.test"),
+        ("https://service.onion/api/oauth/demo/callback", "service.onion"),
+        ("https://service.alt/api/oauth/demo/callback", "service.alt"),
+        ("https://service.arpa/api/oauth/demo/callback", "service.arpa"),
+        ("https://service.in-addr.arpa/api/oauth/demo/callback", "service.in-addr.arpa"),
+        (
+            "https://metadata.google.internal/api/oauth/demo/callback",
+            "metadata.google.internal",
+        ),
+    ],
+)
+def test_hosted_oauth_callback_rejects_browser_aliases_and_non_public_hosts(
+    callback_uri: str,
+    request_hostname: str,
+) -> None:
+    assert not is_valid_hosted_oauth_callback_for_request(callback_uri, request_hostname)
+
+
+@pytest.mark.parametrize(
     ("method", "path"),
     [
         ("POST", "/api/oauth/public_mail/connect?agent_name=general"),
         ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
     ],
 )
-def test_oauth_entrypoints_reject_runtime_bootstrapped_client_from_remote_request(
+def test_oauth_entrypoints_reject_paired_client_from_remote_request(
     tmp_path: Path,
     method: str,
     path: str,
@@ -876,6 +989,179 @@ def test_oauth_entrypoints_reject_runtime_bootstrapped_client_from_remote_reques
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url="https://mindroom.example.test") as client:
+            _login(client)
+            response = client.request(method, path)
+
+    assert response.status_code == 503
+    assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("public_url", "stored_redirect_uri", "registered_redirect_uri", "request_base_url"),
+    [
+        (
+            "https://oauth.mindroom.chat",
+            "https://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            None,
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://callback.mindroom.chat",
+            "https://callback.mindroom.chat/api/oauth/public_mail/callback",
+            "https://callback.mindroom.chat/api/oauth/public_mail/callback",
+            "https://dashboard.mindroom.chat",
+        ),
+        (
+            "https://fa\u00df.de",
+            "https://fa\u00df.de/api/oauth/public_mail/callback",
+            "https://fa\u00df.de/api/oauth/public_mail/callback",
+            "https://fass.de",
+        ),
+        (
+            "https://app.mindroom.chat?tenant=one",
+            "https://app.mindroom.chat?tenant=one/api/oauth/public_mail/callback",
+            "https://app.mindroom.chat?tenant=one/api/oauth/public_mail/callback",
+            "https://app.mindroom.chat",
+        ),
+        (
+            "https://oauth.mindroom.chat",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://oauth.mindroom.chat",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://other.mindroom.chat/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        ("https://oauth.mindroom.chat", None, None, "https://oauth.mindroom.chat"),
+        (
+            "http://oauth.mindroom.chat",
+            "http://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "http://oauth.mindroom.chat/api/oauth/public_mail/callback",
+            "http://oauth.mindroom.chat",
+        ),
+        (
+            "https://localhost:8000",
+            "https://localhost:8000/api/oauth/public_mail/callback",
+            "https://localhost:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://127.0.0.2:8000",
+            "https://127.0.0.2:8000/api/oauth/public_mail/callback",
+            "https://127.0.0.2:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://localhost.:8000",
+            "https://localhost.:8000/api/oauth/public_mail/callback",
+            "https://localhost.:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://[::]:8000",
+            "https://[::]:8000/api/oauth/public_mail/callback",
+            "https://[::]:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://[fc00::1]:8000",
+            "https://[fc00::1]:8000/api/oauth/public_mail/callback",
+            "https://[fc00::1]:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://[::ffff:192.168.1.1]:8000",
+            "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
+            "https://[::ffff:192.168.1.1]:8000/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        (
+            "https://mindroom.chat:invalid",
+            "https://mindroom.chat:invalid/api/oauth/public_mail/callback",
+            "https://mindroom.chat:invalid/api/oauth/public_mail/callback",
+            "https://oauth.mindroom.chat",
+        ),
+        *[
+            (
+                f"https://{hostname}:8000",
+                f"https://{hostname}:8000/api/oauth/public_mail/callback",
+                f"https://{hostname}:8000/api/oauth/public_mail/callback",
+                "https://oauth.mindroom.chat",
+            )
+            for hostname in (
+                "2130706433",
+                "127.1",
+                "0x7f000001",
+                "0177.0.0.1",
+                "0",
+                "0.0.0.0",  # noqa: S104
+                "192.168.1.1",
+                "169.254.169.254",
+                "localhost\\@example.com",
+                "user@example.com",
+                "%6cocalhost",
+                "%31%32%37.0.0.1",
+                "127\u30020\u30020\u30021",
+                "\uff11\uff12\uff17.\uff10.\uff10.\uff11",
+                "\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54",
+            )
+        ],
+    ],
+)
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/oauth/public_mail/connect?agent_name=general"),
+        ("GET", "/api/oauth/public_mail/authorize?agent_name=general"),
+    ],
+)
+def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
+    tmp_path: Path,
+    public_url: str,
+    stored_redirect_uri: str | None,
+    registered_redirect_uri: str | None,
+    request_base_url: str,
+    method: str,
+    path: str,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_PUBLIC_URL": public_url,
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    client_credentials = {
+        "client_id": "provisioned-client-id",
+        "client_secret": "provisioned-client-secret",
+        "_source": "oauth_dynamic_client_registration",
+        RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+    }
+    if stored_redirect_uri is not None:
+        client_credentials["redirect_uri"] = stored_redirect_uri
+    if registered_redirect_uri is not None:
+        client_credentials[OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY] = registered_redirect_uri
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        client_credentials,
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=request_base_url) as client:
             _login(client)
             response = client.request(method, path)
 

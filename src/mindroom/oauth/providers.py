@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import math
 import secrets
@@ -15,11 +16,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
+import idna
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError, HTTPStatusError
 
 from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     is_oauth_client_config_service,
     is_oauth_token_service,
@@ -47,12 +51,110 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
     {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
 )
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
-_OAUTH_LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES = (
+    "alt",
+    "arpa",
+    "example",
+    "example.com",
+    "example.net",
+    "example.org",
+    "internal",
+    "invalid",
+    "local",
+    "localdomain",
+    "localhost",
+    "onion",
+    "test",
+)
+
+
+def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an IP address, including an IPv4-mapped address, is loopback."""
+    return address.is_loopback or (
+        isinstance(address, ipaddress.IPv6Address)
+        and address.ipv4_mapped is not None
+        and address.ipv4_mapped.is_loopback
+    )
+
+
+def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
+    """Return whether browser URL parsing treats the final label as an IPv4 number."""
+    final_label = hostname.rsplit(".", maxsplit=1)[-1]
+    return final_label.isdigit() or (
+        final_label.startswith("0x") and all(character in "0123456789abcdef" for character in final_label[2:])
+    )
 
 
 def is_oauth_loopback_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname is supported by local loopback OAuth flows."""
-    return hostname is not None and hostname.casefold() in _OAUTH_LOOPBACK_HOSTNAMES
+    """Return whether a hostname resolves by definition to the local loopback interface."""
+    if hostname is None or "%" in hostname or not hostname.isascii():
+        return False
+    normalized_hostname = hostname.rstrip(".").casefold()
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        return False
+    return _is_loopback_address(address)
+
+
+def is_valid_hosted_oauth_callback_for_request(callback_uri: str, request_hostname: str | None) -> bool:
+    """Return whether a hosted callback uses the initiating public ASCII DNS host."""
+    if (
+        request_hostname is None
+        or not request_hostname.isascii()
+        or request_hostname.endswith(".")
+        or not callback_uri.isascii()
+        or "?" in callback_uri
+        or "#" in callback_uri
+        or "\\" in callback_uri
+        or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in callback_uri)
+    ):
+        return False
+    try:
+        parsed_callback = urlparse(callback_uri)
+        _ = parsed_callback.port
+        callback_hostname = parsed_callback.hostname
+    except ValueError:
+        return False
+    if (
+        parsed_callback.scheme.casefold() != "https"
+        or not parsed_callback.netloc
+        or parsed_callback.username is not None
+        or parsed_callback.password is not None
+        or "[" in parsed_callback.netloc
+        or "]" in parsed_callback.netloc
+        or "%" in parsed_callback.netloc
+        or callback_hostname is None
+        or callback_hostname.endswith(".")
+    ):
+        return False
+    callback_hostname = callback_hostname.casefold()
+    try:
+        ipaddress.ip_address(callback_hostname)
+    except ValueError:
+        is_ip_literal = False
+    else:
+        is_ip_literal = True
+    try:
+        idna.decode(callback_hostname, strict=True, uts46=False, std3_rules=True)
+    except idna.IDNAError:
+        is_valid_dns_name = False
+    else:
+        is_valid_dns_name = True
+    return (
+        callback_hostname == request_hostname.casefold()
+        and len(callback_hostname) <= 253
+        and not is_ip_literal
+        and is_valid_dns_name
+        and "." in callback_hostname
+        and not any(
+            callback_hostname == suffix or callback_hostname.endswith(f".{suffix}")
+            for suffix in _NON_PUBLIC_OAUTH_HOSTNAME_SUFFIXES
+        )
+        and not _hostname_ends_in_ipv4_number(callback_hostname)
+    )
 
 
 def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:
@@ -159,6 +261,8 @@ class OAuthClientConfigResolution:
     config: OAuthClientConfig
     service: str
     custom: bool = True
+    dynamically_registered: bool = False
+    registered_redirect_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,10 +615,19 @@ class OAuthProvider:
             credentials = manager.load_credentials(service)
             config = self._stored_client_config_from_service(runtime_paths, credentials, True)
             if config is not None:
+                credentials = credentials or {}
+                runtime_bootstrapped = credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is True
+                registered_redirect_uri = credentials.get(OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY)
                 return OAuthClientConfigResolution(
                     config=config,
                     service=service,
-                    custom=(credentials or {}).get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True,
+                    custom=not runtime_bootstrapped,
+                    dynamically_registered=(
+                        runtime_bootstrapped and credentials.get("_source") == OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE
+                    ),
+                    registered_redirect_uri=(
+                        registered_redirect_uri if isinstance(registered_redirect_uri, str) else None
+                    ),
                 )
         for service in self.shared_client_config_services:
             credentials = manager.load_credentials(service)

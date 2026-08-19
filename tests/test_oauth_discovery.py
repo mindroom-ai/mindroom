@@ -11,7 +11,10 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+)
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
 from mindroom.oauth.discovery import (
@@ -19,6 +22,7 @@ from mindroom.oauth.discovery import (
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
     _cross_loop_lock,
     _discover_metadata,
+    _stored_registration,
 )
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -80,7 +84,13 @@ class _ResourceOriginDiscoveryClient:
     ) -> _Response:
         del headers
         self.posts.append((url, json))
-        return _Response({"client_id": "registered-public-client"}, 201)
+        return _Response(
+            {
+                "client_id": "registered-public-client",
+                "redirect_uris": ["https://mindroom.example.test/api/oauth/example/callback"],
+            },
+            201,
+        )
 
 
 class _BlockingRegistrationClient(_ResourceOriginDiscoveryClient):
@@ -271,10 +281,44 @@ async def test_resource_origin_metadata_registers_public_client(
     assert get_runtime_credentials_manager(runtime_paths).load_credentials("example_oauth_client") == {
         "client_id": "registered-public-client",
         "redirect_uri": "https://mindroom.example.test/api/oauth/example/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "https://mindroom.example.test/api/oauth/example/callback",
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "example",
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
+
+
+@pytest.mark.parametrize(
+    "registered_redirect_uris",
+    [None, [], ["https://other.example.test/api/oauth/example/callback"]],
+)
+def test_dynamic_registration_rejects_unconfirmed_redirect_uri(
+    tmp_path: Path,
+    registered_redirect_uris: list[str] | None,
+) -> None:
+    """Only callback metadata returned by the registration server is confirmed."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    provider = OAuthProvider(
+        id="example",
+        display_name="Example",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",  # noqa: S106
+        scopes=(),
+        allow_empty_scopes=True,
+        credential_service="example_oauth",
+        client_config_services=("example_oauth_client",),
+        token_endpoint_auth_method="none",  # noqa: S106
+    )
+    registration: dict[str, Any] = {"client_id": "registered-public-client"}
+    if registered_redirect_uris is not None:
+        registration["redirect_uris"] = registered_redirect_uris
+
+    with pytest.raises(OAuthProviderError, match="did not confirm redirect_uri"):
+        _stored_registration(provider, runtime_paths, registration)
 
 
 @pytest.mark.asyncio
