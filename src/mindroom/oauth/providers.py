@@ -53,25 +53,84 @@ _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
 _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
 
 
-def is_oauth_loopback_hostname(hostname: str | None) -> bool:
-    """Return whether a hostname resolves by definition to the local loopback interface."""
-    if hostname is None:
-        return False
-    normalized_hostname = hostname.rstrip(".").casefold()
-    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
-        return True
+def _normalized_oauth_hostname(hostname: str | None) -> str | None:
+    """Return a validated ASCII hostname without browser-canonicalization ambiguity."""
+    if hostname is None or "%" in hostname:
+        return None
     try:
-        address = ipaddress.ip_address(normalized_hostname)
+        normalized_hostname = hostname.encode("idna").decode("ascii").rstrip(".").casefold()
+    except UnicodeError:
+        return None
+    if not normalized_hostname or len(normalized_hostname) > 253:
+        return None
+    try:
+        ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        labels = normalized_hostname.split(".")
+        if any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(character.isalnum() or character == "-" for character in label)
+            for label in labels
+        ):
+            return None
+    return normalized_hostname
+
+
+def _oauth_ip_address(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse strict and browser-compatible numeric IP address forms without DNS."""
+    try:
+        return ipaddress.ip_address(hostname)
     except ValueError:
         try:
-            address = ipaddress.IPv4Address(socket.inet_aton(normalized_hostname))
+            return ipaddress.IPv4Address(socket.inet_aton(hostname))
         except OSError:
-            return False
+            return None
+
+
+def _is_loopback_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an IP address, including an IPv4-mapped address, is loopback."""
     return address.is_loopback or (
         isinstance(address, ipaddress.IPv6Address)
         and address.ipv4_mapped is not None
         and address.ipv4_mapped.is_loopback
     )
+
+
+def _hostname_ends_in_ipv4_number(hostname: str) -> bool:
+    """Return whether browser URL parsing treats the final label as an IPv4 number."""
+    final_label = hostname.rsplit(".", maxsplit=1)[-1]
+    return final_label.isdigit() or (
+        final_label.startswith("0x")
+        and len(final_label) > 2
+        and all(character in "0123456789abcdef" for character in final_label[2:])
+    )
+
+
+def is_oauth_loopback_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname resolves by definition to the local loopback interface."""
+    normalized_hostname = _normalized_oauth_hostname(hostname)
+    if normalized_hostname is None:
+        return False
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return True
+    address = _oauth_ip_address(normalized_hostname)
+    return address is not None and _is_loopback_address(address)
+
+
+def is_valid_non_loopback_oauth_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname is valid and cannot canonicalize to a loopback address."""
+    normalized_hostname = _normalized_oauth_hostname(hostname)
+    if normalized_hostname is None:
+        return False
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return False
+    address = _oauth_ip_address(normalized_hostname)
+    if address is not None:
+        return not _is_loopback_address(address)
+    return not _hostname_ends_in_ipv4_number(normalized_hostname)
 
 
 def oauth_connect_url_requires_host_browser(connect_url: str | None) -> bool:

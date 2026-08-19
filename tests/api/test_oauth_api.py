@@ -990,7 +990,17 @@ def test_oauth_entrypoints_reject_paired_client_from_remote_request(
                 f"https://{hostname}:8000/api/oauth/public_mail/callback",
                 "https://mindroom.example.test",
             )
-            for hostname in ("2130706433", "127.1", "0x7f000001", "0177.0.0.1")
+            for hostname in (
+                "2130706433",
+                "127.1",
+                "0x7f000001",
+                "0177.0.0.1",
+                "%6cocalhost",
+                "%31%32%37.0.0.1",
+                "127\u30020\u30020\u30021",
+                "\uff11\uff12\uff17.\uff10.\uff10.\uff11",
+                "\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54",
+            )
         ],
     ],
 )
