@@ -43,7 +43,8 @@ defaults:
 
 `allowed_tools` contains toolkit names, not function names.
 A non-empty list restricts the launch grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
-An empty list captures the agent's full callable tool surface at launch but preapproves none of it for background use.
+An empty list captures the agent's full background-eligible callable surface at launch but preapproves none of it for background use.
+The `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
 The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
@@ -216,3 +217,7 @@ Design watchers so they can be launched again from known state rather than assum
 
 Process output is bounded, and cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
 When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
+
+Terminal runs are retained for 30 days by default.
+After that window, lifecycle maintenance removes the private source and capability snapshot, background approval rows, durable tool-call receipts, and the terminal run row.
+Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to a finite positive number of seconds to change the window; zero, negative, nonnumeric, and non-finite values are rejected at startup.

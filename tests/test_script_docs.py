@@ -17,6 +17,10 @@ def test_background_script_docs_cover_security_and_lifecycle() -> None:
         "interrupted",
         "indeterminate",
         "MINDROOM_SCRIPT_GATEWAY_URL",
+        "MINDROOM_SCRIPT_RETENTION_SECONDS",
         "local execution",
     ):
         assert required in text
+
+    environment_reference = Path("docs/configuration/index.md").read_text(encoding="utf-8")
+    assert "MINDROOM_SCRIPT_RETENTION_SECONDS" in environment_reference

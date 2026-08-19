@@ -373,7 +373,8 @@ MindRoom now supports background Python only through the primary-owned `script` 
 The primary runtime durably owns run identity, requester-and-agent scope, capability revocation, launch grants, approval receipts, runtime limits, and desired cancellation state.
 The worker-local supervisor owns the process handle, bounded output, status checks, graceful signals, and force kills.
 Scripts call governed tools through the authenticated script gateway rather than receiving the primary runtime's tool objects or secrets.
-The source and raw capability are staged in a private run directory under the addressed agent workspace, and the raw capability is removed during terminal cleanup.
+In worker mode, the source and raw capability are staged in a private run directory under the dedicated worker state root's `workspace`; unsafe local mode instead uses the canonical agent workspace.
+The raw capability is removed during terminal cleanup in either mode.
 A worker loss, eviction, restart, migration, or missing supervisor handle transitions the run to `interrupted`; the first release does not restart the Python source automatically.
 Ordinary unmanaged background commands remain outside the product contract even when they happen to outlive one tool request.
 See [Background Python Scripts](../tools/background-scripts.md) for configuration, SDK, approval, cancellation, and self-trigger guidance.

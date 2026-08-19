@@ -56,6 +56,7 @@ logger = get_logger(__name__)
 
 _REMOVED_AGENT_REASON = "Owning agent was removed by configuration reload."
 _ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload."
+_SCRIPT_TOOL_REMOVED_REASON = "Background script tool was removed by configuration reload."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -541,13 +542,20 @@ class ScriptRuntimeLifecycle:
             for agent_name in set(current_config.agents) & set(plan.new_config.agents)
             if _agent_isolation_changed(current_config.agents[agent_name], plan.new_config.agents[agent_name])
         }
-        if not removed_agents and not isolation_changes:
+        script_tool_removals = {
+            agent_name
+            for agent_name in set(current_config.agents) & set(plan.new_config.agents)
+            if _agent_has_script_tool(current_config, agent_name)
+            and not _agent_has_script_tool(plan.new_config, agent_name)
+        }
+        if not removed_agents and not isolation_changes and not script_tool_removals:
             return
         try:
             await asyncio.wait_for(
                 self._apply_update_pass(
                     removed_agents=removed_agents,
                     isolation_changes=isolation_changes,
+                    script_tool_removals=script_tool_removals,
                 ),
                 timeout=self.pass_timeout_seconds,
             )
@@ -559,13 +567,19 @@ class ScriptRuntimeLifecycle:
         *,
         removed_agents: set[str],
         isolation_changes: set[str],
+        script_tool_removals: set[str],
     ) -> None:
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        affected = [run for run in runs if run.agent_name in removed_agents | isolation_changes]
+        affected_agents = removed_agents | isolation_changes | script_tool_removals
+        affected = [run for run in runs if run.agent_name in affected_agents]
         semaphore = asyncio.Semaphore(self.pass_concurrency)
 
         def reason_for(run: ScriptRunRecord) -> str:
-            return _REMOVED_AGENT_REASON if run.agent_name in removed_agents else _ISOLATION_CHANGE_REASON
+            if run.agent_name in removed_agents:
+                return _REMOVED_AGENT_REASON
+            if run.agent_name in isolation_changes:
+                return _ISOLATION_CHANGE_REASON
+            return _SCRIPT_TOOL_REMOVED_REASON
 
         async def persist_revocation(run: ScriptRunRecord) -> bool:
             async with semaphore:
@@ -878,6 +892,11 @@ def build_script_runtime(
 def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool:
     """Return whether one agent's process isolation contract changed."""
     return current.private != updated.private
+
+
+def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
+    """Return whether one agent's effective tool surface includes script controls."""
+    return any(entry.name == "script" for entry in config.resolve_entity(agent_name).tool_configs)
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:

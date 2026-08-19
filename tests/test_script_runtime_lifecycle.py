@@ -442,6 +442,50 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path: Path) -> None:
+    """Removing launch authority must also revoke capabilities already in use."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        return store.request_cancel(run_id, reason=reason)
+
+    manager = SimpleNamespace(
+        request_revocation=MagicMock(side_effect=request_revocation),
+        revoke=AsyncMock(return_value=run),
+        reconcile_durable=AsyncMock(return_value=run),
+    )
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "tools": ["calculator"]}},
+        defaults={"tools": []},
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock()),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda: None,
+    )
+
+    await runtime.apply_update_plan(_plan(old_config, new_config))
+
+    manager.request_revocation.assert_called_once_with(
+        run_id=run.run_id,
+        reason="Background script tool was removed by configuration reload.",
+    )
+    assert store.get_run(run.run_id).cancel_requested_at is not None
+    manager.revoke.assert_awaited_once_with(
+        run.run_id,
+        reason="Background script tool was removed by configuration reload.",
+    )
+    manager.reconcile_durable.assert_awaited_once_with(run_id=run.run_id, broker_revoked=True)
+
+
+@pytest.mark.asyncio
 async def test_isolation_change_interrupts_running_script_without_replacing_services(tmp_path: Path) -> None:
     """Isolation changes interrupt runs without replacing process-local services."""
     runtime_paths = _runtime_paths(tmp_path)
