@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio import crypto
@@ -36,6 +36,9 @@ from mindroom.constants import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = get_logger(__name__)
 
@@ -270,8 +273,7 @@ def _build_terminal_edit_preview(
         msg = "Large-message preview body must be text"
         raise TypeError(msg)
 
-    inner_limit = len(preview_body.encode("utf-8"))
-    while True:
+    def build_inner(inner_limit: int) -> dict[str, Any]:
         inner_content = dict(preview_content)
         inner_content["body"] = (
             _create_preview(
@@ -287,28 +289,59 @@ def _build_terminal_edit_preview(
             sidecar_metadata = dict(sidecar_metadata)
             sidecar_metadata["preview_size"] = len(inner_content["body"])
             inner_content["io.mindroom.long_text"] = sidecar_metadata
-        outer_limit = len(inner_content["body"].encode("utf-8"))
-        while True:
-            outer_body = (
-                f"* {_create_preview(preview_text, outer_limit, continuation_indicator=continuation_indicator)}"
-                if outer_limit > 0
-                else ""
-            )
-            modified_content: dict[str, Any] = {
-                "msgtype": source_content.get("msgtype", "m.text"),
-                "body": outer_body,
-                "m.new_content": inner_content,
-                "m.relates_to": content.get("m.relates_to", {}),
-            }
-            _copy_edit_wrapper_metadata(source_content, modified_content)
-            if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
-                return modified_content
-            if outer_limit == 0:
-                break
-            outer_limit = max(0, outer_limit // 2)
-        if inner_limit == 0:
-            raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
-        inner_limit = max(0, inner_limit // 2)
+        return inner_content
+
+    def build_event(inner_content: dict[str, Any], outer_limit: int) -> dict[str, Any]:
+        outer_body = (
+            f"* {_create_preview(preview_text, outer_limit, continuation_indicator=continuation_indicator)}"
+            if outer_limit > 0
+            else ""
+        )
+        modified_content: dict[str, Any] = {
+            "msgtype": source_content.get("msgtype", "m.text"),
+            "body": outer_body,
+            "m.new_content": inner_content,
+            "m.relates_to": content.get("m.relates_to", {}),
+        }
+        _copy_edit_wrapper_metadata(source_content, modified_content)
+        return modified_content
+
+    def fits(inner_content: dict[str, Any], outer_limit: int) -> bool:
+        return _calculate_event_size(build_event(inner_content, outer_limit)) <= _MATRIX_EVENT_HARD_LIMIT
+
+    empty_inner = build_inner(0)
+    if not fits(empty_inner, 0):
+        raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
+
+    maximum_inner_limit = len(preview_body.encode("utf-8"))
+    full_inner = build_inner(maximum_inner_limit)
+    if fits(full_inner, 0):
+        fitted_inner = full_inner
+    else:
+        inner_limit = _largest_fitting_limit(
+            maximum_inner_limit,
+            lambda candidate_limit: fits(build_inner(candidate_limit), 0),
+        )
+        fitted_inner = build_inner(inner_limit)
+
+    outer_limit = _largest_fitting_limit(
+        len(fitted_inner["body"].encode("utf-8")),
+        lambda candidate_limit: fits(fitted_inner, candidate_limit),
+    )
+    return build_event(fitted_inner, outer_limit)
+
+
+def _largest_fitting_limit(maximum: int, fits: Callable[[int], bool]) -> int:
+    """Return the greatest monotonic byte limit accepted by ``fits``."""
+    lower = 0
+    upper = maximum
+    while lower < upper:
+        candidate = (lower + upper + 1) // 2
+        if fits(candidate):
+            lower = candidate
+        else:
+            upper = candidate - 1
+    return lower
 
 
 def _ensure_event_fits(content: dict[str, Any], *, room_id: str) -> None:

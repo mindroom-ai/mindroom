@@ -1,7 +1,7 @@
 """Tests for large message handling."""
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -725,6 +725,64 @@ async def test_prepare_large_message_never_returns_an_unrepresentable_payload() 
 
     with pytest.raises(ValueError, match="cannot fit within the Matrix event limit"):
         await prepare_large_message(client, "!room:server", edit_content)
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_edit_keeps_the_largest_outer_preview_that_fits() -> None:
+    """A small overflow must trim only the bytes the finished envelope cannot carry."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/maximal-preview"))
+    text = "x" * 20_500
+    metadata = "m" * 10_500
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            "io.mindroom.test_metadata": metadata,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+        "io.mindroom.test_metadata": metadata,
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["m.new_content"]["body"] == text
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+    outer_preview = result["body"][2:]
+    assert outer_preview.endswith("[Message continues in attached file]")
+    visible_prefix_length = len(outer_preview) - len("\n\n[Message continues in attached file]")
+    one_more_byte = dict(result)
+    one_more_byte["body"] = f"* {text[: visible_prefix_length + 1]}\n\n[Message continues in attached file]"
+    assert _calculate_event_size(one_more_byte) > _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_edit_rejects_irreducible_metadata_before_repeated_fitting() -> None:
+    """An impossible envelope is detected from its empty-preview form."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/impossible-metadata"))
+    text = "x" * 30_000
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            "io.mindroom.required_metadata": "m" * 70_000,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        "msgtype": "m.text",
+    }
+
+    with (
+        patch(
+            "mindroom.matrix.large_messages._calculate_event_size",
+            wraps=_calculate_event_size,
+        ) as calculate_size,
+        pytest.raises(ValueError, match="cannot fit within the Matrix event limit"),
+    ):
+        await prepare_large_message(client, "!room:server", edit_content)
+
+    assert calculate_size.call_count <= 3
 
 
 @pytest.mark.asyncio
