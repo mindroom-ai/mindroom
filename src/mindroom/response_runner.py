@@ -55,7 +55,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
-    fetch_latest_bundled_edit_body,
+    fetch_latest_visible_body,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
@@ -90,7 +90,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
-    build_restart_interrupted_body,
+    build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
 )
@@ -142,6 +142,17 @@ from .response_lifecycle import (
 _INTERRUPTED_APPROVAL_RECOVERY_REASON = (
     "Tool approval continuation was interrupted before final delivery and denied safely."
 )
+
+
+def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart", "interrupted"] | None:
+    """Recover the cancellation provenance persisted for an interrupted approval."""
+    if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
+        return "sync_restart"
+    cancel_source = cancel_source_from_failure_reason(reason)
+    if cancel_source == "user_stop" or cancel_failure_reason(cancel_source) != reason:
+        return None
+    return cancel_source
+
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -1157,8 +1168,13 @@ class ResponseRunner:
     ) -> None:
         """Preserve partial text for interrupted continuations, but not explicit stops."""
         reason = outcome.failure_reason or "Tool approval continuation failed safely."
-        if outcome.terminal_status == "cancelled" and cancel_source_from_failure_reason(reason) != "user_stop":
-            await self._settle_interrupted_approval_recovery(continuation)
+        cancel_source = cancel_source_from_failure_reason(reason)
+        if outcome.terminal_status == "cancelled" and cancel_source != "user_stop":
+            await self._settle_interrupted_approval_recovery(
+                continuation,
+                reason=cancel_failure_reason(cancel_source),
+                cancel_source=cancel_source,
+            )
         else:
             await self._approval_responses.settle_failure(continuation, reason)
 
@@ -1210,38 +1226,49 @@ class ResponseRunner:
                 _INTERRUPTED_APPROVAL_RECOVERY_REASON,
             )
             return claimed.response_event_id if settled else None
-        settled = await self._settle_interrupted_approval_recovery(claimed)
+        settled = await self._settle_interrupted_approval_recovery(
+            claimed,
+            reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON,
+            cancel_source="sync_restart",
+        )
         return claimed.response_event_id if settled else None
 
-    async def _settle_interrupted_approval_recovery(self, continuation: ApprovalContinuation) -> bool:
+    async def _settle_interrupted_approval_recovery(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        reason: str,
+        cancel_source: Literal["sync_restart", "interrupted"],
+    ) -> bool:
         """Fence an uncertain stale claim and settle it with the committed visible body."""
         failing = continuation
         if failing.state != "failing":
             requested = await self._approval_responses.request_failure(
                 failing,
-                _INTERRUPTED_APPROVAL_RECOVERY_REASON,
+                reason,
             )
             if requested is None:
                 return False
             failing = requested
-        update = await self._approval_restart_interruption_update(failing)
+        update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        visible_text = update
         return await self._approval_responses.settle_failure(
             failing,
-            _INTERRUPTED_APPROVAL_RECOVERY_REASON,
-            visible_text=visible_text,
+            reason,
+            visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
 
-    async def _approval_restart_interruption_update(
+    async def _approval_interruption_update(
         self,
         continuation: ApprovalContinuation,
+        *,
+        cancel_source: Literal["sync_restart", "interrupted"],
     ) -> str | None:
-        """Read the latest committed edit and build its restart terminalization."""
+        """Read the latest committed edit and build its interruption terminalization."""
         try:
-            body = await fetch_latest_bundled_edit_body(
+            body = await fetch_latest_visible_body(
                 self._client(),
                 room_id=continuation.room_id,
                 event_id=continuation.response_event_id,
@@ -1261,8 +1288,11 @@ class ResponseRunner:
                 error=str(error),
             )
             return None
+        note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
         return (
-            body if body.rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE) else build_restart_interrupted_body(body)
+            body
+            if body.rstrip().endswith(note)
+            else build_cancelled_response_update(body, cancel_source=cancel_source)[0]
         )
 
     async def _recover_frozen_approval_final(
@@ -2243,9 +2273,14 @@ class ResponseRunner:
                 owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
                 return True, event_id if owns_final else None
             reason = owned.failure_reason or "Tool approval continuation was interrupted and denied safely."
+            cancel_source = _approval_interruption_cancel_source(reason)
             settled = (
-                await self._settle_interrupted_approval_recovery(owned)
-                if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON
+                await self._settle_interrupted_approval_recovery(
+                    owned,
+                    reason=reason,
+                    cancel_source=cancel_source,
+                )
+                if cancel_source is not None
                 else await self._approval_responses.settle_failure(owned, reason)
             )
             return True, owned.response_event_id if settled else None

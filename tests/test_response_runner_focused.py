@@ -69,7 +69,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_visible_messages import fetch_latest_bundled_edit_body
+from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
@@ -1207,7 +1207,7 @@ async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Pa
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.response_runner.fetch_latest_bundled_edit_body",
+            "mindroom.response_runner.fetch_latest_visible_body",
             new=AsyncMock(return_value="committed partial"),
         ),
         patch(
@@ -1255,11 +1255,153 @@ async def test_claimed_approval_user_stop_keeps_user_stop_settlement(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_path: Path) -> None:
+    """A generic cancellation preserves its provenance instead of claiming a restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-interrupted",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="current-runtime",
+    )
+    assert claimed is not None
+
+    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={"body": request.new_text},
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$waiting",
+            delivered_projections=(),
+        )
+        return True
+
+    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+    outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$waiting",
+        failure_reason="interrupted",
+        is_visible_response=True,
+    )
+
+    fetch_body = AsyncMock(side_effect=[None, "committed partial"])
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=fetch_body,
+        ),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        await runner._settle_failed_approval_outcome(claimed, outcome)
+        failing = await store.approval_continuation(continuation.approval_id)
+        assert failing is not None
+        handled, event_id = await runner._recover_nonready_approval(
+            failing,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert handled
+    assert event_id == "$waiting"
+    assert fetch_body.await_count == 2
+    edit_request = edit_text.await_args.args[0]
+    assert edit_request.new_text == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
+    assert edit_request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+
+
+def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
+    """Return one complete visible Matrix event response."""
+    response = nio.RoomGetEventResponse.from_dict(
+        {
+            "event_id": "$waiting",
+            "sender": sender,
+            "origin_server_ts": 1_000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": body},
+        },
+    )
+    assert isinstance(response, nio.RoomGetEventResponse)
+    return response
+
+
+def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent:
+    """Return one encrypted Matrix event."""
+    event = nio.MegolmEvent.from_dict(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": 2_000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "ciphertext",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+            },
+        },
+    )
+    assert isinstance(event, nio.MegolmEvent)
+    return event
+
+
+def _decrypted_edit(*, sender: str) -> nio.RoomMessage:
+    """Return the visible edit corresponding to `_encrypted_event`."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": "$edit",
+            "sender": sender,
+            "origin_server_ts": 2_000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "latest partial",
+                "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$waiting"},
+            },
+        },
+    )
+    assert isinstance(event, nio.RoomMessage)
+    return event
+
+
+async def _relations(*events: nio.Event) -> AsyncIterator[nio.Event]:
+    """Yield relation fixtures in server order."""
+    for event in events:
+        yield event
+
+
+@pytest.mark.asyncio
 async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(tmp_path: Path) -> None:
     """An unreadable authoritative edit is retryable, not permission to use stale text."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    response = nio.RoomGetEventResponse()
-    response.event = MagicMock(source={})
+    response = _visible_event_response(sender=runner.deps.matrix_full_id, body="original partial")
     client = runner._client()
     client.room_get_event = AsyncMock(return_value=response)
     extract_body = AsyncMock(side_effect=[(None, None), ("older partial", {})])
@@ -1271,7 +1413,7 @@ async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(t
         ),
         patch("mindroom.matrix.client_visible_messages.extract_visible_edit_body", new=extract_body),
     ):
-        update = await fetch_latest_bundled_edit_body(
+        update = await fetch_latest_visible_body(
             client,
             room_id="!room:localhost",
             event_id="$waiting",
@@ -1284,21 +1426,71 @@ async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(t
 
 
 @pytest.mark.asyncio
-async def test_restart_recovery_uses_original_body_when_no_edit_exists(tmp_path: Path) -> None:
-    """A verified unedited response still has an authoritative visible body."""
+@pytest.mark.parametrize(
+    ("decryptable", "expected_body"),
+    [(True, "latest partial"), (False, None)],
+    ids=("decrypted", "unreadable"),
+)
+async def test_restart_recovery_uses_only_decryptable_latest_relation(
+    tmp_path: Path,
+    *,
+    decryptable: bool,
+    expected_body: str | None,
+) -> None:
+    """A missing bundle resolves its encrypted relation without stale fallback."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(return_value=_relations(_encrypted_event(sender=sender)))
+    client.olm = MagicMock()
+    client.decrypt_event = (
+        MagicMock(return_value=_decrypted_edit(sender=sender))
+        if decryptable
+        else MagicMock(side_effect=nio.EncryptionError("missing session"))
+    )
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == expected_body
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_retries_when_original_cannot_decrypt(tmp_path: Path) -> None:
+    """An undecryptable original event cannot become a marker-only replacement."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     response = nio.RoomGetEventResponse()
-    response.event = MagicMock(
-        source={
-            "type": "m.room.message",
-            "sender": runner.deps.matrix_full_id,
-            "content": {"msgtype": "m.text", "body": "original partial"},
-        },
-    )
+    response.event = _encrypted_event(sender=runner.deps.matrix_full_id, event_id="$waiting")
     client = runner._client()
     client.room_get_event = AsyncMock(return_value=response)
 
-    body = await fetch_latest_bundled_edit_body(
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body is None
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_uses_original_body_when_no_edit_exists(tmp_path: Path) -> None:
+    """A verified unedited response still has an authoritative visible body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    client = runner._client()
+    client.room_get_event = AsyncMock(
+        return_value=_visible_event_response(sender=runner.deps.matrix_full_id, body="original partial"),
+    )
+
+    body = await fetch_latest_visible_body(
         client,
         room_id="!room:localhost",
         event_id="$waiting",

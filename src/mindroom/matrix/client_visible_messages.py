@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import nio
+from nio.api import RelationshipType
 from typing_extensions import TypeIs
 
 from mindroom.constants import STREAM_STATUS_KEY
@@ -248,7 +250,58 @@ async def extract_visible_edit_body(
     )
 
 
-async def fetch_latest_bundled_edit_body(
+async def _latest_relation_or_original_body(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    event_id: str,
+    event: VisibleRoomMessage,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    trusted_sender_ids: Collection[str] | None,
+) -> str | None:
+    """Read the newest valid replacement relation, or the original body."""
+    relations = client.room_get_event_relations(
+        room_id,
+        event_id,
+        RelationshipType.replacement,
+        direction=nio.MessageDirection.back,
+    )
+    async with contextlib.aclosing(relations):
+        async for candidate in relations:
+            replacement = candidate
+            if isinstance(replacement, nio.MegolmEvent):
+                if client.olm is None:
+                    return None
+                try:
+                    replacement = client.decrypt_event(replacement)
+                except nio.EncryptionError:
+                    return None
+            if not is_visible_room_message(replacement):
+                return None
+            if replacement.sender != event.sender:
+                continue
+            body, _content = await extract_visible_edit_body(
+                replacement.source,
+                client,
+                config=config,
+                runtime_paths=runtime_paths,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+            return body
+
+    _resolved_source, body = await resolve_visible_event_source(
+        event.source,
+        client,
+        fallback_body=room_message_fallback_body(event),
+        config=config,
+        runtime_paths=runtime_paths,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    return body
+
+
+async def fetch_latest_visible_body(
     client: nio.AsyncClient,
     *,
     room_id: str,
@@ -257,32 +310,36 @@ async def fetch_latest_bundled_edit_body(
     runtime_paths: RuntimePaths,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
-    """Fetch an event's authoritative bundled edit body, failing closed."""
+    """Fetch an event's authoritative latest visible body, failing closed."""
     response = await client.room_get_event(room_id, event_id)
     if not isinstance(response, nio.RoomGetEventResponse):
         return None
-    event_source = response.event.source if isinstance(response.event.source, dict) else None
+    event = response.event
+    if not is_visible_room_message(event):
+        return None
+    event_source = event.source if isinstance(event.source, dict) else None
     if event_source is None:
         return None
     replacements = bundled_replacement_candidates(event_source)
-    if not replacements:
-        _resolved_source, body = await resolve_visible_event_source(
-            event_source,
+    if replacements:
+        body, _content = await extract_visible_edit_body(
+            replacements[0],
             client,
-            fallback_body=room_message_fallback_body(response.event),
             config=config,
             runtime_paths=runtime_paths,
             trusted_sender_ids=trusted_sender_ids,
         )
         return body
-    body, _content = await extract_visible_edit_body(
-        replacements[0],
+
+    return await _latest_relation_or_original_body(
         client,
+        room_id=room_id,
+        event_id=event_id,
+        event=event,
         config=config,
         runtime_paths=runtime_paths,
         trusted_sender_ids=trusted_sender_ids,
     )
-    return body
 
 
 async def resolve_visible_event_source(
@@ -685,7 +742,7 @@ __all__ = [
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
-    "fetch_latest_bundled_edit_body",
+    "fetch_latest_visible_body",
     "is_visible_room_message",
     "message_preview",
     "replace_visible_message",
