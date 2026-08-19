@@ -899,7 +899,7 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
     return value
 
 
-def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
+async def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
     """Return the gateway URL injected into isolated script processes."""
     worker_process_enabled = script_execution_uses_worker(runtime_paths) or primary_worker_backend_is_dedicated(
         runtime_paths,
@@ -907,12 +907,12 @@ def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> 
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:
         gateway_url = explicit_url.rstrip("/")
-        _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        await _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
         return gateway_url
     public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
     if public_url:
         gateway_url = f"{public_url.rstrip('/')}/api/script-gateway"
-        _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
+        await _validate_script_gateway(gateway_url, worker_process_enabled=worker_process_enabled)
         return gateway_url
     if worker_process_enabled:
         msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
@@ -921,7 +921,7 @@ def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> 
     return f"http://{gateway_host}:{port}/api/script-gateway"
 
 
-def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
+async def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:
     parsed = urlsplit(gateway_url)
     try:
         port = parsed.port
@@ -942,7 +942,8 @@ def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) 
     if not worker_process_enabled:
         return
     try:
-        resolved = socket.getaddrinfo(
+        resolved = await asyncio.to_thread(
+            socket.getaddrinfo,
             parsed.hostname,
             port or (443 if parsed.scheme == "https" else 80),
             type=socket.SOCK_STREAM,

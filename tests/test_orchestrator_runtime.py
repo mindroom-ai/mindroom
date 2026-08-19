@@ -6,7 +6,7 @@ import asyncio
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -315,10 +315,14 @@ class TestAgentBot(AgentBotTestBase):
             del send
 
         started: list[tuple[str, int]] = []
+
+        async def record_started(host: str, port: int) -> None:
+            started.append((host, port))
+
         server = _SignalAwareUvicornServer(
             uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off", ws="websockets-sansio"),  # noqa: S104
             asyncio.Event(),
-            on_started=lambda host, port: started.append((host, port)),
+            on_started=record_started,
         )
         server.config.load()
         server.lifespan = server.config.lifespan_class(server.config)
@@ -354,7 +358,7 @@ class TestAgentBot(AgentBotTestBase):
                 _config: object,
                 _shutdown_requested: asyncio.Event | None,
                 *,
-                on_started: Callable[[str, int], None] | None = None,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
             ) -> None:
                 del on_started
 
@@ -401,14 +405,14 @@ class TestAgentBot(AgentBotTestBase):
                 _config: object,
                 _shutdown_requested: asyncio.Event | None,
                 *,
-                on_started: Callable[[str, int], None] | None = None,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
             ) -> None:
                 self.on_started = on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
                 assert callable(self.on_started)
-                self.on_started("127.0.0.1", 43210)
+                await self.on_started("127.0.0.1", 43210)
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()

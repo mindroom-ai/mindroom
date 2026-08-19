@@ -22,6 +22,7 @@ from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.script_runtime import (
     ScriptRuntimeLifecycle,
+    _release_worker_leases_before_deadline,
     _ScriptRuntimeUnavailableError,
     build_script_runtime,
     script_gateway_url,
@@ -191,7 +192,8 @@ def test_retention_rejects_non_finite_values(tmp_path: Path, raw: str) -> None:
         )
 
 
-def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
     """A dedicated worker must not receive an unreachable primary loopback URL."""
     runtime_paths = replace(
         _runtime_paths(tmp_path),
@@ -202,10 +204,11 @@ def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path: Path)
     )
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
-def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: Path) -> None:
     """A separate static runner must not receive the primary process's loopback URL."""
     runtime_paths = replace(
         _runtime_paths(tmp_path),
@@ -217,9 +220,10 @@ def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: P
     )
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("environment_name", "configured_url"),
     [
@@ -227,7 +231,7 @@ def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_path: P
         ("MINDROOM_PUBLIC_URL", "http://localhost:8765"),
     ],
 )
-def test_worker_gateway_rejects_explicit_loopback_urls(
+async def test_worker_gateway_rejects_explicit_loopback_urls(
     tmp_path: Path,
     environment_name: str,
     configured_url: str,
@@ -244,9 +248,10 @@ def test_worker_gateway_rejects_explicit_loopback_urls(
     )
 
     with pytest.raises(ValueError, match="non-loopback"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "configured_url",
     [
@@ -255,7 +260,7 @@ def test_worker_gateway_rejects_explicit_loopback_urls(
         "http://localtest.me:8765/api/script-gateway",
     ],
 )
-def test_worker_gateway_rejects_every_hostname_that_resolves_to_loopback(
+async def test_worker_gateway_rejects_every_hostname_that_resolves_to_loopback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     configured_url: str,
@@ -273,10 +278,11 @@ def test_worker_gateway_rejects_every_hostname_that_resolves_to_loopback(
     monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 8765))])
 
     with pytest.raises(ValueError, match="non-loopback"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
-def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
     """Malformed explicit gateway configuration fails before any worker launch."""
     runtime_paths = replace(
         _runtime_paths(tmp_path),
@@ -289,9 +295,10 @@ def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("environment_name", "configured_url"),
     [
@@ -301,7 +308,7 @@ def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None:
         ("MINDROOM_PUBLIC_URL", "https://gateway.test/base#fragment"),
     ],
 )
-def test_gateway_base_rejects_query_and_fragment_components(
+async def test_gateway_base_rejects_query_and_fragment_components(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     environment_name: str,
@@ -324,7 +331,38 @@ def test_gateway_base_rejects_query_and_fragment_components(
     )
 
     with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
-        script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+@pytest.mark.asyncio
+async def test_worker_gateway_dns_resolution_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker gateway validation cannot resolve DNS on the request loop thread."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            "MINDROOM_SCRIPT_GATEWAY_URL": "https://gateway.test/api/script-gateway",
+        },
+    )
+    request_loop_thread = threading.get_ident()
+    resolver_threads: list[int] = []
+
+    def resolve_gateway(*_args: object, **_kwargs: object) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        resolver_threads.append(threading.get_ident())
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve_gateway)
+
+    gateway_url = await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+    assert gateway_url == "https://gateway.test/api/script-gateway"
+    assert len(resolver_threads) == 1
+    assert resolver_threads[0] != request_loop_thread
 
 
 @pytest.mark.asyncio
@@ -1055,10 +1093,12 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
 ) -> None:
     """Reconciliation and lease release share one budget without losing release ownership."""
     release_lease = threading.Event()
+    release_started = threading.Event()
     lease_released = threading.Event()
     lease = _Lease(_Backend([]))
 
     def blocking_release() -> None:
+        release_started.set()
         assert release_lease.wait(timeout=1.0)
         lease.released = True
         lease_released.set()
@@ -1076,18 +1116,50 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
     runtime._activated_once = True
     runtime._worker_leases.append(lease)
 
+    reconciliation_started = asyncio.Event()
+
     async def blocking_complete_pass(_runtime: ScriptRuntimeLifecycle) -> None:
-        await asyncio.sleep(0.2)
+        reconciliation_started.set()
+        await asyncio.Event().wait()
 
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", blocking_complete_pass)
-    started = asyncio.get_running_loop().time()
+    shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.05))
     try:
-        await runtime.shutdown(timeout_seconds=0.05)
-        elapsed = asyncio.get_running_loop().time() - started
+        await asyncio.wait_for(reconciliation_started.wait(), timeout=1.0)
+        await asyncio.wait_for(shutdown, timeout=1.0)
+        assert release_started.is_set()
+        assert lease_released.is_set() is False
     finally:
         release_lease.set()
 
-    assert elapsed < 0.08
+    assert await asyncio.to_thread(lease_released.wait, 1.0)
+    assert lease.released is True
+
+
+@pytest.mark.asyncio
+async def test_expired_shutdown_deadline_retains_lease_release_owner() -> None:
+    """An exhausted shutdown budget returns without cancelling lease release."""
+    release_lease = threading.Event()
+    release_started = threading.Event()
+    lease_released = threading.Event()
+    lease = _Lease(_Backend([]))
+
+    def blocking_release() -> None:
+        release_started.set()
+        assert release_lease.wait(timeout=1.0)
+        lease.released = True
+        lease_released.set()
+
+    lease.release = blocking_release  # type: ignore[method-assign]
+    await _release_worker_leases_before_deadline(
+        [lease],
+        deadline=asyncio.get_running_loop().time(),
+        timeout_seconds=0.05,
+    )
+    assert await asyncio.to_thread(release_started.wait, 1.0)
+    assert lease_released.is_set() is False
+
+    release_lease.set()
     assert await asyncio.to_thread(lease_released.wait, 1.0)
     assert lease.released is True
 

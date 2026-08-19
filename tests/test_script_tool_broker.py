@@ -79,6 +79,27 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
+async def _cancel_cleanup_owner(
+    broker: ScriptToolBroker,
+    owner: asyncio.Task[None],
+) -> asyncio.Task[None]:
+    """Cancel one retained owner and return its explicit replacement."""
+    replacement_ready = asyncio.Event()
+    replacement: list[asyncio.Task[None]] = []
+
+    def capture_replacement(_completed: asyncio.Task[None]) -> None:
+        replacement.extend(task for task in broker._cleanup_tasks if task is not owner and not task.done())
+        replacement_ready.set()
+
+    owner.add_done_callback(capture_replacement)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    await asyncio.wait_for(replacement_ready.wait(), timeout=1.0)
+    assert len(replacement) == 1
+    return replacement[0]
+
+
 def _hook_registry(events: list[str]) -> HookRegistry:
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(_context: ToolBeforeCallContext) -> None:
@@ -1035,27 +1056,16 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     await broker.cancel_run(request.run_id)
 
     [body_owner] = broker._cleanup_tasks
-    body_owner.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await body_owner
-    await asyncio.sleep(0)
+    first_close_owner = await _cancel_cleanup_owner(broker, body_owner)
     release_body.set()
     assert await asyncio.to_thread(close_started.wait, 1.0)
 
     try:
-        [first_close_owner] = broker._cleanup_tasks
-        first_close_owner.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first_close_owner
-        await asyncio.sleep(0)
+        second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
         owned_after_first_cancel = bool(broker._cleanup_tasks)
         first_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
 
-        [second_close_owner] = broker._cleanup_tasks
-        second_close_owner.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await second_close_owner
-        await asyncio.sleep(0)
+        await _cancel_cleanup_owner(broker, second_close_owner)
         owned_after_second_cancel = bool(broker._cleanup_tasks)
         second_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
         close_finished_before_release = close_finished.is_set()
@@ -1071,6 +1081,64 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     assert second_drain is False
     assert close_finished_before_release is False
     assert close_calls == 1
+    assert broker._cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async-body cancellation cannot leave a blocking synchronous close unowned."""
+    body_entered = asyncio.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+
+    class BlockingCloseToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            close_started.set()
+            release_close.wait()
+            close_finished.set()
+
+        async def add(self, a: int, b: int) -> int:
+            body_entered.set()
+            await asyncio.Event().wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, BlockingCloseToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    request = _request(call_id="cancelled-async-close")
+    await broker.accept_authenticated(request, f"Bearer {token}")
+    await body_entered.wait()
+    broker.store.request_cancel(request.run_id)
+
+    cancellation = asyncio.create_task(broker.cancel_run(request.run_id))
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+    try:
+        await asyncio.wait_for(cancellation, timeout=1.0)
+        [first_close_owner] = broker._cleanup_tasks
+        second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
+        await _cancel_cleanup_owner(broker, second_close_owner)
+        cleanup_retained = bool(broker._cleanup_tasks)
+        drained_before_release = await drain_script_tool_cleanup(broker, timeout_seconds=0)
+        close_finished_before_release = close_finished.is_set()
+    finally:
+        release_close.set()
+
+    assert await asyncio.to_thread(close_finished.wait, 1.0)
+    assert await drain_script_tool_cleanup(broker, timeout_seconds=1.0)
+    assert cleanup_retained is True
+    assert drained_before_release is False
+    assert close_finished_before_release is False
     assert broker._cleanup_tasks == set()
 
 
@@ -1121,12 +1189,23 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     )
     lifecycle._activated_once = True
     monkeypatch.setattr(ScriptRuntimeLifecycle, "_complete_pass", AsyncMock())
+    drain_started = asyncio.Event()
+    original_drain = broker_module.drain_script_tool_cleanup
+
+    async def observing_drain(
+        observed_broker: ScriptToolBroker,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        drain_started.set()
+        return await original_drain(observed_broker, timeout_seconds=timeout_seconds)
+
+    monkeypatch.setattr("mindroom.orchestration.script_runtime.drain_script_tool_cleanup", observing_drain)
     shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=0.05))
-    await asyncio.sleep(0.01)
+    await asyncio.wait_for(drain_started.wait(), timeout=1.0)
 
     shutdown_waited_for_cleanup = shutdown.done() is False
-    original_cleanup.cancel()
-    await asyncio.sleep(0)
+    await _cancel_cleanup_owner(broker, original_cleanup)
     close_started_before_body_returned = close_started.is_set()
     await asyncio.wait_for(shutdown, timeout=0.2)
     cleanup_owned_after_timeout = bool(broker._cleanup_tasks)

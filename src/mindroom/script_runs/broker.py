@@ -547,11 +547,8 @@ class ScriptToolBroker:
     async def _connect_toolkit(self, toolkit: Toolkit) -> None:
         if not toolkit.requires_connect:
             return
-        if inspect.iscoroutinefunction(toolkit.connect):
-            await toolkit.connect()
-            return
         completion_task = asyncio.create_task(
-            _run_sync_toolkit_lifecycle(toolkit.connect),
+            _run_toolkit_lifecycle(toolkit.connect),
             name="script-toolkit-connect",
         )
         try:
@@ -627,47 +624,64 @@ class ScriptToolBroker:
             completion_task = completion_tracker.started_task()
             if completion_task is not None and not completion_task.done():
                 self._retain_toolkit_cleanup(completion_task, toolkit)
-                cleanup_transferred = True
+            else:
+                self._retain_toolkit_close(toolkit)
+            cleanup_transferred = True
             raise
         finally:
             if not cleanup_transferred:
-                await _close_toolkit(toolkit)
+                await self._close_toolkit_owned(toolkit)
+
+    async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
+        """Close one toolkit or transfer its exact close task on cancellation."""
+        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            if not close_task.done():
+                self._retain_cleanup_task(close_task)
+            raise
+
+    def _retain_toolkit_close(self, toolkit: Toolkit) -> None:
+        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
+        self._retain_cleanup_task(close_task)
 
     def _retain_toolkit_cleanup(
         self,
         completion_task: asyncio.Task[object],
         toolkit: Toolkit,
-        *,
-        close_task: asyncio.Task[None] | None = None,
     ) -> None:
-        async def cleanup() -> None:
+        async def finish_lifecycle() -> None:
             completion_failure: BaseException | None = None
-            owned_close_task = close_task
             try:
-                try:
-                    await asyncio.shield(completion_task)
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as exc:
-                    completion_failure = exc
-                if owned_close_task is None:
-                    owned_close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
-                await asyncio.shield(owned_close_task)
-            except asyncio.CancelledError:
-                self._retain_toolkit_cleanup(completion_task, toolkit, close_task=owned_close_task)
-                raise
+                await completion_task
+            except BaseException as exc:
+                completion_failure = exc
+            await _close_toolkit(toolkit)
             if completion_failure is not None:
                 raise completion_failure
 
-        cleanup_task = asyncio.create_task(cleanup(), name="script-toolkit-cleanup")
-        self._cleanup_tasks.add(cleanup_task)
+        lifecycle_task = asyncio.create_task(finish_lifecycle(), name="script-toolkit-lifecycle")
+        self._retain_cleanup_task(lifecycle_task)
+
+    def _retain_cleanup_task(self, retained_task: asyncio.Task[None]) -> None:
+        async def retain() -> None:
+            try:
+                await asyncio.shield(retained_task)
+            except asyncio.CancelledError:
+                if not retained_task.done():
+                    self._retain_cleanup_task(retained_task)
+                raise
+
+        owner_task = asyncio.create_task(retain(), name="script-toolkit-cleanup")
+        self._cleanup_tasks.add(owner_task)
 
         def forget_cleanup_task(completed: asyncio.Task[None]) -> None:
             self._cleanup_tasks.discard(completed)
             if not completed.cancelled():
                 completed.exception()
 
-        cleanup_task.add_done_callback(forget_cleanup_task)
+        owner_task.add_done_callback(forget_cleanup_task)
 
     def _prepare_execution(
         self,

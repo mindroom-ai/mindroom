@@ -201,7 +201,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         config: uvicorn.Config,
         shutdown_requested: asyncio.Event | None,
         *,
-        on_started: Callable[[str, int], None] | None = None,
+        on_started: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
@@ -222,7 +222,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         bound_port = bound_address[1]
         set_api_server_address(bound_host, bound_port)
         if self._on_started is not None:
-            self._on_started(bound_host, bound_port)
+            await self._on_started(bound_host, bound_port)
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
@@ -2301,9 +2301,9 @@ async def _run_api_server(
         ws="websockets-sansio",
     )
 
-    def on_started(bound_host: str, bound_port: int) -> None:
+    async def on_started(bound_host: str, bound_port: int) -> None:
         if script_runtime is not None:
-            script_runtime.bind_api(script_gateway_url(runtime_paths, host=bound_host, port=bound_port))
+            script_runtime.bind_api(await script_gateway_url(runtime_paths, host=bound_host, port=bound_port))
 
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
