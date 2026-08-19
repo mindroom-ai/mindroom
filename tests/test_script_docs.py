@@ -24,3 +24,6 @@ def test_background_script_docs_cover_security_and_lifecycle() -> None:
 
     environment_reference = Path("docs/configuration/index.md").read_text(encoding="utf-8")
     assert "MINDROOM_SCRIPT_RETENTION_SECONDS" in environment_reference
+
+    generated_reference = Path("skills/mindroom-docs/references/page__tools__background-scripts__index.md")
+    assert generated_reference.read_text(encoding="utf-8").startswith("# Background Python Scripts")

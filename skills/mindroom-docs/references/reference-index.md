@@ -38,6 +38,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
 | Memory & Storage | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
 | Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
+| Background Python Scripts | `tools/background-scripts.md` | `tools/background-scripts/index.md` | `page__tools__background-scripts__index.md` |
 | Automation & Platforms | `tools/automation-and-platforms.md` | `tools/automation-and-platforms/index.md` | `page__tools__automation-and-platforms__index.md` |
 | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | All Tools (Redirect) | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
