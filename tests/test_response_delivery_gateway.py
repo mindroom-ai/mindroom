@@ -759,6 +759,39 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert _calculate_event_size(frozen) <= 64_000
         assert client.room_send.await_args.kwargs["content"] == frozen
 
+    async def test_an_unrepresentable_final_is_refused_before_enqueue_or_send(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Irreducible metadata fails through the normal delivery outcome."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-edit"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 70_000),
+            existing_event_id="$placeholder",
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.required_metadata": "m" * 70_000},
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.failure_reason == "delivery_failed"
+        assert outbox.rows == {}
+        client.room_send.assert_not_awaited()
+
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
         tmp_path: Path,

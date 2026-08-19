@@ -304,6 +304,27 @@ async def test_send_message_outcome_maps_send_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_outcome_maps_an_unrepresentable_payload() -> None:
+    """Irreducible metadata is a typed refusal and never reaches Matrix."""
+    client = _mock_client()
+    client.upload.return_value = (
+        nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-message"}),
+        None,
+    )
+    content = {
+        "body": "x" * 70_000,
+        "msgtype": "m.text",
+        "io.mindroom.required_metadata": "m" * 70_000,
+    }
+
+    outcome = await send_message_outcome(client, "!room:localhost", content)
+
+    assert isinstance(outcome, MatrixDeliveryFailure)
+    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_maps_unexpected_response() -> None:
     """A non-send response maps to the unexpected-response kind."""
     client = _mock_client()

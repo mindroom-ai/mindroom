@@ -55,7 +55,7 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_message_result,
 )
-from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import (
@@ -412,6 +412,7 @@ class DeliveryGatewayDeps:
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
     MatrixDeliveryFailureKind.ENCRYPTION_GUARD: "encrypted delivery rejected by local trust policy",
     MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE: "room encryption state unknown",
+    MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE: "matrix event exceeds the hard size limit",
     MatrixDeliveryFailureKind.SEND_EXCEPTION: "matrix delivery raised a local exception",
     MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE: "matrix delivery returned an unexpected response",
 }
@@ -863,12 +864,15 @@ class DeliveryGateway:
         # homeserver had already accepted. An attempted row is already frozen,
         # so preparation is skipped and `enqueue` leaves that stored payload
         # untouched for the claimed send below.
-        content = await self._prepared_for_the_wire(
-            room_id,
-            content,
-            turn_id=request.delivery_turn_id,
-            stage=request.delivery_stage,
-        )
+        try:
+            content = await self._prepared_for_the_wire(
+                room_id,
+                content,
+                turn_id=request.delivery_turn_id,
+                stage=request.delivery_stage,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
         requested_delivery: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:
@@ -1004,12 +1008,15 @@ class DeliveryGateway:
         # upload again under a transaction ID already accepted. An attempted
         # row is already frozen, so preparation is skipped and
         # `enqueue` leaves that stored envelope untouched for the claimed send.
-        envelope = await self._prepared_for_the_wire(
-            room_id,
-            envelope,
-            turn_id=request.delivery_turn_id,
-            stage=DeliveryStage.FINAL,
-        )
+        try:
+            envelope = await self._prepared_for_the_wire(
+                room_id,
+                envelope,
+                turn_id=request.delivery_turn_id,
+                stage=DeliveryStage.FINAL,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
         delivered: DeliveredMatrixEvent | None = None
 
         async def send(claimed: MatrixDelivery) -> str:

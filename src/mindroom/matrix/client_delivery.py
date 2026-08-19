@@ -17,7 +17,7 @@ from nio.api import Api
 from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
@@ -48,6 +48,7 @@ class MatrixDeliveryFailureKind(enum.Enum):
 
     ENCRYPTION_GUARD = "encryption_guard"
     UNKNOWN_ENCRYPTION_STATE = "unknown_encryption_state"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     SEND_EXCEPTION = "send_exception"
     UNEXPECTED_RESPONSE = "unexpected_response"
 
@@ -392,12 +393,15 @@ async def send_message_outcome(
     )
     content_sent = content
     if not content_is_prepared:
-        content_sent = await prepare_large_message(
-            client,
-            room_id,
-            content,
-            room_encrypted=room_encryption_override,
-        )
+        try:
+            content_sent = await prepare_large_message(
+                client,
+                room_id,
+                content,
+                room_encrypted=room_encryption_override,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",

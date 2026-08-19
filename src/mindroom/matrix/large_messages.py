@@ -80,6 +80,10 @@ _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
 
 
+class MatrixEventTooLargeError(ValueError):
+    """The complete Matrix event cannot fit even after sidecar preparation."""
+
+
 def _is_passthrough_preview_key(key: object) -> bool:
     """Return whether one source key should stay on the preview event."""
     if not isinstance(key, str):
@@ -338,7 +342,7 @@ def _build_terminal_edit_preview(
 
     empty_inner = build_inner(0)
     if not fits(empty_inner, 0):
-        raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
+        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
 
     maximum_inner_limit = len(preview_body.encode("utf-8"))
     full_inner = build_inner(maximum_inner_limit)
@@ -382,7 +386,7 @@ def _ensure_event_fits(content: dict[str, Any], *, room_id: str) -> None:
         final_size_bytes=final_size,
         size_limit_bytes=_MATRIX_EVENT_HARD_LIMIT,
     )
-    raise ValueError(_UNREPRESENTABLE_MESSAGE_ERROR)
+    raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
 
 
 def _prefix_by_bytes(text: str, max_bytes: int) -> str:
