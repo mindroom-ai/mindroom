@@ -10363,8 +10363,10 @@ defaults:
 ```
 
 `allowed_tools` contains toolkit names, not function names.
-A non-empty list restricts the launch grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
-An empty list captures the agent's full background-eligible callable surface at launch but preapproves none of it for background use.
+MindRoom captures it when the script launches.
+A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
+An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
+Later configuration changes cannot expand a running script's unattended approval authority, including when they add toolkits to `allowed_tools`.
 The `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
@@ -10480,8 +10482,9 @@ Normal Matrix authorization is still enforced when a script supplies another roo
 
 ## Grants, Approval, And Revocation
 
-MindRoom captures the run's permitted toolkit-and-function pairs at launch.
+MindRoom captures the run's permitted toolkit-and-function pairs and unattended approval authority at launch.
 Every call intersects that launch grant with the agent's current live tool surface, so removing a tool or function revokes it without restarting the script.
+Adding toolkits or functions to the live surface, including through a later `allowed_tools` expansion, does not grant a running script new unattended authority.
 Configuration reloads that remove the agent, remove the `script` tool, or change requester isolation durably revoke affected runs before process reconciliation.
 
 Background calls use the same tool hooks, approval scripts, function-authored confirmation, execution identity, worker routing, result normalization, and audit events as an ordinary agent tool call.
@@ -10534,7 +10537,9 @@ Calls are serialized within one run to keep approval and side-effect order predi
 
 Scripts do not survive worker loss in the first release, and MindRoom does not automatically restart the Python source after an `interrupted` run.
 A primary-runtime restart can reconcile a still-live worker process, but worker eviction, restart, or migration may end it.
-Design watchers so they can be launched again from known state rather than assuming an immortal process.
+Worker configuration replacement and full upgrades do not preserve or relaunch active scripts.
+MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
+Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
 
 Process output is bounded, and cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
 When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
