@@ -10,6 +10,7 @@ import nio
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
+from nio import crypto
 
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
@@ -132,9 +133,10 @@ async def test_regular_message_over_limit() -> None:
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
 
-    # Should be an m.file message
-    assert sent_content["msgtype"] == "m.file"
-    assert sent_content["filename"] == "message-content.json"
+    # A direct send can cross into encryption while its upload yields, so its
+    # frozen sidecar is encrypted and carried by a parseable text preview.
+    assert sent_content["msgtype"] == "m.text"
+    assert "filename" not in sent_content
 
     # Should have truncated body preview
     assert len(sent_content["body"]) < len(large_text)
@@ -147,7 +149,8 @@ async def test_regular_message_over_limit() -> None:
     assert sent_content["io.mindroom.long_text"]["is_complete_content"] is True
 
     # Should have file URL
-    assert "url" in sent_content or "file" in sent_content
+    assert "url" not in sent_content
+    assert sent_content["file"]["url"].startswith("mxc://server/")
 
 
 @pytest.mark.asyncio
@@ -167,7 +170,7 @@ async def test_edit_message_with_lower_threshold() -> None:
     # Should be truncated due to edit limit
     # For edits, check m.new_content
     assert "m.new_content" in sent_content
-    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in sent_content["m.new_content"]
     assert len(sent_content["m.new_content"]["body"]) < len(text)
 
@@ -195,12 +198,20 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
     assert "m.new_content" in sent_content
-    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert sent_content["m.new_content"]["msgtype"] == "m.text"
     for key, value in extra_content.items():
         assert sent_content[key] == value
         assert sent_content["m.new_content"][key] == value
 
-    uploaded_payload = json.loads(client.uploads[0]["data"].read().decode("utf-8"))
+    encrypted_file = sent_content["m.new_content"]["file"]
+    uploaded_payload = json.loads(
+        crypto.attachments.decrypt_attachment(
+            client.uploads[0]["data"].read(),
+            encrypted_file["key"]["k"],
+            encrypted_file["hashes"]["sha256"],
+            encrypted_file["iv"],
+        ),
+    )
     for key, value in extra_content.items():
         assert uploaded_payload["m.new_content"][key] == value
 
@@ -285,7 +296,7 @@ async def test_streaming_initial_message_over_limit() -> None:
     # Should have sent with large message handling
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
-    assert sent_content["msgtype"] == "m.file"
+    assert sent_content["msgtype"] == "m.text"
     assert len(sent_content["body"]) < 60000
     assert "io.mindroom.long_text" in sent_content
 
@@ -324,7 +335,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
 
     # Edit should have large message handling
     assert "m.new_content" in edit_content
-    assert edit_content["m.new_content"]["msgtype"] == "m.file"
+    assert edit_content["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in edit_content["m.new_content"]
     assert len(edit_content["m.new_content"]["body"]) < 35000
 
@@ -376,7 +387,7 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
     assert nonterminal_large_edit["m.new_content"]["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
 
     terminal_large_edit = client.messages_sent[-1][2]
-    assert terminal_large_edit["m.new_content"]["msgtype"] == "m.file"
+    assert terminal_large_edit["m.new_content"]["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in terminal_large_edit["m.new_content"]
 
 
@@ -408,7 +419,7 @@ async def test_streaming_with_thread_context() -> None:
     assert relates_to.get("event_id") == "$thread_root" or relates_to.get("rel_type") == "m.thread"
 
     # Should have large message handling
-    assert sent_content["msgtype"] == "m.file"
+    assert sent_content["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in sent_content
 
 
@@ -552,7 +563,7 @@ async def test_streaming_finalize() -> None:
     sent_content = client.messages_sent[0][2]
 
     # Should have large message handling
-    assert sent_content["msgtype"] == "m.file"
+    assert sent_content["msgtype"] == "m.text"
     assert "io.mindroom.long_text" in sent_content
     # Should not have in-progress marker in final
     assert "⋯" not in sent_content["body"]

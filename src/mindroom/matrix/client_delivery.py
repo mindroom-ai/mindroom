@@ -399,6 +399,7 @@ async def send_message_outcome(
                 room_id,
                 content,
                 room_encrypted=room_encryption_override,
+                transition_safe=True,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))

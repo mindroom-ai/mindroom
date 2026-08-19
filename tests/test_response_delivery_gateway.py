@@ -836,9 +836,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert first.terminal_status == "error"
         frozen = dict(outbox.rows["$cause", "final"].payload)
-        assert frozen["msgtype"] == "m.file"
-        assert "url" in frozen
-        assert "file" not in frozen
+        assert frozen["msgtype"] == "m.text"
+        assert "url" not in frozen
+        assert frozen["file"]["url"] == "mxc://localhost/transition-safe-sidecar"
         event_source = {
             "content": frozen,
             "event_id": "$transition-safe",
@@ -846,8 +846,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             "origin_server_ts": 1,
             "type": "m.room.message",
         }
-        assert isinstance(nio.Event.parse_event(event_source), nio.RoomMessageFile)
-        assert isinstance(nio.RoomMessage.parse_decrypted_event(event_source), nio.RoomMessageFile)
+        assert isinstance(nio.Event.parse_event(event_source), nio.RoomMessageText)
+        assert isinstance(nio.RoomMessage.parse_decrypted_event(event_source), nio.RoomMessageText)
         assert (
             _calculate_delivery_event_size(
                 frozen,

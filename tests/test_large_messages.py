@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
+from nio import crypto
 from nio.crypto import OutboundGroupSession
 
 from mindroom.constants import (
@@ -67,7 +68,12 @@ def _large_text_content(prefix: str) -> dict[str, str]:
     return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
 
 
-def _actual_encrypted_event_size(content: dict[str, object], *, room_id: str) -> int:
+def _actual_encrypted_event_size(
+    content: dict[str, object],
+    *,
+    room_id: str,
+    device_id: str = "DEVICE",
+) -> int:
     """Encrypt one event with Megolm and measure the resulting content envelope."""
     session = OutboundGroupSession()
     session.shared = True
@@ -83,7 +89,7 @@ def _actual_encrypted_event_size(content: dict[str, object], *, room_id: str) ->
         "sender_key": "s" * 43,
         "ciphertext": session.encrypt(plaintext),
         "session_id": "i" * 43,
-        "device_id": "DEVICE",
+        "device_id": device_id,
     }
     relation = content.get("m.relates_to")
     if isinstance(relation, dict):
@@ -137,6 +143,67 @@ async def test_prepare_encrypted_normal_message_fits_after_megolm_encryption() -
     assert prepared["msgtype"] == "m.file"
     assert prepared["file"]["url"] == "mxc://server/encrypted-normal-sidecar"
     assert _actual_encrypted_event_size(prepared, room_id="!room:server") <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_transition_safe_plaintext_room_uses_an_encrypted_parseable_sidecar() -> None:
+    """A room transition must not expose sidecar bytes or invalidate the frozen preview."""
+    content = {"body": "x" * 100_000, "msgtype": "m.text"}
+    client = _UploadClient(nio.UploadResponse("mxc://server/transition-safe-sidecar"))
+
+    prepared = await prepare_large_message(
+        client,
+        "!room:server",
+        content,
+        room_encrypted=False,
+        transition_safe=True,
+    )
+
+    assert prepared["msgtype"] == "m.text"
+    assert "url" not in prepared
+    assert prepared["file"]["url"] == "mxc://server/transition-safe-sidecar"
+    event_source = {
+        "content": prepared,
+        "event_id": "$transition-safe",
+        "sender": "@agent:server",
+        "origin_server_ts": 123,
+        "type": "m.room.message",
+    }
+    assert isinstance(nio.Event.parse_event(event_source), nio.RoomMessageText)
+    assert isinstance(nio.RoomMessage.parse_decrypted_event(event_source), nio.RoomMessageText)
+    assert client.uploaded_data is not None
+    encrypted_file = prepared["file"]
+    decrypted = crypto.attachments.decrypt_attachment(
+        client.uploaded_data,
+        encrypted_file["key"]["k"],
+        encrypted_file["hashes"]["sha256"],
+        encrypted_file["iv"],
+    )
+    assert json.loads(decrypted) == content
+
+
+@pytest.mark.asyncio
+async def test_encrypted_fitting_reserves_for_a_longer_recovery_device_id() -> None:
+    """A frozen payload fitted on one device must remain sendable after device recovery."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/recovery-sidecar"))
+    client.device_id = "D"
+
+    prepared = await prepare_large_message(
+        client,
+        "!room:server",
+        {"body": "x" * 100_000, "msgtype": "m.text"},
+        room_encrypted=True,
+        transition_safe=True,
+    )
+
+    assert (
+        _actual_encrypted_event_size(
+            prepared,
+            room_id="!room:server",
+            device_id="R" * 255,
+        )
+        <= _MATRIX_EVENT_HARD_LIMIT
+    )
 
 
 @pytest.mark.parametrize("is_edit", [False, True])

@@ -1668,9 +1668,11 @@ class DeliveryGateway:
 
         A durable row can also outlive the room state observed here. Size it for
         encrypted delivery even when the room is currently unencrypted, so
-        enabling encryption cannot make the frozen event too large. The sidecar
-        remains shaped for the current room: a plaintext ``m.file`` stays valid
-        inside a later encrypted event and is parseable before the transition too.
+        enabling encryption cannot make the frozen event too large. Encrypt the
+        sidecar immediately and carry its descriptor on a normal text preview
+        while the room is still plaintext. That preview is parseable in either
+        room state, and a later encrypted send does not expose plaintext sidecar
+        bytes to the homeserver.
         This conservative work happens once per durable row, before enqueue;
         retries and startup recovery send the same frozen bytes without repeating it.
         """

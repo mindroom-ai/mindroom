@@ -80,6 +80,14 @@ _MATRIX_EVENT_HARD_LIMIT = 64000
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
+# A transition-safe payload may be encrypted by a different device after recovery.
+# Matrix leaves device IDs opaque, so fitting to the current ID would put a
+# mutable envelope field exactly on the event boundary. Budget 1 KiB for its
+# canonical JSON value and use an even larger current value verbatim. This
+# keeps ordinary device rotation from invalidating frozen bytes without
+# shrinking typical previews by more than a small fraction. It is deliberately
+# recovery headroom, not a claimed protocol maximum.
+_RECOVERY_DEVICE_ID_JSON_RESERVE_BYTES = 1024
 _UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
@@ -186,7 +194,7 @@ def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
 def _add_sidecar_metadata(
     target_content: dict[str, Any],
     *,
-    room_encrypted: bool,
+    sidecar_encrypted: bool,
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     original_size: int,
@@ -194,7 +202,7 @@ def _add_sidecar_metadata(
     if mxc_uri is None or file_info is None:
         return
 
-    if room_encrypted:
+    if sidecar_encrypted:
         target_content["file"] = file_info
     else:
         target_content["url"] = mxc_uri
@@ -282,12 +290,18 @@ def _delivery_event_size_calculator(
     *,
     room_id: str,
     room_encrypted: bool,
+    recovery_safe: bool,
 ) -> Callable[[dict[str, Any]], int]:
-    """Bind the delivery-specific fields needed by repeated preview fitting."""
+    """Bind delivery fields while reserving mutable recovery-envelope space."""
     device_id: str | None = None
     if room_encrypted:
-        raw_device_id = client.olm.device_id if client.olm is not None else client.device_id
+        olm = getattr(client, "olm", None)
+        raw_device_id = getattr(olm, "device_id", None) if olm is not None else getattr(client, "device_id", None)
         device_id = raw_device_id if isinstance(raw_device_id, str) else None
+        device_id_json_bytes = len(json.dumps(device_id).encode("utf-8")) if device_id is not None else 0
+        if recovery_safe and device_id_json_bytes < _RECOVERY_DEVICE_ID_JSON_RESERVE_BYTES:
+            # Quotes occupy two bytes in the serialized JSON value.
+            device_id = "d" * (_RECOVERY_DEVICE_ID_JSON_RESERVE_BYTES - 2)
 
     def calculate(candidate: dict[str, Any]) -> int:
         return _calculate_delivery_event_size(
@@ -353,7 +367,7 @@ def _build_nonterminal_streaming_edit_preview(
     source_content: dict[str, Any],
     preview_text: str,
     *,
-    room_encrypted: bool,
+    sidecar_encrypted: bool,
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     original_size: int,
@@ -377,7 +391,7 @@ def _build_nonterminal_streaming_edit_preview(
         _copy_inline_streaming_preview_metadata(source_content, preview_content)
         _add_sidecar_metadata(
             preview_content,
-            room_encrypted=room_encrypted,
+            sidecar_encrypted=sidecar_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=original_size,
@@ -692,26 +706,31 @@ async def _build_file_content(
     preview_text: str,
     size_limit: int,
     *,
-    room_encrypted: bool,
+    sidecar_encrypted: bool,
+    use_file_message: bool,
+    preview_msgtype: str,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
-    """Upload full original content JSON and build preview ``m.file`` event."""
+    """Upload full original content JSON and build its parseable preview."""
     mxc_uri, file_info = await upload_json_sidecar(
         client,
         room_id,
         full_content,
-        room_encrypted=room_encrypted,
+        room_encrypted=sidecar_encrypted,
     )
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
     preview = _create_preview(preview_text, available)
 
-    modified_content: dict[str, Any] = {
-        "msgtype": "m.file",
-        "body": preview,
-        "filename": "message-content.json",
-    }
-    if file_info is not None:
-        modified_content["info"] = file_info
+    modified_content: dict[str, Any] = {"msgtype": preview_msgtype, "body": preview}
+    if use_file_message:
+        modified_content.update(
+            {
+                "msgtype": "m.file",
+                "filename": "message-content.json",
+            },
+        )
+        if file_info is not None:
+            modified_content["info"] = file_info
 
     return mxc_uri, file_info, modified_content
 
@@ -894,14 +913,15 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
-        transition_safe: Size for the strongest room state the payload may encounter
+        transition_safe: Prepare for the strongest room state the payload may encounter
 
-            Durable payloads can outlive the room state observed during preparation, while
-            room encryption can later change from disabled to enabled. Encrypted-envelope
-            sizing keeps their exact frozen bytes valid after that transition. The sidecar
-            still follows the current room state: a plaintext ``m.file`` remains valid inside
-            a later encrypted event, while an encrypted-file-only event cannot be parsed in a
-            plaintext room. Direct sends retain the default and use only the current state.
+            Durable payloads can outlive the observed room state, and a direct send can yield
+            during its sidecar upload while encryption changes from disabled to enabled.
+            Encrypted-envelope sizing and recovery-device headroom keep the prepared bytes
+            valid after that transition. Sidecars are encrypted up front. In a currently
+            plaintext room, the encrypted descriptor lives on a normal text preview: that
+            event parses before or after the transition, while an encrypted-file-only
+            ``m.file`` does not parse as a plaintext event.
 
     Returns:
         Original content (if small) or modified content with preview and MXC reference
@@ -917,7 +937,9 @@ async def prepare_large_message(
         client,
         room_id=room_id,
         room_encrypted=size_for_encrypted_delivery,
+        recovery_safe=transition_safe,
     )
+    sidecar_encrypted = room_encrypted or transition_safe
 
     current_size = _calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
@@ -942,12 +964,12 @@ async def prepare_large_message(
             client,
             room_id,
             content,
-            room_encrypted=room_encrypted,
+            room_encrypted=sidecar_encrypted,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
             file_info,
-            room_encrypted=room_encrypted,
+            room_encrypted=sidecar_encrypted,
         ):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
@@ -963,7 +985,7 @@ async def prepare_large_message(
             content,
             source_content,
             preview_text,
-            room_encrypted=room_encrypted,
+            sidecar_encrypted=sidecar_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -994,19 +1016,21 @@ async def prepare_large_message(
         content,
         preview_text,
         size_limit,
-        room_encrypted=room_encrypted,
+        sidecar_encrypted=sidecar_encrypted,
+        use_file_message=room_encrypted or not transition_safe,
+        preview_msgtype=("m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"),
     )
 
     sidecar_usable = sidecar_upload_is_usable(
         mxc_uri,
         file_info,
-        room_encrypted=room_encrypted,
+        room_encrypted=sidecar_encrypted,
     )
     if sidecar_usable:
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
-            room_encrypted=room_encrypted,
+            sidecar_encrypted=sidecar_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
