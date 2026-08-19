@@ -1284,6 +1284,32 @@ async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(t
 
 
 @pytest.mark.asyncio
+async def test_restart_recovery_uses_original_body_when_no_edit_exists(tmp_path: Path) -> None:
+    """A verified unedited response still has an authoritative visible body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    response = nio.RoomGetEventResponse()
+    response.event = MagicMock(
+        source={
+            "type": "m.room.message",
+            "sender": runner.deps.matrix_full_id,
+            "content": {"msgtype": "m.text", "body": "original partial"},
+        },
+    )
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+
+    body = await fetch_latest_bundled_edit_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True], ids=("error", "cancellation"))
 async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, cancelled: bool) -> None:
     """A failed outbox read cannot hide a same-runtime claim until restart."""

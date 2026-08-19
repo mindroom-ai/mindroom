@@ -266,7 +266,15 @@ async def fetch_latest_bundled_edit_body(
         return None
     replacements = bundled_replacement_candidates(event_source)
     if not replacements:
-        return None
+        _resolved_source, body = await resolve_visible_event_source(
+            event_source,
+            client,
+            fallback_body=room_message_fallback_body(response.event),
+            config=config,
+            runtime_paths=runtime_paths,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+        return body
     body, _content = await extract_visible_edit_body(
         replacements[0],
         client,
