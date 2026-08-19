@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import ipaddress
 import json
 import threading
 from collections.abc import AsyncIterator
@@ -16,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -852,9 +851,8 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
     "public_url",
     [
         "https://oauth.mindroom.chat",
-        "https://8.8.8.8",
-        "https://m\u00fcnchen.mindroom.chat",
-        "https://fa\u00df.de",
+        "https://xn--mnchen-3ya.mindroom.chat",
+        "https://xn--fa-hia.de",
     ],
 )
 def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
@@ -906,6 +904,8 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
 @pytest.mark.parametrize(
     ("callback_uri", "request_hostname"),
     [
+        ("https://m\u00fcnchen.mindroom.chat/api/oauth/demo/callback", "m\u00fcnchen.mindroom.chat"),
+        ("https://fa\u00df.de/api/oauth/demo/callback", "fa\u00df.de"),
         ("https://fa\u00df.de/api/oauth/demo/callback", "fass.de"),
         ("https://xn--a.com/api/oauth/demo/callback", "xn--a.com"),
         ("https://[v1.foo]/api/oauth/demo/callback", "v1.foo"),
@@ -916,6 +916,11 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
         ("https://oauth.mindroom.chat/api/oauth/demo/callback?", "oauth.mindroom.chat"),
         ("https://oauth.mindroom.chat/api/oauth/demo/callback#", "oauth.mindroom.chat"),
         ("https://oauth.mindroom.chat/api/oauth/demo/callback?#", "oauth.mindroom.chat"),
+        ("https://8.8.8.8/api/oauth/demo/callback", "8.8.8.8"),
+        (
+            "https://[2001:4860:0000:0000:0000:0000:0000:8888]/api/oauth/demo/callback",
+            "2001:4860::8888",
+        ),
         ("https://224.0.0.1/api/oauth/demo/callback", "224.0.0.1"),
         ("https://[ff02::1]/api/oauth/demo/callback", "ff02::1"),
         ("https://[fec0::1]/api/oauth/demo/callback", "fec0::1"),
@@ -944,41 +949,6 @@ def test_hosted_oauth_callback_rejects_browser_aliases_and_non_public_hosts(
     request_hostname: str,
 ) -> None:
     assert not is_valid_hosted_oauth_callback_for_request(callback_uri, request_hostname)
-
-
-def test_hosted_oauth_callback_accepts_global_ipv6_literal() -> None:
-    assert is_valid_hosted_oauth_callback_for_request(
-        "https://[2001:4860:0000:0000:0000:0000:0000:8888]/api/oauth/demo/callback",
-        "2001:4860::8888",
-    )
-
-
-@pytest.mark.parametrize(
-    "address",
-    ["192.0.0.9", "192.0.0.10", "64:ff9b::808:808", "2001:1::3"],
-)
-def test_hosted_oauth_callback_accepts_registry_global_ip_literal(address: str) -> None:
-    authority = f"[{address}]" if ":" in address else address
-    assert is_valid_hosted_oauth_callback_for_request(
-        f"https://{authority}/api/oauth/demo/callback",
-        address,
-    )
-
-
-def test_hosted_oauth_callback_rejects_6to4_with_embedded_loopback_on_older_python() -> None:
-    with patch.object(ipaddress.IPv6Address, "is_global", new_callable=PropertyMock, return_value=True):
-        assert not is_valid_hosted_oauth_callback_for_request(
-            "https://[2002:7f00:1::]/api/oauth/demo/callback",
-            "2002:7f00:1::",
-        )
-
-
-def test_hosted_oauth_callback_rejects_registry_non_global_ipv4_on_older_python() -> None:
-    with patch.object(ipaddress.IPv4Address, "is_global", new_callable=PropertyMock, return_value=True):
-        assert not is_valid_hosted_oauth_callback_for_request(
-            "https://192.0.0.8/api/oauth/demo/callback",
-            "192.0.0.8",
-        )
 
 
 @pytest.mark.parametrize(

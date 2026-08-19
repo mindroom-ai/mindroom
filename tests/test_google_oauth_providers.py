@@ -430,9 +430,6 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
         "app.localhost",
         "127.0.0.1",
         "127.0.0.2",
-        "2130706433",
-        "127.1",
-        "0x7f000001",
         "[::1]",
         "[::ffff:127.0.0.2]",
     ],
@@ -459,7 +456,10 @@ def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     assert resolution is not None
 
 
-@pytest.mark.parametrize("hostname", ["provisioning.example", "1.1", "0x08080808"])
+@pytest.mark.parametrize(
+    "hostname",
+    ["provisioning.example", "2130706433", "127.1", "0x7f000001", "1.1", "0x08080808"],
+)
 def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path, hostname: str) -> None:
     """Pairing credentials must never be sent to a plaintext remote endpoint."""
     runtime_paths = resolve_runtime_paths(
