@@ -790,22 +790,22 @@ class TestSendMessageResult:
         )
         client._send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
 
-        prepared_content = {"body": "hello", "msgtype": "m.text"}
+        content = {"body": "hello", "msgtype": "m.text"}
         with patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = prepared_content
+            mock_prepare.return_value = content
             result = await send_message_result(
                 client,
                 "!room:localhost",
-                {"body": "hello", "msgtype": "m.text"},
+                content,
             )
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
-        assert result.content_sent == prepared_content
+        assert result.content_sent is content
         mock_prepare.assert_awaited_once_with(
             client,
             "!room:localhost",
-            {"body": "hello", "msgtype": "m.text"},
+            content,
             room_encrypted=False,
         )
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")

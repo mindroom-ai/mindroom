@@ -65,6 +65,14 @@ class MatrixDeliveryFailure:
 type MatrixSendOutcome = DeliveredMatrixEvent | MatrixDeliveryFailure
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedMatrixMessage:
+    """Prepared content plus the transport path that must send it."""
+
+    content: dict[str, Any]
+    cache_bypass: bool
+
+
 def _sanitized_delivery_error_message(error: Exception) -> str:
     """Return a log-safe Matrix delivery failure message."""
     if isinstance(error, OlmTrustError):
@@ -342,6 +350,69 @@ async def send_room_event_result(
     return cast("nio.RoomSendResponse | nio.RoomSendError | None", response)
 
 
+async def _prepare_matrix_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    operation: str,
+    content_is_prepared: bool,
+) -> _PreparedMatrixMessage | MatrixDeliveryFailure:
+    """Prepare one message, rebuilding once if encryption turns on while yielding."""
+    rooms = client.rooms
+    room = rooms.get(room_id)
+    encryption_outcome = await resolve_room_encryption_outcome(
+        client,
+        room_id,
+        operation=operation,
+    )
+    if isinstance(encryption_outcome, MatrixDeliveryFailure):
+        return encryption_outcome
+    room_encrypted = encryption_outcome
+    cache_bypass = room is None and not room_encrypted
+
+    content_sent = content
+    if not content_is_prepared:
+        try:
+            content_sent = await prepare_large_message(
+                client,
+                room_id,
+                content,
+                room_encrypted=room_encrypted,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
+        # An unchanged return means preparation did not yield, so room state
+        # could not have changed within this task. A changed plaintext payload
+        # may contain a sidecar uploaded across an await. Recheck only then.
+        # If encryption became enabled, rebuild from the semantic source once:
+        # the first upload remains unreferenced and the sent event points only
+        # at encrypted bytes. Matrix room encryption cannot later be disabled.
+        if not room_encrypted and content_sent is not content:
+            encryption_outcome = await resolve_room_encryption_outcome(
+                client,
+                room_id,
+                operation=operation,
+            )
+            if isinstance(encryption_outcome, MatrixDeliveryFailure):
+                return encryption_outcome
+            room_encrypted = encryption_outcome
+            cache_bypass = rooms.get(room_id) is None and not room_encrypted
+            if room_encrypted:
+                try:
+                    content_sent = await prepare_large_message(
+                        client,
+                        room_id,
+                        content,
+                        room_encrypted=True,
+                    )
+                except MatrixEventTooLargeError as error:
+                    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
+    return _PreparedMatrixMessage(content_sent, cache_bypass)
+
+
 async def send_message_outcome(
     client: nio.AsyncClient,
     room_id: str,
@@ -364,19 +435,6 @@ async def send_message_outcome(
             "encrypted delivery rejected by local trust policy",
         )
 
-    rooms = client.rooms
-    cache_bypass = False
-    room = rooms.get(room_id)
-    encryption_outcome = await resolve_room_encryption_outcome(
-        client,
-        room_id,
-        operation=operation,
-    )
-    if isinstance(encryption_outcome, MatrixDeliveryFailure):
-        return encryption_outcome
-    room_encryption_override = encryption_outcome
-    cache_bypass = room is None and not room_encryption_override
-
     message_type = "m.room.message"
     emit_timing_event(
         "Matrix send timing",
@@ -384,17 +442,17 @@ async def send_message_outcome(
         room_id=room_id,
         message_type=message_type,
     )
-    content_sent = content
-    if not content_is_prepared:
-        try:
-            content_sent = await prepare_large_message(
-                client,
-                room_id,
-                content,
-                room_encrypted=room_encryption_override,
-            )
-        except MatrixEventTooLargeError as error:
-            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+    prepared = await _prepare_matrix_message(
+        client,
+        room_id,
+        content,
+        operation=operation,
+        content_is_prepared=content_is_prepared,
+    )
+    if isinstance(prepared, MatrixDeliveryFailure):
+        return prepared
+    content_sent = prepared.content
+    cache_bypass = prepared.cache_bypass
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",

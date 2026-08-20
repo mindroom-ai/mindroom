@@ -805,6 +805,50 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
         client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
 
+    async def test_plaintext_durable_payload_is_fitted_for_a_later_encrypted_send(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Persistence must freeze bytes that remain valid if encryption is enabled."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/transition-sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(
+            replace(
+                self._final_request("x" * 100_000),
+                defer_source_handoff=True,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["file"]["url"] == "mxc://localhost/transition-sidecar"
+        assert "url" not in frozen
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+
     async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
         self,
         tmp_path: Path,

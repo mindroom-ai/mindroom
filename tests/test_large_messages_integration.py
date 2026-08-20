@@ -116,6 +116,7 @@ async def test_regular_message_under_limit() -> None:
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
+    assert sent_content is content
     assert sent_content["body"] == "Hello world"
     assert "io.mindroom.long_text" not in sent_content
 
@@ -147,7 +148,7 @@ async def test_regular_message_over_limit() -> None:
     assert sent_content["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
     assert sent_content["io.mindroom.long_text"]["is_complete_content"] is True
 
-    # Should have file URL
+    # A room that stays plaintext keeps standard Matrix m.file semantics.
     assert sent_content["url"].startswith("mxc://server/")
     assert "file" not in sent_content
 

@@ -286,7 +286,9 @@ def _delivery_event_size_calculator(
     """Bind the currently observed delivery fields for size estimation."""
     device_id: str | None = None
     if room_encrypted:
-        device_id = client.olm.device_id if client.olm is not None else client.device_id
+        olm = client.olm
+        raw_device_id = olm.device_id if olm is not None else client.device_id
+        device_id = raw_device_id if isinstance(raw_device_id, str) else None
 
     def calculate(candidate: dict[str, Any]) -> int:
         return _calculate_delivery_event_size(
@@ -878,6 +880,7 @@ async def prepare_large_message(
     content: dict[str, Any],
     *,
     room_encrypted: bool | None = None,
+    prepare_for_encrypted_delivery: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -892,9 +895,13 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
+        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
 
     Returns:
-        Original content (if small) or modified content with preview and MXC reference
+        The original content object when no preparation is needed, otherwise
+        modified content with a preview and MXC reference. The identity
+        guarantee lets the delivery boundary avoid a redundant state lookup
+        when this coroutine completed without yielding.
 
     """
     content = _without_local_recovery_data(content)
@@ -902,10 +909,11 @@ async def prepare_large_message(
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
+    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
-        room_encrypted=room_encrypted,
+        room_encrypted=encrypted_delivery_safe,
     )
     current_size = _calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
@@ -930,12 +938,12 @@ async def prepare_large_message(
             client,
             room_id,
             content,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
             file_info,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
         ):
             logger.warning(
                 "large_message_sidecar_unavailable_using_inline_preview",
@@ -951,7 +959,7 @@ async def prepare_large_message(
             content,
             source_content,
             preview_text,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -982,19 +990,19 @@ async def prepare_large_message(
         content,
         preview_text,
         size_limit,
-        room_encrypted=room_encrypted,
+        room_encrypted=encrypted_delivery_safe,
     )
 
     sidecar_usable = sidecar_upload_is_usable(
         mxc_uri,
         file_info,
-        room_encrypted=room_encrypted,
+        room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
-            room_encrypted=room_encrypted,
+            room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,

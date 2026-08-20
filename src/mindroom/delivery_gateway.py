@@ -1685,9 +1685,11 @@ class DeliveryGateway:
         nothing can ever reference -- or fail before the durable payload gets
         another chance to reach Matrix.
 
-        Preparation uses the currently observed room encryption state. Once
-        attempted, retries and startup recovery send the same frozen bytes
-        without uploading or rebuilding anything.
+        A durable row may be replayed after room encryption is enabled, and an
+        attempted row cannot be rebuilt. Durable sidecars therefore use the
+        encrypted form before the payload is frozen, even while the room is
+        currently plaintext. Direct sends keep standard plaintext sidecars and
+        rebuild only if encryption changes during their upload.
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
@@ -1712,6 +1714,7 @@ class DeliveryGateway:
                 room_id,
                 wire_content,
                 room_encrypted=encryption_outcome,
+                prepare_for_encrypted_delivery=True,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
