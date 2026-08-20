@@ -28,7 +28,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
-from mindroom.workers.backends._metadata_store import open_worker_state_root
+from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
     validate_local_copy_source_dir,

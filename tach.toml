@@ -3503,6 +3503,17 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.workers.worker_retirement"
+depends_on = []
+visibility = [
+    "mindroom.script_runs.manager",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.kubernetes",
+    "mindroom.workers.backends.local",
+]
+
+[[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
@@ -4859,6 +4870,18 @@ from = ["mindroom.api.script_gateway"]
 [[interfaces]]
 expose = ["MindRoomToolCallError", "MindRoomTools"]
 from = ["mindroom.script_sdk"]
+
+[[interfaces]]
+expose = ["open_worker_state_root", "remove_directory_tree_at"]
+from = ["mindroom.workers.worker_retirement"]
+visibility = [
+    "mindroom.script_runs.manager",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.docker_projection",
+    "mindroom.workers.backends.kubernetes",
+    "mindroom.workers.backends.local",
+]
+exclusive = true
 
 [[interfaces]]
 expose = ["ApprovalMatrixTransport"]

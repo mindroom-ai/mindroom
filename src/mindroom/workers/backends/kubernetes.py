@@ -22,7 +22,6 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
 )
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
-from mindroom.workers.backends._metadata_store import open_worker_state_root
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -32,6 +31,7 @@ from mindroom.workers.models import (
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.worker_retirement import open_worker_state_root
 
 from . import kubernetes_resources as resources
 from .kubernetes_config import (

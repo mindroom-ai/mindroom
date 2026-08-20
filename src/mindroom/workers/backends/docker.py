@@ -50,7 +50,6 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
-    open_worker_state_root,
     save_worker_metadata,
 )
 from mindroom.workers.backends.docker_config import (
@@ -73,6 +72,7 @@ from mindroom.workers.models import (
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable

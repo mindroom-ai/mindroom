@@ -36,8 +36,8 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
     worker_root_path,
 )
+from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
@@ -2208,7 +2208,7 @@ def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
     sentinel.write_text("keep", encoding="utf-8")
     retired_root = tmp_path / "retired-original"
     swapped = False
-    original_stat = metadata_store_module.os.stat
+    original_stat = worker_retirement_module.os.stat
 
     def stat_after_swap(
         path: str | bytes,
@@ -2226,7 +2226,7 @@ def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
                 swapped = True
         return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(metadata_store_module.os, "stat", stat_after_swap)
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
 
     with pytest.raises(WorkerBackendError, match="changed during retirement"):
         backend.retire_worker(run_key)
@@ -2254,7 +2254,7 @@ def test_docker_backend_refuses_projection_root_swapped_after_validation(
     (replacement_root / "keep.txt").write_text("keep", encoding="utf-8")
     retired_projection_root = tmp_path / "retired-projection"
     swapped = False
-    original_stat = metadata_store_module.os.stat
+    original_stat = worker_retirement_module.os.stat
 
     def stat_after_swap(
         path: str | bytes,
@@ -2271,7 +2271,7 @@ def test_docker_backend_refuses_projection_root_swapped_after_validation(
                 swapped = True
         return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(metadata_store_module.os, "stat", stat_after_swap)
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
 
     with pytest.raises(WorkerBackendError, match="changed during retirement"):
         backend.retire_worker(run_key)
@@ -2293,7 +2293,7 @@ def test_docker_backend_normalizes_retirement_recursion_failure(
     state_root = worker_root_path(tmp_path, run_key)
     identity_file = state_root / "metadata" / "worker.json"
     exact_identity = identity_file.read_bytes()
-    original_listdir = metadata_store_module.os.listdir
+    original_listdir = worker_retirement_module.os.listdir
 
     def fail_worker_traversal(path: int) -> list[str]:
         descriptor_root = Path(f"/proc/self/fd/{path}").resolve()
@@ -2302,7 +2302,7 @@ def test_docker_backend_normalizes_retirement_recursion_failure(
             raise RecursionError(msg)
         return original_listdir(path)
 
-    monkeypatch.setattr(metadata_store_module.os, "listdir", fail_worker_traversal)
+    monkeypatch.setattr(worker_retirement_module.os, "listdir", fail_worker_traversal)
 
     with pytest.raises(WorkerBackendError, match="injected retirement depth failure"):
         backend.retire_worker(run_key)

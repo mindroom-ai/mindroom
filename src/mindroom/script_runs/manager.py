@@ -45,9 +45,9 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
-from mindroom.workers.backends.filesystem_cleanup import remove_directory_tree_at
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.worker_retirement import remove_directory_tree_at
 from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
