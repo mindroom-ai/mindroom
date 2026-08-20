@@ -39,6 +39,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -68,6 +69,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
@@ -1152,6 +1154,579 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     assert event_id == "$waiting"
     lifecycle.finalize.assert_awaited_once()
     assert await store.approval_continuation(continuation.approval_id) is None
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Path) -> None:
+    """Restart recovery retires an uncertain claim without replacing its streamed body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-stale-claim",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="previous-runtime",
+    )
+    assert claimed is not None
+    interrupted_body = f"committed partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+
+    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={"body": request.new_text},
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$waiting",
+            delivered_projections=(),
+        )
+        return True
+
+    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=AsyncMock(return_value="committed partial"),
+        ),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        event_id = await runner._recover_claimed_approval_lifecycle(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert event_id == "$waiting"
+    edit_request = edit_text.await_args.args[0]
+    assert edit_request.new_text == interrupted_body
+    assert edit_request.extra_content == {
+        STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+    }
+    assert await store.approval_continuation(continuation.approval_id) is None
+    assert not await store.is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_path: Path) -> None:
+    """A restart cancellation stays recognizable after the claim is fenced."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-restart-cancelled",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="current-runtime",
+    )
+    assert claimed is not None
+
+    with (
+        patch.object(
+            runner,
+            "_run_claimed_approval_lifecycle",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner._run_owned_approval_continuation(
+            claimed,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    failing = await store.approval_continuation(continuation.approval_id)
+    assert failing is not None
+    assert failing.state == "failing"
+    assert failing.failure_reason == "sync_restart_cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
+async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
+    tmp_path: Path,
+    failure_reason: str,
+) -> None:
+    """User stops and hook suppression must not be relabeled as interruptions."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = MagicMock(spec=ApprovalContinuation)
+    settle_failure = AsyncMock()
+    restart_recovery = AsyncMock()
+    outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$waiting",
+        failure_reason=failure_reason,
+        is_visible_response=True,
+    )
+
+    with (
+        patch.object(runner._approval_responses, "settle_failure", new=settle_failure),
+        patch.object(runner, "_settle_interrupted_approval_recovery", new=restart_recovery),
+    ):
+        await runner._settle_failed_approval_outcome(continuation, outcome)
+
+    settle_failure.assert_awaited_once_with(continuation, failure_reason)
+    restart_recovery.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_path: Path) -> None:
+    """A generic cancellation preserves its provenance instead of claiming a restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    continuation = ApprovalContinuation(
+        approval_id="approval-interrupted",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+    )
+    assert await store.create_approval_continuation(continuation) == continuation
+    claimed = await store.claim_approval_continuation(
+        continuation.approval_id,
+        runtime_generation="current-runtime",
+    )
+    assert claimed is not None
+
+    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
+        await store.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            payload={"body": request.new_text},
+            edits_event_id="$waiting",
+        )
+        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
+        await store.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.FINAL,
+            event_id="$waiting",
+            delivered_projections=(),
+        )
+        return True
+
+    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+    outcome = FinalDeliveryOutcome(
+        terminal_status="cancelled",
+        event_id="$waiting",
+        failure_reason="interrupted",
+        is_visible_response=True,
+    )
+
+    fetch_body = AsyncMock(side_effect=[None, "committed partial"])
+    with (
+        patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=fetch_body,
+        ),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        await runner._settle_failed_approval_outcome(claimed, outcome)
+        failing = await store.approval_continuation(continuation.approval_id)
+        assert failing is not None
+        handled, event_id = await runner._recover_nonready_approval(
+            failing,
+            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        )
+
+    assert handled
+    assert event_id == "$waiting"
+    assert fetch_body.await_count == 2
+    edit_request = edit_text.await_args.args[0]
+    assert edit_request.new_text == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
+    assert edit_request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+
+
+def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
+    """Return one complete visible Matrix event response."""
+    response = nio.RoomGetEventResponse.from_dict(
+        {
+            "event_id": "$waiting",
+            "sender": sender,
+            "origin_server_ts": 1_000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": body},
+        },
+    )
+    assert isinstance(response, nio.RoomGetEventResponse)
+    return response
+
+
+def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent:
+    """Return one encrypted Matrix event."""
+    event = nio.MegolmEvent.from_dict(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": 2_000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "ciphertext",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+            },
+        },
+    )
+    assert isinstance(event, nio.MegolmEvent)
+    return event
+
+
+def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.RoomMessage:
+    """Return the visible edit corresponding to `_encrypted_event`."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": "$edit",
+            "sender": sender,
+            "origin_server_ts": 2_000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "latest partial",
+                "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
+            },
+        },
+    )
+    assert isinstance(event, nio.RoomMessage)
+    return event
+
+
+def _sidecar_preview_content() -> dict[str, Any]:
+    """Return one unresolved v2 long-text preview."""
+    return {
+        "msgtype": "m.file",
+        "body": "Preview partial...",
+        "info": {"mimetype": "application/json"},
+        "io.mindroom.long_text": {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        },
+        "url": "mxc://server/recovery-sidecar",
+    }
+
+
+def _sidecar_edit(*, sender: str) -> nio.RoomMessage:
+    """Return one replacement whose full body lives in a v2 sidecar."""
+    source = _decrypted_edit(sender=sender).source
+    source["content"]["body"] = "* Preview partial..."
+    source["content"]["m.new_content"] = _sidecar_preview_content()
+    event = nio.Event.parse_event(source)
+    assert isinstance(event, nio.RoomMessage)
+    return event
+
+
+async def _relations(*events: nio.Event) -> AsyncIterator[nio.Event]:
+    """Yield relation fixtures in server order."""
+    for event in events:
+        yield event
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_does_not_fall_back_from_unreadable_latest_edit(tmp_path: Path) -> None:
+    """An unreadable authoritative edit is retryable, not permission to use stale text."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    extract_body = AsyncMock(side_effect=[(None, None), ("older partial", {})])
+    replacement = _decrypted_edit(sender=sender).source
+
+    with (
+        patch(
+            "mindroom.matrix.client_visible_messages.bundled_replacement_candidates",
+            return_value=[replacement, replacement],
+        ),
+        patch("mindroom.matrix.client_visible_messages.extract_visible_edit_body", new=extract_body),
+    ):
+        update = await fetch_latest_visible_body(
+            client,
+            room_id="!room:localhost",
+            event_id="$waiting",
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
+        )
+
+    assert update is None
+    assert extract_body.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("replacement_sender", "target_event_id"),
+    [
+        ("@other:localhost", "$waiting"),
+        (None, "$other"),
+    ],
+    ids=("foreign-sender", "wrong-target"),
+)
+async def test_restart_recovery_ignores_unrelated_bundled_replacement(
+    tmp_path: Path,
+    *,
+    replacement_sender: str | None,
+    target_event_id: str,
+) -> None:
+    """A bundled edit cannot replace a different sender's event or target."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
+    response.event.source["unsigned"] = {
+        "m.relations": {
+            "m.replace": {
+                "latest_event": _decrypted_edit(
+                    sender=replacement_sender or sender,
+                    target_event_id=target_event_id,
+                ).source,
+            },
+        },
+    }
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    client.room_get_event_relations = MagicMock(return_value=_relations())
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_ignores_unreadable_foreign_relation(tmp_path: Path) -> None:
+    """An unreadable relation from another sender cannot block the original body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(
+        return_value=_relations(_encrypted_event(sender="@other:localhost")),
+    )
+    client.olm = MagicMock()
+    client.decrypt_event = MagicMock(side_effect=nio.EncryptionError("missing session"))
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decryptable", "expected_body"),
+    [(True, "latest partial"), (False, None)],
+    ids=("decrypted", "unreadable"),
+)
+async def test_restart_recovery_uses_only_decryptable_latest_relation(
+    tmp_path: Path,
+    *,
+    decryptable: bool,
+    expected_body: str | None,
+) -> None:
+    """A missing bundle resolves its encrypted relation without stale fallback."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(return_value=_relations(_encrypted_event(sender=sender)))
+    client.olm = MagicMock()
+    client.decrypt_event = (
+        MagicMock(return_value=_decrypted_edit(sender=sender))
+        if decryptable
+        else MagicMock(side_effect=nio.EncryptionError("missing session"))
+    )
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == expected_body
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_retries_when_original_cannot_decrypt(tmp_path: Path) -> None:
+    """An undecryptable original event cannot become a marker-only replacement."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    response = nio.RoomGetEventResponse()
+    response.event = _encrypted_event(sender=runner.deps.matrix_full_id, event_id="$waiting")
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body is None
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_uses_original_body_when_no_edit_exists(tmp_path: Path) -> None:
+    """A verified unedited response still has an authoritative visible body."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    client = runner._client()
+    client.room_get_event = AsyncMock(
+        return_value=_visible_event_response(sender=runner.deps.matrix_full_id, body="original partial"),
+    )
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "original partial"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["original", "bundled", "relation"])
+async def test_restart_recovery_waits_for_unresolved_long_text(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """A failed sidecar fetch cannot replace the committed full response with its preview."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    response = _visible_event_response(sender=sender, body="original partial")
+    replacement = _sidecar_edit(sender=sender)
+    relations: tuple[nio.Event, ...] = ()
+    if source_kind == "original":
+        response = nio.RoomGetEventResponse.from_dict(
+            {
+                "event_id": "$waiting",
+                "sender": sender,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": _sidecar_preview_content(),
+            },
+        )
+        assert isinstance(response, nio.RoomGetEventResponse)
+    elif source_kind == "bundled":
+        response.event.source["unsigned"] = {
+            "m.relations": {"m.replace": {"latest_event": replacement.source}},
+        }
+    else:
+        relations = (replacement,)
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=response)
+    client.room_get_event_relations = MagicMock(return_value=_relations(*relations))
+    client.download = AsyncMock(return_value=nio.DownloadError("missing"))
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body is None
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_skips_redacted_replacement(tmp_path: Path) -> None:
+    """A redacted latest edit cannot permanently hide an older visible edit."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    sender = runner.deps.matrix_full_id
+    redacted = nio.Event.parse_event(
+        {
+            "event_id": "$redacted-edit",
+            "sender": sender,
+            "origin_server_ts": 3_000,
+            "type": "m.room.message",
+            "content": {},
+            "unsigned": {
+                "redacted_because": {
+                    "sender": "@moderator:localhost",
+                    "content": {},
+                },
+            },
+        },
+    )
+    assert isinstance(redacted, nio.RedactedEvent)
+    client = runner._client()
+    client.room_get_event = AsyncMock(return_value=_visible_event_response(sender=sender, body="original partial"))
+    client.room_get_event_relations = MagicMock(
+        return_value=_relations(redacted, _decrypted_edit(sender=sender)),
+    )
+
+    body = await fetch_latest_visible_body(
+        client,
+        room_id="!room:localhost",
+        event_id="$waiting",
+        config=runner.deps.runtime.config,
+        runtime_paths=runner.deps.runtime_paths,
+    )
+
+    assert body == "latest partial"
 
 
 @pytest.mark.asyncio
