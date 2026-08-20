@@ -881,6 +881,68 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
 
 
 @pytest.mark.asyncio
+async def test_post_spawn_task_cancellation_signals_local_process_before_propagating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task cancellation after local spawn retains ownership until the process exits."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    spawned = False
+    blocked_read = False
+    read_entered = threading.Event()
+    release_read = threading.Event()
+    killed_handles: list[str] = []
+    original_get_run = manager.store.get_run
+
+    async def launch_local(*_args: object, **_kwargs: object) -> str:
+        nonlocal spawned
+        spawned = True
+        return f"Handle: shell:{manager.store.list_runs()[0].run_id.removeprefix('script-')}"
+
+    def block_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
+        nonlocal blocked_read
+        if spawned and not blocked_read:
+            blocked_read = True
+            read_entered.set()
+            assert release_read.wait(timeout=5)
+        return original_get_run(run_id)
+
+    def kill_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        handle: str,
+        force: bool,
+    ) -> str:
+        del namespace, force
+        killed_handles.append(handle)
+        return "Force-killed process"
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(
+        manager_module,
+        "check_command_via_supervisor",
+        lambda *_args, **_kwargs: "Status: FINISHED (exit code -9)",
+    )
+    monkeypatch.setattr(manager.store, "get_run", block_first_post_spawn_read)
+
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(read_entered.wait, 5)
+    launch.cancel()
+    release_read.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch
+
+    [stored] = manager.store.list_runs()
+    assert stored.state is ScriptRunState.INTERRUPTED
+    assert killed_handles == [f"shell:{stored.run_id.removeprefix('script-')}"]
+
+
+@pytest.mark.asyncio
 async def test_launch_adopts_cancellation_that_finishes_before_running_transition(tmp_path: Path) -> None:
     """Launch completion cannot overwrite or error on a concurrently confirmed cancellation."""
     manager, _backend, client = _manager(tmp_path)

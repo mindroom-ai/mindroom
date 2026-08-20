@@ -752,7 +752,11 @@ class ScriptRunManager:
                 state=ScriptRunState.RUNNING,
                 worker_id=worker_id,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            with suppress(_AmbiguousLaunchError):
+                await run_coroutine_until_complete(
+                    self._resolve_ambiguous_launch_failure(context, run.run_id, exc),
+                )
             raise
         except BaseException as exc:
             return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)

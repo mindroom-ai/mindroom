@@ -1342,12 +1342,22 @@ async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tm
 
 
 @pytest.mark.asyncio
-async def test_reload_cannot_release_an_unfinished_startup_cleanup_fence(tmp_path: Path) -> None:
-    """A reload fence cannot reopen launches while inherited-run cleanup still owns it."""
+async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pending(tmp_path: Path) -> None:
+    """Reload completion releases its counted owner without releasing startup's owner."""
     runtime_paths = _runtime_paths(tmp_path)
+    reconciliation_owners = 1
+
+    async def begin_startup_reconciliation() -> None:
+        nonlocal reconciliation_owners
+        reconciliation_owners += 1
+
+    async def end_startup_reconciliation() -> None:
+        nonlocal reconciliation_owners
+        reconciliation_owners -= 1
+
     manager = SimpleNamespace(
-        begin_startup_reconciliation=AsyncMock(),
-        end_startup_reconciliation=AsyncMock(),
+        begin_startup_reconciliation=begin_startup_reconciliation,
+        end_startup_reconciliation=end_startup_reconciliation,
         worker_replacement_in_progress=False,
     )
     config = _config()
@@ -1365,7 +1375,9 @@ async def test_reload_cannot_release_an_unfinished_startup_cleanup_fence(tmp_pat
     await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
     await runtime.complete_worker_replacement()
 
-    manager.end_startup_reconciliation.assert_not_awaited()
+    assert reconciliation_owners == 1
+    await manager.end_startup_reconciliation()
+    assert reconciliation_owners == 0
 
 
 def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Path) -> None:
@@ -2954,6 +2966,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
         release_revocations.set()
 
     assert all(store.get_run(run.run_id).cancel_requested_at is not None for run in runs)
+    assert await asyncio.to_thread(lease.release_event.wait, 1.0)
     assert lease.released is True
     assert runtime._current_worker_lease is None
     assert manager.worker_backend is None

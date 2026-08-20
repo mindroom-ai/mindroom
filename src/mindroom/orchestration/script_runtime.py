@@ -585,8 +585,7 @@ class ScriptRuntimeLifecycle:
         finally:
             if self._reload_launch_fence_started:
                 self._reload_launch_fence_started = False
-                if not self._startup_cleanup_pending:
-                    await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
+                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
 
     def _clear_current_worker_backend(self) -> None:
         self._current_worker_lease = None
@@ -676,8 +675,7 @@ class ScriptRuntimeLifecycle:
                 await run_coroutine_until_complete(self.manager.end_worker_replacement())
             if launch_fence_started:
                 self._reload_launch_fence_started = False
-                if not self._startup_cleanup_pending:
-                    await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
+                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
             if isinstance(exc, TimeoutError):
                 msg = "Background script reload did not durably revoke every active run before the reload deadline."
                 raise _ScriptRuntimeLifecycleError(msg) from None
