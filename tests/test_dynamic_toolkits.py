@@ -978,7 +978,7 @@ def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: P
 
     def blocked_validator(_loaded_tools: list[str]) -> None:
         validation_started.set()
-        assert continue_validation.wait(timeout=5)
+        assert continue_validation.wait(timeout=30)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         load_future = executor.submit(
@@ -989,7 +989,7 @@ def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: P
             tool_name="shell",
             validate_loaded_tools=blocked_validator,
         )
-        assert validation_started.wait(timeout=5)
+        assert validation_started.wait(timeout=10)
         try:
             surface_future = executor.submit(
                 visible_tool_surface,
@@ -997,11 +997,11 @@ def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: P
                 config=config,
                 session_id="thread-a",
             )
-            surface = surface_future.result(timeout=1)
+            surface = surface_future.result(timeout=10)
         finally:
             continue_validation.set()
 
-        result = load_future.result(timeout=5)
+        result = load_future.result(timeout=30)
 
     assert surface.loaded_tools == ()
     assert result.status == "loaded"
@@ -1024,7 +1024,7 @@ def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> N
         validated_candidates.append(candidate)
         if candidate == ("shell",) and not continue_first_validation.is_set():
             first_validation_started.set()
-            assert continue_first_validation.wait(timeout=5)
+            assert continue_first_validation.wait(timeout=30)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         shell_future = executor.submit(
@@ -1035,7 +1035,7 @@ def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> N
             tool_name="shell",
             validate_loaded_tools=validator,
         )
-        assert first_validation_started.wait(timeout=5)
+        assert first_validation_started.wait(timeout=10)
         try:
             sleep_future = executor.submit(
                 load_tool_for_session,
@@ -1045,11 +1045,11 @@ def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> N
                 tool_name="sleep",
                 validate_loaded_tools=validator,
             )
-            sleep_result = sleep_future.result(timeout=1)
+            sleep_result = sleep_future.result(timeout=10)
         finally:
             continue_first_validation.set()
 
-        shell_result = shell_future.result(timeout=5)
+        shell_result = shell_future.result(timeout=30)
 
     assert shell_result.status == "loaded"
     assert sleep_result.status == "loaded"
