@@ -35,7 +35,7 @@ class VisibleToolSurface:
 
 @dataclass(frozen=True)
 class LoadToolResult:
-    """Result of one locked dynamic-tool load attempt."""
+    """Result of one dynamic-tool load attempt."""
 
     status: str
     loaded_tools: tuple[str, ...]
@@ -479,6 +479,7 @@ def load_tool_for_session(
             candidate_loaded_tools = _ordered_deferred_tools(deferred_tool_names, [*loaded_tools, tool_name])
             state_snapshot = tuple(_loaded_tools[key]) if key in _loaded_tools else None
 
+        # Validation may be slow, so run it unlocked; retry if same-session state changes.
         validation_failure = (
             validate_loaded_tools(candidate_loaded_tools) if validate_loaded_tools is not None else None
         )
