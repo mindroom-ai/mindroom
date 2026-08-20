@@ -36,11 +36,7 @@ class DesktopSessionError(RuntimeError):
     """Desktop Matrix session state is missing, exposed, or invalid."""
 
 
-_DESKTOP_SYNC_STORAGE = MatrixSyncStorage(
-    recover_limited_timelines=False,
-    persist_recovery=False,
-    store_tokens=True,
-)
+_DESKTOP_SYNC_STORAGE = MatrixSyncStorage(store_tokens=True)
 
 
 @dataclass(frozen=True, slots=True)

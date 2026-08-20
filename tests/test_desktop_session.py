@@ -295,11 +295,7 @@ async def test_login_translates_expected_matrix_authentication_failure(
         "wrong-password",
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
-        sync_storage=MatrixSyncStorage(
-            recover_limited_timelines=False,
-            persist_recovery=False,
-            store_tokens=True,
-        ),
+        sync_storage=MatrixSyncStorage(store_tokens=True),
     )
 
 
@@ -307,11 +303,7 @@ async def test_login_translates_expected_matrix_authentication_failure(
 async def test_password_login_uses_desktop_upstream_sync_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Desktop password login disables nio limited-timeline recovery only.
-
-    This fails if the Desktop boundary omits its upstream-compatible sync
-    policy or the config builder does not consume that policy.
-    """
+    """Desktop password login persists its ordinary Classic sync cursor."""
     client = SimpleNamespace(
         user_id="@desktop:example.org",
         device_id="DESKTOP",
@@ -334,14 +326,8 @@ async def test_password_login_uses_desktop_upstream_sync_configuration(
     )
 
     sync_storage = matrix_login.await_args.kwargs["sync_storage"]
-    assert sync_storage == MatrixSyncStorage(
-        recover_limited_timelines=False,
-        persist_recovery=False,
-        store_tokens=True,
-    )
+    assert sync_storage == MatrixSyncStorage(store_tokens=True)
     config = matrix_client_config(sync_storage=sync_storage)
-    assert config.backfill_limited_timelines is False
-    assert config.backfill_persist_recovery is False
     assert config.store_sync_tokens is True
 
 
@@ -412,11 +398,7 @@ async def test_sso_login_uses_returned_identity_without_password(
         runtime_paths,
         expected_user_id=None,
         http_headers={"X-Access-Client": "test-secret"},
-        sync_storage=MatrixSyncStorage(
-            recover_limited_timelines=False,
-            persist_recovery=False,
-            store_tokens=True,
-        ),
+        sync_storage=MatrixSyncStorage(store_tokens=True),
     )
     prepare.assert_awaited_once_with(client)
     cross_sign.assert_not_awaited()
@@ -448,9 +430,5 @@ async def test_restore_translates_expected_revoked_session_failure(
 
     assert matrix_restore.await_args.kwargs == {
         "http_headers": {"X-Access-Client": "test-secret"},
-        "sync_storage": MatrixSyncStorage(
-            recover_limited_timelines=False,
-            persist_recovery=False,
-            store_tokens=True,
-        ),
+        "sync_storage": MatrixSyncStorage(store_tokens=True),
     }

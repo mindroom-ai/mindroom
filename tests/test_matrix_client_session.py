@@ -18,7 +18,6 @@ import pytest
 from nio.ingest.config import ClassicSourceConfig, IngestionConfig
 from nio.store.database import DefaultStore, SqliteStore
 
-from mindroom.bot import _SYNC_TIMELINE_LIMIT
 from mindroom.constants import (
     CONFIG_CONFIRMATION_REACTION_KEY,
     STREAM_STATUS_KEY,
@@ -150,38 +149,19 @@ def test_matrix_client_config_copies_custom_http_headers() -> None:
     assert config.custom_headers == {"X-Access-Client": "test-secret"}
 
 
-def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
-    """MindRoom clients must recover events omitted by limited sync windows."""
+def test_matrix_client_config_enables_sync_token_storage() -> None:
+    """MindRoom clients persist their ordinary Classic sync cursor."""
     config = matrix_client_config()
 
-    assert config.backfill_limited_timelines is True
-    assert config.backfill_persist_recovery is True
     assert config.store_sync_tokens is True
 
 
-def test_matrix_client_config_backfills_far_past_the_sync_window() -> None:
-    """A room busy enough to truncate its sync window must still be recoverable.
-
-    nio's default event cap abandons recovery after four sync windows of
-    catch-up, which a single burst of streaming agent edits already exceeds.
-    """
-    config = matrix_client_config()
-
-    assert config.backfill_max_events >= 20 * _SYNC_TIMELINE_LIMIT
-    assert config.backfill_max_events > nio.AsyncClientConfig().backfill_max_events
-
-
-def test_matrix_client_config_supports_application_owned_classic_sync() -> None:
-    """Classic ingress can disable nio's durable cursor and recovery journal."""
+def test_matrix_client_config_supports_application_owned_sync_tokens() -> None:
+    """Classic ingress can leave its cursor under application ownership."""
     config = matrix_client_config(
-        sync_storage=MatrixSyncStorage(
-            store_tokens=False,
-            persist_recovery=False,
-        ),
+        sync_storage=MatrixSyncStorage(store_tokens=False),
     )
 
-    assert config.backfill_limited_timelines is True
-    assert config.backfill_persist_recovery is False
     assert config.store_sync_tokens is False
 
 
@@ -473,11 +453,7 @@ async def test_login_with_token_uses_supplied_sync_storage_for_both_clients(
         env_path=tmp_path / ".env",
         storage_root=tmp_path / "data",
     )
-    sync_storage = MatrixSyncStorage(
-        recover_limited_timelines=False,
-        persist_recovery=False,
-        store_tokens=True,
-    )
+    sync_storage = MatrixSyncStorage(store_tokens=True)
 
     result = await login_with_token(
         "https://matrix.example.org",

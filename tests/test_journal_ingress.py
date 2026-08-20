@@ -1138,8 +1138,8 @@ class TestDurableAdmission:
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [m.content["body"] for m in page.messages] == ["old"]
 
-    async def test_a_failed_admission_refuses_the_callback(self) -> None:
-        """Refusing is what keeps the event for redelivery instead of losing it."""
+    async def test_a_failed_compatibility_admission_preserves_the_store_error(self) -> None:
+        """A compatibility caller receives the exact durable-store refusal."""
 
         class Failing:
             principal_id = "agent@alice"
@@ -1150,7 +1150,7 @@ class TestDurableAdmission:
 
         ingress = _JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
 
-        with pytest.raises(nio.CallbackNotAcceptedError):
+        with pytest.raises(RuntimeError, match="disk is full"):
             await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
 
     async def test_redelivery_after_a_crash_creates_one_turn(

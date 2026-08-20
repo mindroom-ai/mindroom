@@ -411,11 +411,10 @@ class _JournalIngress:
                 inbound_event(room.room_id, event, kind, event_class),
                 projected_event(room.room_id, event, kind, self_sender=self.self_sender),
             )
-        except Exception as error:
-            # Refusing acceptance is the whole point: nio keeps the event for
-            # redelivery and does not advance the checkpoint past it.
+        except Exception:
+            # Preserve the durable-store refusal for compatibility callers.
             self.on_persist_failure()
-            raise nio.CallbackNotAcceptedError(str(error)) from error
+            raise
         if event_class is not EventClass.ACTIONABLE:
             return
         if admission is AdmissionResult.ADMITTED:
