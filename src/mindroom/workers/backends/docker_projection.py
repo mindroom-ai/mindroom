@@ -609,6 +609,9 @@ class DockerProjectionManager:
                 worker_scope=policy.effective_execution_scope,
             )
         )
+        if len(matching_agent_names) > 1:
+            msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+            raise WorkerBackendError(msg)
         if matching_agent_names:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:

@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
+NEVER_PREAPPROVE_TOOLKITS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
+
 
 def build_automation_approval_config(
     config: Config,
@@ -21,6 +23,8 @@ def build_automation_approval_config(
 ) -> Config:
     """Require approval by default and append safe function-level auto-approval rules."""
     allow_all = "*" in preapproved_toolkits
+    # A bare function name can belong to multiple toolkits. Auto-approve it only
+    # when every owner is eligible; live operator rules remain first-match-wins.
     safe_preapproved_toolkits = {
         toolkit_name
         for owners in function_owners.values()

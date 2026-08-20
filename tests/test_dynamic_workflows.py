@@ -38,7 +38,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import _matching_tool_approval_rule
-from mindroom.tool_system.automation_approval import build_automation_approval_config
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from tests.authorization_helpers import (
@@ -2089,7 +2089,7 @@ def test_dynamic_workflow_uses_shared_automation_approval_policy(tmp_path: Path)
         context.config,
         function_owners={"read_url": frozenset({"website"})},
         preapproved_toolkits=frozenset({"website"}),
-        never_preapprove_toolkits=dynamic_workflow_module._WORKFLOW_NO_PREAPPROVAL_TOOLS,
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
 
     assert shared.tool_approval.default == "require_approval"

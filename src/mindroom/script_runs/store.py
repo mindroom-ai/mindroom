@@ -104,6 +104,10 @@ class ScriptCallRateLimitError(ScriptRunStoreError):
     """Raised when a new logical call would exceed its run's durable rate limit."""
 
 
+class ScriptReceiptTooLargeError(ScriptRunStoreError):
+    """Raised when a terminal call receipt exceeds its durable size limit."""
+
+
 class ScriptCapabilityError(ScriptRunStoreError):
     """Raised when a run capability is invalid or cannot accept calls."""
 
@@ -608,17 +612,6 @@ class ScriptRunStore:
         with self._write_transaction() as connection:
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
-            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(script_runs)")}
-            if "snapshot_locator" not in columns:
-                connection.execute("ALTER TABLE script_runs ADD COLUMN snapshot_locator TEXT")
-            if "preapprove_launch_grants" not in columns:
-                connection.execute(
-                    "ALTER TABLE script_runs ADD COLUMN preapprove_launch_grants INTEGER NOT NULL DEFAULT 0",
-                )
-            if "output" not in columns:
-                connection.execute("ALTER TABLE script_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''")
-            if "worker_backend_locator" not in columns:
-                connection.execute("ALTER TABLE script_runs ADD COLUMN worker_backend_locator TEXT")
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -751,7 +744,6 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
 
 def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
     execution_identity = json.loads(str(row["execution_identity_json"]))
-    column_names = row.keys()
     return ScriptRunRecord(
         run_id=str(row["run_id"]),
         agent_name=str(row["agent_name"]),
@@ -760,9 +752,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         source_digest=str(row["source_digest"]),
         grants=_grants_from_json(str(row["grants_json"])),
         token_hash=str(row["token_hash"]),
-        preapprove_launch_grants=(
-            bool(row["preapprove_launch_grants"]) if "preapprove_launch_grants" in column_names else False
-        ),
+        preapprove_launch_grants=bool(row["preapprove_launch_grants"]),
         thread_root_event_id=_nullable_string(row["thread_root_event_id"]),
         execution_identity=cast("dict[str, object]", execution_identity),
         worker_key=_nullable_string(row["worker_key"]),
@@ -779,7 +769,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         finished_at=_nullable_string(row["finished_at"]),
         exit_code=cast("int | None", row["exit_code"]),
         error=_nullable_string(row["error"]),
-        output=str(row["output"]) if "output" in column_names else "",
+        output=str(row["output"]),
         cancel_requested_at=_nullable_string(row["cancel_requested_at"]),
         cancellation_reason=_nullable_string(row["cancellation_reason"]),
     )
@@ -823,7 +813,7 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
         raise ScriptRunStoreError(_RECEIPT_NOT_SERIALIZABLE) from exc
     if len(serialized.encode("utf-8")) > _MAX_RECEIPT_BYTES:
         msg = f"Script call receipt exceeds the {_MAX_RECEIPT_BYTES}-byte limit."
-        raise ScriptRunStoreError(msg)
+        raise ScriptReceiptTooLargeError(msg)
     return serialized
 
 

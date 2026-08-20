@@ -214,21 +214,6 @@ def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
 
 
-def test_instance_chart_sets_internal_script_gateway_for_workers() -> None:
-    """Background workers should call the runtime through its in-cluster service."""
-    docs = _render_chart(
-        Path("cluster/k8s/instance"),
-        "customer=tenant42",
-    )
-    deployment = _resource(docs, "Deployment", "mindroom-tenant42")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
-
-    assert env_values["MINDROOM_SCRIPT_GATEWAY_URL"] == (
-        "http://mindroom-tenant42.mindroom-instances.svc.cluster.local:8765/api/script-gateway"
-    )
-
-
 def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     """OIDC tenants should authorize and auto-join the platform owner to managed rooms."""
     docs = _render_chart(
@@ -891,63 +876,6 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
         "app.kubernetes.io/managed-by": "mindroom",
         "app.kubernetes.io/name": "mindroom-worker",
     }
-
-
-def test_runtime_chart_sets_reachable_script_gateway_and_worker_egress() -> None:
-    """Cross-namespace workers should reach the runtime gateway through cluster DNS."""
-    docs = _render_chart(
-        Path("cluster/k8s/runtime"),
-        "workers.backend=kubernetes",
-        "workers.kubernetes.namespace=mindroom-workers",
-        "workers.sandbox.proxyToken.value=test-token",
-        "eventCache.postgres.auth.password=test-password",
-        "egressProxy.enabled=true",
-        "egressProxy.service.name=egress-proxy",
-        "egressProxy.service.namespace=proxy-system",
-        "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
-        "networkPolicy.create=true",
-        "networkPolicy.apiIngressFrom[0].podSelector.matchLabels.app=ingress",
-        release_name="mindroom-runtime",
-        namespace="mindroom-system",
-    )
-    deployment = _resource(docs, "Deployment", "mindroom-runtime")
-    environment = _env_by_name(_container(deployment, "mindroom"))
-    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
-    runtime_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime")
-
-    assert environment["MINDROOM_SCRIPT_GATEWAY_URL"]["value"] == (
-        "http://mindroom-runtime.mindroom-system.svc.cluster.local:8765/api/script-gateway"
-    )
-    assert {
-        "to": [
-            {
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-system"}},
-                "podSelector": {
-                    "matchLabels": {
-                        "app.kubernetes.io/name": "mindroom-runtime",
-                        "app.kubernetes.io/instance": "mindroom-runtime",
-                        "app.kubernetes.io/component": "runtime",
-                    },
-                },
-            },
-        ],
-        "ports": [{"protocol": "TCP", "port": 8765}],
-    } in policy["spec"]["egress"]
-    assert {
-        "from": [
-            {
-                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
-                "podSelector": {
-                    "matchLabels": {
-                        "mindroom.ai/component": "worker",
-                        "app.kubernetes.io/managed-by": "mindroom",
-                        "app.kubernetes.io/name": "mindroom-worker",
-                    },
-                },
-            },
-        ],
-        "ports": [{"protocol": "TCP", "port": 8765}],
-    } in runtime_policy["spec"]["ingress"]
 
 
 def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configmap() -> None:

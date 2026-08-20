@@ -166,7 +166,7 @@ agents:
 - **agent_name**: The configured identifier used for agent config and aliases; provisioning may propose a `mindroom_<agent_name>` username when an account is missing, but runtime identity always comes from persisted Matrix account state.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
-- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))
+- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides, including `script` controls such as `allowed_tools`, concurrency, call-rate, and runtime limits (see Available Tools below, [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration), and [Background Python Scripts](../tools/background-scripts.md))
 - **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior
@@ -203,7 +203,6 @@ Compaction rewrites the live session so compacted history moves into `session.su
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
 - **worker_scope**: Worker runtime reuse mode for routed tools: `shared`, `user`, or `user_agent`
-- **script**: Supervised background Python controls configured as an inline tool entry with `allowed_tools`, concurrency, call-rate, and runtime limits; see [Background Python Scripts](../tools/background-scripts.md)
 - **delegate_to**: List of agent names this agent can delegate tasks to via tool calls
 - **private**: Optional requester-private state config for per-requester materialized instances
 

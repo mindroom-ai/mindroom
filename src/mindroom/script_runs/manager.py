@@ -29,6 +29,13 @@ from mindroom.script_runs.models import (
     supervisor_handle_for_run,
 )
 from mindroom.script_runs.policy import resolve_script_launch_grants
+from mindroom.script_runs.reasons import (
+    AMBIGUOUS_LAUNCH,
+    INTERRUPTION_REASONS,
+    MAX_RUNTIME_EXCEEDED,
+    PROCESS_EXIT_OBSERVED,
+    SUPERVISOR_UNAVAILABLE,
+)
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
 from mindroom.shell_supervisor import (
@@ -80,31 +87,6 @@ _TERMINAL_STATES = frozenset(
         ScriptRunState.FAILED,
         ScriptRunState.CANCELLED,
         ScriptRunState.INTERRUPTED,
-    },
-)
-_ISOLATION_INTERRUPTION_REASON = "Agent isolation changed during configuration reload."
-_WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
-_RUNTIME_SHUTDOWN_INTERRUPTION_REASON = "MindRoom runtime shut down."
-_RUNTIME_STARTUP_INTERRUPTION_REASON = "MindRoom runtime restarted."
-_REMOVED_AGENT_INTERRUPTION_REASON = "Owning agent was removed by configuration reload."
-_SCRIPT_TOOL_REMOVED_INTERRUPTION_REASON = "Background script tool was removed by configuration reload."
-_AUTHORIZATION_INTERRUPTION_REASON = "Script owner no longer has room-and-agent reply authorization."
-_SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON = "Background script supervisor handle is unavailable."
-_AMBIGUOUS_LAUNCH_INTERRUPTION_REASON = "Background script launch outcome is indeterminate."
-_RUNTIME_LIMIT_INTERRUPTION_REASON = "Background script maximum runtime exceeded."
-_PROCESS_EXIT_OBSERVED_REASON = "Background script process exited."
-_INTERRUPTION_REASONS = frozenset(
-    {
-        _ISOLATION_INTERRUPTION_REASON,
-        _WORKER_CONFIGURATION_INTERRUPTION_REASON,
-        _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
-        _RUNTIME_STARTUP_INTERRUPTION_REASON,
-        _REMOVED_AGENT_INTERRUPTION_REASON,
-        _SCRIPT_TOOL_REMOVED_INTERRUPTION_REASON,
-        _AUTHORIZATION_INTERRUPTION_REASON,
-        _SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON,
-        _AMBIGUOUS_LAUNCH_INTERRUPTION_REASON,
-        _RUNTIME_LIMIT_INTERRUPTION_REASON,
     },
 )
 
@@ -175,7 +157,7 @@ class ScriptRunLimits:
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptRunStatus:  # privata: ignore -- Task 6 lifecycle consumes this status contract.
+class ScriptRunStatus:
     """One durable run record paired with its latest supervisor output."""
 
     run: ScriptRunRecord
@@ -515,7 +497,7 @@ class ScriptRunManager:
         if _runtime_expired(run):
             reconciled = await self._terminate_durable_run_locked(
                 run,
-                reason=_RUNTIME_LIMIT_INTERRUPTION_REASON,
+                reason=MAX_RUNTIME_EXCEEDED,
             )
             return ScriptRunStatus(run=reconciled, output=reconciled.output)
         status = await self._process_status(run)
@@ -678,7 +660,7 @@ class ScriptRunManager:
             return await self._terminate_durable_run_locked(
                 run,
                 force=False,
-                reason=_RUNTIME_LIMIT_INTERRUPTION_REASON,
+                reason=MAX_RUNTIME_EXCEEDED,
             )
         status = await self._process_status(run)
         return await self._apply_process_status(run, status)
@@ -756,7 +738,7 @@ class ScriptRunManager:
             await self._terminate_durable_run_locked(
                 run,
                 force=True,
-                reason=_AMBIGUOUS_LAUNCH_INTERRUPTION_REASON,
+                reason=AMBIGUOUS_LAUNCH,
             )
         except BaseException:
             logger.warning("script_ambiguous_launch_cancel_pending", run_id=run_id, exc_info=True)
@@ -898,10 +880,10 @@ class ScriptRunManager:
             return run
         bounded_output = _bounded_output(status.output)
         if status.state == "unknown":
-            reason = _SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON
+            reason = SUPERVISOR_UNAVAILABLE
             error = reason
         else:
-            reason = _PROCESS_EXIT_OBSERVED_REASON
+            reason = PROCESS_EXIT_OBSERVED
             error = (
                 None
                 if status.exit_code == 0
@@ -941,7 +923,7 @@ class ScriptRunManager:
                 self.store.record_process_exit,
                 run.run_id,
                 exit_code=process_status.exit_code,
-                error=(_SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON if process_status.state == "unknown" else None),
+                error=(SUPERVISOR_UNAVAILABLE if process_status.state == "unknown" else None),
                 output=_bounded_output(process_status.output),
                 cancellation_reason=run.cancellation_reason or "Cancellation requested by the owning agent.",
             ),
@@ -1319,9 +1301,9 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> WorkerBacke
 
 
 def _terminal_state_for(run: ScriptRunRecord) -> ScriptRunState:
-    if run.cancellation_reason in _INTERRUPTION_REASONS:
+    if run.cancellation_reason in INTERRUPTION_REASONS:
         return ScriptRunState.INTERRUPTED
-    if run.finished_at is None or run.cancellation_reason != _PROCESS_EXIT_OBSERVED_REASON:
+    if run.finished_at is None or run.cancellation_reason != PROCESS_EXIT_OBSERVED:
         return ScriptRunState.CANCELLED
     return ScriptRunState.EXITED if run.exit_code == 0 else ScriptRunState.FAILED
 

@@ -92,7 +92,7 @@ def reserve_delivery(
         ),
     )
     if inserted is None:
-        return False
+        return True
     approval_card_state.reserve_delivery(
         transaction,
         principal_id,

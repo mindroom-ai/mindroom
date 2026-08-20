@@ -40,10 +40,10 @@ defaults:
 `allowed_tools` contains toolkit names, not function names.
 It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
 Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
-MindRoom captures it when the script launches.
+MindRoom captures the configured `allowed_tools` value when the script launches.
 A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
 An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
-Later configuration changes cannot expand a running script's unattended approval authority, including when they add toolkits to `allowed_tools`.
+A later `allowed_tools` expansion cannot widen a running script's unattended approval authority; operator-authored `tool_approval` rules always apply live.
 The `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
@@ -82,7 +82,7 @@ Control responses never expose the capability token or its hash.
 
 ## Calling Agent Tools From A Script
 
-The worker environment includes the standard-library-only `mindroom.script_sdk` client.
+The worker environment includes the `mindroom.script_sdk` client, whose implementation uses no third-party imports of its own.
 Create one `MindRoomTools` instance and call tools by toolkit name, function name, and JSON-compatible keyword arguments.
 
 ```python
@@ -173,7 +173,7 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 ## Worker And Network Requirements
 
 The supported safe deployment uses the dedicated Docker backend described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
-The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured shared state root.
+The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured dedicated worker state root.
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts currently return an error because the primary Kubernetes Service exposes more than the capability-gated script gateway on one listener.
 They will remain disabled until the chart provides a gateway-only listener and NetworkPolicy target.
@@ -220,6 +220,7 @@ Run states are `starting`, `running`, `exited`, `failed`, `cancelled`, and `inte
 `failed` means launch failed or the process returned a nonzero exit code.
 `cancelled` means cancellation was requested and process exit was confirmed.
 `interrupted` means MindRoom lost a required runtime fact, such as the worker supervisor handle, or an isolation-changing reload intentionally stopped the run.
+Authorization loss, owning-agent removal, and removal of the `script` tool are also recorded as interruptions.
 
 Call states are `pending`, `completed`, `failed`, and `indeterminate`.
 Call receipts are durable so a script can poll one accepted call without replaying it.

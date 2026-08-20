@@ -28,7 +28,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import tool_may_require_approval
-from mindroom.tool_system.automation_approval import build_automation_approval_config
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -47,11 +47,6 @@ if TYPE_CHECKING:
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "invite_router", "memory", "self_config"},
 )
-
-# Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create
-# cron jobs, run an autonomous coding agent). Embedded participants cannot suspend for
-# approval, so allowed_tools (including "*") never makes these tools available.
-_WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 
 _MINIMAL_SPEC_EXAMPLE = (
     '{"schema_version": 1, "kind": "workflow", "id": "my_flow", "name": "My Flow", '
@@ -805,7 +800,7 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
         context.config,
         function_owners=_toolkit_function_owners(toolkits_by_name),
         preapproved_toolkits=_workflow_allowed_tools(context),
-        never_preapprove_toolkits=_WORKFLOW_NO_PREAPPROVAL_TOOLS,
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
 
 

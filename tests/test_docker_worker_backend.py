@@ -3661,6 +3661,40 @@ def test_docker_backend_projects_shared_agent_for_narrower_user_agent_worker(
     assert str(agent_state_root_path(tmp_path, "alpha")) in volumes
 
 
+def test_docker_backend_rejects_ambiguous_normalized_user_agent_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A normalized script worker key cannot silently select the first matching agent."""
+    config_text = """
+agents:
+  foo:
+    display_name: Foo
+    tools: [script]
+  foo_:
+    display_name: Foo underscore
+    tools: [script]
+models:
+  default:
+    provider: openai
+    id: test-model
+router:
+  model: default
+"""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
+        backend.ensure_worker(
+            WorkerSpec(
+                "v1:default:user_agent:@alice:example.org:foo",
+                private_agent_names=frozenset(),
+            ),
+            now=10.0,
+        )
+
+    assert fake_client.containers.run_calls == []
+
+
 def test_docker_backend_projects_only_user_scoped_assets_for_requester_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

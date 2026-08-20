@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_approval import AutomationToolOrigin, BackgroundScriptToolOrigin
+    from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -212,7 +212,7 @@ def _build_tool_failure_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-    origin: AutomationToolOrigin | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Build one sanitized durable record for a failing tool call."""
     return _ToolCallRecord(
@@ -252,7 +252,7 @@ def _build_tool_success_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-    origin: AutomationToolOrigin | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Build one sanitized durable record for a successful tool call."""
     return _ToolCallRecord(
@@ -275,7 +275,7 @@ def _build_tool_success_record(
     )
 
 
-def _origin_record_fields(origin: AutomationToolOrigin | None) -> dict[str, str | None]:
+def _origin_record_fields(origin: BackgroundScriptToolOrigin | None) -> dict[str, str | None]:
     """Return durable audit fields for a typed automation origin."""
     if origin is None:
         return {
@@ -285,21 +285,12 @@ def _origin_record_fields(origin: AutomationToolOrigin | None) -> dict[str, str 
             "toolkit_name": None,
             "function_name": None,
         }
-    if origin.origin_kind == "background_script":
-        background_origin = cast("BackgroundScriptToolOrigin", origin)
-        return {
-            "origin": "background_script",
-            "run_id": background_origin.run_id,
-            "call_id": background_origin.call_id,
-            "toolkit_name": background_origin.toolkit_name,
-            "function_name": background_origin.function_name,
-        }
     return {
-        "origin": "dynamic_workflow",
+        "origin": "background_script",
         "run_id": origin.run_id,
-        "call_id": None,
-        "toolkit_name": None,
-        "function_name": None,
+        "call_id": origin.call_id,
+        "toolkit_name": origin.toolkit_name,
+        "function_name": origin.function_name,
     }
 
 
@@ -351,7 +342,7 @@ def record_tool_failure(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
-    origin: AutomationToolOrigin | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Persist one sanitized tool failure record when runtime paths are available."""
     record = _build_tool_failure_record(
@@ -404,7 +395,7 @@ def record_tool_success(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
-    origin: AutomationToolOrigin | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Persist one sanitized tool success record when runtime paths are available."""
     record = _build_tool_success_record(

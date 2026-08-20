@@ -222,8 +222,6 @@ def _workspace_file(
     byte_limit: int,
 ) -> Path:
     relative_path = Path(raw_relative_path)
-    if relative_path.is_absolute() or relative_path.is_symlink():
-        raise HTTPException(status_code=400, detail=f"{label} must be a regular file inside the worker workspace.")
     candidate = workspace / relative_path
     if candidate.is_symlink():
         raise HTTPException(status_code=400, detail=f"{label} must not be a symbolic link.")
@@ -264,7 +262,6 @@ def _script_environment(payload: SandboxScriptRunRequest, *, workspace: Path, to
         or not parsed_url.hostname
         or parsed_url.username is not None
         or parsed_url.password is not None
-        or len(payload.gateway_url) > 2048
     ):
         raise HTTPException(status_code=400, detail="Script gateway environment must contain a safe HTTP(S) URL.")
     return {
@@ -308,7 +305,7 @@ def _parse_status_message(message: str) -> SandboxScriptStatusResponse:
 def _parse_cancel_message(message: str) -> SandboxScriptCancelResponse:
     if message.startswith(("Terminated process", "Force-killed process")):
         return SandboxScriptCancelResponse(ok=True, cancel_requested=True)
-    if message.startswith(("Process already finished", "Process ")):
+    if message.startswith("Process "):
         return SandboxScriptCancelResponse(ok=True, cancel_requested=False, already_finished=True)
     if message.startswith("Error: Unknown handle"):
         return SandboxScriptCancelResponse(ok=True, cancel_requested=False, unknown_handle=True)

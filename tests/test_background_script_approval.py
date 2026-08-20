@@ -14,6 +14,7 @@ from mindroom.event_journal import (
     ApprovalCardReservation,
     BackgroundApprovalDecision,
     DeliveryStage,
+    DepartureSource,
     EventJournalStore,
     MatrixDelivery,
     StoredApprovalCard,
@@ -136,6 +137,38 @@ async def _wait_for_pending_card(journal: EventJournalStore) -> StoredApprovalCa
         await asyncio.sleep(0.001)
     message = "Approval delivery was not durably acknowledged."
     raise AssertionError(message)
+
+
+@pytest.mark.asyncio
+async def test_background_approval_fails_closed_when_room_departure_is_fenced(tmp_path: Path) -> None:
+    """A room that cannot publish a card must not hold the script call until timeout."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path)
+    cards = journal.principal("router@shared")
+    await cards.fence_departure("!room:localhost", source=DepartureSource.LOCAL)
+
+    try:
+        decision = await asyncio.wait_for(
+            manager.request_background_approval(
+                origin=_origin(),
+                room_id="!room:localhost",
+                thread_id="$thread",
+                agent_name="watcher",
+                requester_id="@alice:localhost",
+                approver_user_id="@alice:localhost",
+                tool_name="add",
+                arguments={"a": 1, "b": 2},
+                timeout_seconds=30.0,
+            ),
+            timeout=1.0,
+        )
+
+        assert decision.status == "denied"
+        assert decision.reason == "Approval card could not be published in this room."
+        assert initial_sent.is_set() is False
+        assert await cards.background_approval_decision(run_id="run-1", call_id="call-1") is None
+    finally:
+        await manager.shutdown()
+        await journal.close()
 
 
 @pytest.mark.asyncio

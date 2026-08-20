@@ -503,7 +503,7 @@ async def _monitor_process(
     try:
         await process.wait()
     finally:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGKILL)
         await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)

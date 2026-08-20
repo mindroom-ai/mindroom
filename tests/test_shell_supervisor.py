@@ -183,6 +183,48 @@ async def test_run_nonzero_exit_returns_stderr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup permissions cannot hide an already-observed process exit."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "pass",
+        start_new_session=True,
+    )
+    await process.wait()
+    handle = "shell:monitor-permission"
+    record = shell_execution_module.ProcessRecord(
+        namespace="test",
+        handle=handle,
+        pid=process.pid,
+        args=[sys.executable, "-c", "pass"],
+        process=process,
+    )
+    registry = {handle: record}
+    stdout_reader = asyncio.create_task(asyncio.sleep(0))
+    stderr_reader = asyncio.create_task(asyncio.sleep(0))
+
+    def deny_group_cleanup(_pid: int, _signal: signal.Signals) -> None:
+        msg = "process group belongs to a different user"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(shell_execution_module.os, "killpg", deny_group_cleanup)
+
+    await shell_execution_module._monitor_process(
+        registry,
+        handle,
+        process,
+        stdout_reader,
+        stderr_reader,
+    )
+
+    assert record.finished is True
+    assert record.return_code == 0
+
+
+@pytest.mark.asyncio
 async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
     """The full run→check→kill handle lifecycle should work over the socket."""
     registry: dict[str, ProcessRecord] = {}

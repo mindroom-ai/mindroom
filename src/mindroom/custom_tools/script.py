@@ -18,7 +18,7 @@ __all__ = ["ScriptTools", "bind_script_run_manager"]
 _SCRIPT_RUN_MANAGER: ScriptRunManager | None = None
 
 
-def bind_script_run_manager(  # privata: ignore -- Task 6 owns runtime binding and hot reload.
+def bind_script_run_manager(
     manager: ScriptRunManager | None,
 ) -> None:
     """Replace the live primary manager used by existing and future toolkit instances."""

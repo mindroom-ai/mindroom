@@ -104,6 +104,16 @@ def _plan(current: Config, updated: Config) -> ConfigUpdatePlan:
     )
 
 
+async def _reconcile_once(runtime: ScriptRuntimeLifecycle) -> None:
+    with suppress(TimeoutError):
+        await asyncio.wait_for(runtime._reconcile_pass(), timeout=runtime.pass_timeout_seconds)
+
+
+async def _prune_once(runtime: ScriptRuntimeLifecycle, *, now: datetime | None = None) -> None:
+    with suppress(TimeoutError):
+        await asyncio.wait_for(runtime._prune_pass(now=now), timeout=runtime.pass_timeout_seconds)
+
+
 def _run(
     runtime_paths: RuntimePaths,
     *,
@@ -1275,6 +1285,86 @@ async def test_ordinary_agent_restart_keeps_running_script_retryable(tmp_path: P
     assert store.get_run("run-1").state is ScriptRunState.RUNNING
 
 
+@pytest.mark.asyncio
+async def test_plugin_reload_interrupts_running_scripts_before_code_replacement(tmp_path: Path) -> None:
+    """Plugin replacement uses a clear interruption boundary instead of stale tool objects."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        return store.request_cancel(run_id, reason=reason)
+
+    def finish_interrupted(*, run_id: str, broker_revoked: bool) -> ScriptRunRecord:
+        del broker_revoked
+        return store.transition_run(
+            run_id,
+            state=ScriptRunState.INTERRUPTED,
+            error="Plugin tools changed during configuration reload.",
+        )
+
+    manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
+        request_revocation=MagicMock(side_effect=request_revocation),
+        revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
+        reconcile_durable=AsyncMock(side_effect=finish_interrupted),
+    )
+    config = _config()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=lambda: config,
+        worker_lease_provider=lambda _locator: None,
+    )
+
+    await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+
+    manager.request_revocation.assert_called_once_with(
+        run_id=run.run_id,
+        reason="Plugin tools changed during configuration reload.",
+    )
+    manager.revoke.assert_awaited_once_with(
+        run.run_id,
+        reason="Plugin tools changed during configuration reload.",
+    )
+    manager.reconcile_durable.assert_awaited_once_with(run_id=run.run_id, broker_revoked=True)
+
+
+@pytest.mark.asyncio
+async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tmp_path: Path) -> None:
+    """Plugin code cannot be replaced while an old script can still call it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+    config = _config()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=SimpleNamespace(
+            begin_startup_reconciliation=AsyncMock(),
+            end_startup_reconciliation=AsyncMock(),
+            request_revocation=MagicMock(
+                side_effect=lambda run_id, *, reason: store.request_cancel(run_id, reason=reason),
+            ),
+            revoke=AsyncMock(return_value=run),
+            reconcile_revoked_process=AsyncMock(return_value=run),
+            reconcile_durable=AsyncMock(return_value=run),
+        ),
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=lambda: config,
+        worker_lease_provider=lambda _locator: None,
+    )
+
+    with pytest.raises(RuntimeError, match="Plugin reload did not interrupt every active background script"):
+        await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+
+
 def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Path) -> None:
     """Run authority includes the bot's current grant-room membership index."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -1340,7 +1430,7 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     manager.request_revocation.assert_called_once()
     manager.revoke.assert_awaited_once()
@@ -1379,7 +1469,7 @@ async def test_maintenance_interrupts_run_when_its_agent_was_removed(tmp_path: P
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     manager.request_revocation.assert_called_once()
     assert store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
@@ -1417,7 +1507,7 @@ async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     durable = store.get_run(running.run_id)
     assert durable.cancel_requested_at is None
@@ -1536,7 +1626,7 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
         worker_lease_provider=lambda _locator: next(leases),
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
     await runtime.apply_update_plan(_plan(old_config, new_config))
 
     assert first.released is True
@@ -1948,7 +2038,7 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     admitted_launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await asyncio.wait_for(client.launch_entered.wait(), timeout=1)
@@ -2158,7 +2248,7 @@ async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: 
         worker_lease_provider=lambda _locator: _Lease(backend),
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert backend.actions == [f"touch:{run.worker_key}", "reconcile:run-1"]
 
@@ -2206,7 +2296,7 @@ async def test_worker_replacement_completion_uses_the_config_visible_at_completi
         "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
         lambda _paths, config: "new" if config is new_config else "old",
     )
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
     await runtime.apply_update_plan(_plan(old_config, new_config))
 
     await runtime.complete_worker_replacement()
@@ -2253,7 +2343,7 @@ async def test_reconciliation_leaves_worker_transport_ambiguity_retryable_and_co
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert store.get_run(first.run_id).state is ScriptRunState.RUNNING
     assert reconciled == [second.run_id]
@@ -2285,7 +2375,7 @@ async def test_backend_failure_isolated_from_later_run_reconciliation(tmp_path: 
         worker_lease_provider=lambda _locator: None,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert reconciled == [second.run_id]
 
@@ -2316,7 +2406,7 @@ async def test_backend_provider_failure_does_not_abort_run_reconciliation(tmp_pa
         worker_lease_provider=unavailable_provider,
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert reconciled == [run.run_id]
 
@@ -2345,7 +2435,7 @@ async def test_worker_touch_failure_does_not_abort_run_reconciliation(tmp_path: 
         worker_lease_provider=lambda _locator: _Lease(backend),
     )
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert reconciled == [run.run_id]
 
@@ -2372,11 +2462,11 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
-        pass_timeout_seconds=0.02,
+        pass_timeout_seconds=0.1,
     )
     started = asyncio.get_running_loop().time()
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert asyncio.get_running_loop().time() - started < 0.2
 
@@ -2406,7 +2496,7 @@ async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_d
     heartbeat_task = asyncio.create_task(beat())
     started = asyncio.get_running_loop().time()
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert asyncio.get_running_loop().time() - started < 0.1
     await asyncio.wait_for(heartbeat.wait(), timeout=0.05)
@@ -2437,11 +2527,11 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
         worker_lease_provider=slow_provider,
         pass_timeout_seconds=0.02,
     )
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
     release_provider.set()
     runtime.pass_timeout_seconds = 1
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert calls == 1
     assert runtime._worker_backend_for(None) is lease.manager
@@ -3139,11 +3229,11 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
         worker_lease_provider=lambda _locator: next(leases),
         pass_timeout_seconds=0.02,
     )
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
     store.transition_run(run.run_id, state=ScriptRunState.EXITED, exit_code=0)
     started = asyncio.get_running_loop().time()
 
-    await runtime.reconcile_once()
+    await _reconcile_once(runtime)
 
     assert asyncio.get_running_loop().time() - started < 0.1
 
@@ -3314,7 +3404,7 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
     )
     started = asyncio.get_running_loop().time()
 
-    await runtime.prune_once()
+    await _prune_once(runtime)
 
     assert asyncio.get_running_loop().time() - started < 0.1
 
@@ -3454,10 +3544,10 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
     )
     finished_at = datetime.fromisoformat(terminal.finished_at)
 
-    await runtime.prune_once(now=finished_at + timedelta(seconds=59))
+    await _prune_once(runtime, now=finished_at + timedelta(seconds=59))
     assert store.get_run(run_id).state is ScriptRunState.EXITED
 
-    await runtime.prune_once(now=finished_at + timedelta(seconds=61))
+    await _prune_once(runtime, now=finished_at + timedelta(seconds=61))
     with pytest.raises(ScriptRunNotFoundError):
         store.get_run(run_id)
 

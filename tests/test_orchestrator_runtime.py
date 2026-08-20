@@ -3254,9 +3254,45 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
-        apply_update_plan.assert_awaited_once_with(plan)
+        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=False)
         assert orchestrator.script_runtime is runtime
         assert orchestrator.config is current_config
+
+    @pytest.mark.asyncio
+    async def test_plugin_reload_interrupts_scripts_before_replacing_plugin_code(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin changes cross the script interruption boundary before code is swapped."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        apply_update_plan = AsyncMock(side_effect=RuntimeError("script plugin boundary"))
+        replace_plugins = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+            patch.object(orchestrator, "_apply_plugin_changes_for_config_update", new=replace_plugins),
+            pytest.raises(RuntimeError, match="script plugin boundary"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ("plugins/example.py",))
+
+        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=True)
+        replace_plugins.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_config_update_reopens_worker_admission_when_apply_boundary_fails(

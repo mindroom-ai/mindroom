@@ -190,8 +190,6 @@ spec:
               value: {{ .Values.workers.backend | quote }}
             - name: MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS
               value: {{ .Values.workers.cleanupIntervalSeconds | quote }}
-            - name: MINDROOM_SCRIPT_GATEWAY_URL
-              value: {{ printf "http://%s.%s.svc.cluster.local:%v/api/script-gateway" $fullname .Release.Namespace .Values.service.port | quote }}
             - name: MINDROOM_SANDBOX_EXECUTION_MODE
               value: {{ .Values.workers.sandbox.executionMode | quote }}
             - name: MINDROOM_SANDBOX_PROXY_TOOLS

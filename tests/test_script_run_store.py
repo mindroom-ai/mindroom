@@ -190,32 +190,6 @@ def test_run_store_rejects_oversized_terminal_output(runtime_paths: RuntimePaths
         )
 
 
-def test_run_store_migrates_existing_database_without_output_column(runtime_paths: RuntimePaths) -> None:
-    """Opening a pre-output database adds the bounded terminal-output column conservatively."""
-    initial = ScriptRunStore(runtime_paths)
-    with sqlite3.connect(initial.database_path) as connection:
-        connection.execute("ALTER TABLE script_runs DROP COLUMN output")
-
-    migrated = ScriptRunStore(runtime_paths)
-    created = migrated.create_run(_new_run())
-
-    assert migrated.get_run(created.run_id).output == ""
-
-
-def test_run_store_adds_nullable_worker_backend_locator(runtime_paths: RuntimePaths) -> None:
-    """Legacy rows cannot be guessed onto a backend configured after restart."""
-    store = ScriptRunStore(runtime_paths)
-    store.create_run(_new_run())
-
-    with sqlite3.connect(store.database_path) as connection:
-        columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(script_runs)")]
-        row = connection.execute("SELECT * FROM script_runs").fetchone()
-
-    assert "worker_backend_locator" in columns
-    assert row is not None
-    assert row[columns.index("worker_backend_locator")] is None
-
-
 def test_call_rate_limit_is_atomic_and_does_not_charge_stable_retries(runtime_paths: RuntimePaths) -> None:
     """Concurrent new claims share one durable quota while an identical retry remains free."""
     store = ScriptRunStore(runtime_paths)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.error
@@ -13,6 +14,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+
+__all__ = ["MindRoomToolCallError", "MindRoomTools"]
 
 _GATEWAY_URL_ENV = "MINDROOM_SCRIPT_GATEWAY_URL"
 _RUN_ID_ENV = "MINDROOM_SCRIPT_RUN_ID"
@@ -80,6 +83,9 @@ class MindRoomTools:
         http_timeout_seconds: float = _DEFAULT_HTTP_TIMEOUT_SECONDS,
         poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
     ) -> None:
+        if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
+            msg = "poll_interval_seconds must be positive."
+            raise ValueError(msg)
         self._gateway_url = _required_env(_GATEWAY_URL_ENV).rstrip("/")
         parsed_gateway = urllib.parse.urlsplit(self._gateway_url)
         if parsed_gateway.scheme not in {"http", "https"} or not parsed_gateway.netloc:
@@ -344,7 +350,8 @@ def _parse_receipt(
 
 
 def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCallError:
-    retryable = exc.code >= 500
+    rate_limited = exc.code == 429
+    retryable = rate_limited or exc.code >= 500
     try:
         payload = json.loads(exc.read())
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -352,10 +359,7 @@ def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCal
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return MindRoomToolCallError(
         str(detail or f"Background tool gateway request failed with status {exc.code}."),
-        kind="gateway_unavailable" if retryable else "request_rejected",
+        kind="rate_limited" if rate_limited else ("gateway_unavailable" if retryable else "request_rejected"),
         retryable=retryable,
         call_id=call_id,
     )
-
-
-_PUBLIC_SDK = (MindRoomToolCallError, MindRoomTools)

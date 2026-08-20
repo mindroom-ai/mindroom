@@ -21,6 +21,15 @@ from mindroom.script_runs.store import (
     ScriptCapabilityError,
 )
 
+__all__ = [
+    "ScriptCallReceiptResponse",
+    "ScriptToolCallRequestModel",
+    "bind_script_tool_broker",
+    "get_script_call",
+    "router",
+    "submit_script_call",
+]
+
 _MAX_REQUEST_BYTES = 64 * 1024
 
 
@@ -184,6 +193,3 @@ async def get_script_call(
     except ScriptCallPreparationPendingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ScriptCallReceiptResponse.from_domain(receipt)
-
-
-_PUBLIC_ENTRYPOINTS = (bind_script_tool_broker, submit_script_call, get_script_call)

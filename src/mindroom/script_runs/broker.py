@@ -26,16 +26,16 @@ from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptCapabilityError,
+    ScriptReceiptTooLargeError,
     ScriptRunNotFoundError,
     ScriptRunStore,
 )
 from mindroom.tool_approval import (
-    AutomationToolOrigin,
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
     evaluate_tool_approval,
 )
-from mindroom.tool_system.automation_approval import build_automation_approval_config
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -92,7 +92,11 @@ _INVALID_RESULT_ERROR = {
     "message": "The tool returned a result that cannot be represented as strict JSON.",
     "retryable": False,
 }
-_NEVER_PREAPPROVE_TOOLKITS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
+_RESULT_TOO_LARGE_ERROR = {
+    "kind": "result_too_large",
+    "message": "The tool result exceeds the background receipt size limit.",
+    "retryable": False,
+}
 _ACTIVE_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING})
 
 
@@ -152,7 +156,7 @@ class ScriptRuntimeResolver(Protocol):
 class _BackgroundApprovalGate(Protocol):
     async def __call__(
         self,
-        origin: AutomationToolOrigin,
+        origin: BackgroundScriptToolOrigin,
         tool_name: str,
         arguments: dict[str, object],
     ) -> ToolApprovalDecision: ...
@@ -401,16 +405,6 @@ class ScriptToolBroker:
             task.cancel()
         if active:
             await asyncio.gather(*(task for _key, task in active), return_exceptions=True)
-        for (_claimed_run_id, call_id), _task in active:
-            record = await asyncio.to_thread(self.store.get_call, run_id, call_id)
-            if record.state is ScriptCallState.PENDING:
-                await asyncio.to_thread(
-                    self.store.publish_call_result,
-                    run_id=run_id,
-                    call_id=call_id,
-                    state=ScriptCallState.INDETERMINATE,
-                    error=_INDETERMINATE_ERROR,
-                )
         pending = await asyncio.to_thread(self.store.pending_calls, run_id)
         for record in pending:
             await asyncio.to_thread(
@@ -431,7 +425,6 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate and durably claim one gateway call before acknowledging it."""
-        self._require_call_admission()
         return await run_coroutine_until_complete(
             self._accept_prepared_call(request, authorization=authorization),
         )
@@ -443,7 +436,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
-        self.authenticate(run_id, authorization)
+        await asyncio.to_thread(self.authenticate, run_id, authorization)
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:
             run, call = await asyncio.gather(
@@ -612,8 +605,9 @@ class ScriptToolBroker:
                     approval_gate=approval_gate,
                 )
                 prepend_tool_hook_bridge(toolkit, bridge)
-                if authored_decision is not None:
-                    function.cache_results = function.cache_results and authored_decision.approved
+                # Durable receipts are the idempotency boundary for background calls.
+                # Agno's result cache returns before hooks, approval, and live authority checks.
+                function.cache_results = False  # noqa: Vulture
                 return await FunctionCall(
                     function=function,
                     arguments=arguments,
@@ -810,6 +804,16 @@ class ScriptToolBroker:
                 result=result,
                 error=error,
             )
+        except ScriptReceiptTooLargeError:
+            try:
+                stored = self.store.publish_call_result(
+                    run_id=call.run_id,
+                    call_id=call.call_id,
+                    state=ScriptCallState.FAILED,
+                    error=_RESULT_TOO_LARGE_ERROR,
+                )
+            except BaseException:
+                return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
         except BaseException:
             if state is not ScriptCallState.INDETERMINATE:
                 try:
@@ -916,7 +920,7 @@ def _build_background_approval_gate(
 ) -> _BackgroundApprovalGate:
 
     async def approval_gate(
-        origin: AutomationToolOrigin,
+        origin: BackgroundScriptToolOrigin,
         tool_name: str,
         arguments: dict[str, object],
     ) -> ToolApprovalDecision:
@@ -931,7 +935,6 @@ def _build_background_approval_gate(
                 run.agent_name,
             )
             if policy_requires_approval:
-                assert isinstance(origin, BackgroundScriptToolOrigin)
                 decision = await runtime_resolver.request_approval(
                     origin=origin,
                     context=context,
@@ -986,7 +989,7 @@ def _background_approval_config(
         preapproved_toolkits=(
             frozenset(grant.toolkit_name for grant in run.grants) if run.preapprove_launch_grants else frozenset()
         ),
-        never_preapprove_toolkits=_NEVER_PREAPPROVE_TOOLKITS,
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
     )
 
 

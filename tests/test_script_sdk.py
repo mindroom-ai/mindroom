@@ -62,6 +62,14 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
 
 
+def test_script_sdk_rejects_nonpositive_poll_interval(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A zero interval must fail explicitly instead of flooding receipt endpoints."""
+    _configure(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="poll_interval_seconds must be positive"):
+        MindRoomTools(poll_interval_seconds=0)
+
+
 def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -83,7 +91,7 @@ def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    result = MindRoomTools(poll_interval_seconds=0).call(
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
         "website",
         "read_url",
         url="https://example.org/",
@@ -117,7 +125,7 @@ def test_script_sdk_digests_the_json_wire_argument_representation(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    result = MindRoomTools(poll_interval_seconds=0).call(
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
         "website",
         "read_url",
         payload={1: "one", 10: "ten", 2: "two"},
@@ -153,7 +161,7 @@ def test_script_sdk_rejects_invalid_arguments_before_post(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", **invalid_arguments)
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", **invalid_arguments)
 
     assert exc_info.value.kind == "invalid_arguments"
     assert exc_info.value.retryable is False
@@ -190,7 +198,7 @@ def test_script_sdk_rejects_cyclic_arguments_before_post(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", payload=cyclic)
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", payload=cyclic)
 
     assert exc_info.value.kind == "invalid_arguments"
     assert exc_info.value.retryable is False
@@ -220,7 +228,7 @@ def test_script_sdk_retries_same_submit_after_transport_loss_before_dispatch(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert result == "page body"
     assert methods == ["POST", "POST"]
@@ -248,7 +256,7 @@ def test_script_sdk_retries_same_submit_after_accepted_response_is_lost(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert result == "accepted earlier"
     assert methods == ["POST", "POST"]
@@ -281,10 +289,45 @@ def test_script_sdk_retries_same_submit_while_owner_runtime_restarts(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    result = MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert result == "accepted earlier"
     assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
+
+
+def test_script_sdk_retries_same_submit_after_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A temporary 429 retries the same stable call instead of killing the script."""
+    _configure(monkeypatch, tmp_path)
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        payloads.append(request.data)
+        if len(payloads) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {},
+                io.BytesIO(b'{"detail":"rate limited"}'),
+            )
+        return io.BytesIO(_receipt("completed", result="accepted after rate limit"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
+        "website",
+        "read_url",
+        url="https://example.org/",
+    )
+
+    assert result == "accepted after rate limit"
+    assert len(payloads) == 2
     assert payloads[0] == payloads[1]
 
 
@@ -332,7 +375,7 @@ def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call(
+        MindRoomTools(poll_interval_seconds=0.0001).call(
             "website",
             "read_url",
             url="https://example.org/",
@@ -360,7 +403,7 @@ def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert exc_info.value.kind == "capability_revoked"
     assert exc_info.value.retryable is False
@@ -387,7 +430,7 @@ def test_script_sdk_returns_ordinary_completed_decline_result(
     monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
-    assert MindRoomTools(poll_interval_seconds=0).call("website", "read_url") == declined
+    assert MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url") == declined
 
 
 @pytest.mark.parametrize("removed_state", ["declined", "cancelled"])
@@ -407,7 +450,7 @@ def test_script_sdk_rejects_removed_call_states(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert exc_info.value.kind == "invalid_response"
 
@@ -429,6 +472,6 @@ def test_script_sdk_rejects_unhashable_receipt_states(
     monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
 
     with pytest.raises(MindRoomToolCallError) as exc_info:
-        MindRoomTools(poll_interval_seconds=0).call("website", "read_url", url="https://example.org/")
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
 
     assert exc_info.value.kind == "invalid_response"

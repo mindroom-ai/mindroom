@@ -91,16 +91,6 @@ spec:
     {{- with .Values.egressProxy.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-          podSelector:
-            matchLabels:
-              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.runtime.apiPort }}
   {{- end }}
 {{- end }}
 {{- if and .Values.approvedEgress.enabled .Values.approvedEgress.networkPolicy.create }}
@@ -168,23 +158,6 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-    {{- if and (eq .Values.workers.backend "kubernetes") .Values.networkPolicy.apiIngressFrom }}
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ include "mindroom-runtime.workerNamespace" . | quote }}
-          podSelector:
-            matchLabels:
-              mindroom.ai/component: worker
-              app.kubernetes.io/managed-by: mindroom
-              app.kubernetes.io/name: mindroom-worker
-              {{- with .Values.workers.kubernetes.extraLabels }}
-              {{- toYaml . | nindent 14 }}
-              {{- end }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.runtime.apiPort }}
-    {{- end }}
     {{- with .Values.networkPolicy.extraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

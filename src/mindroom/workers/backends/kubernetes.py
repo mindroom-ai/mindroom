@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.workers.cleanup_locator import KubernetesWorkerCleanupLocator
 
 __all__ = [
     "KubernetesWorkerBackend",
@@ -288,7 +287,6 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
-        cleanup_client_locator: KubernetesWorkerCleanupLocator | None = None,
     ) -> None:
         unsupported_services = sorted(
             {
@@ -317,7 +315,6 @@ class KubernetesWorkerBackend:
             tool_validation_snapshot=tool_validation_snapshot,
             config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
-            cleanup_client_locator=cleanup_client_locator,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -337,7 +334,6 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
-        cleanup_client_locator: KubernetesWorkerCleanupLocator | None = None,
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
@@ -348,7 +344,6 @@ class KubernetesWorkerBackend:
             tool_validation_snapshot=tool_validation_snapshot,
             config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
-            cleanup_client_locator=cleanup_client_locator,
         )
 
     def shutdown(self) -> None:

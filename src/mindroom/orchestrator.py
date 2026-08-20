@@ -103,7 +103,7 @@ from .credentials_sync import sync_env_to_credentials
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
-from .orchestration.config_updates import configured_entity_names
+from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
@@ -967,6 +967,14 @@ class _MultiAgentOrchestrator:
                 )
                 return None
             config = self._require_config()
+            plan = build_config_update_plan(
+                current_config=config,
+                new_config=config,
+                configured_entities=set(configured_entity_names(config)),
+                existing_entities=set(self.agent_bots),
+                agent_bots=self.agent_bots,
+            )
+            await self._script_runtime.apply_update_plan(plan, plugins_changed=True)
             logger.info(
                 "Reloading plugins",
                 source=source,
@@ -974,27 +982,30 @@ class _MultiAgentOrchestrator:
             )
             watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
             try:
-                result = reload_plugins(config, self.runtime_paths)
-            except Exception:
-                recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                    config,
-                    self.runtime_paths,
-                )
-                self._activate_hook_registry(recovery_result.hook_registry)
+                try:
+                    result = reload_plugins(config, self.runtime_paths)
+                except Exception:
+                    recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
+                        config,
+                        self.runtime_paths,
+                    )
+                    self._activate_hook_registry(recovery_result.hook_registry)
+                    clear_worker_validation_snapshot_cache()
+                    self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
+                    logger.warning(warning_message, source=source, **warning_kwargs)
+                    raise
+                self._activate_hook_registry(result.hook_registry)
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-                logger.warning(warning_message, source=source, **warning_kwargs)
-                raise
-            self._activate_hook_registry(result.hook_registry)
-            clear_worker_validation_snapshot_cache()
-            self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-            logger.info(
-                "Plugin reload complete",
-                source=source,
-                active_plugins=list(result.active_plugin_names),
-                cancelled_task_count=result.cancelled_task_count,
-            )
-            return result
+                logger.info(
+                    "Plugin reload complete",
+                    source=source,
+                    active_plugins=list(result.active_plugin_names),
+                    cancelled_task_count=result.cancelled_task_count,
+                )
+                return result
+            finally:
+                await self._script_runtime.complete_worker_replacement()
 
     async def _apply_plugin_changes_for_config_update(
         self,
@@ -1792,7 +1803,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
-        await self._script_runtime.apply_update_plan(plan)
+        await self._script_runtime.apply_update_plan(plan, plugins_changed=bool(plugin_changes))
 
         try:
             replay_startup_maintenance = await self._startup_maintenance.cancel()

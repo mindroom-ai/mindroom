@@ -319,15 +319,19 @@ class _ApprovalManager:
             expires_at_ns=expires_at_ns,
             card=reservation,
         )
-        if reserved:
-            try:
-                await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-            except Exception:
-                logger.warning(
-                    "approval_card_initial_delivery_deferred",
-                    delivery_id=delivery_id,
-                    exc_info=True,
-                )
+        if not reserved:
+            return BackgroundApprovalDecision(
+                status="denied",
+                reason="Approval card could not be published in this room.",
+            )
+        try:
+            await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+        except Exception:
+            logger.warning(
+                "approval_card_initial_delivery_deferred",
+                delivery_id=delivery_id,
+                exc_info=True,
+            )
         self._ensure_deadline_sweep()
         deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
         while True:
@@ -341,7 +345,7 @@ class _ApprovalManager:
                 if decision is not None:
                     return decision
                 return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
-            await asyncio.sleep(min(0.1, remaining))
+            await asyncio.sleep(min(1.0, remaining))
 
     async def _prepare_approval_card(
         self,

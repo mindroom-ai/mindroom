@@ -19,11 +19,8 @@ from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubern
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 from mindroom.workers.cleanup_locator import (
     DockerWorkerCleanupLocator,
-    KubernetesWorkerCleanupLocator,
     docker_cleanup_runtime_paths,
     docker_worker_cleanup_locator,
-    kubernetes_cleanup_runtime_paths,
-    kubernetes_worker_cleanup_locator,
     parse_worker_cleanup_locator,
     serialize_worker_cleanup_locator,
 )
@@ -103,7 +100,6 @@ class _ReconstructedWorkerManagerLease:
     """Detached lease for one exact durable cleanup locator."""
 
     manager: WorkerBackend
-    _released: bool = False
 
     def __enter__(self) -> WorkerBackend:
         """Enter the detached lease context and return its cleanup manager."""
@@ -116,7 +112,6 @@ class _ReconstructedWorkerManagerLease:
 
     def release(self) -> None:
         """Drop the detached cleanup manager without broad backend shutdown."""
-        self._released = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,27 +323,13 @@ def _reconstruct_worker_manager_lease(
 ) -> _ReconstructedWorkerManagerLease | None:
     """Recreate only the backend client and selectors needed for exact cleanup."""
     locator = parse_worker_cleanup_locator(serialized_locator)
-    if isinstance(locator, DockerWorkerCleanupLocator):
-        cleanup_paths = docker_cleanup_runtime_paths(runtime_paths, locator)
-        manager: WorkerBackend = DockerWorkerBackend.from_runtime(
-            cleanup_paths,
-            auth_token=proxy_token,
-            storage_path=cleanup_paths.storage_root,
-            worker_grantable_credentials=frozenset(),
-        )
-    elif isinstance(locator, KubernetesWorkerCleanupLocator):
-        cleanup_paths = kubernetes_cleanup_runtime_paths(runtime_paths, locator)
-        manager = KubernetesWorkerBackend.from_runtime(
-            cleanup_paths,
-            auth_token=proxy_token,
-            storage_root=cleanup_paths.storage_root,
-            tool_validation_snapshot={},
-            config_snapshot={},
-            worker_grantable_credentials=frozenset(),
-            cleanup_client_locator=locator,
-        )
-    else:
-        return None
+    cleanup_paths = docker_cleanup_runtime_paths(runtime_paths, locator)
+    manager: WorkerBackend = DockerWorkerBackend.from_runtime(
+        cleanup_paths,
+        auth_token=proxy_token,
+        storage_path=cleanup_paths.storage_root,
+        worker_grantable_credentials=frozenset(),
+    )
     manager.cleanup_locator = serialized_locator
     return _ReconstructedWorkerManagerLease(manager=manager)
 
@@ -562,11 +543,9 @@ def _worker_cleanup_locator_for_runtime(
     *,
     backend_name: str,
     storage_root: Path,
-) -> DockerWorkerCleanupLocator | KubernetesWorkerCleanupLocator | None:
+) -> DockerWorkerCleanupLocator | None:
     if backend_name == "docker":
         return docker_worker_cleanup_locator(runtime_paths, storage_root=storage_root)
-    if backend_name == "kubernetes":
-        return kubernetes_worker_cleanup_locator(runtime_paths, storage_root=storage_root)
     return None
 
 

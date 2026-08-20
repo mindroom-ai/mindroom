@@ -771,6 +771,53 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
 
 
 @pytest.mark.asyncio
+async def test_script_broker_honors_policy_approval_before_agno_cache_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background governance cannot be skipped by Agno's function-result cache."""
+    events: list[str] = []
+
+    class CachedToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+            function = self.functions["add"]
+            function.cache_results = True
+            function.cache_dir = str(tmp_path / "agno-cache")
+
+        def add(self, a: int, b: int) -> int:
+            events.append("tool:body")
+            return a + b
+
+    toolkit = CachedToolkit()
+    cached = await FunctionCall(
+        function=toolkit.functions["add"],
+        arguments={"a": 1, "b": 2},
+        call_id="policy-cache-primer",
+    ).aexecute()
+    assert cached.result == 3
+    events.clear()
+    _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        require_approval=True,
+        approval_decision=ToolApprovalDecision(approved=False, reason="Cached policy denied."),
+    )
+
+    receipt = await _call_through_gateway(broker, _request(call_id="cached-policy"), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert "TOOL CALL DECLINED" in str(receipt.result)
+    assert "Cached policy denied." in str(receipt.result)
+    assert events == [
+        "tool:before_call",
+        "approval:run-1:cached-policy",
+        "tool:after_call",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_script_broker_returns_existing_receipt_without_reexecution(tmp_path: Path) -> None:
     """A duplicate stable call ID must not invoke the registered tool a second time."""
     events: list[str] = []
@@ -1848,6 +1895,34 @@ async def test_script_broker_never_publishes_nonfinite_completed_receipt(
     assert receipt.state is ScriptCallState.FAILED
     json.dumps(receipt.result, allow_nan=False)
     json.dumps(receipt.error, allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_script_broker_publishes_oversized_result_as_explicit_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A known receipt-size rejection is a terminal failure, not an indeterminate call."""
+
+    class OversizedToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> str:
+            del a, b
+            return "x" * (64 * 1024)
+
+    _replace_calculator_toolkit(monkeypatch, OversizedToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id="oversized-result"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "result_too_large",
+        "message": "The tool result exceeds the background receipt size limit.",
+        "retryable": False,
+    }
 
 
 @pytest.mark.asyncio

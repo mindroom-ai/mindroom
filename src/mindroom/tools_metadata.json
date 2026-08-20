@@ -5806,7 +5806,7 @@
         {
           "authored_override": true,
           "default": [],
-          "description": "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, filesystem, environment, or network access.",
+          "description": "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, filesystem, environment, or network access. An empty list grants the full background-eligible SDK surface but preapproves none of it.",
           "label": "Allowed Tools",
           "name": "allowed_tools",
           "options": null,

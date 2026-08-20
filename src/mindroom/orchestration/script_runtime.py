@@ -29,6 +29,16 @@ from mindroom.script_runs.models import (
     ScriptRunState,
     ScriptToolGrant,
 )
+from mindroom.script_runs.reasons import (
+    AGENT_ISOLATION_CHANGED,
+    OWNER_AGENT_REMOVED,
+    OWNER_AUTHORIZATION_REVOKED,
+    PLUGIN_TOOLS_CHANGED,
+    RUNTIME_RESTARTED,
+    RUNTIME_SHUTDOWN,
+    SCRIPT_TOOL_REMOVED,
+    WORKER_CONFIGURATION_CHANGED,
+)
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
@@ -62,13 +72,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_REMOVED_AGENT_REASON = "Owning agent was removed by configuration reload."
-_ISOLATION_CHANGE_REASON = "Agent isolation changed during configuration reload."
-_SCRIPT_TOOL_REMOVED_REASON = "Background script tool was removed by configuration reload."
-_WORKER_CONFIGURATION_INTERRUPTION_REASON = "Worker configuration changed during configuration reload."
-_RUNTIME_SHUTDOWN_INTERRUPTION_REASON = "MindRoom runtime shut down."
-_RUNTIME_STARTUP_INTERRUPTION_REASON = "MindRoom runtime restarted."
-_AUTHORIZATION_REVOKED_REASON = "Script owner no longer has room-and-agent reply authorization."
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -605,7 +608,7 @@ class ScriptRuntimeLifecycle:
         if lease is not None:
             await asyncio.to_thread(lease.release)
 
-    async def apply_update_plan(self, plan: ConfigUpdatePlan) -> None:
+    async def apply_update_plan(self, plan: ConfigUpdatePlan, *, plugins_changed: bool = False) -> None:
         """Revoke removed owners and process-isolation changes before bot replacement."""
         current_config = self.config_provider()
         if current_config is None:
@@ -638,6 +641,7 @@ class ScriptRuntimeLifecycle:
             and not script_tool_removals
             and not worker_configuration_changed
             and not authorization_changed
+            and not plugins_changed
         ):
             return
 
@@ -658,6 +662,7 @@ class ScriptRuntimeLifecycle:
                 script_tool_removals=script_tool_removals,
                 worker_configuration_changed=worker_configuration_changed,
                 authorization_config=plan.new_config if authorization_changed else None,
+                plugins_changed=plugins_changed,
             )
 
         try:
@@ -684,6 +689,7 @@ class ScriptRuntimeLifecycle:
         script_tool_removals: set[str],
         worker_configuration_changed: bool,
         authorization_config: Config | None,
+        plugins_changed: bool,
     ) -> None:
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         unauthorized_ids = {
@@ -693,29 +699,37 @@ class ScriptRuntimeLifecycle:
             and self.resolver.is_authorized(run, config=authorization_config) is False
         }
         affected_agents = removed_agents | isolation_changes | script_tool_removals
-        affected = [
-            run
-            for run in runs
-            if run.run_id in unauthorized_ids
-            or run.agent_name in affected_agents
-            or (worker_configuration_changed and not run.local_unsafe)
-        ]
+        affected = (
+            runs
+            if plugins_changed
+            else [
+                run
+                for run in runs
+                if run.run_id in unauthorized_ids
+                or run.agent_name in affected_agents
+                or (worker_configuration_changed and not run.local_unsafe)
+            ]
+        )
         await self._interrupt_runs(
             affected,
             reason_for=lambda run: (
-                _AUTHORIZATION_REVOKED_REASON
+                OWNER_AUTHORIZATION_REVOKED
                 if run.run_id in unauthorized_ids
                 else _reload_reason_for(
                     run,
                     removed_agents=removed_agents,
                     isolation_changes=isolation_changes,
                     worker_configuration_changed=worker_configuration_changed,
+                    plugins_changed=plugins_changed,
                 )
             ),
             require_worker_success=worker_configuration_changed,
         )
 
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        if plugins_changed and unfinished:
+            msg = "Plugin reload did not interrupt every active background script."
+            raise _ScriptRuntimeLifecycleError(msg)
         _require_terminal_worker_replacement(
             unfinished,
             worker_configuration_changed=worker_configuration_changed,
@@ -771,7 +785,7 @@ class ScriptRuntimeLifecycle:
         if not all(durable_results):
             msg = "Worker replacement did not durably revoke every active run."
             raise _ScriptRuntimeLifecycleError(msg)
-        return [run for run, persisted in zip(runs, durable_results, strict=True) if persisted]
+        return runs
 
     async def _interrupt_durably_revoked_runs(
         self,
@@ -871,13 +885,6 @@ class ScriptRuntimeLifecycle:
             error="Worker replacement did not finalize durable ownership for every active worker run.",
         )
 
-    async def reconcile_once(self) -> None:  # privata: ignore -- explicit lifecycle sweep API.
-        """Run one bounded touch-first reconciliation pass."""
-        try:
-            await asyncio.wait_for(self._reconcile_pass(), timeout=self.pass_timeout_seconds)
-        except TimeoutError:
-            logger.warning("script_reconciliation_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
-
     async def _reconcile_pass(self) -> None:
         try:
             await self._refresh_worker_backend()
@@ -894,7 +901,7 @@ class ScriptRuntimeLifecycle:
         if unauthorized:
             await self._interrupt_runs(
                 unauthorized,
-                reason_for=lambda _run: _AUTHORIZATION_REVOKED_REASON,
+                reason_for=lambda _run: OWNER_AUTHORIZATION_REVOKED,
                 require_worker_success=False,
             )
             unauthorized_ids = {run.run_id for run in unauthorized}
@@ -928,16 +935,20 @@ class ScriptRuntimeLifecycle:
         inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         durably_revoked = await self._durably_revoke_runs(
             inherited,
-            reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
+            reason_for=lambda _run: RUNTIME_RESTARTED,
         )
         if durably_revoked:
             await self._interrupt_runs_through_owning_backends(
                 durably_revoked,
-                reason_for=lambda _run: _RUNTIME_STARTUP_INTERRUPTION_REASON,
+                reason_for=lambda _run: RUNTIME_RESTARTED,
                 require_worker_success=False,
             )
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         if unfinished:
+            logger.error(
+                "script_startup_cleanup_blocked",
+                run_ids=[run.run_id for run in unfinished],
+            )
             return
         await self._release_current_worker_lease()
         if self.api_enabled:
@@ -1003,17 +1014,6 @@ class ScriptRuntimeLifecycle:
                     exc_info=True,
                 )
 
-    async def prune_once(  # privata: ignore -- deterministic retention sweep API.
-        self,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        """Prune terminal approvals, receipts, and run rows after retention."""
-        try:
-            await asyncio.wait_for(self._prune_pass(now=now), timeout=self.pass_timeout_seconds)
-        except TimeoutError:
-            logger.warning("script_retention_pass_timeout", timeout_seconds=self.pass_timeout_seconds)
-
     async def _prune_pass(self, *, now: datetime | None = None) -> None:
         cutoff = (now or datetime.now(UTC)) - timedelta(seconds=self.retention_seconds)
         finished_before = cutoff.isoformat().replace("+00:00", "Z")
@@ -1074,12 +1074,14 @@ class ScriptRuntimeLifecycle:
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
 
+        if was_activated:
+            bind_script_run_manager(None)
         await run_coroutine_until_complete(self.manager.begin_shutdown())
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
         durably_revoked = await run_coroutine_until_complete(
             self._durably_revoke_runs(
                 runs,
-                reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
+                reason_for=lambda _run: RUNTIME_SHUTDOWN,
             ),
         )
         try:
@@ -1089,8 +1091,6 @@ class ScriptRuntimeLifecycle:
                 timeout_seconds=timeout_seconds,
             )
         finally:
-            if was_activated:
-                bind_script_run_manager(None)
             self._started = False
             self._activated_once = False
             await _release_worker_leases_before_deadline(
@@ -1123,7 +1123,7 @@ class ScriptRuntimeLifecycle:
     async def _interrupt_and_prune_for_shutdown(self, runs: Sequence[ScriptRunRecord]) -> None:
         await self._interrupt_runs_through_owning_backends(
             runs,
-            reason_for=lambda _run: _RUNTIME_SHUTDOWN_INTERRUPTION_REASON,
+            reason_for=lambda _run: RUNTIME_SHUTDOWN,
             require_worker_success=False,
         )
         await self._prune_pass()
@@ -1254,14 +1254,17 @@ def _reload_reason_for(
     removed_agents: set[str],
     isolation_changes: set[str],
     worker_configuration_changed: bool,
+    plugins_changed: bool,
 ) -> str:
     if worker_configuration_changed and not run.local_unsafe:
-        return _WORKER_CONFIGURATION_INTERRUPTION_REASON
+        return WORKER_CONFIGURATION_CHANGED
+    if plugins_changed:
+        return PLUGIN_TOOLS_CHANGED
     if run.agent_name in removed_agents:
-        return _REMOVED_AGENT_REASON
+        return OWNER_AGENT_REMOVED
     if run.agent_name in isolation_changes:
-        return _ISOLATION_CHANGE_REASON
-    return _SCRIPT_TOOL_REMOVED_REASON
+        return AGENT_ISOLATION_CHANGED
+    return SCRIPT_TOOL_REMOVED
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:

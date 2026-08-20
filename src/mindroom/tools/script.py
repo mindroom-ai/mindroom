@@ -39,7 +39,8 @@ if TYPE_CHECKING:
             default=[],
             description=(
                 "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, "
-                "filesystem, environment, or network access."
+                "filesystem, environment, or network access. An empty list grants the full background-eligible "
+                "SDK surface but preapproves none of it."
             ),
         ),
         ConfigField(

@@ -424,10 +424,6 @@ _INDEXES = (
     ON approval_cards (continuation_id/*bytes*/, continuation_generation, tool_call_id/*bytes*/)
     """,
     """
-    CREATE INDEX IF NOT EXISTS background_approval_calls_room_lookup
-    ON background_approval_calls (principal_id, run_id/*bytes*/, call_id/*bytes*/)
-    """,
-    """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
     ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
     """,

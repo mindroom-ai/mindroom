@@ -54,7 +54,7 @@ if TYPE_CHECKING:
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
-    from mindroom.tool_approval import AutomationToolOrigin, BackgroundScriptToolOrigin, ToolApprovalDecision
+    from mindroom.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
@@ -71,7 +71,7 @@ class _ToolApprovalGate(Protocol):
 
     async def __call__(
         self,
-        origin: AutomationToolOrigin,
+        origin: BackgroundScriptToolOrigin,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> ToolApprovalDecision:
@@ -167,7 +167,7 @@ class _ResolvedToolContext:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
-    origin: AutomationToolOrigin | None
+    origin: BackgroundScriptToolOrigin | None
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -196,16 +196,15 @@ class _ToolHookBridgeContext:
     config: Config | None
     runtime_paths: RuntimePaths | None
     dispatch_context: ToolDispatchContext | None
-    origin: AutomationToolOrigin | None
+    origin: BackgroundScriptToolOrigin | None
 
 
 def _correlation_id_for_runtime_context(
     runtime_context: ToolRuntimeContext | None,
-    origin: AutomationToolOrigin | None,
+    origin: BackgroundScriptToolOrigin | None,
 ) -> str:
-    if origin is not None and origin.origin_kind == "background_script":
-        background_origin = cast("BackgroundScriptToolOrigin", origin)
-        return f"background-script:{background_origin.run_id}:{background_origin.call_id}"
+    if origin is not None:
+        return f"background-script:{origin.run_id}:{origin.call_id}"
     if runtime_context is not None and runtime_context.correlation_id:
         return runtime_context.correlation_id
     request_context = current_llm_request_log_context()
@@ -771,7 +770,7 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
-    origin: AutomationToolOrigin | None,
+    origin: BackgroundScriptToolOrigin | None,
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
@@ -979,7 +978,7 @@ def build_tool_hook_bridge(
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
-    origin: AutomationToolOrigin | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
     approval_gate: _ToolApprovalGate | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
