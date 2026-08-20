@@ -265,6 +265,19 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS background_approval_calls (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, delivery_id),
+        UNIQUE (principal_id, run_id, call_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS approval_action_tombstones (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,

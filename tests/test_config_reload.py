@@ -710,6 +710,46 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
     assert reload_call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication(tmp_path: Path) -> None:
+    """Command and watcher reloads share the fail-closed script boundary."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    order: list[str] = []
+
+    async def apply_update_plan(
+        _runtime: object,
+        plan: ConfigUpdatePlan,
+        *,
+        plugins_changed: bool = False,
+    ) -> None:
+        assert plan.new_config is config
+        assert plugins_changed is True
+        order.append("scripts")
+
+    async def complete_worker_replacement(_runtime: object) -> None:
+        order.append("complete")
+
+    def reload_current_plugins(_config: Config, _runtime_paths: object) -> PluginReloadResult:
+        order.append("plugins")
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    with (
+        patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+        patch.object(
+            type(orchestrator.script_runtime),
+            "complete_worker_replacement",
+            new=complete_worker_replacement,
+        ),
+        patch("mindroom.orchestrator.reload_plugins", side_effect=reload_current_plugins),
+    ):
+        await orchestrator.reload_plugins_now(source="command")
+
+    assert order == ["scripts", "plugins", "complete"]
+
+
 def _plugin_watcher_race_runtime(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, Path, Path]:
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()

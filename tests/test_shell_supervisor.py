@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -16,9 +17,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom import shell_execution as shell_execution_module
 from mindroom import shell_supervisor
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import resolve_runtime_paths
+from mindroom.script_runs import shim as script_run_shim
 from mindroom.shell_execution import run_command
 from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
@@ -26,6 +29,7 @@ from mindroom.shell_supervisor import (
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -41,11 +45,37 @@ if TYPE_CHECKING:
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
 
+@pytest.mark.parametrize(
+    ("message", "state", "exit_code"),
+    [
+        ("Status: RUNNING (PID 123, elapsed 1.0s)", "running", None),
+        ("Status: FINISHED (exit code -9, ran for 1.0s)", "exited", -9),
+        ("Error: Unknown handle shell:missing", "unknown", None),
+        ("unexpected supervisor reply", "error", None),
+    ],
+)
+def test_supervisor_status_parser_is_canonical(
+    message: str,
+    state: str,
+    exit_code: int | None,
+) -> None:
+    """Local and worker adapters share one fail-closed status interpretation."""
+    status = parse_shell_supervisor_status(message)
+
+    assert status.state == state
+    assert status.output == message
+    assert status.exit_code == exit_code
+
+
 @contextlib.asynccontextmanager
 async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
-    server = await asyncio.start_unix_server(partial(_handle_connection, registry), path=socket_path)
+    handle_reservations: set[str] = set()
+    server = await asyncio.start_unix_server(
+        partial(_handle_connection, registry, handle_reservations),
+        path=socket_path,
+    )
     try:
         yield socket_path
     finally:
@@ -54,7 +84,14 @@ async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[s
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
-async def _run(socket_path: str, argv: list[str], *, namespace: str = "ns", timeout: float = 30) -> str:  # noqa: ASYNC109
+async def _run(
+    socket_path: str,
+    argv: list[str],
+    *,
+    namespace: str = "ns",
+    timeout: float = 30,  # noqa: ASYNC109
+    handle: str | None = None,
+) -> str:
     return await run_command_via_supervisor(
         socket_path,
         namespace=namespace,
@@ -63,6 +100,7 @@ async def _run(socket_path: str, argv: list[str], *, namespace: str = "ns", time
         cwd=None,
         tail=100,
         timeout=timeout,
+        handle=handle,
     )
 
 
@@ -106,6 +144,21 @@ async def _assert_pid_dead(pid: int) -> None:
     raise AssertionError(message)
 
 
+async def _assert_linux_pid_not_running(pid: int) -> None:
+    """Wait until a Linux process exits, allowing an unreaped zombie."""
+    stat_path = Path(f"/proc/{pid}/stat")
+    for _ in range(40):
+        try:
+            state = stat_path.read_text(encoding="utf-8").split()[2]
+        except (FileNotFoundError, ProcessLookupError):
+            return
+        if state == "Z":
+            return
+        await asyncio.sleep(0.05)
+    message = f"Process {pid} is still running"
+    raise AssertionError(message)
+
+
 # ---------------------------------------------------------------------------
 # Server protocol
 # ---------------------------------------------------------------------------
@@ -130,6 +183,48 @@ async def test_run_nonzero_exit_returns_stderr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup permissions cannot hide an already-observed process exit."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "pass",
+        start_new_session=True,
+    )
+    await process.wait()
+    handle = "shell:monitor-permission"
+    record = shell_execution_module.ProcessRecord(
+        namespace="test",
+        handle=handle,
+        pid=process.pid,
+        args=[sys.executable, "-c", "pass"],
+        process=process,
+    )
+    registry = {handle: record}
+    stdout_reader = asyncio.create_task(asyncio.sleep(0))
+    stderr_reader = asyncio.create_task(asyncio.sleep(0))
+
+    def deny_group_cleanup(_pid: int, _signal: signal.Signals) -> None:
+        msg = "process group belongs to a different user"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(shell_execution_module.os, "killpg", deny_group_cleanup)
+
+    await shell_execution_module._monitor_process(
+        registry,
+        handle,
+        process,
+        stdout_reader,
+        stderr_reader,
+    )
+
+    assert record.finished is True
+    assert record.return_code == 0
+
+
+@pytest.mark.asyncio
 async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
     """The full run→check→kill handle lifecycle should work over the socket."""
     registry: dict[str, ProcessRecord] = {}
@@ -150,6 +245,266 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
 
 
 @pytest.mark.asyncio
+async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
+    """The private shim must narrow the child environment and clean its raw token."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text(
+        "import os\nprint(os.environ.get('MINDROOM_CONTROL_STATE_PATH', 'absent'), flush=True)\n",
+        encoding="utf-8",
+    )
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_CONTROL_STATE_PATH": str(tmp_path / "primary-control"),
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+    registry: dict[str, ProcessRecord] = {}
+
+    result = await run_command(
+        registry,
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message == "absent"
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_removes_capability_file_when_source_validation_fails(tmp_path: Path) -> None:
+    """A rejected launch must not strand its raw capability token on disk."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": "0" * 64,
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_rejects_missing_workspace_root(tmp_path: Path) -> None:
+    """A missing workspace root must not make the current directory the trust boundary."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert "MINDROOM_SCRIPT_WORKSPACE_ROOT must be set" in result.message
+    assert token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_removes_oversized_capability_file(tmp_path: Path) -> None:
+    """Token-size rejection must still remove the trusted raw launch entry."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("x" * 4097, encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_unlinks_rejected_token_symlink_without_deleting_target(tmp_path: Path) -> None:
+    """Cleanup must unlink the trusted entry rather than its resolved outside target."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    outside_token = tmp_path / "outside-capability"
+    outside_token.write_text("raw-secret", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.symlink_to(outside_token)
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.startswith("Error:")
+    assert not token_path.exists()
+    assert outside_token.read_text(encoding="utf-8") == "raw-secret"
+
+
+@pytest.mark.asyncio
+async def test_script_shim_does_not_treat_workspace_root_as_a_token_entry(tmp_path: Path) -> None:
+    """A rejected directory path must retain its validation error and the workspace itself."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(workspace),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(workspace)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
+    assert workspace.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Path) -> None:
+    """Cleanup must leave a rejected token directory and preserve the validation error."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.mkdir()
+    env = {
+        **_MINIMAL_ENV,
+        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
+        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
+    }
+
+    result = await run_command(
+        {},
+        namespace="script:test",
+        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
+        env=env,
+        cwd=str(workspace),
+        tail=100,
+        timeout=30,
+    )
+
+    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
+    assert token_path.is_dir()
+
+
+@pytest.mark.parametrize("cleanup_operation", ["lstat", "unlink"])
+def test_script_shim_cleanup_permission_error_preserves_source_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cleanup_operation: str,
+) -> None:
+    """Best-effort token cleanup must not replace the source validation failure."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_path = workspace / "source.py"
+    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    token_path = workspace / "capability"
+    token_path.write_text("raw-secret", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_SCRIPT_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("MINDROOM_SCRIPT_SOURCE_DIGEST", hashlib.sha256(source_path.read_bytes()).hexdigest())
+    monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
+
+    def reject_source(_source_path: Path) -> None:
+        if cleanup_operation == "lstat":
+
+            def deny_lstat(_path: Path) -> os.stat_result:
+                message = "cleanup denied"
+                raise PermissionError(message)
+
+            monkeypatch.setattr(Path, "lstat", deny_lstat)
+        else:
+
+            def deny_unlink(_path: Path, *, missing_ok: bool = False) -> None:
+                del missing_ok
+                message = "cleanup denied"
+                raise PermissionError(message)
+
+            monkeypatch.setattr(Path, "unlink", deny_unlink)
+        msg = "Script source digest does not match the launch receipt."
+        raise ValueError(msg)
+
+    monkeypatch.setattr(script_run_shim, "_validate_source_digest", reject_source)
+
+    with pytest.raises(ValueError, match="Script source digest does not match the launch receipt"):
+        script_run_shim._main(["shim", str(source_path), str(token_path)])
+
+    assert token_path.read_text(encoding="utf-8") == "raw-secret"
+
+
+@pytest.mark.asyncio
 async def test_handles_are_namespace_scoped() -> None:
     """Handles must not be visible to callers from another namespace."""
     registry: dict[str, ProcessRecord] = {}
@@ -161,6 +516,111 @@ async def test_handles_are_namespace_scoped() -> None:
             assert "Unknown handle" in await _kill(socket_path, handle, namespace="ns-b", force=True)
         finally:
             await _kill(socket_path, handle, namespace="ns-a", force=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_handle_is_registered_once() -> None:
+    """A durable caller handle names exactly one supervised process."""
+    registry: dict[str, ProcessRecord] = {}
+    requested_handle = f"shell:{'a' * 32}"
+    async with _running_server(registry) as socket_path:
+        first = await _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle)
+        duplicate = await _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle)
+        try:
+            assert _extract_handle(first) == requested_handle
+            assert "already registered" in duplicate
+            assert list(registry) == [requested_handle]
+        finally:
+            await _kill(socket_path, requested_handle, force=True)
+
+
+@pytest.mark.asyncio
+async def test_background_limit_discards_rejected_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rejecting a process at the background limit must not leave an unowned child."""
+    registry: dict[str, ProcessRecord] = {}
+    spawned_pids: list[int] = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def recording_spawn(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        process = await original_spawn(*args, **kwargs)
+        spawned_pids.append(process.pid)
+        return process
+
+    monkeypatch.setattr(shell_execution_module, "_MAX_BACKGROUNDED", 1)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
+    async with _running_server(registry) as socket_path:
+        accepted = await _run(socket_path, ["sleep", "300"], timeout=0)
+        rejected = await _run(socket_path, ["sleep", "300"], timeout=0)
+        try:
+            assert "Too many backgrounded processes" in rejected
+            assert len(spawned_pids) == 2
+            await _assert_pid_dead(spawned_pids[1])
+        finally:
+            await _kill(socket_path, _extract_handle(accepted), force=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_caller_handle_is_reserved_before_process_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent use of one durable handle starts exactly one real child process."""
+    registry: dict[str, ProcessRecord] = {}
+    requested_handle = f"shell:{'b' * 32}"
+    original_spawn = asyncio.create_subprocess_exec
+    first_spawned = asyncio.Event()
+    duplicate_spawned = asyncio.Event()
+    release_first_spawn = asyncio.Event()
+    spawn_count = 0
+
+    async def controlled_spawn(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal spawn_count
+        process = await original_spawn(*args, **kwargs)
+        spawn_count += 1
+        if spawn_count == 1:
+            first_spawned.set()
+            await release_first_spawn.wait()
+        else:
+            duplicate_spawned.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", controlled_spawn)
+    async with _running_server(registry) as socket_path:
+        first_task = asyncio.create_task(
+            _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle),
+        )
+        await first_spawned.wait()
+        second_task = asyncio.create_task(
+            _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle),
+        )
+        duplicate_waiter = asyncio.create_task(duplicate_spawned.wait())
+        done, _pending = await asyncio.wait(
+            {second_task, duplicate_waiter},
+            timeout=2,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert done
+        release_first_spawn.set()
+        first, second = await asyncio.gather(first_task, second_task)
+        duplicate_waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await duplicate_waiter
+        try:
+            assert spawn_count == 1
+            assert sum("Handle:" in result for result in (first, second)) == 1
+            assert sum("already registered" in result for result in (first, second)) == 1
+        finally:
+            await _kill(socket_path, requested_handle, force=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_handle_requires_full_random_identifier() -> None:
+    """Short or malformed caller handles are rejected before process registration."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        result = await _run(socket_path, ["sleep", "300"], timeout=0, handle="shell:1234abcd")
+
+    assert "Invalid caller-supplied shell handle" in result
+    assert registry == {}
 
 
 @pytest.mark.asyncio
@@ -246,11 +706,42 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         "timeout": 0,
     }
 
-    message = await shell_supervisor._handle_run(registry, payload, eof_reader)
+    message = await shell_supervisor._handle_run(registry, set(), payload, eof_reader)
 
     assert message is None
     assert registry == {}
     await _assert_pid_dead(pid)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only caller-owned script handles should pay for the Linux watchdog wrapper."""
+    observed_argv: list[str] = []
+
+    async def record_run(*_args: object, **kwargs: object) -> object:
+        argv = kwargs["argv"]
+        assert isinstance(argv, list)
+        observed_argv.extend(str(item) for item in argv)
+        return shell_execution_module._RunResult(message="ordinary result")
+
+    monkeypatch.setattr(shell_supervisor, "run_command", record_run)
+    reader = asyncio.StreamReader()
+    payload = {
+        "op": "run",
+        "namespace": "ns",
+        "argv": ["echo", "ordinary"],
+        "env": _MINIMAL_ENV,
+        "cwd": None,
+        "tail": 100,
+        "timeout": 30,
+    }
+
+    message = await shell_supervisor._handle_run({}, set(), payload, reader)
+
+    assert message == "ordinary result"
+    assert observed_argv == ["echo", "ordinary"]
 
 
 @pytest.mark.asyncio
@@ -312,6 +803,126 @@ async def test_supervisor_terminate_kills_children_and_invalidates_handles(
     new_socket_path = manager.ensure()
     assert new_socket_path != socket_path
     assert "Unknown handle" in await _check(new_socket_path, handle)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux parent-death signal regression")
+@pytest.mark.asyncio
+async def test_supervisor_sigkill_terminates_supervised_process_group(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A hard-crashed supervisor must not leave a script or its child running."""
+    socket_path = manager.ensure()
+    ready_path = tmp_path / "child-ready"
+    child = (
+        "import os, pathlib, subprocess, sys, time; "
+        "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
+        "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {descendant.pid}', encoding='utf-8'); "
+        "time.sleep(300)"
+    )
+    result = await _run(
+        socket_path,
+        [sys.executable, "-c", child, str(ready_path)],
+        timeout=0,
+        handle=f"shell:{'a' * 32}",
+    )
+    supervised_pid = int(result.split("PID ")[1].split(")")[0])
+    for _ in range(40):
+        if ready_path.exists():
+            break
+        await asyncio.sleep(0.05)
+    script_pid, descendant_pid = map(int, ready_path.read_text(encoding="utf-8").split())
+
+    supervisor = manager._supervisor
+    assert supervisor is not None
+    try:
+        supervisor.process.kill()
+        supervisor.process.wait(timeout=10)
+
+        await _assert_linux_pid_not_running(supervised_pid)
+        await _assert_linux_pid_not_running(script_pid)
+        await _assert_linux_pid_not_running(descendant_pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(supervised_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_sigterm_preserves_target_graceful_exit(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A normal group SIGTERM must let the target report its graceful exit."""
+    socket_path = manager.ensure()
+    ready_path = tmp_path / "ready"
+    handled_path = tmp_path / "handled"
+    child = (
+        "import pathlib, signal, sys, time\n"
+        "ready = pathlib.Path(sys.argv[1])\n"
+        "handled = pathlib.Path(sys.argv[2])\n"
+        "def stop(_signum, _frame):\n"
+        "    handled.write_text('handled', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "ready.write_text('ready', encoding='utf-8')\n"
+        "time.sleep(300)\n"
+    )
+    result = await _run(
+        socket_path,
+        [sys.executable, "-c", child, str(ready_path), str(handled_path)],
+        timeout=0,
+        handle=f"shell:{'b' * 32}",
+    )
+    handle = _extract_handle(result)
+    for _ in range(40):
+        if ready_path.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert ready_path.exists()
+
+    try:
+        assert "Terminated" in await _kill(socket_path, handle)
+        status = await _wait_for_finished(socket_path, handle)
+
+        assert "exit code 0" in status
+        assert handled_path.read_text(encoding="utf-8") == "handled"
+    finally:
+        await _kill(socket_path, handle, force=True)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process-group cleanup regression")
+@pytest.mark.asyncio
+async def test_finished_script_kills_same_group_descendants(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A script leader cannot leave executing descendants after its handle becomes terminal."""
+    socket_path = manager.ensure()
+    child_pid_path = tmp_path / "child-pid"
+    script = (
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
+    )
+    result = await _run(socket_path, [sys.executable, "-c", script, str(child_pid_path)], timeout=0)
+    handle = _extract_handle(result)
+    child_pid: int | None = None
+    try:
+        for _ in range(40):
+            if child_pid_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        assert "FINISHED" in await _wait_for_finished(socket_path, handle)
+        await _assert_linux_pid_not_running(child_pid)
+    finally:
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio

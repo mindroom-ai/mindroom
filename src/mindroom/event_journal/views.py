@@ -27,12 +27,12 @@ if TYPE_CHECKING:
         RoomHistoryRecovery,
     )
 
+    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
     from .approvals import (
-        ApprovalCardReservation,
-        RecordedApprovalDecision,
         StoredApprovalCard,
         UnreadableApprovalCard,
     )
+    from .background_approvals import BackgroundApprovalDecision
     from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionResult,
@@ -414,6 +414,42 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         expected_generation: int,
         cards: tuple[ApprovalCardReservation, ...],
     ) -> bool: ...
+
+    async def reserve_background_approval_card(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        run_id: str,
+        call_id: str,
+        expires_at_ns: int,
+        card: ApprovalCardReservation,
+    ) -> bool: ...
+
+    async def background_approval_decision(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None: ...
+
+    async def resolve_background_approval_call(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        requested_status: Literal["denied", "expired"],
+        reason: str,
+    ) -> RecordedApprovalDecision: ...
+
+    async def resolve_pending_background_approval_calls(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int: ...
+
+    async def prune_background_approvals(self, *, run_id: str) -> bool: ...  # noqa: D102
 
     async def resolve_continuation_approval_card(  # noqa: D102
         self,

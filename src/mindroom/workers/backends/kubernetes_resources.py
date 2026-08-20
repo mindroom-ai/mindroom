@@ -56,6 +56,7 @@ from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
+    resolve_kubeconfig_paths,
 )
 from mindroom.workers.backends.kubernetes_pod_names import (
     AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
@@ -656,13 +657,24 @@ def _agent_names_addressed_by_worker_key(
     encoded_agent_name = worker_key_agent_name(worker_key)
     if encoded_agent_name is None:
         return ()
-    expected_scope = None if scope == "unscoped" else scope
-    return tuple(
-        agent_name
-        for agent_name, policy in resolved_agent_policies.items()
-        if policy.effective_execution_scope == expected_scope
-        and normalize_worker_key_part(agent_name) == encoded_agent_name
-    )[:1]
+    if scope == "user_agent":
+        matches = tuple(
+            agent_name
+            for agent_name in resolved_agent_policies
+            if normalize_worker_key_part(agent_name) == encoded_agent_name
+        )
+    else:
+        expected_scope = None if scope == "unscoped" else scope
+        matches = tuple(
+            agent_name
+            for agent_name, policy in resolved_agent_policies.items()
+            if policy.effective_execution_scope == expected_scope
+            and normalize_worker_key_part(agent_name) == encoded_agent_name
+        )
+    if len(matches) > 1:
+        msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+        raise WorkerBackendError(msg)
+    return matches
 
 
 class KubernetesResourceManager:
@@ -1070,7 +1082,10 @@ class KubernetesResourceManager:
         try:
             kubernetes_config.load_incluster_config()
         except Exception:
-            kubernetes_config.load_kube_config()
+            kubeconfig_paths = resolve_kubeconfig_paths(self.runtime_paths)
+            kubernetes_config.load_kube_config(
+                config_file=os.pathsep.join(str(path) for path in kubeconfig_paths),
+            )
 
         self.apps_api = cast("_AppsApiProtocol", kubernetes_client.AppsV1Api())
         self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())

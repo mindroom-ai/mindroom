@@ -108,6 +108,7 @@ _.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_medi
 DEEPSEEK_V4_PRO  # used by scripts/utilities/rewrite_git_commits_ai.py
 EXPIRED  # dynamically restored ApprovalDecision enum value (src/mindroom/approval_continuation.py)
 _.confirmation_note  # Set by Agno requirement rejection (approval_execution.py, teams.py)
+_.cache_results  # Script broker disables Agno's pre-hook result cache for durable calls
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)

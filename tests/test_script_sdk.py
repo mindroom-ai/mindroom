@@ -1,0 +1,482 @@
+"""Tests for the stdlib-only background-script SDK."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import urllib.error
+from typing import TYPE_CHECKING
+
+import pytest
+
+from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from urllib.request import Request
+
+
+def _arguments_digest(arguments: dict[str, object]) -> str:
+    encoded = json.dumps(
+        arguments,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _receipt(
+    state: object,
+    *,
+    result: object | None = None,
+    error: object | None = None,
+    arguments: dict[str, object] | None = None,
+    toolkit_name: str = "website",
+    function_name: str = "read_url",
+) -> bytes:
+    receipt_arguments = {"url": "https://example.org/"} if arguments is None else arguments
+    return json.dumps(
+        {
+            "run_id": "run-1",
+            "call_id": "stable-call",
+            "toolkit_name": toolkit_name,
+            "function_name": function_name,
+            "arguments_digest": _arguments_digest(receipt_arguments),
+            "state": state,
+            "created_at": "2026-08-18T00:00:00Z",
+            "updated_at": "2026-08-18T00:00:01Z",
+            "result": result,
+            "error": error,
+        },
+    ).encode()
+
+
+def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    token_path = tmp_path / "capability"
+    token_path.write_text("secret-token\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_SCRIPT_GATEWAY_URL", "http://primary:8765/api/script-gateway")
+    monkeypatch.setenv("MINDROOM_SCRIPT_RUN_ID", "run-1")
+    monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
+
+
+def test_script_sdk_rejects_nonpositive_poll_interval(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A zero interval must fail explicitly instead of flooding receipt endpoints."""
+    _configure(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="poll_interval_seconds must be positive"):
+        MindRoomTools(poll_interval_seconds=0)
+
+
+def test_script_sdk_polls_the_same_accepted_call_id_until_completed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pending polling must retain the POST call ID instead of creating a second logical call."""
+    _configure(monkeypatch, tmp_path)
+    requests: list[Request] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        requests.append(request)
+        if request.method == "POST":
+            payload = json.loads(request.data or b"{}")
+            assert payload["call_id"] == "stable-call"
+            return io.BytesIO(_receipt("pending"))
+        assert request.full_url.endswith("/runs/run-1/calls/stable-call")
+        return io.BytesIO(_receipt("completed", result={"status": "ok"}))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
+        "website",
+        "read_url",
+        url="https://example.org/",
+    )
+
+    assert result == {"status": "ok"}
+    assert [request.method for request in requests] == ["POST", "GET"]
+    assert all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
+
+
+def test_script_sdk_digests_the_json_wire_argument_representation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nested integer keys must retain the gateway's post-JSON argument identity."""
+    _configure(monkeypatch, tmp_path)
+    posted_arguments: dict[str, object] = {}
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        payload = json.loads(request.data or b"{}")
+        posted_arguments.update(payload["arguments"])
+        return io.BytesIO(
+            _receipt(
+                "completed",
+                result="accepted",
+                arguments=payload["arguments"],
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
+        "website",
+        "read_url",
+        payload={1: "one", 10: "ten", 2: "two"},
+    )
+
+    assert result == "accepted"
+    assert posted_arguments == {"payload": {"1": "one", "10": "ten", "2": "two"}}
+
+
+@pytest.mark.parametrize(
+    "invalid_arguments",
+    [
+        {"payload": {1: "integer", "2": "string"}},
+        {"payload": float("nan")},
+        {"payload": object()},
+        {"payload": "\udcff"},
+    ],
+)
+def test_script_sdk_rejects_invalid_arguments_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid_arguments: dict[str, object],
+) -> None:
+    """Ambiguous or non-JSON arguments must fail locally without dispatching a call."""
+    _configure(monkeypatch, tmp_path)
+    requests: list[Request] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        requests.append(request)
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", **invalid_arguments)
+
+    assert exc_info.value.kind == "invalid_arguments"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.call_id == "stable-call"
+    assert exc_info.value.__cause__ is None
+    assert requests == []
+
+
+@pytest.mark.parametrize("container_kind", ["mapping", "sequence"])
+def test_script_sdk_rejects_cyclic_arguments_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    container_kind: str,
+) -> None:
+    """Cyclic arguments must use the stable local rejection instead of escaping as recursion errors."""
+    _configure(monkeypatch, tmp_path)
+    requests: list[Request] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        requests.append(request)
+        return io.BytesIO(b"{}")
+
+    if container_kind == "mapping":
+        cyclic_mapping: dict[str, object] = {}
+        cyclic_mapping["self"] = cyclic_mapping
+        cyclic: object = cyclic_mapping
+    else:
+        cyclic_sequence: list[object] = []
+        cyclic_sequence.append(cyclic_sequence)
+        cyclic = cyclic_sequence
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", payload=cyclic)
+
+    assert exc_info.value.kind == "invalid_arguments"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.call_id == "stable-call"
+    assert exc_info.value.__cause__ is None
+    assert requests == []
+
+
+def test_script_sdk_retries_same_submit_after_transport_loss_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A POST lost before dispatch is retried with the same stable call identity."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        payloads.append(request.data)
+        if len(methods) == 1:
+            reason = "connection reset"
+            raise urllib.error.URLError(reason)
+        return io.BytesIO(_receipt("completed", result="page body"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert result == "page body"
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
+
+
+def test_script_sdk_retries_same_submit_after_accepted_response_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An accepted POST with a lost response is safely replayed under its original call ID."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        payloads.append(request.data)
+        if len(methods) == 1:
+            reason = "connection reset after acceptance"
+            raise urllib.error.URLError(reason)
+        return io.BytesIO(_receipt("completed", result="accepted earlier"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert result == "accepted earlier"
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
+
+
+def test_script_sdk_retries_same_submit_while_owner_runtime_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transient owner-runtime 503 retries the same POST instead of losing the call."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        payloads.append(request.data)
+        if len(methods) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b'{"detail":"temporarily unavailable"}'),
+            )
+        return io.BytesIO(_receipt("completed", result="accepted earlier"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert result == "accepted earlier"
+    assert methods == ["POST", "POST"]
+    assert payloads[0] == payloads[1]
+
+
+def test_script_sdk_retries_same_submit_after_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A temporary 429 retries the same stable call instead of killing the script."""
+    _configure(monkeypatch, tmp_path)
+    payloads: list[bytes | None] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        payloads.append(request.data)
+        if len(payloads) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {},
+                io.BytesIO(b'{"detail":"rate limited"}'),
+            )
+        return io.BytesIO(_receipt("completed", result="accepted after rate limit"))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    result = MindRoomTools(poll_interval_seconds=0.0001).call(
+        "website",
+        "read_url",
+        url="https://example.org/",
+    )
+
+    assert result == "accepted after rate limit"
+    assert len(payloads) == 2
+    assert payloads[0] == payloads[1]
+
+
+@pytest.mark.parametrize(
+    ("receipt_toolkit", "receipt_function", "receipt_arguments"),
+    [
+        ("other", "read_url", {"url": "https://example.org/"}),
+        ("website", "other", {"url": "https://example.org/"}),
+        ("website", "read_url", {"url": "https://old.example/"}),
+    ],
+)
+def test_script_sdk_rejects_old_conflicting_receipt_after_ambiguous_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    receipt_toolkit: str,
+    receipt_function: str,
+    receipt_arguments: dict[str, object],
+) -> None:
+    """Replaying an ambiguous submit cannot consume a different call identity."""
+    _configure(monkeypatch, tmp_path)
+    methods: list[str] = []
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        methods.append(request.method)
+        if len(methods) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b'{"detail":"acceptance not yet determined"}'),
+            )
+        return io.BytesIO(
+            _receipt(
+                "completed",
+                result="old result",
+                arguments=receipt_arguments,
+                toolkit_name=receipt_toolkit,
+                function_name=receipt_function,
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call(
+            "website",
+            "read_url",
+            url="https://example.org/",
+        )
+
+    assert exc_info.value.kind == "stable_call_conflict"
+    assert exc_info.value.retryable is False
+    assert methods == ["POST", "POST"]
+
+
+def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A terminal broker failure must retain its failure kind and retryability."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(
+            _receipt(
+                "failed",
+                error={"kind": "capability_revoked", "message": "revoked", "retryable": False},
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert exc_info.value.kind == "capability_revoked"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.call_id == "stable-call"
+
+
+def test_script_sdk_raises_typed_approval_denial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A denied background call is distinguishable from a successful string result."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(
+            _receipt(
+                "failed",
+                error={"kind": "approval_denied", "message": "Not this time.", "retryable": False},
+                arguments={},
+            ),
+        )
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url")
+
+    assert exc_info.value.kind == "approval_denied"
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize("removed_state", ["declined", "cancelled"])
+def test_script_sdk_rejects_removed_call_states(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    removed_state: str,
+) -> None:
+    """Legacy call-only states must not be accepted as current gateway receipts."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(_receipt(removed_state))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert exc_info.value.kind == "invalid_response"
+
+
+@pytest.mark.parametrize("invalid_state", [[], {}])
+def test_script_sdk_rejects_unhashable_receipt_states(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    invalid_state: object,
+) -> None:
+    """Malformed receipt state types should become stable SDK errors instead of raw TypeError."""
+    _configure(monkeypatch, tmp_path)
+
+    def urlopen(_request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        return io.BytesIO(_receipt(invalid_state))
+
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "stable-call"})())
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert exc_info.value.kind == "invalid_response"

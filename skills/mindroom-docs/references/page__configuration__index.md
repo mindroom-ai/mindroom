@@ -211,6 +211,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
+| `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for dedicated Docker worker mode unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
+| `MINDROOM_SCRIPT_RETENTION_SECONDS` | Finite positive seconds to retain terminal background-script runs, tool-call receipts, approval rows, and durable approval records before lifecycle pruning | `2592000` (30 days) |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
 The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.

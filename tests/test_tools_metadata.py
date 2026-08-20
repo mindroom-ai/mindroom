@@ -906,6 +906,28 @@ def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path
     assert tool.exclude_patterns == []
 
 
+def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -> None:
+    """JSON number fields such as 3.0 must satisfy integer-valued script limits."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "script",
+        runtime_paths,
+        tool_config_overrides={
+            "max_concurrent_runs": 3.0,
+            "max_tool_calls_per_minute": 30.0,
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.limits.max_concurrent_runs == 3
+    assert tool.limits.max_tool_calls_per_minute == 30
+
+
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
     """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
     runtime_paths = resolve_runtime_paths(

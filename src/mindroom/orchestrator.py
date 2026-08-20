@@ -89,7 +89,12 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    clear_worker_validation_snapshot_cache,
+    lease_configured_primary_worker_manager,
+    reset_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -98,7 +103,7 @@ from .credentials_sync import sync_env_to_credentials
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
-from .orchestration.config_updates import configured_entity_names
+from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
@@ -118,6 +123,7 @@ from .orchestration.runtime import (
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
 )
+from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 
 if TYPE_CHECKING:
@@ -190,9 +196,16 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
 class _SignalAwareUvicornServer(uvicorn.Server):
     """Uvicorn server that marks the shared shutdown event on signal exit."""
 
-    def __init__(self, config: uvicorn.Config, shutdown_requested: asyncio.Event | None) -> None:
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        shutdown_requested: asyncio.Event | None,
+        *,
+        on_started: Callable[[str, int], Awaitable[None]] | None = None,
+    ) -> None:
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
+        self._on_started = on_started
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         """Publish the API address only after Uvicorn successfully binds it."""
@@ -208,6 +221,8 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         bound_host = bound_address[0]
         bound_port = bound_address[1]
         set_api_server_address(bound_host, bound_port)
+        if self._on_started is not None:
+            await self._on_started(bound_host, bound_port)
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
@@ -270,6 +285,7 @@ class _MultiAgentOrchestrator:
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
+    _script_runtime: ScriptRuntimeLifecycle = field(init=False, repr=False)
     agent_reply_memberships: AgentReplyMembershipIndex = field(
         default_factory=AgentReplyMembershipIndex,
         init=False,
@@ -294,6 +310,17 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+        )
+        self._script_runtime = build_script_runtime(
+            self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
+                self.runtime_paths,
+                runtime_config=self.config,
+                required_backend_locator=required_backend_locator,
+            ),
+            api_enabled=self.api_enabled,
         )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
@@ -329,6 +356,11 @@ class _MultiAgentOrchestrator:
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
         )
+
+    @property
+    def script_runtime(self) -> ScriptRuntimeLifecycle:
+        """Return the process-local background-script lifecycle collaborator."""
+        return self._script_runtime
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
@@ -935,6 +967,14 @@ class _MultiAgentOrchestrator:
                 )
                 return None
             config = self._require_config()
+            plan = build_config_update_plan(
+                current_config=config,
+                new_config=config,
+                configured_entities=set(configured_entity_names(config)),
+                existing_entities=set(self.agent_bots),
+                agent_bots=self.agent_bots,
+            )
+            await self._script_runtime.apply_update_plan(plan, plugins_changed=True)
             logger.info(
                 "Reloading plugins",
                 source=source,
@@ -942,27 +982,30 @@ class _MultiAgentOrchestrator:
             )
             watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
             try:
-                result = reload_plugins(config, self.runtime_paths)
-            except Exception:
-                recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                    config,
-                    self.runtime_paths,
-                )
-                self._activate_hook_registry(recovery_result.hook_registry)
+                try:
+                    result = reload_plugins(config, self.runtime_paths)
+                except Exception:
+                    recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
+                        config,
+                        self.runtime_paths,
+                    )
+                    self._activate_hook_registry(recovery_result.hook_registry)
+                    clear_worker_validation_snapshot_cache()
+                    self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
+                    logger.warning(warning_message, source=source, **warning_kwargs)
+                    raise
+                self._activate_hook_registry(result.hook_registry)
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-                logger.warning(warning_message, source=source, **warning_kwargs)
-                raise
-            self._activate_hook_registry(result.hook_registry)
-            clear_worker_validation_snapshot_cache()
-            self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-            logger.info(
-                "Plugin reload complete",
-                source=source,
-                active_plugins=list(result.active_plugin_names),
-                cancelled_task_count=result.cancelled_task_count,
-            )
-            return result
+                logger.info(
+                    "Plugin reload complete",
+                    source=source,
+                    active_plugins=list(result.active_plugin_names),
+                    cancelled_task_count=result.cancelled_task_count,
+                )
+                return result
+            finally:
+                await self._script_runtime.complete_worker_replacement()
 
     async def _apply_plugin_changes_for_config_update(
         self,
@@ -1362,6 +1405,7 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)
+        await self._script_runtime.start()
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
         async with self.config_reload.startup_publication_admission():
@@ -1758,9 +1802,11 @@ class _MultiAgentOrchestrator:
             new_config.authorization,
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
-        replay_startup_maintenance = await self._startup_maintenance.cancel()
+        replay_startup_maintenance = False
+        await self._script_runtime.apply_update_plan(plan, plugins_changed=bool(plugin_changes))
 
         try:
+            replay_startup_maintenance = await self._startup_maintenance.cancel()
             if plugin_changes:
                 pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
                     current_config=current_config,
@@ -1781,6 +1827,7 @@ class _MultiAgentOrchestrator:
                 self.plugin_watch.sync_roots(new_config)
                 self._activate_hook_registry(self.hook_registry)
                 clear_worker_validation_snapshot_cache()
+            await self._script_runtime.complete_worker_replacement()
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
@@ -1839,6 +1886,7 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
+            await self._script_runtime.complete_worker_replacement()
             if replay_startup_maintenance and self.running and self.config is not None:
                 self._startup_maintenance.restart_after_config_reload(
                     config=self.config,
@@ -2139,6 +2187,10 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
+        try:
+            await self._script_runtime.shutdown()
+        except Exception:
+            logger.exception("Background script runtime shutdown failed")
         await self._approval_transport.close()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
@@ -2242,6 +2294,7 @@ async def _run_api_server(
     log_level: str,
     runtime_paths: RuntimePaths,
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    script_runtime: ScriptRuntimeLifecycle | None = None,
     shutdown_requested: asyncio.Event | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
@@ -2249,6 +2302,12 @@ async def _run_api_server(
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
+    if script_runtime is not None:
+        api_main.bind_script_runtime(
+            api_main.app,
+            broker=script_runtime.broker,
+            touch_live_workers=script_runtime.touch_live_workers,
+        )
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
     config = uvicorn.Config(
@@ -2258,7 +2317,13 @@ async def _run_api_server(
         log_level=log_level.lower(),
         ws="websockets-sansio",
     )
-    server = _SignalAwareUvicornServer(config, shutdown_requested)
+
+    async def on_started(bound_host: str, bound_port: int) -> None:
+        if script_runtime is not None:
+            gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
+            script_runtime.bind_api(gateway_url)
+
+    server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
@@ -2266,6 +2331,9 @@ async def _run_api_server(
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
+        if script_runtime is not None:
+            await script_runtime.unbind_api()
+            api_main.unbind_script_runtime(api_main.app)
         clear_api_server_address()
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(
@@ -2564,7 +2632,7 @@ async def main(
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
-        shutdown_primary_worker_manager(timeout_seconds=0.0)
+        reset_primary_worker_manager()
 
         # Configure logging before any background tasks or account setup begin.
         setup_logging(level=log_level, runtime_paths=runtime_paths)
@@ -2610,6 +2678,7 @@ async def main(
                     log_level,
                     runtime_paths,
                     orchestrator.knowledge_refresh_scheduler,
+                    orchestrator.script_runtime,
                     shutdown_requested,
                 ),
                 name="api_server",

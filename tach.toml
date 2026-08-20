@@ -607,6 +607,7 @@ depends_on = [
 visibility = [
     "mindroom.approval_response",
     "mindroom.approval_transport",
+    "mindroom.orchestration.script_runtime",
     "mindroom.tool_approval",
 ]
 
@@ -703,6 +704,7 @@ visibility = [
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.matrix_rtc.call_tools",
+    "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -1012,6 +1014,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.script_gateway"
+depends_on = [
+    "mindroom.script_runs.broker",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.store",
+]
+
+[[modules]]
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
@@ -1029,6 +1039,7 @@ depends_on = [
     "mindroom.api.oauth",
     "mindroom.api.report_publishing",
     "mindroom.api.schedules",
+    "mindroom.api.script_gateway",
     "mindroom.api.skills",
     "mindroom.api.tools",
     "mindroom.api.workers",
@@ -1174,7 +1185,21 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.sandbox_runner_app"
-depends_on = ["mindroom.api.sandbox_runner"]
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_runner_scripts",
+]
+
+[[modules]]
+path = "mindroom.api.sandbox_runner_scripts"
+depends_on = [
+    "mindroom.api.sandbox_env_assembly",
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.sandbox_worker_prep",
+    "mindroom.constants",
+    "mindroom.shell_supervisor",
+]
 
 [[modules]]
 path = "mindroom.api.sandbox_worker_prep"
@@ -1187,6 +1212,14 @@ depends_on = [
     "mindroom.workers.backends.local",
     "mindroom.workers.models",
 ]
+
+[[modules]]
+path = "mindroom.script_runs.shim"
+depends_on = []
+
+[[modules]]
+path = "mindroom.script_runs.worker_client"
+depends_on = ["mindroom.workers.models"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -1660,6 +1693,24 @@ path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
 [[modules]]
+path = "mindroom.orchestration.script_runtime"
+depends_on = [
+    "mindroom.approval_manager",
+    "mindroom.custom_tools.script",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.orchestration.runtime",
+    "mindroom.script_runs.broker",
+    "mindroom.script_runs.manager",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.store",
+    "mindroom.script_runs.worker_client",
+    "mindroom.tool_approval",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agent_reply_membership_sync",
@@ -1690,12 +1741,14 @@ depends_on = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
+    "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
+    "mindroom.workers.runtime",
 ]
 
 [[modules]]
@@ -3453,6 +3506,15 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.workers.worker_retirement"
+depends_on = []
+visibility = [
+    "mindroom.script_runs.manager",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.docker_projection",
+]
+
+[[modules]]
 path = "mindroom.tool_system.skills"
 depends_on = [
     "mindroom.constants",
@@ -4812,6 +4874,24 @@ expose = ["build_tool_hook_bridge", "prepend_tool_hook_bridge"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[interfaces]]
+expose = ["bind_script_tool_broker", "router"]
+from = ["mindroom.api.script_gateway"]
+
+[[interfaces]]
+expose = ["MindRoomToolCallError", "MindRoomTools"]
+from = ["mindroom.script_sdk"]
+
+[[interfaces]]
+expose = ["open_worker_state_root", "remove_directory_tree_at"]
+from = ["mindroom.workers.worker_retirement"]
+visibility = [
+    "mindroom.script_runs.manager",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.docker_projection",
+]
+exclusive = true
+
+[[interfaces]]
 expose = ["ApprovalMatrixTransport"]
 from = ["mindroom.approval_transport"]
 
@@ -4820,7 +4900,11 @@ expose = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
+    "AutomationToolOrigin",
+    "BackgroundScriptToolOrigin",
+    "DynamicWorkflowToolOrigin",
     "MatrixApprovalAction",
+    "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "evaluate_tool_approval",

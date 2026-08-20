@@ -17,18 +17,30 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from . import approval_continuations, approvals, interactive_questions, journal, outbox, reads, turn_records
+from . import (
+    approval_continuations,
+    approvals,
+    background_approvals,
+    interactive_questions,
+    journal,
+    outbox,
+    reads,
+    turn_records,
+)
+from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
+    ApprovalCardReservation,
+    RecordedApprovalDecision,
+)
 from .approval_continuations import (  # noqa: TC001 - runtime return and input types
     ApprovalCall,
     ApprovalContinuation,
     ApprovalContinuationState,
 )
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
-    ApprovalCardReservation,
-    RecordedApprovalDecision,
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
+from .background_approvals import BackgroundApprovalDecision  # noqa: TC001
 from .membership_state import claim_active_membership_epoch
 from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
@@ -872,6 +884,92 @@ class PrincipalStore:
             ),
         )
 
+    async def reserve_background_approval_card(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        run_id: str,
+        call_id: str,
+        expires_at_ns: int,
+        card: ApprovalCardReservation,
+    ) -> bool:
+        """Atomically reserve one exact background-call approval card."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.reserve_delivery(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                call_id=call_id,
+                expires_at_ns=expires_at_ns,
+                card=card,
+            ),
+        )
+
+    async def background_approval_decision(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None:
+        """Return one exact background call's terminal decision."""
+        return await self._backend.read(
+            lambda transaction: background_approvals.decision(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                call_id=call_id,
+            ),
+        )
+
+    async def resolve_background_approval_call(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        requested_status: Literal["denied", "expired"],
+        reason: str,
+    ) -> RecordedApprovalDecision:
+        """Resolve one exact background target through the shared card transaction."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.resolve_call(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                call_id=call_id,
+                requested_status=requested_status,
+                reason=reason,
+            ),
+        )
+
+    async def resolve_pending_background_approval_calls(
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int:
+        """Resolve every pending background target for one run atomically."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.resolve_pending_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                reason=reason,
+            ),
+        )
+
+    async def prune_background_approvals(self, *, run_id: str) -> bool:
+        """Prune settled background targets after their cards have retired."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.prune_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+            ),
+        )
+
     async def resolve_continuation_approval_card(
         self,
         *,
@@ -882,7 +980,7 @@ class PrincipalStore:
     ) -> RecordedApprovalDecision:
         """Atomically record one native card and its exact-call decision."""
         return await self._backend.write(
-            lambda transaction: approvals.resolve_continuation(
+            lambda transaction: approvals.resolve_card(
                 transaction,
                 self._principal_id,
                 card_event_id=card_event_id,
@@ -899,7 +997,7 @@ class PrincipalStore:
     ) -> RecordedApprovalDecision:
         """Atomically expire a due call whose attempted card still lacks an event ID."""
         return await self._backend.write(
-            lambda transaction: approvals.resolve_continuation(
+            lambda transaction: approvals.resolve_card(
                 transaction,
                 self._principal_id,
                 card_event_id=None,

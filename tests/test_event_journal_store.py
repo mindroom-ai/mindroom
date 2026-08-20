@@ -6034,6 +6034,84 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
+    async def test_background_call_uses_shared_card_dispatch_and_retirement(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Both database backends preserve the extracted exact-call transaction."""
+        router = journal_store.principal("router@shared")
+        assert await router.reserve_background_approval_card(
+            room_id=ROOM,
+            thread_id="$thread",
+            run_id="background-run-1",
+            call_id="background-call-1",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+            card=ApprovalCardReservation(
+                delivery_id="background-card-1",
+                tool_call_id="background-call-1",
+                event_type="io.mindroom.tool_approval",
+                payload={
+                    "approval_target": "background_script",
+                    "background_run_id": "background-run-1",
+                    "background_call_id": "background-call-1",
+                    "status": "pending",
+                },
+            ),
+        )
+        assert await router.claim_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        await router.record_matrix_delivery_device(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+            device_id=DEVICE,
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_id="$background-approval",
+            delivered_projections=(),
+        )
+
+        recorded = await router.resolve_continuation_approval_card(
+            card_event_id="$background-approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.continuation_ready is False
+        decision = await router.background_approval_decision(
+            run_id="background-run-1",
+            call_id="background-call-1",
+        )
+        assert decision is not None
+        assert decision.status == "approved"
+        assert await router.prune_background_approvals(run_id="background-run-1") is False
+
+        assert await router.claim_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await router.record_matrix_delivery_device(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+            device_id=DEVICE,
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$background-terminal",
+            delivered_projections=(),
+        )
+        assert await router.retire_approval_card(
+            delivery_id="background-card-1",
+            card_event_id="$background-approval",
+        )
+        assert await router.prune_background_approvals(run_id="background-run-1") is True
+
     async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
         """A coalesced source cannot replay outside its one paused-run owner."""
         await self.admit_sources(alice)

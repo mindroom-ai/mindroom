@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -31,6 +32,35 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_path=tmp_path / "storage",
         process_env={},
     )
+
+
+def test_duplicate_worker_manager_build_is_immediately_disposable() -> None:
+    """A losing same-signature build does not wait for application shutdown."""
+    signature = ("test", "same")
+    active_manager = MagicMock()
+    duplicate_manager = MagicMock()
+    active = workers_runtime_module._WorkerManagerEntry(active_manager, signature)
+    previous_active = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
+    previous_retired = workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES
+    previous_building = workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES
+    try:
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY = active
+        workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES = []
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = {signature}
+
+        published = workers_runtime_module._publish_primary_worker_manager_build(
+            duplicate_manager,
+            signature,
+            acquisition_epoch=workers_runtime_module._PRIMARY_WORKER_MANAGER_EPOCH,
+            acquire_lease=False,
+        )
+
+        assert published == (active, [duplicate_manager])
+        assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
+    finally:
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY = previous_active
+        workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES = previous_retired
+        workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = previous_building
 
 
 def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver_result(
@@ -276,3 +306,113 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_plu
     )
 
     assert calls == 2
+
+
+def test_configured_primary_worker_manager_lease_uses_one_committed_config_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Lifecycle and cleanup should resolve the same config-aware primary manager."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config()
+    expected = MagicMock()
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    expected_lease = MagicMock(manager=expected)
+    lease_manager = MagicMock(return_value=expected_lease)
+    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
+
+    resolved = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=runtime_config,
+    )
+
+    assert resolved is expected_lease
+    assert lease_manager.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    assert lease_manager.call_args.kwargs["worker_grantable_credentials"] == (
+        runtime_config.get_worker_grantable_credentials()
+    )
+
+
+def test_configured_primary_worker_manager_identity_uses_the_lease_signature_without_constructing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A reload can compare one committed worker identity without publishing a manager."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config()
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
+    signature = MagicMock(return_value=("signature",))
+    monkeypatch.setattr(workers_runtime_module, "_primary_worker_backend_config_signature", signature)
+    build_manager = MagicMock()
+    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+
+    identity = workers_runtime_module.configured_primary_worker_manager_identity(runtime_paths, runtime_config)
+
+    assert identity == "645b967075b7e04dcf2484456e24e777ae602b20c0bf8b0414bd06d9aaffaed6"
+    assert signature.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    build_manager.assert_not_called()
+
+
+def test_configured_worker_lease_requires_the_current_durable_backend_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Historical backends fail closed instead of being reconstructed from durable state."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config()
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    manager = MagicMock(cleanup_locator="current-identity")
+    lease = MagicMock(manager=manager)
+    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", MagicMock(return_value=lease))
+
+    matched = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=runtime_config,
+        required_backend_locator="current-identity",
+    )
+    mismatched = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=runtime_config,
+        required_backend_locator="historical-identity",
+    )
+
+    assert matched is lease
+    assert mismatched is None
+    lease.release.assert_called_once_with()
+
+
+def test_configured_primary_worker_manager_lease_skips_kubernetes_without_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Kubernetes maintenance must wait for a committed config snapshot."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
+    )
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "kubernetes")
+    lease_manager = MagicMock()
+    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
+
+    resolved = workers_runtime_module.lease_configured_primary_worker_manager(
+        runtime_paths,
+        runtime_config=None,
+    )
+
+    assert resolved is None
+    lease_manager.assert_not_called()

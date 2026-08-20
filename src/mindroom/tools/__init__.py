@@ -116,6 +116,7 @@ from mindroom.tools.replicate import replicate_tools
 from mindroom.tools.resend import resend_tools
 from mindroom.tools.scheduler import scheduler_tools
 from mindroom.tools.scrapegraph import scrapegraph_tools
+from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
@@ -250,6 +251,7 @@ __all__ = [
     "resend_tools",
     "scheduler_tools",
     "scrapegraph_tools",
+    "script_tools",
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",

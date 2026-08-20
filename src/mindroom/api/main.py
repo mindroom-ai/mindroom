@@ -33,6 +33,8 @@ from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.schedules import router as schedules_router
+from mindroom.api.script_gateway import bind_script_tool_broker
+from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
@@ -45,15 +47,8 @@ from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.backend import maintain_workers
-from mindroom.workers.runtime import (
-    get_primary_worker_manager,
-    primary_worker_backend_available,
-    primary_worker_backend_name,
-    serialized_kubernetes_worker_config_snapshot,
-    serialized_kubernetes_worker_validation_snapshot,
-)
+from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -65,6 +60,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.script_runs.broker import ScriptToolBroker
+    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -197,40 +194,19 @@ def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
     runtime_config: Config | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
+    touch_live_workers: Callable[[WorkerBackend], None] | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    if not primary_worker_backend_available(
+    worker_lease = lease_configured_primary_worker_manager(
         runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
-        return 0
-
-    if runtime_config is None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        return 0
-
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-            runtime_paths,
-            runtime_config=runtime_config,
-        )
-        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
-        if worker_grantable_credentials is None:
-            worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-    worker_manager = get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
+        runtime_config=runtime_config,
     )
-    maintenance = maintain_workers(worker_manager)
+    if worker_lease is None:
+        return 0
+    with worker_lease as worker_manager:
+        if touch_live_workers is not None:
+            touch_live_workers(worker_manager)
+        maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
@@ -276,11 +252,7 @@ async def _worker_cleanup_loop(
                     _cleanup_workers_once,
                     runtime_paths,
                     runtime_config=runtime_config,
-                    worker_grantable_credentials=(
-                        runtime_config.get_worker_grantable_credentials()
-                        if runtime_config is not None
-                        else constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-                    ),
+                    touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
                 )
             except Exception:
                 logger.exception("Background worker cleanup failed")
@@ -308,6 +280,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.external_trigger_runtime = None
+        app_state.script_worker_keepalive = None
+        bind_script_tool_broker(api_app, None)
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -336,6 +310,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.external_trigger_runtime = None
+            app_state.script_worker_keepalive = None
+            bind_script_tool_broker(api_app, None)
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -347,6 +323,23 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             source_files=source_files,
         )
     config_lifecycle.register_api_app(api_app)
+
+
+def bind_script_runtime(
+    api_app: FastAPI,
+    *,
+    broker: ScriptToolBroker,
+    touch_live_workers: Callable[[WorkerBackend], None],
+) -> None:
+    """Bind the lifecycle-owned broker and worker keepalive to the primary API."""
+    bind_script_tool_broker(api_app, broker)
+    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = touch_live_workers
+
+
+def unbind_script_runtime(api_app: FastAPI) -> None:
+    """Clear script capabilities and keepalive when an API runtime is replaced."""
+    bind_script_tool_broker(api_app, None)
+    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = None
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
@@ -720,6 +713,7 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+app.include_router(script_gateway_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 

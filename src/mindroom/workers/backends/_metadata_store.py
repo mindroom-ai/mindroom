@@ -6,6 +6,8 @@ import json
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.durable_write import write_json_file_durable
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -69,5 +71,10 @@ def save_worker_metadata(
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
 
     lock_context = nullcontext() if lock is None else lock
-    with lock_context, paths.metadata_file.open("w", encoding="utf-8") as f:
-        json.dump(vars(metadata), f, sort_keys=True)
+    with lock_context:
+        write_json_file_durable(
+            paths.metadata_file,
+            vars(metadata),
+            strict_atomic_replace=True,
+            sort_keys=True,
+        )

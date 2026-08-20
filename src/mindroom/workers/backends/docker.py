@@ -20,6 +20,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     RuntimePaths,
     resolve_primary_runtime_paths,
+    runtime_env_values,
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     serialize_runtime_paths,
@@ -71,6 +72,7 @@ from mindroom.workers.models import (
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -267,9 +269,13 @@ def _load_docker_client_and_errors(
         msg = "The Docker worker backend could not import the Docker SDK after ensuring the optional 'docker' extra."
         raise WorkerBackendError(msg) from exc
 
-    docker_from_env = cast("Callable[[], _DockerClient]", docker_module.from_env)
+    docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)
     try:
-        client = docker_from_env()
+        client = (
+            docker_from_env(environment=runtime_env_values(runtime_paths))
+            if runtime_paths is not None
+            else docker_from_env()
+        )
     except docker_errors.DockerException as exc:
         msg = f"Failed to initialize Docker client: {exc}"
         raise WorkerBackendError(msg) from exc
@@ -308,6 +314,7 @@ class DockerWorkerBackend:
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
     backend_name = "docker"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,
@@ -461,7 +468,11 @@ class DockerWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 spec.worker_key,
-                allowed_services=self.worker_grantable_credentials,
+                allowed_services=(
+                    self.worker_grantable_credentials
+                    if spec.mirrored_credential_services is None
+                    else spec.mirrored_credential_services
+                ),
                 credentials_manager=self._credentials_manager,
             )
 
@@ -592,6 +603,37 @@ class DockerWorkerBackend:
                     self._remove_container(container)
                     self._reconcile_missing_container_metadata(paths, metadata, None)
         return sorted(cleaned, key=lambda handle: handle.last_used_at, reverse=True)
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Remove one exact Docker worker container and all backend-owned state."""
+        with self._worker_lock(worker_key):
+            worker_name = worker_dir_name(worker_key)
+            try:
+                with open_worker_state_root(
+                    self._workers_root,
+                    workers_subpath=(),
+                    worker_name=worker_name,
+                    expected_worker_key=worker_key,
+                    identity_path=("metadata", "worker.json"),
+                    identity_field_path=("worker_key",),
+                ) as state:
+                    container_name = self._container_name_for_worker(worker_key)
+                    container = self._read_container(container_name)
+                    if container is not None and not self._container_env_matches(
+                        container,
+                        expected_env={_DEDICATED_WORKER_KEY_ENV: worker_key},
+                    ):
+                        msg = f"Docker worker container does not match retirement key '{worker_key}'."
+                        raise WorkerBackendError(msg)
+                    self._remove_container(container)
+                    if self._read_container(container_name) is not None:
+                        msg = f"Docker worker '{worker_key}' still exists after retirement."
+                        raise WorkerBackendError(msg)
+                    self._projection_manager.retire_worker_projection(worker_name)
+                    state.remove()
+            except (OSError, RecursionError, TypeError, ValueError) as exc:
+                msg = f"Failed to retire Docker worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""

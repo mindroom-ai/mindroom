@@ -108,6 +108,16 @@ _TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
 @pytest.mark.asyncio
 async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
     """Worker proxy calls must not queue behind unrelated default-pool work."""
@@ -3492,11 +3502,57 @@ def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
-def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_release(
+def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A leased manager should survive replacement until the request-scoped lease is released."""
+    """Final shutdown rejects new builds until an explicit process reset establishes a new epoch."""
+    workers_runtime_module._reset_primary_worker_manager()
+
+    class _FakeWorkerManager:
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("reset-generation",),
+    )
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_build_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeWorkerManager(),
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    try:
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        with pytest.raises(WorkerBackendError, match="shut down"):
+            workers_runtime_module.get_primary_worker_manager(
+                runtime_paths,
+                proxy_url=None,
+                proxy_token=None,
+                storage_root=tmp_path,
+            )
+
+        workers_runtime_module._reset_primary_worker_manager()
+        manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=tmp_path,
+        )
+
+        assert isinstance(manager, _FakeWorkerManager)
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A superseded manager shuts down exactly once when its final borrower releases it."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3576,6 +3632,7 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
     assert first_manager.shutdown_calls == 1
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     workers_runtime_module._reset_primary_worker_manager()
+    assert first_manager.shutdown_calls == 1
     assert second_manager.shutdown_calls == 1
 
 
@@ -3736,11 +3793,11 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     assert first_manager.shutdown_calls == 1
 
 
-def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_would_raise(
+def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdown_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Retired-manager shutdown failures should not poison the replacement manager or later requests."""
+    """The final lease release disposes a superseded manager exactly once even on failure."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3913,11 +3970,11 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retired_shutdown(
+def test_docker_worker_manager_replacement_disposes_unleased_generation_before_return(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A slow retired-manager shutdown must not block cache reads of the new active manager."""
+    """An unleased superseded manager is disposed before replacement acquisition returns."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3993,7 +4050,11 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
 
     replacement_thread = threading.Thread(target=_replace_manager)
     replacement_thread.start()
-    assert shutdown_started.wait(timeout=5.0)
+    assert shutdown_started.wait(timeout=1.0)
+    assert replacement_thread.is_alive()
+    allow_shutdown.set()
+    replacement_thread.join(timeout=5.0)
+    assert not replacement_thread.is_alive()
 
     second_manager = workers_runtime_module.get_primary_worker_manager(
         second_runtime_paths,
@@ -4001,9 +4062,6 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=second_storage_path,
     )
-
-    allow_shutdown.set()
-    replacement_thread.join(timeout=5.0)
 
     assert thread_result["manager"] is second_manager
     workers_runtime_module._reset_primary_worker_manager()

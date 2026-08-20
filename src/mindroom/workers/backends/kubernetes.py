@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key_value
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    credentials_encryption_key_value,
+)
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (
     WorkerBackendError,
@@ -270,6 +273,7 @@ class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = "kubernetes"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,
@@ -462,7 +466,10 @@ class KubernetesWorkerBackend:
                             status="starting",
                         )
                         self._resources.patch_deployment(worker_id, annotations=annotations)
-                    self._sync_shared_credentials(worker_key)
+                    self._sync_shared_credentials(
+                        worker_key,
+                        mirrored_credential_services=spec.mirrored_credential_services,
+                    )
                     self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
@@ -742,10 +749,19 @@ class KubernetesWorkerBackend:
             replicas_override=0,
         )
 
-    def _sync_shared_credentials(self, worker_key: str) -> None:
+    def _sync_shared_credentials(
+        self,
+        worker_key: str,
+        *,
+        mirrored_credential_services: frozenset[str] | None,
+    ) -> None:
         sync_shared_credentials_to_worker(
             worker_key,
-            allowed_services=self.worker_grantable_credentials,
+            allowed_services=(
+                self.worker_grantable_credentials
+                if mirrored_credential_services is None
+                else mirrored_credential_services
+            ),
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
@@ -757,7 +773,10 @@ class KubernetesWorkerBackend:
             handle = self._patch_cached_worker_usage(entry, now=now)
             if handle is None:
                 return None
-            self._sync_shared_credentials(spec.worker_key)
+            self._sync_shared_credentials(
+                spec.worker_key,
+                mirrored_credential_services=spec.mirrored_credential_services,
+            )
         except WorkerBackendError:
             self._invalidate_ready_worker(spec.worker_key)
             raise

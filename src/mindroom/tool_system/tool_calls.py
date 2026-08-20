@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -58,6 +59,11 @@ class _ToolCallRecordDict(TypedDict, total=False):
     error_type: str
     error_message: str
     traceback: str
+    origin: str
+    run_id: str
+    call_id: str
+    toolkit_name: str
+    function_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,11 @@ class _ToolCallRecord:
     error_type: str | None = None
     error_message: str | None = None
     traceback: str | None = None
+    origin: str | None = None
+    run_id: str | None = None
+    call_id: str | None = None
+    toolkit_name: str | None = None
+    function_name: str | None = None
 
     def as_dict(self) -> _ToolCallRecordDict:
         """Return the record in JSON-serializable dictionary form."""
@@ -131,6 +142,11 @@ class _ToolCallRecord:
             ("error_type", self.error_type),
             ("error_message", self.error_message),
             ("traceback", self.traceback),
+            ("origin", self.origin),
+            ("run_id", self.run_id),
+            ("call_id", self.call_id),
+            ("toolkit_name", self.toolkit_name),
+            ("function_name", self.function_name),
         )
         record.update({key: value for key, value in optional_fields if value is not None})
         return cast("_ToolCallRecordDict", record)
@@ -196,6 +212,7 @@ def _build_tool_failure_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Build one sanitized durable record for a failing tool call."""
     return _ToolCallRecord(
@@ -216,6 +233,7 @@ def _build_tool_failure_record(
         error_type=type(error).__name__,
         error_message=_safe_error_message(error),
         traceback=_safe_traceback(error),
+        **_origin_record_fields(origin),
     )
 
 
@@ -234,6 +252,7 @@ def _build_tool_success_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Build one sanitized durable record for a successful tool call."""
     return _ToolCallRecord(
@@ -252,7 +271,27 @@ def _build_tool_success_record(
         success=True,
         timing=timing,
         result=sanitize_failure_value(result),
+        **_origin_record_fields(origin),
     )
+
+
+def _origin_record_fields(origin: BackgroundScriptToolOrigin | None) -> dict[str, str | None]:
+    """Return durable audit fields for a typed automation origin."""
+    if origin is None:
+        return {
+            "origin": None,
+            "run_id": None,
+            "call_id": None,
+            "toolkit_name": None,
+            "function_name": None,
+        }
+    return {
+        "origin": "background_script",
+        "run_id": origin.run_id,
+        "call_id": origin.call_id,
+        "toolkit_name": origin.toolkit_name,
+        "function_name": origin.function_name,
+    }
 
 
 def _tool_call_log_path(runtime_paths: RuntimePaths) -> Path:
@@ -303,6 +342,7 @@ def record_tool_failure(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Persist one sanitized tool failure record when runtime paths are available."""
     record = _build_tool_failure_record(
@@ -319,6 +359,7 @@ def record_tool_failure(
         requester_id=requester_id,
         session_id=session_id,
         correlation_id=correlation_id,
+        origin=origin,
     )
     if runtime_paths is None:
         logger.debug(
@@ -354,6 +395,7 @@ def record_tool_success(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
+    origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
     """Persist one sanitized tool success record when runtime paths are available."""
     record = _build_tool_success_record(
@@ -370,6 +412,7 @@ def record_tool_success(
         requester_id=requester_id,
         session_id=session_id,
         correlation_id=correlation_id,
+        origin=origin,
     )
     if runtime_paths is None:
         logger.debug(

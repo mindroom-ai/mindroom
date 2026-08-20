@@ -150,7 +150,11 @@ def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
 
 
 def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
-    lock_key = str(paths.root)
+    return _shared_worker_initialization_lock_for_root(paths.root)
+
+
+def _shared_worker_initialization_lock_for_root(state_root: Path) -> threading.Lock:
+    lock_key = str(state_root)
     with _SHARED_INITIALIZATION_LOCK:
         worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
         if worker_lock is None:
@@ -163,6 +167,7 @@ class _LocalWorkerBackend:
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,

@@ -26,14 +26,17 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
 )
-from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
     worker_root_path,
 )
+from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.docker import (
@@ -1322,6 +1325,64 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert metadata["startup_count"] == 1
 
 
+def test_docker_script_worker_profile_mirrors_no_global_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A script-specific Docker worker denies automatic credential mirroring."""
+    backend, _fake_client, sync_calls = _backend(monkeypatch, tmp_path)
+    backend.worker_grantable_credentials = frozenset({"openai", "github_private"})
+
+    backend.ensure_worker(
+        WorkerSpec(
+            _TEST_UNSCOPED_WORKER_KEY,
+            mirrored_credential_services=frozenset(),
+        ),
+        now=10.0,
+    )
+
+    assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, frozenset())]
+
+
+def test_docker_backend_keeps_run_pinned_worker_roots_out_of_sibling_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two script worker keys create distinct containers that mount only their own run roots."""
+    config_text = """
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watch values
+    model: default
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip()
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    base_key = "v1:default:user_agent:@alice:example.test:watcher"
+    broad_key = script_worker_key_for_run(base_key, f"script-{'a' * 32}")
+    narrow_key = script_worker_key_for_run(base_key, f"script-{'b' * 32}")
+
+    broad = backend.ensure_worker(WorkerSpec(broad_key, private_agent_names=frozenset()), now=10.0)
+    narrow = backend.ensure_worker(WorkerSpec(narrow_key, private_agent_names=frozenset()), now=10.0)
+
+    assert broad.worker_id != narrow.worker_id
+    broad_root = worker_root_path(tmp_path, broad_key)
+    narrow_root = worker_root_path(tmp_path, narrow_key)
+    assert broad.debug_metadata["state_root"] == str(broad_root)
+    assert narrow.debug_metadata["state_root"] == str(narrow_root)
+    broad_volumes = fake_client.containers.run_calls[0]["volumes"]
+    narrow_volumes = fake_client.containers.run_calls[1]["volumes"]
+    assert isinstance(broad_volumes, dict)
+    assert isinstance(narrow_volumes, dict)
+    assert str(broad_root) in broad_volumes
+    assert str(narrow_root) not in broad_volumes
+    assert str(narrow_root) in narrow_volumes
+    assert str(broad_root) not in narrow_volumes
+
+
 def test_docker_backend_accepts_manager_progress_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2034,6 +2095,191 @@ def test_docker_backend_cleanup_stops_idle_workers(
     worker_file.parent.mkdir(parents=True, exist_ok=True)
     worker_file.write_text("still here", encoding="utf-8")
     assert worker_file.read_text(encoding="utf-8") == "still here"
+
+
+def test_docker_backend_retires_only_one_exact_run_worker_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement removes one run container and root without touching its ordinary worker."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    ordinary = backend.ensure_worker(WorkerSpec(base_key, private_agent_names=frozenset()), now=1.0)
+    retired = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    retired_root = worker_root_path(tmp_path, run_key)
+    retired_projection_root = backend._projection_manager._worker_projected_configs_root(
+        local_worker_state_paths_for_root(retired_root),
+    )
+    (retired_root / "workspace").mkdir(parents=True, exist_ok=True)
+    (retired_root / "workspace" / "note.txt").write_text("retire me", encoding="utf-8")
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[retired.worker_id].removed == 1
+    assert fake_client.containers.by_name[ordinary.worker_id].removed == 0
+    assert retired_root.exists() is False
+    assert retired_projection_root.exists() is False
+    assert worker_root_path(tmp_path, base_key).is_dir()
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_docker_backend_refuses_retirement_when_live_container_key_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale container name cannot authorize deletion when its live worker identity differs."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'f' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    raw_env = container.attrs["Config"]["Env"]
+    worker_key_env = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
+    container.attrs["Config"]["Env"] = [
+        f"{worker_key_env}={base_key}" if entry.startswith(f"{worker_key_env}=") else entry for entry in raw_env
+    ]
+
+    with pytest.raises(WorkerBackendError, match="does not match retirement key"):
+        backend.retire_worker(run_key)
+
+    assert container.removed == 0
+    assert worker_root_path(tmp_path, run_key).is_dir()
+
+
+def test_docker_backend_refuses_symlinked_run_root_with_malformed_target_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed metadata cannot redirect Docker worker-state retirement through a run-key symlink."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    base_key = "v1:t:user_agent:alice:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'1' * 32}")
+    target_root = worker_root_path(tmp_path, base_key)
+    (target_root / "metadata").mkdir(parents=True)
+    (target_root / "metadata" / "worker.json").write_text("{malformed", encoding="utf-8")
+    sentinel = target_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    worker_root_path(tmp_path, run_key).symlink_to(target_root, target_is_directory=True)
+
+    with pytest.raises(WorkerBackendError, match="symbolic link"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("metadata_contents", [None, "{malformed"])
+def test_docker_backend_refuses_existing_run_root_without_exact_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metadata_contents: str | None,
+) -> None:
+    """An existing Docker state root needs readable exact-key metadata before recursive deletion."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'2' * 32}")
+    state_root = worker_root_path(tmp_path, run_key)
+    state_root.mkdir(parents=True)
+    sentinel = state_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    if metadata_contents is not None:
+        metadata_file = state_root / "metadata" / "worker.json"
+        metadata_file.parent.mkdir()
+        metadata_file.write_text(metadata_contents, encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity metadata"):
+        backend.retire_worker(run_key)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement after validating exact state."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'3' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    state_root = worker_root_path(tmp_path, run_key)
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    sentinel = replacement_root / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    retired_root = tmp_path / "retired-original"
+    swapped = False
+    original_stat = worker_retirement_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == state_root.name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == backend._workers_root:
+                state_root.rename(retired_root)
+                replacement_root.rename(state_root)
+                replacement_root.symlink_to(state_root, target_is_directory=True)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 0
+    assert swapped is True
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_docker_backend_refuses_projection_root_swapped_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker retirement cannot recursively delete a replacement projection root."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'4' * 32}")
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    worker_name = worker_dir_name(run_key)
+    projected_configs_root = backend._projection_manager._projected_configs_root
+    projection_root = projected_configs_root / worker_name
+    projection_root.mkdir(parents=True, exist_ok=True)
+    (projection_root / "old.txt").write_text("old", encoding="utf-8")
+    replacement_root = tmp_path / "replacement-projection"
+    replacement_root.mkdir()
+    (replacement_root / "keep.txt").write_text("keep", encoding="utf-8")
+    retired_projection_root = tmp_path / "retired-projection"
+    swapped = False
+    original_stat = worker_retirement_module.os.stat
+
+    def stat_after_swap(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> object:
+        nonlocal swapped
+        if path == worker_name and dir_fd is not None and not swapped:
+            descriptor_root = Path(f"/proc/self/fd/{dir_fd}").resolve()
+            if descriptor_root == projected_configs_root:
+                projection_root.rename(retired_projection_root)
+                replacement_root.rename(projection_root)
+                swapped = True
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(worker_retirement_module.os, "stat", stat_after_swap)
+
+    with pytest.raises(WorkerBackendError, match="changed during retirement"):
+        backend.retire_worker(run_key)
+
+    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert swapped is True
+    assert worker_root_path(tmp_path, run_key).is_dir()
+    assert (projection_root / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_docker_backend_records_failure_and_stops_container(
@@ -3366,22 +3612,57 @@ def test_docker_backend_rejects_stale_user_agent_worker_keys_for_projection(
     assert fake_client.containers.run_calls == []
 
 
-def test_docker_backend_rejects_user_agent_worker_keys_when_agent_is_shared(
+def test_docker_backend_projects_shared_agent_for_narrower_user_agent_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A user-agent worker key must fail closed when the agent still exists but is not user_agent scoped."""
+    """A script-isolated worker should project its agent even when normal tools use shared scope."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:@alice:example.org:alpha"
 
-    with pytest.raises(WorkerBackendError, match="does not match any configured agent policy"):
+    backend.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=frozenset()),
+        now=10.0,
+    )
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    projected_config = yaml.safe_load((_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8"))
+    assert list(projected_config["agents"]) == ["alpha"]
+    assert str(agent_state_root_path(tmp_path, "alpha")) in volumes
+
+
+def test_docker_backend_rejects_ambiguous_normalized_user_agent_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A normalized script worker key cannot silently select the first matching agent."""
+    config_text = """
+agents:
+  foo:
+    display_name: Foo
+    tools: [script]
+  foo_:
+    display_name: Foo underscore
+    tools: [script]
+models:
+  default:
+    provider: openai
+    id: test-model
+router:
+  model: default
+"""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
         backend.ensure_worker(
             WorkerSpec(
-                "v1:default:user_agent:@alice:example.org:alpha",
-                private_agent_names=frozenset({"alpha"}),
+                "v1:default:user_agent:@alice:example.org:foo",
+                private_agent_names=frozenset(),
             ),
             now=10.0,
         )
+
     assert fake_client.containers.run_calls == []
 
 

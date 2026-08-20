@@ -58,6 +58,7 @@ class StaticSandboxRunnerBackend:
     """Worker backend representing the current shared sandbox-runner deployment."""
 
     backend_name = "static_sandbox_runner"
+    cleanup_locator: str | None = None
 
     def __init__(
         self,

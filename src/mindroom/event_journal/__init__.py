@@ -14,6 +14,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.interactive_models import InteractiveSelection
 
+from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .approval_continuations import (
     ApprovalCall,
     ApprovalContinuation,
@@ -21,11 +22,10 @@ from .approval_continuations import (
     ApprovalMemoryTurn,
 )
 from .approvals import (
-    ApprovalCardReservation,
-    RecordedApprovalDecision,
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
+from .background_approvals import BackgroundApprovalDecision
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership import MembershipFence, MembershipView
 from .models import (
@@ -79,6 +79,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
+    "BackgroundApprovalDecision",
     "ConversationCursor",
     "ConversationPage",
     "ConversationReadView",

@@ -15,7 +15,6 @@ from agno.tools import Toolkit
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_from_cached_room
-from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -29,6 +28,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import tool_may_require_approval
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -47,11 +47,6 @@ if TYPE_CHECKING:
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "invite_router", "memory", "self_config"},
 )
-
-# Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create
-# cron jobs, run an autonomous coding agent). Embedded participants cannot suspend for
-# approval, so allowed_tools (including "*") never makes these tools available.
-_WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 
 _MINIMAL_SPEC_EXAMPLE = (
     '{"schema_version": 1, "kind": "workflow", "id": "my_flow", "name": "My Flow", '
@@ -801,39 +796,21 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
     """Return the policy used to reject granted tools that would require suspension."""
     if not toolkits_by_name:
         return context.config
-    allowed_tools = _workflow_allowed_tools(context)
-    allow_all = "*" in allowed_tools
-    # The approval engine matches by bare function name, but function names collide across
-    # toolkits (read_file on python and file, run_shell_command on daytona and shell). A function
-    # is only safe to pre-approve when every granted toolkit exposing it is itself pre-approved;
-    # otherwise a non-pre-approved toolkit's call would inherit the auto-approve rule.
-    owning_tools: dict[str, set[str]] = {}
-    for tool_name, toolkit in toolkits_by_name.items():
+    return build_automation_approval_config(
+        context.config,
+        function_owners=_toolkit_function_owners(toolkits_by_name),
+        preapproved_toolkits=_workflow_allowed_tools(context),
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+    )
+
+
+def _toolkit_function_owners(toolkits_by_name: dict[str, Toolkit]) -> dict[str, frozenset[str]]:
+    """Map each participant function to every already-built toolkit that owns it."""
+    owners: dict[str, set[str]] = {}
+    for toolkit_name, toolkit in toolkits_by_name.items():
         for function_name in (*toolkit.functions, *toolkit.async_functions):
-            owning_tools.setdefault(function_name, set()).add(tool_name)
-    pre_approved_tools = {
-        tool_name
-        for tool_name in toolkits_by_name
-        if tool_name not in _WORKFLOW_NO_PREAPPROVAL_TOOLS and (allow_all or tool_name in allowed_tools)
-    }
-    pre_approved_functions = sorted(
-        function_name for function_name, tools in owning_tools.items() if tools <= pre_approved_tools
-    )
-    tool_approval = context.config.tool_approval.model_copy(
-        update={
-            "default": "require_approval",
-            # Operator-authored rules keep precedence (first match wins); workflow pre-approval
-            # only applies to functions the operator has not already ruled on.
-            "rules": [
-                *context.config.tool_approval.rules,
-                *(
-                    ApprovalRuleConfig(match=function_name, action="auto_approve")
-                    for function_name in pre_approved_functions
-                ),
-            ],
-        },
-    )
-    return context.config.model_copy(update={"tool_approval": tool_approval})
+            owners.setdefault(function_name, set()).add(toolkit_name)
+    return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
