@@ -16,11 +16,7 @@ from nio.api import Api
 from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.large_messages import (
-    MatrixEventTooLargeError,
-    ensure_prepared_message_fits_delivery,
-    prepare_large_message,
-)
+from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
@@ -71,7 +67,7 @@ type MatrixSendOutcome = DeliveredMatrixEvent | MatrixDeliveryFailure
 
 @dataclass(frozen=True, slots=True)
 class _PreparedMatrixMessage:
-    """Validated content plus the transport path that must send it."""
+    """Prepared content plus the transport path that must send it."""
 
     content: dict[str, Any]
     cache_bypass: bool
@@ -362,7 +358,7 @@ async def _prepare_matrix_message(
     operation: str,
     content_is_prepared: bool,
 ) -> _PreparedMatrixMessage | MatrixDeliveryFailure:
-    """Prepare or revalidate one message against its latest delivery envelope."""
+    """Prepare one message, rebuilding once if encryption turns on while yielding."""
     rooms = client.rooms
     room = rooms.get(room_id)
     encryption_outcome = await resolve_room_encryption_outcome(
@@ -383,29 +379,37 @@ async def _prepare_matrix_message(
                 room_id,
                 content,
                 room_encrypted=room_encrypted,
-                fit_for_encrypted_delivery=True,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
-        encryption_outcome = await resolve_room_encryption_outcome(
-            client,
-            room_id,
-            operation=operation,
-        )
-        if isinstance(encryption_outcome, MatrixDeliveryFailure):
-            return encryption_outcome
-        room_encrypted = encryption_outcome
-        cache_bypass = rooms.get(room_id) is None and not room_encrypted
 
-    try:
-        ensure_prepared_message_fits_delivery(
-            client,
-            room_id,
-            content_sent,
-            room_encrypted=room_encrypted,
-        )
-    except MatrixEventTooLargeError as error:
-        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+        # An unchanged return means preparation did not yield, so room state
+        # could not have changed within this task. A changed plaintext payload
+        # may contain a sidecar uploaded across an await. Recheck only then.
+        # If encryption became enabled, rebuild from the semantic source once:
+        # the first upload remains unreferenced and the sent event points only
+        # at encrypted bytes. Matrix room encryption cannot later be disabled.
+        if not room_encrypted and content_sent is not content:
+            encryption_outcome = await resolve_room_encryption_outcome(
+                client,
+                room_id,
+                operation=operation,
+            )
+            if isinstance(encryption_outcome, MatrixDeliveryFailure):
+                return encryption_outcome
+            room_encrypted = encryption_outcome
+            cache_bypass = rooms.get(room_id) is None and not room_encrypted
+            if room_encrypted:
+                try:
+                    content_sent = await prepare_large_message(
+                        client,
+                        room_id,
+                        content,
+                        room_encrypted=True,
+                    )
+                except MatrixEventTooLargeError as error:
+                    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
     return _PreparedMatrixMessage(content_sent, cache_bypass)
 
 

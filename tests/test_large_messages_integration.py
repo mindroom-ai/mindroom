@@ -10,7 +10,6 @@ import nio
 import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
-from nio import crypto
 
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
@@ -117,6 +116,7 @@ async def test_regular_message_under_limit() -> None:
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
+    assert sent_content is content
     assert sent_content["body"] == "Hello world"
     assert "io.mindroom.long_text" not in sent_content
 
@@ -148,12 +148,9 @@ async def test_regular_message_over_limit() -> None:
     assert sent_content["io.mindroom.long_text"]["encoding"] == "matrix_event_content_json"
     assert sent_content["io.mindroom.long_text"]["is_complete_content"] is True
 
-    # Transition-safe sends encrypt the sidecar even while the room is plaintext.
-    assert sent_content["file"]["url"].startswith("mxc://server/")
-    assert sent_content["file"]["key"]
-    assert sent_content["file"]["iv"]
-    assert sent_content["file"]["hashes"]
-    assert "url" not in sent_content
+    # A room that stays plaintext keeps standard Matrix m.file semantics.
+    assert sent_content["url"].startswith("mxc://server/")
+    assert "file" not in sent_content
 
 
 @pytest.mark.asyncio
@@ -206,15 +203,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
         assert sent_content[key] == value
         assert sent_content["m.new_content"][key] == value
 
-    encrypted_file = sent_content["m.new_content"]["file"]
-    uploaded_payload = json.loads(
-        crypto.attachments.decrypt_attachment(
-            client.uploads[0]["data"].read(),
-            encrypted_file["key"]["k"],
-            encrypted_file["hashes"]["sha256"],
-            encrypted_file["iv"],
-        ),
-    )
+    uploaded_payload = json.loads(client.uploads[0]["data"].read())
     for key, value in extra_content.items():
         assert uploaded_payload["m.new_content"][key] == value
 

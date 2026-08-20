@@ -406,17 +406,22 @@ async def test_send_message_outcome_success_returns_delivered_event() -> None:
 
 @pytest.mark.asyncio
 async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_upload() -> None:
-    """A state change while preparation yields must not make the event oversized."""
+    """A direct plaintext sidecar is rebuilt if encryption turns on during upload."""
     client = _mock_client()
     client.device_id = "D"
+    upload_requests: list[tuple[str, str]] = []
 
     async def upload_and_enable_encryption(**kwargs: object) -> tuple[nio.UploadResponse, None]:
         data_provider = cast("Callable[[object, object], BytesIO]", kwargs["data_provider"])
         data_provider(None, None).read()
-        client.rooms["!room:localhost"].encrypted = True
-        client.olm = MagicMock()
-        client.olm.device_id = "D"
-        return nio.UploadResponse("mxc://server/direct-sidecar"), None
+        content_type = cast("str", kwargs["content_type"])
+        filename = cast("str", kwargs["filename"])
+        upload_requests.append((content_type, filename))
+        if len(upload_requests) == 1:
+            client.rooms["!room:localhost"].encrypted = True
+            client.olm = MagicMock()
+            client.olm.device_id = "D"
+        return nio.UploadResponse(f"mxc://server/direct-sidecar-{len(upload_requests)}"), None
 
     client.upload.side_effect = upload_and_enable_encryption
 
@@ -427,6 +432,16 @@ async def test_send_message_outcome_fits_for_encryption_enabled_during_sidecar_u
     )
 
     assert isinstance(outcome, DeliveredMatrixEvent)
+    assert upload_requests == [
+        ("application/json", "message-content.json"),
+        ("application/octet-stream", "message-content.json.enc"),
+    ]
+    encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
+    assert encrypted_file["url"] == "mxc://server/direct-sidecar-2"
+    assert encrypted_file["key"]
+    assert encrypted_file["iv"]
+    assert encrypted_file["hashes"]
+    assert "url" not in outcome.content_sent
     assert (
         _calculate_delivery_event_size(
             outcome.content_sent,
@@ -458,7 +473,10 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
             ),
         ],
     )
-    client.upload.return_value = nio.UploadResponse("mxc://server/uncached-sidecar"), None
+    client.upload.side_effect = [
+        (nio.UploadResponse("mxc://server/uncached-sidecar-1"), None),
+        (nio.UploadResponse("mxc://server/uncached-sidecar-2"), None),
+    ]
     client._send.return_value = nio.RoomSendResponse("$raw", "!room:localhost")
     client.room_send.side_effect = [
         nio.SendRetryError("Classic Sync room state is being rebuilt."),
@@ -480,52 +498,22 @@ async def test_uncached_room_encryption_enabled_during_upload_avoids_raw_send() 
     assert isinstance(outcome, DeliveredMatrixEvent)
     assert outcome.event_id == "$encrypted"
     encrypted_file = cast("dict[str, object]", outcome.content_sent["file"])
-    assert encrypted_file["url"] == "mxc://server/uncached-sidecar"
+    assert encrypted_file["url"] == "mxc://server/uncached-sidecar-2"
     assert encrypted_file["key"]
     assert encrypted_file["iv"]
     assert encrypted_file["hashes"]
     assert "url" not in outcome.content_sent
+    assert [call.kwargs["content_type"] for call in client.upload.await_args_list] == [
+        "application/json",
+        "application/octet-stream",
+    ]
+    assert [call.kwargs["filename"] for call in client.upload.await_args_list] == [
+        "message-content.json",
+        "message-content.json.enc",
+    ]
     assert client.room_get_state_event.await_count == 2
     assert client.room_send.await_count == 2
     client._send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_send_message_outcome_rejects_a_frozen_event_that_no_longer_fits() -> None:
-    """Recovery must validate the current encrypted envelope before network I/O."""
-    client = _mock_client(encrypted=True)
-    client.olm.device_id = "😀" * 512
-    frozen = {"body": "x" * 45_000, "msgtype": "m.text"}
-
-    assert (
-        _calculate_delivery_event_size(
-            frozen,
-            room_id="!room:localhost",
-            room_encrypted=True,
-            device_id="D",
-        )
-        <= _MATRIX_EVENT_HARD_LIMIT
-    )
-    assert (
-        _calculate_delivery_event_size(
-            frozen,
-            room_id="!room:localhost",
-            room_encrypted=True,
-            device_id=client.olm.device_id,
-        )
-        > _MATRIX_EVENT_HARD_LIMIT
-    )
-
-    outcome = await send_message_outcome(
-        client,
-        "!room:localhost",
-        frozen,
-        content_is_prepared=True,
-    )
-
-    assert isinstance(outcome, MatrixDeliveryFailure)
-    assert outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
-    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

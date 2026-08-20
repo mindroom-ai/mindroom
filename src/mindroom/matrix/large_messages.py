@@ -81,9 +81,6 @@ _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
 _UNREPRESENTABLE_MESSAGE_ERROR = "Large message cannot fit within the Matrix event limit after sidecar preparation"
-_PREPARED_MESSAGE_TOO_LARGE_ERROR = (
-    "Prepared Matrix event exceeds the hard size limit under the current delivery envelope"
-)
 _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
 _oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
 
@@ -302,23 +299,6 @@ def _delivery_event_size_calculator(
         )
 
     return calculate
-
-
-def ensure_prepared_message_fits_delivery(
-    client: nio.AsyncClient,
-    room_id: str,
-    content: dict[str, Any],
-    *,
-    room_encrypted: bool,
-) -> None:
-    """Reject prepared content that cannot fit its current wire envelope."""
-    calculate_delivery_event_size = _delivery_event_size_calculator(
-        client,
-        room_id=room_id,
-        room_encrypted=room_encrypted,
-    )
-    if calculate_delivery_event_size(content) > _MATRIX_EVENT_HARD_LIMIT:
-        raise MatrixEventTooLargeError(_PREPARED_MESSAGE_TOO_LARGE_ERROR)
 
 
 def _is_edit_message(content: dict[str, Any]) -> bool:
@@ -900,7 +880,7 @@ async def prepare_large_message(
     content: dict[str, Any],
     *,
     room_encrypted: bool | None = None,
-    fit_for_encrypted_delivery: bool = False,
+    prepare_for_encrypted_delivery: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -915,10 +895,13 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative encryption state when the room cache is unavailable
-        fit_for_encrypted_delivery: Encrypt sidecars and fit bytes for a possible encrypted delivery
+        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
 
     Returns:
-        Original content (if small) or modified content with preview and MXC reference
+        The original content object when no preparation is needed, otherwise
+        modified content with a preview and MXC reference. The identity
+        guarantee lets the delivery boundary avoid a redundant state lookup
+        when this coroutine completed without yielding.
 
     """
     content = _without_local_recovery_data(content)
@@ -926,7 +909,7 @@ async def prepare_large_message(
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
-    encrypted_delivery_safe = room_encrypted or fit_for_encrypted_delivery
+    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,

@@ -837,6 +837,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outcome.terminal_status == "completed"
         frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["file"]["url"] == "mxc://localhost/transition-sidecar"
+        assert "url" not in frozen
         assert (
             _calculate_delivery_event_size(
                 frozen,
@@ -911,17 +913,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert not failed.attempted
         assert failed.edits_event_id == existing_event_id
         assert failed == frozen
-        assert _calculate_event_size(dict(failed.payload)) <= _MATRIX_EVENT_HARD_LIMIT
-        assert (
-            _calculate_delivery_event_size(
-                dict(failed.payload),
-                room_id=_ROOM_ID,
-                room_encrypted=True,
-                device_id="DEVICE",
-            )
-            <= _MATRIX_EVENT_HARD_LIMIT
-        )
-        assert "io.mindroom.required_metadata" not in failed.payload
         client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
 

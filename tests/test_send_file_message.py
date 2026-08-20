@@ -711,7 +711,6 @@ class TestSendAudioMessage:
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
         client.olm = None
-        client.device_id = "DEVICE"
         client.access_token = "token"  # noqa: S105
         client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
         client.room_get_state_event.return_value = nio.RoomGetStateEventError(
@@ -731,7 +730,7 @@ class TestSendAudioMessage:
         )
 
         assert event_id == "$voice:localhost"
-        assert client.room_get_state_event.await_count == 3
+        assert client.room_get_state_event.await_count == 2
         client.room_send.assert_not_awaited()
         client._send.assert_awaited_once()
 
@@ -791,26 +790,25 @@ class TestSendMessageResult:
         )
         client._send.return_value = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
 
-        prepared_content = {"body": "hello", "msgtype": "m.text"}
+        content = {"body": "hello", "msgtype": "m.text"}
         with patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = prepared_content
+            mock_prepare.return_value = content
             result = await send_message_result(
                 client,
                 "!room:localhost",
-                {"body": "hello", "msgtype": "m.text"},
+                content,
             )
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
-        assert result.content_sent == prepared_content
+        assert result.content_sent is content
         mock_prepare.assert_awaited_once_with(
             client,
             "!room:localhost",
-            {"body": "hello", "msgtype": "m.text"},
+            content,
             room_encrypted=False,
-            fit_for_encrypted_delivery=True,
         )
-        assert client.room_get_state_event.await_count == 2
+        client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
         client.room_send.assert_not_awaited()
         client._send.assert_awaited_once()
 
@@ -971,16 +969,10 @@ class TestSendMessageResult:
         assert client.room_send.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_encrypted_sidecar_refreshes_state_across_cache_reset_race(self) -> None:
-        """A cache reset after inspection must refresh encryption before delivery."""
+    async def test_encrypted_sidecar_keeps_cached_state_across_reset_race(self) -> None:
+        """A cache reset after inspection cannot downgrade sidecar encryption."""
         client = _mock_client(encrypted=True)
         room = client.rooms["!room:localhost"]
-        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-            {"algorithm": "m.megolm.v1.aes-sha2"},
-            "m.room.encryption",
-            "",
-            "!room:localhost",
-        )
         client.room_send.side_effect = [
             nio.SendRetryError("Classic Sync room state is being rebuilt."),
             nio.RoomSendResponse("$evt:localhost", "!room:localhost"),
@@ -992,10 +984,8 @@ class TestSendMessageResult:
             _content: dict[str, object],
             *,
             room_encrypted: bool | None,
-            fit_for_encrypted_delivery: bool,
         ) -> dict[str, str]:
             assert room_encrypted is True
-            assert fit_for_encrypted_delivery is True
             client.rooms.clear()
             return {"body": "prepared", "msgtype": "m.text"}
 
@@ -1014,7 +1004,6 @@ class TestSendMessageResult:
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
-        client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
 
     @pytest.mark.parametrize("is_edit", [False, True], ids=["send", "edit"])
     @pytest.mark.asyncio
