@@ -11,6 +11,7 @@ from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+    from contextvars import Context
 
 logger = get_logger(__name__)
 _MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
@@ -78,6 +79,7 @@ def create_background_task(
     *,
     owner: object | None = None,
     log_exceptions: bool = True,
+    context: Context | None = None,
 ) -> asyncio.Task[Any]:
     """Create a background task that won't block the main execution.
 
@@ -87,12 +89,14 @@ def create_background_task(
         error_handler: Optional error handler function
         owner: Optional logical owner used for scoped shutdown waits
         log_exceptions: Whether unhandled task exceptions should be logged automatically
+        context: Execution context for the task. ``None`` preserves asyncio's normal
+            caller-context inheritance.
 
     Returns:
         The created task
 
     """
-    task: asyncio.Task[Any] = asyncio.create_task(coro)
+    task: asyncio.Task[Any] = asyncio.create_task(coro, context=context)
     if name:
         task.set_name(name)
 

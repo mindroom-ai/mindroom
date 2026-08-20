@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import Context
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
@@ -1683,6 +1684,8 @@ class AgentBot:
             self._run_scheduled_delivery_recovery(),
             name=f"delivery_recovery_{self.agent_name}",
             owner=self._runtime_view,
+            # Recovery outlives the sync request generation, so it must not inherit that context.
+            context=Context(),
         )
 
     async def _run_scheduled_delivery_recovery(self) -> None:
