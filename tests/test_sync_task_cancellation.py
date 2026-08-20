@@ -2722,10 +2722,10 @@ async def test_startup_membership_publication_serializes_config_reload(
         if entity_name == ROUTER_AGENT_NAME:
             router_sync_started.set()
 
-    async def blocked_reload() -> bool:
+    async def blocked_config_load(*_args: object, **_kwargs: object) -> Config:
         reload_started.set()
         await reload_can_finish.wait()
-        return True
+        return orchestrator.config
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
@@ -2740,7 +2740,7 @@ async def test_startup_membership_publication_serializes_config_reload(
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
-        patch.object(orchestrator.config_reload, "_update_config", side_effect=blocked_reload),
+        patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
@@ -2760,7 +2760,7 @@ async def test_startup_membership_publication_serializes_config_reload(
             await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
             await asyncio.wait_for(reload_started.wait(), timeout=1.0)
-            assert orchestrator._response_admission_gate.closed
+            assert not orchestrator._response_admission_gate.closed
 
             reload_can_finish.set()
             await asyncio.wait_for(reload_task, timeout=1.0)
@@ -2784,7 +2784,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     """Hot reload during startup maintenance must not lose one-shot restart cleanup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = Config()
-    new_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
 
     plan = ConfigUpdatePlan(
         new_config=new_config,

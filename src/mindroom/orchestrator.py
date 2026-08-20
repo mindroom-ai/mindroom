@@ -1740,7 +1740,7 @@ class _MultiAgentOrchestrator:
         changed_entities: set[str],
     ) -> None:
         """Reconcile rooms and memberships after entity/config updates."""
-        bots_to_setup = self._running_bots_for_entities(changed_entities)
+        bots_to_setup = self._running_bots_for_entities(changed_entities | plan.entities_to_reconcile_rooms)
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
         if plan.matrix_space_changed or plan.room_metadata_changed:
@@ -2259,7 +2259,10 @@ async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchest
     def config_source_paths() -> Iterable[Path]:
         config = orchestrator.config
         watched: set[Path] = {config_path}
-        if config is not None and config.source_files:
+        loaded_source_files = orchestrator.config_reload.loaded_source_files
+        if loaded_source_files is not None:
+            watched.update(loaded_source_files)
+        elif config is not None and config.source_files:
             watched.update(config.source_files)
         # A failed reload's own source set covers include files the last good
         # config never referenced, so fixing them still triggers a retry.

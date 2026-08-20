@@ -19,7 +19,6 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
-from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
@@ -589,11 +588,11 @@ class TestDynamicConfigUpdate:
         assert membership_client.joined_members.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_failed_router_replacement_invalidates_ready_reply_memberships(
+    async def test_room_only_update_keeps_ready_reply_memberships_without_router_replacement(
         self,
         orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
-        """A stopped control client cannot leave its old grant snapshot authoritative."""
+        """Live room reconciliation should preserve grants without replacing the router."""
         authorization = {
             "global_users": ["@alice:example.com"],
             "agent_reply_permissions": {
@@ -649,21 +648,23 @@ class TestDynamicConfigUpdate:
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
             patch.object(
                 orchestrator,
-                "_create_and_start_entities",
-                new=AsyncMock(return_value=EntityStartResults(retryable_entities=[ROUTER_AGENT_NAME])),
-            ),
-            patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
-            patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()),
+                "_restart_changed_entities",
+                new=AsyncMock(return_value=(set(), [], [])),
+            ) as restart_entities,
+            patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()) as reconcile_rooms,
             patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
-        assert orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
-        assert not orchestrator.agent_reply_memberships.is_allowed(
+        plan = restart_entities.await_args.args[0]
+        assert plan.entities_to_restart == set()
+        assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME, "general"}
+        reconcile_rooms.assert_awaited_once_with(plan, set())
+        assert not orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
+        assert orchestrator.agent_reply_memberships.is_allowed(
             "@alice:example.com",
             ["lobby"],
             updated_config.authorization,

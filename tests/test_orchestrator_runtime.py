@@ -1724,6 +1724,41 @@ class TestMultiAgentOrchestrator:
         ensure_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
 
     @pytest.mark.asyncio
+    async def test_reconcile_post_update_rooms_sets_up_live_room_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Room-only edits should reconcile the affected live bots without replacement."""
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        router_bot = MagicMock(running=True)
+        general_bot = MagicMock(running=True)
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "general": general_bot,
+        }
+        plan = ConfigUpdatePlan(
+            new_config=config,
+            changed_mcp_servers=set(),
+            configured_entities={ROUTER_AGENT_NAME, "general"},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+            entities_to_reconcile_rooms={ROUTER_AGENT_NAME, "general"},
+        )
+
+        with patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as setup_rooms:
+            await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+        setup_rooms.assert_awaited_once()
+        assert set(setup_rooms.await_args.args[0]) == {router_bot, general_bot}
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.orchestrator.load_config")
@@ -3692,31 +3727,19 @@ class TestMultiAgentOrchestrator:
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-
-        config = MagicMock()
-        config.agents = {}
-        config.teams = {}
-        config.mindroom_user = None
-        config.matrix_room_access = MagicMock()
-        config.authorization = MagicMock()
-        config.event_journal = MagicMock()
-        config.defaults.enable_streaming = True
-
-        orchestrator.config = config
+        current_config = _runtime_bound_config(Config(defaults={"enable_streaming": True}), tmp_path)
+        new_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
+        orchestrator.config = current_config
         orchestrator.running = True
         router_bot = MagicMock()
-        router_bot.config = config
+        router_bot.config = current_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
-            patch(
-                "mindroom.orchestration.config_updates._identify_entities_to_restart",
-                return_value=set(),
-            ),
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
@@ -3724,9 +3747,9 @@ class TestMultiAgentOrchestrator:
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(
-            config,
+            new_config,
             start_watcher=True,
-            previous_config=config,
+            previous_config=current_config,
         )
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
