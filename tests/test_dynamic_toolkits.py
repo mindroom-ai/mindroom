@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from typing import TYPE_CHECKING
 
 import pytest
@@ -41,6 +41,7 @@ from mindroom.response_runner import _agent_has_matrix_messaging_tool
 from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import (
     get_loaded_tools_for_session,
+    load_tool_for_session,
     save_loaded_tools_for_session,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
@@ -965,6 +966,98 @@ def test_dynamic_tools_manager_concurrent_load_collision_uses_latest_state(tmp_p
         ["mcp_demo"],
         ["shell"],
     )
+
+
+def test_blocked_load_validation_does_not_block_visible_tool_surface(tmp_path: Path) -> None:
+    """Reading visible tools should not wait for an in-progress load validation."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    validation_started = Event()
+    continue_validation = Event()
+
+    def blocked_validator(_loaded_tools: list[str]) -> None:
+        validation_started.set()
+        assert continue_validation.wait(timeout=30)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        load_future = executor.submit(
+            load_tool_for_session,
+            agent_name="code",
+            config=config,
+            session_id="thread-a",
+            tool_name="shell",
+            validate_loaded_tools=blocked_validator,
+        )
+        assert validation_started.wait(timeout=10)
+        try:
+            surface_future = executor.submit(
+                visible_tool_surface,
+                agent_name="code",
+                config=config,
+                session_id="thread-a",
+            )
+            surface = surface_future.result(timeout=10)
+        finally:
+            continue_validation.set()
+
+        result = load_future.result(timeout=30)
+
+    assert surface.loaded_tools == ()
+    assert result.status == "loaded"
+
+
+def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> None:
+    """A load should merge with state committed while its first validation is blocked."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    first_validation_started = Event()
+    continue_first_validation = Event()
+    validated_candidates: list[tuple[str, ...]] = []
+
+    def validator(loaded_tools: list[str]) -> None:
+        candidate = tuple(loaded_tools)
+        validated_candidates.append(candidate)
+        if candidate == ("shell",) and not continue_first_validation.is_set():
+            first_validation_started.set()
+            assert continue_first_validation.wait(timeout=30)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        shell_future = executor.submit(
+            load_tool_for_session,
+            agent_name="code",
+            config=config,
+            session_id="thread-a",
+            tool_name="shell",
+            validate_loaded_tools=validator,
+        )
+        assert first_validation_started.wait(timeout=10)
+        try:
+            sleep_future = executor.submit(
+                load_tool_for_session,
+                agent_name="code",
+                config=config,
+                session_id="thread-a",
+                tool_name="sleep",
+                validate_loaded_tools=validator,
+            )
+            sleep_result = sleep_future.result(timeout=10)
+        finally:
+            continue_first_validation.set()
+
+        shell_result = shell_future.result(timeout=30)
+
+    assert shell_result.status == "loaded"
+    assert sleep_result.status == "loaded"
+    assert ("shell", "sleep") in validated_candidates
+    assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == [
+        "shell",
+        "sleep",
+    ]
 
 
 def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path: Path) -> None:
