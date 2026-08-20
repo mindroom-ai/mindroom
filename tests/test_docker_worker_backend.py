@@ -3640,13 +3640,20 @@ def test_docker_backend_precreates_nested_storage_mount_targets(
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = "v1:default:user_agent:@alice:example.org:alpha"
+    worker_root = worker_root_path(tmp_path, worker_key)
+    original_run = fake_client.containers.run
+
+    def run_after_asserting_mount_target(image: str, **kwargs: object) -> _FakeContainer:
+        assert (worker_root / "agents" / "alpha").is_dir()
+        return original_run(image, **kwargs)
+
+    monkeypatch.setattr(fake_client.containers, "run", run_after_asserting_mount_target)
 
     backend.ensure_worker(
         WorkerSpec(worker_key, private_agent_names=frozenset()),
         now=10.0,
     )
 
-    worker_root = worker_root_path(tmp_path, worker_key)
     assert (worker_root / "agents" / "alpha").is_dir()
     assert len(fake_client.containers.run_calls) == 1
 
