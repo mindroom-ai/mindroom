@@ -66,6 +66,13 @@ _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakK
 _ToolHookResult = Any
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundToolApprovalDenied:
+    """Typed background result that the broker publishes as a terminal denial."""
+
+    reason: str
+
+
 class _ToolApprovalGate(Protocol):
     """Approval callback inserted between before-call hooks and the tool body."""
 
@@ -822,7 +829,8 @@ async def _execute_bridge(
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
         if not decision.approved:
-            return await _finish_blocked_tool_call(
+            reason = decision.reason or "The bound requester declined this background tool call."
+            await _finish_blocked_tool_call(
                 timing=timing,
                 hook_registry=hook_registry,
                 resolved_context=resolved_context,
@@ -831,11 +839,12 @@ async def _execute_bridge(
                 tool_name=tool_name,
                 blocked_result=_format_declined_result(
                     tool_name,
-                    decision.reason or "The bound requester declined this background tool call.",
+                    reason,
                 ),
                 has_after_hooks=has_after_hooks,
                 outcome="blocked_approval",
             )
+            return BackgroundToolApprovalDenied(reason=reason)
 
     result: _ToolHookResult = None
     error: BaseException | None = None

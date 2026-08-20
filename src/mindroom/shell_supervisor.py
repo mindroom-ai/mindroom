@@ -120,7 +120,7 @@ async def _handle_run(
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
     command_argv = [str(item) for item in argv_payload]
-    if background_script_supervision_supported():
+    if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
             sys.executable,
             "-m",

@@ -1005,7 +1005,11 @@ class ScriptRuntimeLifecycle:
     def touch_live_workers(self, backend: WorkerBackend) -> None:
         """Refresh active-run worker leases immediately before idle cleanup."""
         for worker_key in sorted(
-            {run.worker_key for run in self.store.list_runs(include_finished=False) if run.worker_key is not None},
+            {
+                run.worker_key
+                for run in self.store.list_runs(include_finished=False)
+                if run.worker_key is not None and run.worker_backend_locator == backend.cleanup_locator
+            },
         ):
             try:
                 backend.touch_worker(worker_key)
@@ -1076,17 +1080,17 @@ class ScriptRuntimeLifecycle:
         maintenance_task, self._maintenance_task = self._maintenance_task, None
         await cancel_task(maintenance_task)
 
-        if was_activated:
-            bind_script_run_manager(None)
-        await run_coroutine_until_complete(self.manager.begin_shutdown())
-        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        durably_revoked = await run_coroutine_until_complete(
-            self._durably_revoke_runs(
-                runs,
-                reason_for=lambda _run: RUNTIME_SHUTDOWN,
-            ),
-        )
         try:
+            if was_activated:
+                bind_script_run_manager(None)
+            await run_coroutine_until_complete(self.manager.begin_shutdown())
+            runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+            durably_revoked = await run_coroutine_until_complete(
+                self._durably_revoke_runs(
+                    runs,
+                    reason_for=lambda _run: RUNTIME_SHUTDOWN,
+                ),
+            )
             await self._run_shutdown_cleanup(
                 durably_revoked,
                 deadline=shutdown_deadline,

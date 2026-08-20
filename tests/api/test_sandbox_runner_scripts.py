@@ -344,8 +344,8 @@ async def test_worker_script_endpoint_stops_reading_chunked_body_over_limit(
 
 
 @pytest.mark.asyncio
-async def test_shared_runner_rejects_script_route_before_reading_body(tmp_path: Path) -> None:
-    """A shared runner cannot parse or execute any background-script request."""
+async def test_shared_runner_authenticates_before_revealing_script_topology(tmp_path: Path) -> None:
+    """An unauthenticated caller cannot distinguish shared and dedicated runner topology."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
@@ -361,25 +361,32 @@ async def test_shared_runner_rejects_script_route_before_reading_body(tmp_path: 
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         runner_token=_TOKEN,
     )
-    body_started = False
-
-    async def forbidden_body() -> AsyncIterator[bytes]:
-        nonlocal body_started
-        body_started = True
-        yield b"not-json"
-
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=shared_app),
         base_url="http://testserver",
     ) as client:
-        response = await client.post(
+        unauthenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
-            headers={**_HEADERS, "content-type": "application/json"},
-            content=forbidden_body(),
+            json={
+                "run_id": f"script-{'a' * 32}",
+                "worker_key": _WORKER_KEY,
+                "source_digest": "0" * 64,
+                "gateway_url": "http://primary:8765/api/script-gateway",
+            },
+        )
+        authenticated = await client.post(
+            "/api/sandbox-runner/scripts/run",
+            headers=_HEADERS,
+            json={
+                "run_id": f"script-{'a' * 32}",
+                "worker_key": _WORKER_KEY,
+                "source_digest": "0" * 64,
+                "gateway_url": "http://primary:8765/api/script-gateway",
+            },
         )
 
-    assert response.status_code == 404
-    assert body_started is False
+    assert unauthenticated.status_code == 401
+    assert authenticated.status_code == 404
 
 
 @pytest.mark.asyncio

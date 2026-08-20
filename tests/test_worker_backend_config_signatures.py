@@ -13,7 +13,10 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
-from mindroom.workers.backends.docker_config import docker_backend_config_signature
+from mindroom.workers.backends.docker_config import (
+    docker_backend_cleanup_signature,
+    docker_backend_config_signature,
+)
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
     credentials_encryption_key_hash,
@@ -409,3 +412,40 @@ def test_docker_signature_changes_with_auth_token_and_grantable_credentials(tmp_
         storage_path=runtime_paths.storage_root,
         worker_grantable_credentials=frozenset({"OPENAI_API_KEY"}),
     )
+
+
+def test_docker_cleanup_signature_ignores_launch_config_but_tracks_resource_owner(tmp_path: Path) -> None:
+    """Routine image/token changes must retain cleanup access to the same Docker worker."""
+    storage_path = tmp_path / "shared-storage"
+    base_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_DOCKER_ENV,
+            "DOCKER_HOST": "unix:///run/docker.sock",
+            "MINDROOM_DOCKER_WORKER_NAME_PREFIX": "scripts",
+        },
+    )
+    launch_changed_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_DOCKER_ENV,
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:new",
+            "MINDROOM_DOCKER_WORKER_ENV_JSON": '{"NEW_SETTING":"1"}',
+            "DOCKER_HOST": "unix:///run/docker.sock",
+            "MINDROOM_DOCKER_WORKER_NAME_PREFIX": "scripts",
+        },
+    )
+    different_owner_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_DOCKER_ENV,
+            "DOCKER_HOST": "unix:///run/other-docker.sock",
+            "MINDROOM_DOCKER_WORKER_NAME_PREFIX": "scripts",
+        },
+    )
+
+    base = docker_backend_cleanup_signature(base_paths, storage_path=storage_path)
+
+    assert base == docker_backend_cleanup_signature(launch_changed_paths, storage_path=storage_path)
+    assert base != docker_backend_cleanup_signature(different_owner_paths, storage_path=storage_path)
+    assert base != docker_backend_cleanup_signature(base_paths, storage_path=tmp_path / "other-storage")

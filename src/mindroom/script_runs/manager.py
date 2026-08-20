@@ -196,7 +196,7 @@ class ScriptRunManager:
     _launches_drained: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _launches_in_progress: int = field(default=0, init=False)
     _launch_admission_closed: bool = field(default=False, init=False)
-    _startup_reconciliation_in_progress: bool = field(default=False, init=False)
+    _startup_reconciliation_owners: int = field(default=0, init=False)
     _worker_launch_gate_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _worker_launches_drained: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _worker_launches_in_progress: int = field(default=0, init=False)
@@ -236,7 +236,7 @@ class ScriptRunManager:
     async def begin_startup_reconciliation(self) -> None:
         """Fence all launches until inherited durable ownership is revoked and retired."""
         async with self._launch_admission_lock:
-            self._startup_reconciliation_in_progress = True
+            self._startup_reconciliation_owners += 1
             if self._launches_in_progress == 0:
                 self._launches_drained.set()
         await self._launches_drained.wait()
@@ -244,14 +244,17 @@ class ScriptRunManager:
     async def end_startup_reconciliation(self) -> None:
         """Reopen launch admission only after startup cleanup is durably complete."""
         async with self._launch_admission_lock:
-            self._startup_reconciliation_in_progress = False
+            if self._startup_reconciliation_owners <= 0:
+                msg = "Background script runtime reconciliation is not active."
+                raise ScriptRunManagerError(msg)
+            self._startup_reconciliation_owners -= 1
 
     async def _admit_launch(self) -> None:
         async with self._launch_admission_lock:
             if self._launch_admission_closed:
                 msg = "Background script runtime is shutting down."
                 raise ScriptRunManagerError(msg)
-            if self._startup_reconciliation_in_progress:
+            if self._startup_reconciliation_owners:
                 msg = "Background script runtime reconciliation is in progress."
                 raise ScriptRunManagerError(msg)
             self._launches_in_progress += 1
@@ -328,11 +331,18 @@ class ScriptRunManager:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        token, token_hash = mint_script_capability()
         launch_grants = await asyncio.to_thread(self.grant_resolver, context)
         if effective_limits.allowed_tools is not None:
             allowed_tools = frozenset(effective_limits.allowed_tools)
+            unknown_toolkits = allowed_tools - {grant.toolkit_name for grant in launch_grants}
+            if unknown_toolkits:
+                names = ", ".join(sorted(unknown_toolkits))
+                msg = (
+                    f"Background script allowed_tools contains unknown toolkit names or unavailable toolkits: {names}."
+                )
+                raise ScriptRunManagerError(msg)
             launch_grants = tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
+        token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
             run_id=run_id,
             agent_name=context.agent_name,
@@ -731,17 +741,19 @@ class ScriptRunManager:
         worker_id: str | None = None,
     ) -> ScriptRunRecord:
         """Publish one spawned process or preserve a concurrent cancellation."""
-        launched = await asyncio.to_thread(self.store.get_run, run.run_id)
-        if launched.cancel_requested_at is not None:
-            await self._preserve_ambiguous_launch(context, run.run_id)
-            return await asyncio.to_thread(self.store.get_run, run.run_id)
         try:
+            launched = await asyncio.to_thread(self.store.get_run, run.run_id)
+            if launched.cancel_requested_at is not None:
+                await self._preserve_ambiguous_launch(context, run.run_id)
+                return await asyncio.to_thread(self.store.get_run, run.run_id)
             return await asyncio.to_thread(
                 self.store.transition_run,
                 run.run_id,
                 state=ScriptRunState.RUNNING,
                 worker_id=worker_id,
             )
+        except asyncio.CancelledError:
+            raise
         except BaseException as exc:
             return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
 
@@ -770,6 +782,8 @@ class ScriptRunManager:
                 force=True,
                 reason=AMBIGUOUS_LAUNCH,
             )
+        except asyncio.CancelledError:
+            raise
         except BaseException:
             logger.warning("script_ambiguous_launch_cancel_pending", run_id=run_id, exc_info=True)
 
@@ -914,6 +928,8 @@ class ScriptRunManager:
             return run
         try:
             process_status = await self._terminate_and_confirm(run, force=force)
+        except asyncio.CancelledError:
+            raise
         except BaseException as process_error:
             try:
                 return await self._retire_worker_to_confirm_exit(run)
@@ -1009,6 +1025,8 @@ class ScriptRunManager:
         try:
             receipt = await self._signal_process(run, force=force)
             _validate_cancel_receipt(receipt)
+        except asyncio.CancelledError:
+            raise
         except BaseException as exc:
             signal_error = exc
         try:
@@ -1084,15 +1102,15 @@ class ScriptRunManager:
         return await asyncio.to_thread(self.store.record_snapshot_locator, run.run_id, locator)
 
     async def _cleanup_owned_resources(self, run: ScriptRunRecord) -> None:
-        if run.snapshot_locator is not None:
-            cleaned = await asyncio.to_thread(_remove_snapshot, self.store.storage_root, run.snapshot_locator)
-            if not cleaned:
-                msg = "Background script snapshot cleanup is pending."
-                raise ScriptRunManagerError(msg)
         if run.local_unsafe:
             if run.worker_key is not None or run.worker_id is not None:
                 msg = "Unsafe-local script run cannot own a dedicated worker."
                 raise ScriptRunManagerError(msg)
+            if run.snapshot_locator is not None:
+                cleaned = await asyncio.to_thread(_remove_snapshot, self.store.storage_root, run.snapshot_locator)
+                if not cleaned:
+                    msg = "Background script snapshot cleanup is pending."
+                    raise ScriptRunManagerError(msg)
             return
         worker_key = run.worker_key
         if worker_key is None or not script_worker_key_belongs_to_run(worker_key, run.run_id):

@@ -31,7 +31,12 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
 )
-from mindroom.script_runs.store import ScriptCallConflictError, ScriptCallRateLimitError, ScriptCapabilityError
+from mindroom.script_runs.store import (
+    ScriptCallConflictError,
+    ScriptCallRateLimitError,
+    ScriptCapabilityError,
+    ScriptRunNotFoundError,
+)
 
 if TYPE_CHECKING:
     from mindroom.script_runs.broker import ScriptToolCallRequest
@@ -159,6 +164,52 @@ async def test_script_gateway_fails_closed_when_public_broker_state_is_empty() -
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Background script gateway is unavailable."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["post", "get"])
+async def test_script_gateway_hides_run_deletion_races(method: str) -> None:
+    """A run removed after authentication remains an unavailable call instead of becoming a 500."""
+
+    class RemovedRunBroker(_GatewayBroker):
+        async def accept_authenticated(
+            self,
+            request: ScriptToolCallRequest,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del request, authorization
+            message = "run disappeared"
+            raise ScriptRunNotFoundError(message)
+
+        async def get_authenticated(
+            self,
+            run_id: str,
+            call_id: str,
+            authorization: str | None,
+        ) -> ScriptCallRecord:
+            del run_id, call_id, authorization
+            message = "run disappeared"
+            raise ScriptRunNotFoundError(message)
+
+    broker = RemovedRunBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        if method == "post":
+            response = await client.post(
+                "/api/script-gateway/calls",
+                json=_payload(),
+                headers={"Authorization": "Bearer secret-token"},
+            )
+        else:
+            response = await client.get(
+                "/api/script-gateway/runs/run-1/calls/call-1",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Background script call is unavailable."}
 
 
 def _payload() -> dict[str, object]:

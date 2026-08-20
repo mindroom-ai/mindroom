@@ -714,6 +714,37 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
 
 
 @pytest.mark.asyncio
+async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only caller-owned script handles should pay for the Linux watchdog wrapper."""
+    observed_argv: list[str] = []
+
+    async def record_run(*_args: object, **kwargs: object) -> object:
+        argv = kwargs["argv"]
+        assert isinstance(argv, list)
+        observed_argv.extend(str(item) for item in argv)
+        return shell_execution_module._RunResult(message="ordinary result")
+
+    monkeypatch.setattr(shell_supervisor, "run_command", record_run)
+    reader = asyncio.StreamReader()
+    payload = {
+        "op": "run",
+        "namespace": "ns",
+        "argv": ["echo", "ordinary"],
+        "env": _MINIMAL_ENV,
+        "cwd": None,
+        "tail": 100,
+        "timeout": 30,
+    }
+
+    message = await shell_supervisor._handle_run({}, set(), payload, reader)
+
+    assert message == "ordinary result"
+    assert observed_argv == ["echo", "ordinary"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_operation_returns_error() -> None:
     """Unknown operations should produce an error message, not kill the server."""
     registry: dict[str, ProcessRecord] = {}
@@ -789,7 +820,12 @@ async def test_supervisor_sigkill_terminates_supervised_process_group(
         "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {descendant.pid}', encoding='utf-8'); "
         "time.sleep(300)"
     )
-    result = await _run(socket_path, [sys.executable, "-c", child, str(ready_path)], timeout=0)
+    result = await _run(
+        socket_path,
+        [sys.executable, "-c", child, str(ready_path)],
+        timeout=0,
+        handle=f"shell:{'a' * 32}",
+    )
     supervised_pid = int(result.split("PID ")[1].split(")")[0])
     for _ in range(40):
         if ready_path.exists():
@@ -835,6 +871,7 @@ async def test_supervisor_sigterm_preserves_target_graceful_exit(
         socket_path,
         [sys.executable, "-c", child, str(ready_path), str(handled_path)],
         timeout=0,
+        handle=f"shell:{'b' * 32}",
     )
     handle = _extract_handle(result)
     for _ in range(40):

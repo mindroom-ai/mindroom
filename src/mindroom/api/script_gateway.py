@@ -19,6 +19,7 @@ from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptCallRateLimitError,
     ScriptCapabilityError,
+    ScriptRunNotFoundError,
 )
 
 __all__ = [
@@ -162,7 +163,7 @@ async def submit_script_call(
     broker = _app_script_tool_broker(request.app)
     try:
         receipt = await broker.accept_authenticated(payload.to_domain(), authorization)
-    except (ScriptBrokerAuthenticationError, ScriptCapabilityError) as exc:
+    except (ScriptBrokerAuthenticationError, ScriptCapabilityError, ScriptRunNotFoundError) as exc:
         raise _unavailable() from exc
     except ScriptRuntimeUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -186,7 +187,7 @@ async def get_script_call(
     broker = _app_script_tool_broker(request.app)
     try:
         receipt = await broker.get_authenticated(run_id, call_id, authorization)
-    except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError) as exc:
+    except (ScriptBrokerAuthenticationError, ScriptCallNotFoundError, ScriptRunNotFoundError) as exc:
         raise _unavailable() from exc
     except ScriptRuntimeUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

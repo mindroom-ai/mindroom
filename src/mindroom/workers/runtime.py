@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Never, cast
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.docker import DockerWorkerBackend, docker_backend_config_signature
+from mindroom.workers.backends.docker import DockerWorkerBackend
+from mindroom.workers.backends.docker_config import (
+    docker_backend_cleanup_signature,
+    docker_backend_config_signature,
+)
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 
@@ -428,6 +432,21 @@ def _primary_worker_backend_config_signature(
     raise WorkerBackendError(msg)
 
 
+def _primary_worker_backend_cleanup_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    storage_root: Path | None,
+    config_signature: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the stable resource-owner identity used for durable script cleanup."""
+    if primary_worker_backend_name(runtime_paths) == "docker":
+        return docker_backend_cleanup_signature(
+            runtime_paths,
+            storage_path=(storage_root or runtime_paths.storage_root).expanduser().resolve(),
+        )
+    return config_signature
+
+
 def _build_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
@@ -625,6 +644,11 @@ def _resolve_primary_worker_manager_entry(
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
+    cleanup_signature = _primary_worker_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=storage_root,
+        config_signature=config_signature,
+    )
     active_entry = _reserve_primary_worker_manager_build(
         config_signature,
         acquisition_epoch=acquisition_epoch,
@@ -643,7 +667,7 @@ def _resolve_primary_worker_manager_entry(
             kubernetes_config_snapshot=kubernetes_config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
-        built_manager.cleanup_locator = _stable_json_digest(config_signature)
+        built_manager.cleanup_locator = _stable_json_digest(cleanup_signature)
     except Exception:
         with _PRIMARY_WORKER_MANAGER_CONDITION:
             _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)

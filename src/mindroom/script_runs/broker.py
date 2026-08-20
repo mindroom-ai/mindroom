@@ -44,6 +44,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
 from mindroom.tool_system.tool_hooks import (
+    BackgroundToolApprovalDenied,
     SyncToolCompletionTracker,
     build_tool_hook_bridge,
     prepend_tool_hook_bridge,
@@ -494,15 +495,24 @@ class ScriptToolBroker:
                 arguments=arguments,
             )
 
-            if execution.status != "success":
-                return await self._publish_async(
-                    call,
-                    state=ScriptCallState.FAILED,
-                    error={
+            if execution.status != "success" or isinstance(execution.result, BackgroundToolApprovalDenied):
+                error = (
+                    {
+                        "kind": "approval_denied",
+                        "message": sanitize_failure_text(execution.result.reason),
+                        "retryable": False,
+                    }
+                    if isinstance(execution.result, BackgroundToolApprovalDenied)
+                    else {
                         "kind": "tool_failure",
                         "message": sanitize_failure_text(execution.error or "Tool execution failed."),
                         "retryable": False,
-                    },
+                    }
+                )
+                return await self._publish_async(
+                    call,
+                    state=ScriptCallState.FAILED,
+                    error=error,
                 )
             result = _strict_json_result(execution.result)
             return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=result)

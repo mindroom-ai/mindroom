@@ -576,13 +576,12 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
 
     receipt = await _call_through_gateway(broker, _request(call_id="approval-call"), token)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: add\n"
-        "Reason: Not this time.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "approval_denied",
+        "message": "Not this time.",
+        "retryable": False,
+    }
     assert events == [
         "tool:before_call",
         "approval:run-1:approval-call",
@@ -648,9 +647,12 @@ async def test_approved_call_rechecks_durable_authority_before_tool_body(
         await asyncio.sleep(0)
         receipt = broker.get_call(request.run_id, request.call_id)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert "TOOL CALL DECLINED" in str(receipt.result)
-    assert "authority changed" in str(receipt.result)
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "approval_denied",
+        "message": "Background script authority changed while approval was pending.",
+        "retryable": False,
+    }
     assert body_called is False
 
 
@@ -704,13 +706,12 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
 
     receipt = await _call_through_gateway(broker, _request(call_id="authored-confirmation"), token)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: add\n"
-        "Reason: Authored confirmation denied.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "approval_denied",
+        "message": "Authored confirmation denied.",
+        "retryable": False,
+    }
     assert events == [
         "approval:run-1:authored-confirmation",
         "tool:before_call",
@@ -756,13 +757,12 @@ async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
 
     receipt = await _call_through_gateway(broker, _request(call_id="cached-confirmation"), token)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: add\n"
-        "Reason: Cached result denied.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "approval_denied",
+        "message": "Cached result denied.",
+        "retryable": False,
+    }
     assert events == [
         "approval:run-1:cached-confirmation",
         "tool:before_call",
@@ -807,9 +807,12 @@ async def test_script_broker_honors_policy_approval_before_agno_cache_hit(
 
     receipt = await _call_through_gateway(broker, _request(call_id="cached-policy"), token)
 
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert "TOOL CALL DECLINED" in str(receipt.result)
-    assert "Cached policy denied." in str(receipt.result)
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "approval_denied",
+        "message": "Cached policy denied.",
+        "retryable": False,
+    }
     assert events == [
         "tool:before_call",
         "approval:run-1:cached-policy",

@@ -39,6 +39,7 @@ __all__ = [
     "DEFAULT_WORKER_PORT",
     "DOCKER_RESERVED_EXTRA_ENV_NAMES",
     "DockerWorkerBackendConfig",
+    "docker_backend_cleanup_signature",
     "docker_backend_config_signature",
     "docker_workers_root",
     "normalize_docker_name_prefix",
@@ -239,6 +240,31 @@ class _DockerWorkerBackendConfig:
 
 
 DockerWorkerBackendConfig = _DockerWorkerBackendConfig
+
+
+def docker_backend_cleanup_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    storage_path: Path | None = None,
+) -> tuple[str, ...]:
+    """Return the stable fields needed to find and retire an existing Docker worker."""
+    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    effective_runtime_paths = runtime_paths
+    if config.host_config_path is not None:
+        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
+    effective_runtime_paths = runtime_paths_with_storage_root(
+        effective_runtime_paths,
+        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
+    )
+    runtime_env = runtime_env_values(effective_runtime_paths)
+    return (
+        "docker",
+        normalize_docker_name_prefix(config.name_prefix),
+        str(docker_workers_root(effective_runtime_paths.storage_root)),
+        runtime_env.get("DOCKER_HOST", ""),
+        runtime_env.get("DOCKER_TLS_VERIFY", ""),
+        runtime_env.get("DOCKER_CERT_PATH", ""),
+    )
 
 
 def docker_backend_config_signature(

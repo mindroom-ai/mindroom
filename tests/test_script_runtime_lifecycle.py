@@ -937,6 +937,38 @@ async def test_startup_fails_closed_when_the_durable_backend_is_no_longer_config
         await runtime.shutdown()
 
 
+def test_keepalive_touches_only_runs_owned_by_the_supplied_backend(tmp_path: Path) -> None:
+    """Idle cleanup must not be defeated for a durable run owned by a different backend."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    owned = _stored_run_pinned_to_worker(
+        store,
+        runtime_paths,
+        run_id=f"script-{'1' * 32}",
+        worker_backend_locator="locator-a",
+    )
+    disowned = _stored_run_pinned_to_worker(
+        store,
+        runtime_paths,
+        run_id=f"script-{'2' * 32}",
+        worker_backend_locator="locator-b",
+    )
+    backend = _Backend([_worker(owned), _worker(disowned)], cleanup_locator="locator-a")
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=_broker_lifecycle_stub(),  # type: ignore[arg-type]
+        manager=MagicMock(spec=ScriptRunManager),
+        resolver=MagicMock(),
+        config_provider=lambda: None,
+        worker_lease_provider=lambda _locator: None,
+    )
+
+    runtime.touch_live_workers(backend)
+
+    assert backend.actions == [f"touch:{owned.worker_key}"]
+
+
 @pytest.mark.asyncio
 async def test_no_api_startup_still_interrupts_and_retires_inherited_worker_run(tmp_path: Path) -> None:
     """Disabling HTTP exposure must not skip fail-closed inherited-run cleanup."""
@@ -2869,8 +2901,8 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cancellation_finishes_durable_revocation_without_releasing_lease(tmp_path: Path) -> None:
-    """Caller cancellation cannot abandon accepted durable writes or lifecycle ownership."""
+async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_lease(tmp_path: Path) -> None:
+    """Caller cancellation drains accepted writes before releasing process-local ownership."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     runs = [_stored_run(store, runtime_paths, run_id=f"script-{digit * 32}") for digit in ("4", "5")]
@@ -2922,15 +2954,15 @@ async def test_shutdown_cancellation_finishes_durable_revocation_without_releasi
         release_revocations.set()
 
     assert all(store.get_run(run.run_id).cancel_requested_at is not None for run in runs)
-    assert lease.released is False
-    assert runtime._current_worker_lease is lease
-    assert manager.worker_backend is lease.manager
+    assert lease.released is True
+    assert runtime._current_worker_lease is None
+    assert manager.worker_backend is None
     manager.begin_shutdown.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership(tmp_path: Path) -> None:
-    """A failed cancellation write cannot detach the authoritative worker backend."""
+async def test_shutdown_durable_store_failure_still_releases_worker_lease(tmp_path: Path) -> None:
+    """A durable shutdown error must not strand process-local worker-manager ownership."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths, run_id=f"script-{'6' * 32}")
@@ -2969,9 +3001,9 @@ async def test_shutdown_durable_store_failure_retains_worker_lifecycle_ownership
         await runtime.shutdown(timeout_seconds=0.1)
 
     assert store.get_run(run.run_id).cancel_requested_at is None
-    assert lease.released is False
-    assert runtime._current_worker_lease is lease
-    assert manager.worker_backend is lease.manager
+    assert lease.released is True
+    assert runtime._current_worker_lease is None
+    assert manager.worker_backend is None
     manager.begin_shutdown.assert_awaited_once_with()
 
 

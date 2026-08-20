@@ -93,7 +93,6 @@ class _BoundedScriptRoute(APIRoute):
         route_handler = super().get_route_handler()
 
         async def bounded_route_handler(request: Request) -> Response:
-            _require_dedicated_runner(request)
             if request.method == "POST":
                 request = await _bounded_replay_request(request)
             return await route_handler(request)

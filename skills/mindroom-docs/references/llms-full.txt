@@ -10364,6 +10364,7 @@ defaults:
 ```
 
 `allowed_tools` contains toolkit names, not function names.
+Unknown or unavailable toolkit names, including `*`, reject the launch with a clear error.
 It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
 Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
 MindRoom captures the configured `allowed_tools` value when the script launches.
@@ -10426,6 +10427,7 @@ Arguments must have an unambiguous strict-JSON representation.
 Successful results are returned as JSON-compatible Python values and are bounded before they cross the gateway.
 
 Framework and terminal tool failures raise `MindRoomToolCallError`.
+Operator approval denial raises a non-retryable `MindRoomToolCallError` with kind `approval_denied`.
 The exception exposes `kind`, `retryable`, and `call_id` fields so a script can log or stop predictably.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether the side effect completed, so the script must not automatically repeat it.
 
@@ -10554,7 +10556,8 @@ Calls are serialized within one run to keep approval and side-effect order predi
 
 MindRoom never adopts, resumes, or automatically relaunches Python source after a primary-runtime restart, upgrade, worker loss, or worker replacement.
 Startup fences new launches, durably revokes every inherited nonterminal run, terminates processes reachable through the exact currently configured backend, removes private snapshots, and retires exact dedicated workers before reopening.
-If the worker backend configuration changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior backend configuration or retire that worker manually, then restart.
+Routine Docker launch changes such as an image or worker-token rotation retain cleanup ownership of existing workers.
+If the Docker daemon, worker storage root, or worker name prefix changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior ownership configuration, restart once to retire the run, then apply the new configuration.
 MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
