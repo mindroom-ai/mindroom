@@ -136,6 +136,7 @@ def _context(
     preapprove_script_tool: bool = False,
     tool_function_filter: Callable[[Function], bool] | None = None,
     worker_scope: WorkerScope | None = None,
+    private: bool = False,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -145,6 +146,7 @@ def _context(
                     display_name="Watcher",
                     tools=["calculator"],
                     worker_scope=worker_scope,
+                    private=({"per": "user_agent", "root": "private/watcher"} if private else None),
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -283,6 +285,7 @@ def _broker(
     durable_local_unsafe: bool | None = None,
     live_local_unsafe: bool | None = None,
     worker_scope: WorkerScope | None = None,
+    private: bool = False,
     resolved_worker_targets: list[ResolvedWorkerTarget] | None = None,
     run_id: str = "run-1",
     authorized: bool = True,
@@ -296,6 +299,7 @@ def _broker(
         preapprove_script_tool=preapprove_script_tool,
         tool_function_filter=tool_function_filter,
         worker_scope=worker_scope,
+        private=private,
     )
     store = ScriptRunStore(context.runtime_paths)
     token, token_hash = mint_script_capability()
@@ -489,6 +493,33 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
     assert resolved_worker_key is not None
     assert resolved_worker_key_scope(resolved_worker_key) == tool_worker_scope
     assert resolved_worker_key != f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher"
+
+
+@pytest.mark.asyncio
+async def test_private_script_tool_call_uses_canonical_private_worker_target(tmp_path: Path) -> None:
+    """A private script process key must not replace the called tool's canonical state scope."""
+    events: list[str] = []
+    resolved_worker_targets: list[ResolvedWorkerTarget] = []
+    process_worker_key = f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher"
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        private=True,
+        durable_worker_key=process_worker_key,
+        durable_worker_id="script-process-worker",
+        live_worker_id="script-process-worker",
+        resolved_worker_targets=resolved_worker_targets,
+        run_id=_WORKER_RUN_ID,
+    )
+
+    receipt = await _call_through_gateway(broker, _request(run_id=_WORKER_RUN_ID), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert len(resolved_worker_targets) == 2
+    assert resolved_worker_targets[0] == resolved_worker_targets[1]
+    assert resolved_worker_targets[0].worker_key == "v1:default:user_agent:@alice:example.test:watcher"
+    assert resolved_worker_targets[0].private_agent_names == frozenset({"watcher"})
+    assert resolved_worker_targets[0].worker_key != process_worker_key
 
 
 @pytest.mark.asyncio
