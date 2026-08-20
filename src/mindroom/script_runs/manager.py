@@ -260,7 +260,7 @@ class ScriptRunManager:
                 msg = "Background script runtime is shutting down."
                 raise ScriptRunManagerError(msg)
             if self._startup_reconciliation_in_progress:
-                msg = "Background script runtime startup reconciliation is in progress."
+                msg = "Background script runtime reconciliation is in progress."
                 raise ScriptRunManagerError(msg)
             self._launches_in_progress += 1
             self._launches_drained.clear()
@@ -896,6 +896,7 @@ class ScriptRunManager:
             if run.worker_key is not None and backend is not None:
                 await asyncio.to_thread(backend.touch_worker, run.worker_key)
             return run
+        bounded_output = _bounded_output(status.output)
         if status.state == "unknown":
             reason = _SUPERVISOR_UNAVAILABLE_INTERRUPTION_REASON
             error = reason
@@ -904,14 +905,14 @@ class ScriptRunManager:
             error = (
                 None
                 if status.exit_code == 0
-                else status.output or f"Background script exited with code {status.exit_code}."
+                else bounded_output or f"Background script exited with code {status.exit_code}."
             )
         observed = await asyncio.to_thread(
             self.store.record_process_exit,
             run.run_id,
             exit_code=status.exit_code,
             error=error,
-            output=_bounded_output(status.output),
+            output=bounded_output,
             cancellation_reason=reason,
         )
         return await self._finalize_observed_exit(observed)
@@ -1302,7 +1303,13 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> WorkerBacke
     if isinstance(backend, StaticSandboxRunnerBackend):
         msg = (
             "Background scripts cannot use the shared static sandbox runner; configure explicit "
-            "unsafe-local mode or a Docker or Kubernetes worker backend."
+            "unsafe-local mode or a Docker worker backend."
+        )
+        raise ScriptRunManagerError(msg)
+    if backend.backend_name == "kubernetes":
+        msg = (
+            "Kubernetes background scripts require a gateway-only listener; "
+            "use Docker or explicit unsafe-local mode until that boundary is configured."
         )
         raise ScriptRunManagerError(msg)
     if backend.cleanup_locator is None:

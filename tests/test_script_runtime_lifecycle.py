@@ -30,10 +30,10 @@ from mindroom.orchestration.script_runtime import (
     ScriptRuntimeLifecycle,
     _LiveScriptRuntimeResolver,
     _release_worker_leases_before_deadline,
+    _script_gateway_url,
     _ScriptRuntimeLifecycleError,
     _ScriptRuntimeUnavailableError,
     build_script_runtime,
-    script_gateway_url,
 )
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
@@ -564,7 +564,7 @@ async def test_dedicated_workers_require_an_explicit_reachable_gateway(tmp_path:
     )
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -584,7 +584,7 @@ async def test_explicit_local_script_mode_uses_embedded_gateway_with_dedicated_b
         },
     )
 
-    gateway_url = await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+    gateway_url = await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
     assert gateway_url == "http://127.0.0.1:8765/api/script-gateway"
 
@@ -607,7 +607,7 @@ async def test_effective_worker_script_mode_requires_reachable_gateway_with_dedi
     )
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -623,7 +623,7 @@ async def test_static_runner_workers_require_an_explicit_reachable_gateway(tmp_p
     )
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -651,7 +651,7 @@ async def test_worker_gateway_rejects_explicit_loopback_urls(
     )
 
     with pytest.raises(ValueError, match="non-loopback"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -681,7 +681,7 @@ async def test_worker_gateway_rejects_every_hostname_that_resolves_to_loopback(
     monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 8765))])
 
     with pytest.raises(ValueError, match="non-loopback"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -698,7 +698,7 @@ async def test_explicit_gateway_must_be_a_valid_http_url(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -734,7 +734,7 @@ async def test_gateway_base_rejects_query_and_fragment_components(
     )
 
     with pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"):
-        await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
 
 @pytest.mark.asyncio
@@ -761,7 +761,7 @@ async def test_worker_gateway_dns_resolution_runs_off_event_loop(
 
     monkeypatch.setattr(socket, "getaddrinfo", resolve_gateway)
 
-    gateway_url = await script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+    gateway_url = await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
 
     assert gateway_url == "https://gateway.test/api/script-gateway"
     assert len(resolver_threads) == 1
@@ -1122,6 +1122,8 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
         return store.request_cancel(run_id, reason=reason)
 
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
@@ -1164,6 +1166,8 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
         return store.request_cancel(run_id, reason=reason)
 
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
@@ -1206,6 +1210,8 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
     run = _stored_run(store, runtime_paths)
     context = SimpleNamespace(agent_name="watcher", requester_id=run.owner_user_id)
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(return_value=run),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
@@ -1394,6 +1400,8 @@ async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(
         return store.request_cancel(run_id, reason=reason)
 
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=running),
         reconcile_durable=AsyncMock(return_value=running),
@@ -1438,6 +1446,8 @@ async def test_authorization_config_change_interrupts_before_commit(tmp_path: Pa
         return store.request_cancel(run_id, reason=reason)
 
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
         reconcile_revoked_process=AsyncMock(return_value=run),
@@ -1577,6 +1587,8 @@ async def test_generation_replacement_aborts_before_every_run_has_durable_revoca
         lambda _paths, config: "next" if config is new_config else "current",
     )
     manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
         request_revocation=request_revocation,
         revoke=AsyncMock(),
         reconcile_durable=AsyncMock(),
@@ -1944,7 +1956,7 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     await asyncio.sleep(0)
 
     assert replacement.done() is False
-    with pytest.raises(ScriptRunManagerError, match="worker replacement is in progress"):
+    with pytest.raises(ScriptRunManagerError, match="runtime reconciliation is in progress"):
         await manager.run(context, source="print('blocked')\n")
 
     client.release_launch.set()
@@ -1964,6 +1976,85 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
         await manager.run(context, source="print('unavailable')\n")
     assert [stored.run_id for stored in store.list_runs()] == [run.run_id]
+
+
+@pytest.mark.asyncio
+async def test_script_tool_removal_drains_a_launch_admitted_before_durable_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A revoking update cannot miss a launch admitted just before its durable row exists."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    old_config = _config()
+    new_config = Config(
+        agents={"watcher": {"display_name": "Watcher", "tools": ["calculator"]}},
+        defaults={"tools": []},
+    )
+    backend = _LaunchingBackend(runtime_paths)
+    client = _BlockingLaunchWorkerClient()
+    client.release_launch.set()
+    settlement_resolver = _ApprovalSettlementResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=settlement_resolver)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=client,  # type: ignore[arg-type]
+        worker_backend=backend,
+        gateway_url="http://primary.test/api/script-gateway",
+        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
+        cancellation_grace_seconds=0,
+        cancellation_poll_interval_seconds=0,
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=lambda: old_config,
+        worker_lease_provider=lambda _locator: None,
+    )
+    context = make_test_tool_runtime_context(
+        agent_name="watcher",
+        target=MessageTarget.resolve(
+            room_id="!room:example.test",
+            thread_id="$thread:example.test",
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.test",
+        client=SimpleNamespace(),
+        config=old_config,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_paths.storage_root,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    create_started = threading.Event()
+    release_create = threading.Event()
+    original_create = store.create_run
+
+    def blocked_create(run: ScriptRunRecord) -> None:
+        create_started.set()
+        assert release_create.wait(timeout=5)
+        original_create(run)
+
+    monkeypatch.setattr(store, "create_run", blocked_create)
+    launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
+    assert await asyncio.to_thread(create_started.wait, 1)
+    update = asyncio.create_task(runtime.apply_update_plan(_plan(old_config, new_config)))
+    await asyncio.sleep(0.05)
+    update_finished_before_launch = update.done()
+    release_create.set()
+
+    run = await launch
+    await update
+    durable = store.get_run(run.run_id)
+
+    assert update_finished_before_launch is False
+    assert durable.cancel_requested_at is not None
+    assert durable.state is ScriptRunState.INTERRUPTED
+    await runtime.complete_worker_replacement()
 
 
 @pytest.mark.asyncio
@@ -3089,6 +3180,8 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
         store=store,
         broker=MagicMock(),
         manager=SimpleNamespace(
+            begin_startup_reconciliation=AsyncMock(),
+            end_startup_reconciliation=AsyncMock(),
             request_revocation=request_revocation,
             revoke=revoke,
             reconcile_revoked_process=reconcile_revoked_process,
@@ -3110,7 +3203,7 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
 
 @pytest.mark.asyncio
 async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall_deadline(tmp_path: Path) -> None:
-    """Slow durable revocation aborts the reload without early broker closure."""
+    """A deadline cannot return while an accepted durable revocation is still running."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     _stored_run(store, runtime_paths)
@@ -3131,6 +3224,8 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         store=store,
         broker=MagicMock(),
         manager=SimpleNamespace(
+            begin_startup_reconciliation=AsyncMock(),
+            end_startup_reconciliation=AsyncMock(),
             request_revocation=slow_request_revocation,
             revoke=revoke,
             reconcile_durable=AsyncMock(),
@@ -3145,7 +3240,8 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
     with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
         await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
 
-    assert asyncio.get_running_loop().time() - started < 0.1
+    assert asyncio.get_running_loop().time() - started >= 0.15
+    assert store.get_run("run-1").cancel_requested_at is not None
     assert broker_revocations == []
 
 

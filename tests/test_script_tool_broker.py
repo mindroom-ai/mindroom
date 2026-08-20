@@ -483,7 +483,8 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3}'
-    assert len(resolved_worker_targets) == 1
+    assert len(resolved_worker_targets) == 2
+    assert resolved_worker_targets[0] == resolved_worker_targets[1]
     resolved_worker_key = resolved_worker_targets[0].worker_key
     assert resolved_worker_key is not None
     assert resolved_worker_key_scope(resolved_worker_key) == tool_worker_scope
@@ -611,6 +612,46 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
     [(run_id, reason)] = resolver.settled_runs
     assert run_id == request.run_id
     assert reason == "Background script ownership was cancelled."
+
+
+@pytest.mark.asyncio
+async def test_approved_call_rechecks_durable_authority_before_tool_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval cannot revive a call after the owning run was durably revoked."""
+    body_called = False
+
+    class RecordingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> int:
+            nonlocal body_called
+            body_called = True
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, RecordingToolkit)
+    broker, token = _broker(tmp_path, events=[], require_approval=True)
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    resolver.approval_wait = asyncio.Event()
+    resolver.approval_started = asyncio.Event()
+    request = _request(call_id="revoked-after-approval")
+    accepted = await broker.accept_authenticated(request, f"Bearer {token}")
+    assert accepted.state is ScriptCallState.PENDING
+    await resolver.approval_started.wait()
+    broker.store.request_cancel(request.run_id, reason="run cancelled")
+    resolver.approval_wait.set()
+
+    receipt = broker.get_call(request.run_id, request.call_id)
+    while receipt.state is ScriptCallState.PENDING:
+        await asyncio.sleep(0)
+        receipt = broker.get_call(request.run_id, request.call_id)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert "TOOL CALL DECLINED" in str(receipt.result)
+    assert "authority changed" in str(receipt.result)
+    assert body_called is False
 
 
 @pytest.mark.asyncio
@@ -835,6 +876,40 @@ async def test_script_broker_offloads_blocking_sync_toolkit_connect(
 
     assert time.monotonic() - started < 0.07
     assert (await submission).state is ScriptCallState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_script_broker_closes_toolkit_after_connect_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed connection cannot strand resources owned by the selected toolkit."""
+    lifecycle: list[str] = []
+
+    class FailingConnectToolkit(Toolkit):
+        _requires_connect = True
+
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def connect(self) -> None:
+            lifecycle.append("connect")
+            msg = "connect failed"
+            raise RuntimeError(msg)
+
+        def close(self) -> None:
+            lifecycle.append("close")
+
+        def add(self, a: int, b: int) -> int:
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, FailingConnectToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id="failed-connect"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert lifecycle == ["connect", "close"]
 
 
 @pytest.mark.asyncio

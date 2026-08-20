@@ -123,7 +123,7 @@ from .orchestration.runtime import (
     sync_forever_with_restart,
     wait_for_matrix_homeserver,
 )
-from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, script_gateway_url
+from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 
 if TYPE_CHECKING:
@@ -2309,14 +2309,7 @@ async def _run_api_server(
 
     async def on_started(bound_host: str, bound_port: int) -> None:
         if script_runtime is not None:
-            try:
-                gateway_url = await script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
-            except ValueError:
-                explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
-                public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
-                if explicit_url or public_url:
-                    raise
-                gateway_url = ""
+            gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
             script_runtime.bind_api(gateway_url)
 
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)

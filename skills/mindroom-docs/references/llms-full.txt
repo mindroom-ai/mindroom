@@ -10497,9 +10497,11 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 
 ## Worker And Network Requirements
 
-The safe deployment uses a worker backend such as the dedicated Docker or Kubernetes backend described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+The supported safe deployment uses the dedicated Docker backend described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured shared state root.
 The worker must also reach the primary script gateway over an authenticated network path.
+Kubernetes background scripts currently return an error because the primary Kubernetes Service exposes more than the capability-gated script gateway on one listener.
+They will remain disabled until the chart provides a gateway-only listener and NetworkPolicy target.
 
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
 Alternatively, set `MINDROOM_PUBLIC_URL` to the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
@@ -10527,7 +10529,7 @@ The script can read and modify files visible through that scoped worker filesyst
 MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.
 This credential rule is not a general secret boundary because operators can deliberately expose values through worker storage or environment configuration.
 Worker mode is process and filesystem isolation, not an independent network sandbox.
-Direct network access follows the Docker, Kubernetes, host, and configured egress policy of the worker, and `allowed_tools` does not govern that traffic.
+Direct network access follows the Docker, host, and configured egress policy of the worker, and `allowed_tools` does not govern that traffic.
 Sibling run-specific worker roots and snapshots are not mounted into the script worker.
 Brokered tool calls still use the durable requester-and-agent execution identity and each tool's current primary-or-worker execution target rather than the arbitrary script process's run-specific worker.
 
@@ -10554,7 +10556,7 @@ MindRoom durably revokes every affected run before process reconciliation, and p
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
 
-Terminal process output is retained durably with a 64 KiB bound and remains available from `script(action="status")` after maintenance observes the exit.
+Terminal process output is retained durably with a 64 KiB bound and remains available from `status_script(run_id)` after maintenance observes the exit.
 Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
 When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
 

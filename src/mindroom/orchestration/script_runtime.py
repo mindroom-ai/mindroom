@@ -380,6 +380,7 @@ class ScriptRuntimeLifecycle:
     _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
     _pending_worker_backend_locator: str | None = field(default=None, init=False, repr=False)
     _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
+    _reload_launch_fence_started: bool = field(default=False, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -548,35 +549,40 @@ class ScriptRuntimeLifecycle:
 
     async def complete_worker_replacement(self) -> None:
         """Reopen safely, then publish the backend for the config visible now."""
-        if not self.manager.worker_replacement_in_progress:
-            return
+        try:
+            if not self.manager.worker_replacement_in_progress:
+                return
 
-        retired_lease = self._current_worker_lease
-        self._clear_current_worker_backend()
-        self._worker_config_epoch += 1
-        release_task = None if retired_lease is None else _release_worker_lease_later(retired_lease)
-        await run_coroutine_until_complete(self.manager.end_worker_replacement())
-        if release_task is not None:
-            await asyncio.shield(release_task)
+            retired_lease = self._current_worker_lease
+            self._clear_current_worker_backend()
+            self._worker_config_epoch += 1
+            release_task = None if retired_lease is None else _release_worker_lease_later(retired_lease)
+            await run_coroutine_until_complete(self.manager.end_worker_replacement())
+            if release_task is not None:
+                await asyncio.shield(release_task)
 
-        async with self._worker_refresh_lock:
-            try:
-                if self.config_provider() is None:
+            async with self._worker_refresh_lock:
+                try:
+                    if self.config_provider() is None:
+                        self._clear_current_worker_backend()
+                    else:
+                        await asyncio.wait_for(
+                            self._refresh_worker_backend_locked(),
+                            timeout=self.pass_timeout_seconds,
+                        )
+                except TimeoutError:
                     self._clear_current_worker_backend()
-                else:
-                    await asyncio.wait_for(
-                        self._refresh_worker_backend_locked(),
-                        timeout=self.pass_timeout_seconds,
+                    logger.warning(
+                        "script_worker_backend_commit_refresh_timeout",
+                        timeout_seconds=self.pass_timeout_seconds,
                     )
-            except TimeoutError:
-                self._clear_current_worker_backend()
-                logger.warning(
-                    "script_worker_backend_commit_refresh_timeout",
-                    timeout_seconds=self.pass_timeout_seconds,
-                )
-            except Exception:
-                self._clear_current_worker_backend()
-                logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
+                except Exception:
+                    self._clear_current_worker_backend()
+                    logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
+        finally:
+            if self._reload_launch_fence_started:
+                self._reload_launch_fence_started = False
+                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
 
     def _clear_current_worker_backend(self) -> None:
         self._current_worker_lease = None
@@ -636,9 +642,13 @@ class ScriptRuntimeLifecycle:
             return
 
         replacement_started = False
+        launch_fence_started = False
 
         async def apply_update_boundary() -> None:
-            nonlocal replacement_started
+            nonlocal launch_fence_started, replacement_started
+            launch_fence_started = True
+            await self.manager.begin_startup_reconciliation()
+            self._reload_launch_fence_started = True
             if worker_configuration_changed:
                 replacement_started = True
                 await self.manager.begin_worker_replacement()
@@ -658,6 +668,9 @@ class ScriptRuntimeLifecycle:
         except BaseException as exc:
             if replacement_started:
                 await run_coroutine_until_complete(self.manager.end_worker_replacement())
+            if launch_fence_started:
+                self._reload_launch_fence_started = False
+                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
             if isinstance(exc, TimeoutError):
                 msg = "Background script reload did not durably revoke every active run before the reload deadline."
                 raise _ScriptRuntimeLifecycleError(msg) from None
@@ -718,7 +731,9 @@ class ScriptRuntimeLifecycle:
         require_worker_success: bool,
     ) -> None:
         """Durably revoke, close broker work, and reconcile selected processes in phases."""
-        durably_revoked = await self._durably_revoke_runs(runs, reason_for=reason_for)
+        durably_revoked = await run_coroutine_until_complete(
+            self._durably_revoke_runs(runs, reason_for=reason_for),
+        )
         await self._interrupt_durably_revoked_runs(
             durably_revoked,
             reason_for=reason_for,
@@ -1268,7 +1283,7 @@ def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
     return value
 
 
-async def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
+async def _script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
     """Return the gateway URL injected into isolated script processes."""
     worker_process_enabled = script_execution_uses_worker(
         runtime_paths,
@@ -1289,6 +1304,20 @@ async def script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: in
         return gateway_url
     msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
     raise ValueError(msg)
+
+
+async def optional_script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: int) -> str:
+    """Resolve the optional gateway without failing the API for an unrelated public URL."""
+    try:
+        return await _script_gateway_url(runtime_paths, host=host, port=port)
+    except ValueError:
+        explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
+        public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
+        if explicit_url:
+            raise
+        if public_url:
+            logger.warning("background_script_gateway_disabled_invalid_public_url")
+        return ""
 
 
 async def _validate_script_gateway(gateway_url: str, *, worker_process_enabled: bool) -> None:

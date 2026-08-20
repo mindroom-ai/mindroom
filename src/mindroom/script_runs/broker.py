@@ -59,7 +59,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from agno.tools import Toolkit
 
@@ -178,6 +178,8 @@ class _PreparedScriptCall:
 @dataclass(frozen=True, slots=True)
 class _PreparedExecution:
     context: ToolRuntimeContext
+    correlation_id: str
+    source_config: Config
     execution_identity: ToolExecutionIdentity
     toolkit: Toolkit
     function: Function
@@ -489,7 +491,7 @@ class ScriptToolBroker:
                 correlation_id,
             )
             toolkit = prepared.toolkit
-            await self._connect_toolkit(toolkit)
+            await self._connect_toolkit_owned(toolkit)
             execution_started = True
             execution = await self._run_prepared_execution(
                 prepared,
@@ -546,6 +548,21 @@ class ScriptToolBroker:
             self._retain_toolkit_cleanup(completion_task, toolkit)
             raise
 
+    async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
+        """Connect one toolkit and close it if normal connection fails."""
+        try:
+            await self._connect_toolkit(toolkit)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as connect_error:
+            try:
+                await self._close_toolkit_owned(toolkit)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as close_error:
+                raise connect_error from close_error
+            raise
+
     async def _run_prepared_execution(
         self,
         prepared: _PreparedExecution,
@@ -580,6 +597,7 @@ class ScriptToolBroker:
                     call=call,
                     approval_config=prepared.approval_config,
                     authored_decision=authored_decision,
+                    execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
                 )
                 bridge = build_tool_hook_bridge(
                     context.hook_registry,
@@ -618,6 +636,58 @@ class ScriptToolBroker:
         finally:
             if not cleanup_transferred:
                 await self._close_toolkit_owned(toolkit)
+
+    async def _current_execution_decision(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> ToolApprovalDecision:
+        """Return a fail-closed decision from authority immediately before execution."""
+        try:
+            await self._require_current_execution_authority(prepared, run=run, call=call)
+        except ScriptRuntimeUnavailableError as exc:
+            return ToolApprovalDecision(approved=False, reason=str(exc))
+        except (_CurrentGrantRevokedError, ValueError):
+            return ToolApprovalDecision(
+                approved=False,
+                reason="Background script authority changed while approval was pending.",
+            )
+        return ToolApprovalDecision(approved=True)
+
+    async def _require_current_execution_authority(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> None:
+        """Recheck durable and live authority immediately before a tool body starts."""
+        try:
+            durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, run.run_id)
+        except ScriptCapabilityError as exc:
+            raise _CurrentGrantRevokedError from exc
+        current_context = self.runtime_resolver.resolve(
+            durable_run,
+            correlation_id=prepared.correlation_id,
+        )
+        current_config = current_context.current_config
+        authorization_state = self.runtime_resolver.is_authorized(durable_run, config=current_config)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if (
+            authorization_state is False
+            or call.grant not in durable_run.grants
+            or current_config != prepared.source_config
+        ):
+            raise _CurrentGrantRevokedError
+        worker_authority = self.runtime_resolver.resolve_worker_authority(
+            durable_run,
+            context=current_context,
+        )
+        _validate_resolved_authority(durable_run, current_context, worker_authority)
 
     async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
         """Close one toolkit or transfer its exact close task on cancellation."""
@@ -677,7 +747,8 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
-        authorization_state = self.runtime_resolver.is_authorized(run, config=context.current_config)
+        source_config = context.current_config
+        authorization_state = self.runtime_resolver.is_authorized(run, config=source_config)
         if authorization_state is None:
             msg = "Background script owner runtime is temporarily unavailable."
             raise ScriptRuntimeUnavailableError(msg)
@@ -701,6 +772,8 @@ class ScriptToolBroker:
             raise ScriptCapabilityError(msg)
         return _PreparedExecution(
             context=context,
+            correlation_id=correlation_id,
+            source_config=source_config,
             execution_identity=execution_identity,
             toolkit=toolkit,
             function=function,
@@ -839,6 +912,7 @@ def _build_background_approval_gate(
     call: ScriptCallRecord,
     approval_config: Config,
     authored_decision: ToolApprovalDecision | None,
+    execution_gate: Callable[[], Awaitable[ToolApprovalDecision]],
 ) -> _BackgroundApprovalGate:
 
     async def approval_gate(
@@ -847,25 +921,27 @@ def _build_background_approval_gate(
         arguments: dict[str, object],
     ) -> ToolApprovalDecision:
         assert tool_name == call.grant.function_name
-        if authored_decision is not None:
-            return authored_decision
-        policy_requires_approval, timeout_seconds = await evaluate_tool_approval(
-            approval_config,
-            context.runtime_paths,
-            call.grant.function_name,
-            arguments,
-            run.agent_name,
-        )
-        if not policy_requires_approval:
-            return ToolApprovalDecision(approved=True)
-        assert isinstance(origin, BackgroundScriptToolOrigin)
-        return await runtime_resolver.request_approval(
-            origin=origin,
-            context=context,
-            grant=call.grant,
-            arguments=arguments,
-            timeout_seconds=timeout_seconds,
-        )
+        decision = authored_decision
+        if decision is None:
+            policy_requires_approval, timeout_seconds = await evaluate_tool_approval(
+                approval_config,
+                context.runtime_paths,
+                call.grant.function_name,
+                arguments,
+                run.agent_name,
+            )
+            if policy_requires_approval:
+                assert isinstance(origin, BackgroundScriptToolOrigin)
+                decision = await runtime_resolver.request_approval(
+                    origin=origin,
+                    context=context,
+                    grant=call.grant,
+                    arguments=arguments,
+                    timeout_seconds=timeout_seconds,
+                )
+        if decision is not None and not decision.approved:
+            return decision
+        return await execution_gate()
 
     return approval_gate
 

@@ -49,7 +49,12 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    track_sync_tool_completion,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -1395,6 +1400,7 @@ async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path
         with (
             tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
             tool_execution_identity(_execution_identity()),
+            track_sync_tool_completion(SyncToolCompletionTracker()),
         ):
             result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
     finally:
@@ -1412,6 +1418,32 @@ async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path
     ]
     assert tool_thread_ids[0] != request_thread
     assert ticks
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_tracker(tmp_path: Path) -> None:
+    """The broker's cancellation bridge must not rewrite ordinary agent tool execution."""
+    request_thread = threading.get_ident()
+    body_threads: list[int] = []
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            body_threads.append(threading.get_ident())
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="ordinary").aexecute()
+
+    assert result.status == "success"
+    assert result.result == "HI"
+    assert body_threads == [request_thread]
 
 
 @pytest.mark.asyncio

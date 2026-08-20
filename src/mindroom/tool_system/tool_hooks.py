@@ -494,7 +494,8 @@ def _patch_agno_async_tool_hook_chain() -> None:
     ) -> Callable[..., Awaitable[_ToolHookResult]]:
         entrypoint = self.function.entrypoint
         if (
-            entrypoint is None
+            _SYNC_TOOL_COMPLETION_TRACKER.get() is None
+            or entrypoint is None
             or inspect.iscoroutinefunction(entrypoint)
             or inspect.isasyncgenfunction(entrypoint)
             or inspect.isgeneratorfunction(entrypoint)

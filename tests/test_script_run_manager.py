@@ -138,6 +138,7 @@ class _WorkerBackend:
     store: ScriptRunStore
     runtime_paths: RuntimePaths
     cleanup_locator: str | None = "locator-a"
+    backend_name: str = "test"
     handles: dict[str, WorkerHandle] = field(default_factory=dict)
     specs: list[WorkerSpec] = field(default_factory=list)
     saw_starting: bool = False
@@ -467,11 +468,25 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     )
     manager.worker_backend = static_backend
 
-    with pytest.raises(ScriptRunManagerError, match="unsafe-local mode or a Docker or Kubernetes worker"):
+    with pytest.raises(ScriptRunManagerError, match="unsafe-local mode or a Docker worker"):
         await manager.run(_context(tmp_path, backend="static"), source="print('unavailable')\n")
 
     assert manager.store.list_runs() == []
     assert static_backend.list_workers() == []
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener(tmp_path: Path) -> None:
+    """A pod must not receive network access to the primary API's non-gateway routes."""
+    manager, backend, client = _manager(tmp_path)
+    backend.backend_name = "kubernetes"
+
+    with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
+        await manager.run(_context(tmp_path, backend="kubernetes"), source="print('unavailable')\n")
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
     assert client.requested_handles == []
 
 
@@ -1779,6 +1794,26 @@ async def test_terminal_output_is_bounded_to_the_latest_utf8_tail(tmp_path: Path
     assert reconciled.output.endswith(":tail")
     assert "discard-me" not in reconciled.output
     assert later_status.output == reconciled.output
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_error_is_bounded_with_its_output(tmp_path: Path) -> None:
+    """Verbose stderr cannot prevent a failed process from reaching a durable terminal state."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    client.next_status = WorkerScriptStatus(
+        state="exited",
+        output=f"discard-me:{'x' * (64 * 1024)}:tail",
+        exit_code=1,
+    )
+
+    reconciled = await manager.reconcile_durable(run_id=run.run_id)
+
+    assert reconciled.state is ScriptRunState.FAILED
+    assert reconciled.error is not None
+    assert len(reconciled.error.encode("utf-8")) <= 64 * 1024
+    assert reconciled.error.endswith(":tail")
 
 
 @pytest.mark.asyncio
