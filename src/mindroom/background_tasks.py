@@ -89,7 +89,8 @@ def create_background_task(
         error_handler: Optional error handler function
         owner: Optional logical owner used for scoped shutdown waits
         log_exceptions: Whether unhandled task exceptions should be logged automatically
-        context: Optional context in which to run the task
+        context: Execution context for the task. ``None`` preserves asyncio's normal
+            caller-context inheritance.
 
     Returns:
         The created task
