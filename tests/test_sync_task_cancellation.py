@@ -1601,6 +1601,114 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
 
 
 @pytest.mark.asyncio
+async def test_delivery_recovery_drops_sync_request_context_before_transport(
+    tmp_path: Path,
+) -> None:
+    """A detached recovery worker must not retain its spawning sync generation."""
+    bot = _sliding_response_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=False,
+        ),
+    )
+    client.restore_login("@code:localhost", "DEVICEID", "token")
+    bot.client = client
+
+    recovery_started = asyncio.Event()
+    allow_recovery_request = asyncio.Event()
+    request_reached_transport = asyncio.Event()
+
+    async def request(*_args: object, **_kwargs: object) -> object:
+        request_reached_transport.set()
+        return object()
+
+    session = MagicMock()
+    session.request = AsyncMock(side_effect=request)
+    session.close = AsyncMock()
+    client.client_session = session
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        await allow_recovery_request.wait()
+        try:
+            await client.send("GET", "/_matrix/client/versions")
+        finally:
+            bot._sync_shutting_down = True
+            bot._delivery_recovery_wake.set()
+        return RecoveryOutcome(recovered=0, failed=0)
+
+    async def schedule_recovery_from_sync(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        bot._schedule_delivery_recovery()
+
+    room_id = "!room:localhost"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "event_id": "$message:localhost",
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "sender": "@alice:localhost",
+            "type": "m.room.message",
+        },
+    )
+    response = nio.SyncResponse(
+        next_batch="s_after",
+        rooms=nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[event], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        account_data_events=[],
+    )
+
+    async def receive_sync_response(*_args: object, **_kwargs: object) -> nio.SyncResponse:
+        await client.receive_response(response)
+        return response
+
+    client.add_event_callback(schedule_recovery_from_sync, nio.RoomMessageText)
+    try:
+        with (
+            patch.object(client, "_send", new=receive_sync_response),
+            patch.object(
+                bot,
+                "_delivery_gateway",
+                new=SimpleNamespace(recover_deliveries=recover_deliveries),
+            ),
+        ):
+            await client.sync(timeout=0)
+            await asyncio.wait_for(recovery_started.wait(), timeout=1)
+            await client.reset_classic_sync_state()
+            allow_recovery_request.set()
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    finally:
+        bot._sync_shutting_down = True
+        allow_recovery_request.set()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        await client.close()
+
+    assert request_reached_transport.is_set()
+
+
+@pytest.mark.asyncio
 async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_response(
     tmp_path: Path,
 ) -> None:
