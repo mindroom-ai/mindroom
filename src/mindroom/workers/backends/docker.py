@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
@@ -826,17 +826,19 @@ class DockerWorkerBackend:
             container = None
 
         if container is None:
+            volumes = self._container_volumes(
+                paths,
+                worker_key=metadata.worker_key,
+                private_agent_names=private_agent_names,
+            )
+            self._prepare_nested_storage_mount_targets(paths, volumes)
             container = self._client.containers.run(
                 launch_config.image_reference,
                 command=["/app/run-sandbox-runner.sh"],
                 name=metadata.container_name,
                 detach=True,
                 environment=self._container_env(metadata.worker_key),
-                volumes=self._container_volumes(
-                    paths,
-                    worker_key=metadata.worker_key,
-                    private_agent_names=private_agent_names,
-                ),
+                volumes=volumes,
                 ports={f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
                 labels=self._container_labels(
                     metadata,
@@ -1079,6 +1081,29 @@ class DockerWorkerBackend:
                 "mode": "ro" if read_only else "rw",
             }
         return volumes
+
+    def _prepare_nested_storage_mount_targets(
+        self,
+        paths: LocalWorkerStatePaths,
+        volumes: dict[str, dict[str, str]],
+    ) -> None:
+        """Create nested bind targets before the Docker daemon can create them as root."""
+        storage_root = PurePosixPath(self.config.storage_mount_path)
+        for mount in volumes.values():
+            container_path = PurePosixPath(mount["bind"])
+            if container_path == storage_root or storage_root not in container_path.parents:
+                continue
+            relative_path = container_path.relative_to(storage_root)
+            if ".." in relative_path.parts:
+                msg = f"Docker worker mount target escapes the worker storage root: {container_path}"
+                raise WorkerBackendError(msg)
+            current = paths.root
+            for segment in relative_path.parts:
+                current /= segment
+                if current.is_symlink() or (current.exists() and not current.is_dir()):
+                    msg = f"Docker worker mount target must be a real directory: {current}"
+                    raise WorkerBackendError(msg)
+                current.mkdir(exist_ok=True)
 
     def _scoped_storage_mount_specs(
         self,
