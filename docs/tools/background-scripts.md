@@ -179,14 +179,15 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 ## Worker And Network Requirements
 
 The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
-The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured dedicated worker state root.
+The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured worker-state root.
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
 Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
 
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
-Alternatively, set `MINDROOM_PUBLIC_URL` to the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
+For Docker only, `MINDROOM_PUBLIC_URL` can instead name the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
+Kubernetes always requires an explicit `MINDROOM_SCRIPT_GATEWAY_URL` naming its gateway-only listener.
 Worker mode rejects missing, malformed, credential-bearing, unresolved, unspecified, or loopback gateway addresses.
 A query string or fragment is also rejected because the SDK appends receipt endpoint paths to this base.
 
