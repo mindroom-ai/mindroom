@@ -29,6 +29,7 @@ __all__ = [
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
     "plan_scoped_visible_state_roots",
+    "resolve_state_scope_worker_key",
     "resolved_agent_policies_from_config_data",
     "stable_signature_json",
     "validate_dedicated_worker_extra_env",
@@ -60,6 +61,22 @@ class ScopedVisibleStateRoot:
 
     local_path: Path
     worker_visible_path: Path
+
+
+def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str | None) -> str:
+    """Resolve a narrower run key to the durable worker scope it is allowed to mount."""
+    if state_scope_worker_key is None or state_scope_worker_key == worker_key:
+        return worker_key
+    worker_parts = worker_key.split(":")
+    state_scope_parts = state_scope_worker_key.split(":")
+    if (
+        len(worker_parts) == len(state_scope_parts) + 1
+        and worker_parts[:-2] == state_scope_parts[:-1]
+        and worker_parts[-1] == state_scope_parts[-1]
+    ):
+        return state_scope_worker_key
+    msg = f"Worker state scope does not own the requested worker key: {worker_key}"
+    raise WorkerBackendError(msg)
 
 
 def validate_private_user_agent_visibility(

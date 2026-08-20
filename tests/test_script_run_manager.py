@@ -6,7 +6,7 @@ import asyncio
 import stat
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -51,10 +51,18 @@ def _runtime_paths(
     *,
     mode: str | None = "all",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> RuntimePaths:
     process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": mode} if mode is not None else {}
     if backend is not None:
         process_env["MINDROOM_WORKER_BACKEND"] = backend
+    if isolated_script_gateway:
+        process_env.update(
+            {
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+                "MINDROOM_SCRIPT_GATEWAY_URL": "http://script-gateway.test/api/script-gateway",
+            },
+        )
     return RuntimePaths(
         config_path=tmp_path / "config.yaml",
         config_dir=tmp_path,
@@ -74,8 +82,14 @@ def _context(
     private: bool = False,
     worker_scope: str = "user_agent",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> ToolRuntimeContext:
-    runtime_paths = _runtime_paths(tmp_path, mode=mode, backend=backend)
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        mode=mode,
+        backend=backend,
+        isolated_script_gateway=isolated_script_gateway,
+    )
     watcher: dict[str, object] = {
         "display_name": "Watcher",
         "worker_scope": worker_scope,
@@ -280,8 +294,14 @@ def _manager(
     *,
     mode: str | None = "all",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> tuple[ScriptRunManager, _WorkerBackend, _WorkerClient]:
-    context = _context(tmp_path, mode=mode, backend=backend)
+    context = _context(
+        tmp_path,
+        mode=mode,
+        backend=backend,
+        isolated_script_gateway=isolated_script_gateway,
+    )
     store = ScriptRunStore(context.runtime_paths)
     backend = _WorkerBackend(store=store, runtime_paths=context.runtime_paths)
     client = _WorkerClient(store=store)
@@ -290,7 +310,11 @@ def _manager(
         broker=_Broker(store),
         worker_client=client,
         worker_backend=backend,
-        gateway_url="http://primary.test/api/script-gateway",
+        gateway_url=(
+            "http://script-gateway.test/api/script-gateway"
+            if isolated_script_gateway
+            else "http://primary.test/api/script-gateway"
+        ),
         grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
         cancellation_grace_seconds=0,
         cancellation_poll_interval_seconds=0,
@@ -325,6 +349,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
             run.worker_key,
             private_agent_names=frozenset(),
             mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
         ),
     ]
     assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
@@ -451,6 +476,71 @@ async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener
 
     with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
         await manager.run(_context(tmp_path, backend="kubernetes"), source="print('unavailable')\n")
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gateway(tmp_path: Path) -> None:
+    """An operator-attested path-only listener admits a run without weakening the default."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+
+    run = await manager.run(
+        _context(
+            tmp_path,
+            backend="kubernetes",
+            isolated_script_gateway=True,
+        ),
+        source="print('ok')\n",
+    )
+
+    assert run.state is ScriptRunState.RUNNING
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key or "",
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        ),
+    ]
+    assert len(client.requested_handles) == 1
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_requires_an_explicit_gateway_with_isolation_attestation(tmp_path: Path) -> None:
+    """The isolation flag alone must not reinterpret a general API URL as a gateway-only listener."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+    context = _context(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    context = replace(
+        context,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+                "MINDROOM_WORKER_BACKEND": "kubernetes",
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+            },
+        ),
+    )
+
+    with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
+        await manager.run(context, source="print('ok')\n")
 
     assert manager.store.list_runs() == []
     assert backend.specs == []
@@ -687,14 +777,20 @@ async def test_script_process_scope_is_user_agent_independent_of_tool_scope(
 
 @pytest.mark.asyncio
 async def test_script_process_target_preserves_private_agent_visibility(tmp_path: Path) -> None:
-    """Private-agent scripts fail closed rather than mounting a fresh empty state projection."""
+    """A private script keeps a run-specific worker but mounts its owning private state scope."""
     manager, backend, _client = _manager(tmp_path)
 
-    with pytest.raises(ScriptRunManagerError, match="private agents"):
-        await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
+    run = await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
 
-    assert backend.specs == []
-    assert manager.store.list_runs() == []
+    assert run.worker_key is not None
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key,
+            private_agent_names=frozenset({"watcher"}),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        ),
+    ]
 
 
 @pytest.mark.asyncio

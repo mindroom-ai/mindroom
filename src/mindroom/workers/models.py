@@ -17,6 +17,7 @@ class WorkerSpec:
     worker_key: str
     private_agent_names: frozenset[str] | None = None
     mirrored_credential_services: frozenset[str] | None = None
+    state_scope_worker_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

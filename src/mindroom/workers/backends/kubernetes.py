@@ -442,6 +442,7 @@ class KubernetesWorkerBackend:
                         annotations=annotations,
                         replicas=1,
                         private_agent_names=spec.private_agent_names,
+                        state_scope_worker_key=spec.state_scope_worker_key,
                     )
                     startup_triggered = should_restart or deployment_apply.recreated
                     destructive_failure_allowed = destructive_failure_allowed or startup_triggered
@@ -645,6 +646,7 @@ class KubernetesWorkerBackend:
             return False
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
+        state_scope_worker_key = resources.parse_state_scope_worker_key_annotation(annotations)
         if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
             # Deployments created before visibility persistence cannot be rebuilt
             # deterministically; the ensure-time hash check recreates them on next use.
@@ -660,6 +662,7 @@ class KubernetesWorkerBackend:
                 worker_id=handle.worker_id,
                 state_subpath=self._state_subpath(handle.worker_key),
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
@@ -686,6 +689,7 @@ class KubernetesWorkerBackend:
                 annotations=annotations,
                 replicas=0,
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
+                state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)

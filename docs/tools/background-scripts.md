@@ -178,11 +178,12 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 
 ## Worker And Network Requirements
 
-The supported safe deployment uses the dedicated Docker backend described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
+The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
 The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured dedicated worker state root.
 The worker must also reach the primary script gateway over an authenticated network path.
-Kubernetes background scripts currently return an error because the primary Kubernetes Service exposes more than the capability-gated script gateway on one listener.
-They will remain disabled until the chart provides a gateway-only listener and NetworkPolicy target.
+Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
+They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
+Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
 
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
 Alternatively, set `MINDROOM_PUBLIC_URL` to the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
@@ -196,6 +197,14 @@ export MINDROOM_SANDBOX_PROXY_TOKEN=replace-with-a-long-random-token
 export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gateway
 ```
 
+For Kubernetes, configure the dedicated backend and isolated gateway attestation instead:
+
+```bash
+export MINDROOM_WORKER_BACKEND=kubernetes
+export MINDROOM_SCRIPT_GATEWAY_URL=https://script-gateway.example.org/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
+```
+
 Build the worker image from the same source checkout when testing unreleased code.
 
 ```bash
@@ -203,7 +212,6 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
 Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
-Dedicated-worker script launch currently rejects private agents because their canonical private workspace cannot be projected into a run-specific worker without weakening isolation.
 The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
 The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
 The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.

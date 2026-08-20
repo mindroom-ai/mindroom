@@ -243,7 +243,7 @@ class ScriptRunManager:
             if self._launches_in_progress == 0:
                 self._launches_drained.set()
 
-    async def run(  # noqa: PLR0915
+    async def run(
         self,
         context: ToolRuntimeContext,
         *,
@@ -273,12 +273,9 @@ class ScriptRunManager:
             if not self.gateway_url:
                 msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
                 raise ScriptRunManagerError(msg)
-            worker_backend = _require_script_worker_backend(worker_backend)
+            worker_backend = _require_script_launch_backend(worker_backend, context.runtime_paths)
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
-                raise ScriptRunManagerError(msg)
-            if worker_target.private_agent_names:
-                msg = "Background scripts in dedicated workers are not supported for private agents."
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
@@ -331,6 +328,7 @@ class ScriptRunManager:
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
                 mirrored_credential_services=frozenset(),
+                state_scope_worker_key=worker_target.worker_key,
             )
         )
         await self._admit_launch()
@@ -344,7 +342,7 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            admitted_backend = _require_script_worker_backend(self._worker_backend_for(None))
+            admitted_backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
             run = replace(run, worker_backend_locator=admitted_backend.cleanup_locator)
             return await self._create_and_launch(
                 context,
@@ -1302,7 +1300,9 @@ def _raise_concurrent_run_limit() -> None:
     raise ScriptRunManagerError(msg)
 
 
-def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWorkerBackend:
+def _require_script_worker_backend(
+    backend: WorkerBackend | None,
+) -> _RetiringWorkerBackend:
     if backend is None:
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
@@ -1312,12 +1312,6 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWo
             "unsafe-local mode or a Docker worker backend."
         )
         raise ScriptRunManagerError(msg)
-    if backend.backend_name == "kubernetes":
-        msg = (
-            "Kubernetes background scripts require a gateway-only listener; "
-            "use Docker or explicit unsafe-local mode until that boundary is configured."
-        )
-        raise ScriptRunManagerError(msg)
     if backend.cleanup_locator is None:
         msg = "Background script worker backend has no durable cleanup locator."
         raise ScriptRunManagerError(msg)
@@ -1325,6 +1319,23 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWo
         msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
+
+
+def _require_script_launch_backend(
+    backend: WorkerBackend | None,
+    runtime_paths: RuntimePaths,
+) -> _RetiringWorkerBackend:
+    admitted_backend = _require_script_worker_backend(backend)
+    isolated_kubernetes_gateway = runtime_paths.env_flag(
+        "MINDROOM_SCRIPT_GATEWAY_ISOLATED",
+    ) and bool((runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
+    if admitted_backend.backend_name == "kubernetes" and not isolated_kubernetes_gateway:
+        msg = (
+            "Kubernetes background scripts require a gateway-only listener; "
+            "use Docker or explicit unsafe-local mode until that boundary is configured."
+        )
+        raise ScriptRunManagerError(msg)
+    return admitted_backend
 
 
 def _terminal_state_for(run: ScriptRunRecord) -> ScriptRunState:

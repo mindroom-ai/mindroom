@@ -27,6 +27,7 @@ from mindroom.constants import (
     startup_manifest_sha256,
 )
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -49,6 +50,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_PRIVATE_AGENT_NAMES,
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
+    _ANNOTATION_STATE_SCOPE_WORKER_KEY,
     _ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
@@ -2502,6 +2504,60 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     assert f"/app/worker/private_instances/{worker_dir_name(worker_key)}" not in mount_paths
 
 
+def test_kubernetes_script_worker_mounts_the_owning_private_state_scope() -> None:
+    """A unique script worker must not derive a fresh private root from its run ID."""
+    backend, apps_api, _core_api = _backend()
+    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+    run_id = f"script-{'a' * 32}"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
+
+    backend.ensure_worker(
+        WorkerSpec(
+            worker_key,
+            private_agent_names=frozenset({"mind"}),
+            state_scope_worker_key=state_scope_worker_key,
+        ),
+        now=10.0,
+    )
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_private_root = str(
+        _private_instance_state_root_path(
+            Path("/app/worker"),
+            worker_key=state_scope_worker_key,
+            agent_name="mind",
+        ),
+    )
+    expected_private_subpath = f"private_instances/{worker_dir_name(state_scope_worker_key)}/mind"
+    expected_run_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+
+    assert deployment["metadata"]["annotations"][_ANNOTATION_STATE_SCOPE_WORKER_KEY] == state_scope_worker_key
+    assert mount_paths[expected_private_root] == expected_private_subpath
+    assert mount_paths[expected_run_root] == f"workers/{worker_dir_name(worker_key)}"
+    assert f"private_instances/{worker_dir_name(worker_key)}/mind" not in set(mount_paths.values())
+
+
+def test_kubernetes_script_worker_rejects_an_unrelated_state_scope() -> None:
+    """A worker spec cannot use the state-scope field to mount another identity's files."""
+    backend, apps_api, _core_api = _backend()
+    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
+
+    with pytest.raises(WorkerBackendError, match="does not own the requested worker key"):
+        backend.ensure_worker(
+            WorkerSpec(
+                worker_key,
+                private_agent_names=frozenset({"mind"}),
+                state_scope_worker_key="v1:tenant-123:user_agent:@mallory:example.org:mind",
+            ),
+            now=10.0,
+        )
+
+    assert apps_api.created_bodies == []
+
+
 def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes() -> None:
     """Changing private visibility should recreate the Deployment instead of relying on patch semantics."""
     backend, apps_api, _core_api = _backend()
@@ -3059,6 +3115,46 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
         _private_instance_state_root_path(
             Path("/app/worker"),
             worker_key=worker_key,
+            agent_name="mind",
+        ),
+    )
+    assert expected_private_root in mount_paths
+
+
+def test_kubernetes_backend_reconcile_uses_persisted_script_state_scope(tmp_path: Path) -> None:
+    """Template reconciliation must preserve a script worker's canonical private workspace mount."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
+    backend.ensure_worker(
+        WorkerSpec(
+            worker_key,
+            private_agent_names=frozenset({"mind"}),
+            state_scope_worker_key=state_scope_worker_key,
+        ),
+        now=0.0,
+    )
+    backend.cleanup_idle_workers(now=80.0)
+
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    reconciled = updated_backend.maintain_workers(now=100.0).reconciled
+
+    assert [worker.worker_key for worker in reconciled] == [worker_key]
+    recreated = apps_api.created_bodies[-1]
+    assert recreated["metadata"]["annotations"][_ANNOTATION_STATE_SCOPE_WORKER_KEY] == state_scope_worker_key
+    mount_paths = {
+        mount["mountPath"] for mount in recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    }
+    expected_private_root = str(
+        _private_instance_state_root_path(
+            Path("/app/worker"),
+            worker_key=state_scope_worker_key,
             agent_name="mind",
         ),
     )
