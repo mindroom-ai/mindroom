@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -244,6 +245,54 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["cancel_requested"] is True
+
+
+def test_worker_script_endpoint_applies_workspace_environment_overlay(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """Background scripts inherit trusted workspace env without losing their run identity."""
+    client, workspace = runner_client
+    run_id = f"script-{'9' * 32}"
+    hook_path = workspace / ".mindroom" / "worker-env.sh"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(
+        "export SCRIPT_TEST_OVERLAY=from-hook\nexport MINDROOM_SCRIPT_RUN_ID=overridden\n",
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_run_payload(
+            workspace,
+            run_id=run_id,
+            source=(
+                "import os\n"
+                "print(f\"overlay={os.environ['SCRIPT_TEST_OVERLAY']}\", flush=True)\n"
+                "print(f\"run_id={os.environ['MINDROOM_SCRIPT_RUN_ID']}\", flush=True)\n"
+            ),
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    deadline = time.monotonic() + 5
+    status = client.get(
+        f"/api/sandbox-runner/scripts/{run_id}",
+        headers=_HEADERS,
+        params={"worker_key": _WORKER_KEY},
+    )
+    while status.json()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        status = client.get(
+            f"/api/sandbox-runner/scripts/{run_id}",
+            headers=_HEADERS,
+            params={"worker_key": _WORKER_KEY},
+        )
+
+    assert status.json()["state"] == "exited"
+    assert status.json()["exit_code"] == 0
+    assert "overlay=from-hook" in status.json()["output"]
+    assert f"run_id={run_id}" in status.json()["output"]
 
 
 def test_worker_script_endpoint_rejects_source_digest_mismatch(

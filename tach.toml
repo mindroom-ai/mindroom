@@ -1192,6 +1192,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_scripts"
 depends_on = [
+    "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_worker_prep",

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.routing import APIRoute
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from mindroom.api import sandbox_exec, sandbox_worker_prep
+from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
 from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs.models import supervisor_handle_for_run
@@ -338,6 +338,14 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     if python_executable is None or base_environment is None:
         return SandboxScriptRunResponse(ok=False, error="Worker Python runtime is unavailable.", failure_kind="worker")
     execution_environment = sandbox_exec.request_execution_env("python", None, app_runtime_paths(request.app))
+    try:
+        sandbox_env_assembly.build_request_execution_env(
+            request_workspace=workspace,
+            prepared=prepared,
+            execution_env=execution_environment,
+        )
+    except sandbox_exec.WorkspaceEnvHookError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     environment = {**base_environment, **execution_environment, **script_environment}
     environment.pop(CONTROL_STATE_PATH_ENV, None)
     try:
