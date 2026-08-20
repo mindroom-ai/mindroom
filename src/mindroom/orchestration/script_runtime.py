@@ -696,7 +696,7 @@ class ScriptRuntimeLifecycle:
             run.run_id
             for run in runs
             if authorization_config is not None
-            and self.resolver.is_authorized(run, config=authorization_config) is False
+            and self.resolver.is_authorized(run, config=authorization_config) is not True
         }
         affected_agents = removed_agents | isolation_changes | script_tool_removals
         affected = (
@@ -1293,7 +1293,9 @@ async def _script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: i
         worker_backend_configured=primary_worker_backend_is_dedicated(runtime_paths),
     )
     if not worker_process_enabled:
-        gateway_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host  # noqa: S104
+        gateway_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)  # noqa: S104
+        if ":" in gateway_host:
+            gateway_host = f"[{gateway_host}]"
         return f"http://{gateway_host}:{port}/api/script-gateway"
     explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
     if explicit_url:

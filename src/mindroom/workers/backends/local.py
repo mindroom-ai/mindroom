@@ -33,7 +33,6 @@ from mindroom.workers.backends._metadata_store import (
     save_worker_metadata,
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
-from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -268,25 +267,6 @@ class _LocalWorkerBackend:
                     cleaned_workers.append(self._to_handle(metadata, paths, now=timestamp))
 
         return filter_and_sort_worker_handles(cleaned_workers, True)
-
-    def retire_worker(self, worker_key: str) -> None:
-        """Remove one exact local worker root, including its durable metadata."""
-        worker_name = worker_dir_name(worker_key)
-        state_root = self.worker_root / worker_name
-        with _shared_worker_initialization_lock_for_root(state_root), self._lock:
-            try:
-                with open_worker_state_root(
-                    self.worker_root,
-                    workers_subpath=(),
-                    worker_name=worker_name,
-                    expected_worker_key=worker_key,
-                    identity_path=("metadata", "worker.json"),
-                    identity_field_path=("worker_key",),
-                ) as state:
-                    state.remove()
-            except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire local worker '{worker_key}': {exc}"
-                raise WorkerBackendError(msg) from exc
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one local worker failure."""

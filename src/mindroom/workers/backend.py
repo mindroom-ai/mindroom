@@ -62,9 +62,6 @@ class WorkerBackend(Protocol):
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Apply idle cleanup to known workers."""
 
-    def retire_worker(self, worker_key: str) -> None:
-        """Destructively retire the exact worker identified by *worker_key*."""
-
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist a worker failure for observability."""
 

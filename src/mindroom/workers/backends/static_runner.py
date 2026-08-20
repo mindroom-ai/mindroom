@@ -142,11 +142,6 @@ class StaticSandboxRunnerBackend:
                     cleaned_workers.append(self._to_handle(metadata, now=timestamp))
         return filter_and_sort_worker_handles(cleaned_workers, True)
 
-    def retire_worker(self, worker_key: str) -> None:
-        """Forget one harmless process-local handle for the common backend protocol."""
-        with self._lock:
-            self._workers.pop(worker_key, None)
-
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one shared-runner worker failure."""
         timestamp = time.time() if now is None else now

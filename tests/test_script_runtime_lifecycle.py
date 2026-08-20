@@ -600,6 +600,23 @@ async def test_explicit_local_script_mode_uses_embedded_gateway_with_dedicated_b
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["::", "::1"])
+async def test_explicit_local_script_mode_uses_reachable_ipv6_loopback_gateway(
+    tmp_path: Path,
+    host: str,
+) -> None:
+    """An IPv6 listener publishes a bracketed loopback URL for its local script process."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "local"},
+    )
+
+    gateway_url = await _script_gateway_url(runtime_paths, host=host, port=8765)
+
+    assert gateway_url == "http://[::1]:8765/api/script-gateway"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["docker", "kubernetes"])
 @pytest.mark.parametrize("execution_mode", ["all", "sandbox_all", None])
 async def test_effective_worker_script_mode_requires_reachable_gateway_with_dedicated_backend(
@@ -1517,9 +1534,14 @@ async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(
         broker.authenticate(running.run_id, f"Bearer {token}")
 
 
+@pytest.mark.parametrize("authorization_result", [False, None])
 @pytest.mark.asyncio
-async def test_authorization_config_change_interrupts_before_commit(tmp_path: Path) -> None:
-    """A config-only authorization loss triggers immediate pre-commit revocation."""
+async def test_authorization_config_change_interrupts_unconfirmed_owner_before_commit(
+    tmp_path: Path,
+    *,
+    authorization_result: bool | None,
+) -> None:
+    """Config publication requires confirmed continued authority for every active run."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
@@ -1543,7 +1565,7 @@ async def test_authorization_config_change_interrupts_before_commit(tmp_path: Pa
         reconcile_revoked_process=AsyncMock(return_value=run),
         reconcile_durable=AsyncMock(return_value=run),
     )
-    resolver = SimpleNamespace(is_authorized=MagicMock(return_value=False))
+    resolver = SimpleNamespace(is_authorized=MagicMock(return_value=authorization_result))
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,

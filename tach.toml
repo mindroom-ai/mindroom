@@ -3509,8 +3509,6 @@ visibility = [
     "mindroom.script_runs.manager",
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.docker_projection",
-    "mindroom.workers.backends.kubernetes",
-    "mindroom.workers.backends.local",
 ]
 
 [[modules]]

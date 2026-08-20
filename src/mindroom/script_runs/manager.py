@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
@@ -106,6 +106,15 @@ class _AmbiguousLaunchError(Exception):
 class _ScriptBroker(Protocol):
     async def cancel_run(self, run_id: str) -> None:
         """Cancel in-process broker executions for one revoked run."""
+
+
+@runtime_checkable
+class _RetiringWorkerBackend(Protocol):
+    backend_name: str
+    cleanup_locator: str | None
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Destructively retire one exact script-owned worker."""
 
 
 def script_execution_uses_worker(
@@ -942,7 +951,7 @@ class ScriptRunManager:
         if backend is None:
             msg = "Background script worker backend is unavailable; retry process reconciliation."
             raise ScriptRunManagerError(msg)
-        await asyncio.to_thread(backend.retire_worker, worker_key)
+        await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
         return await run_coroutine_until_complete(
             asyncio.to_thread(
                 self.store.record_process_exit,
@@ -1098,7 +1107,7 @@ class ScriptRunManager:
         if backend is None:
             msg = "Background script worker backend is unavailable; retry cleanup."
             raise ScriptRunManagerError(msg)
-        await asyncio.to_thread(backend.retire_worker, worker_key)
+        await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
@@ -1278,7 +1287,7 @@ def _raise_concurrent_run_limit() -> None:
     raise ScriptRunManagerError(msg)
 
 
-def _require_script_worker_backend(backend: WorkerBackend | None) -> WorkerBackend:
+def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWorkerBackend:
     if backend is None:
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
@@ -1296,6 +1305,9 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> WorkerBacke
         raise ScriptRunManagerError(msg)
     if backend.cleanup_locator is None:
         msg = "Background script worker backend has no durable cleanup locator."
+        raise ScriptRunManagerError(msg)
+    if not isinstance(backend, _RetiringWorkerBackend):
+        msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
 
