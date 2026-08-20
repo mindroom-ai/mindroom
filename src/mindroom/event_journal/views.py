@@ -27,13 +27,12 @@ if TYPE_CHECKING:
         RoomHistoryRecovery,
     )
 
+    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
     from .approvals import (
-        ApprovalCardReservation,
-        BackgroundApprovalDecision,
-        RecordedApprovalDecision,
         StoredApprovalCard,
         UnreadableApprovalCard,
     )
+    from .background_approvals import BackgroundApprovalDecision
     from .interactive_questions import InteractiveSelection
     from .models import (
         AdmissionResult,
