@@ -1539,6 +1539,7 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.typing",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
@@ -2130,6 +2131,15 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.typing"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_session",
+]
+visibility = ["mindroom.response_runner"]
+
+[[modules]]
 path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
 visibility = [
@@ -2142,6 +2152,7 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.typing",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
@@ -4056,7 +4067,7 @@ expose = [
     "require_runtime_paths_arg",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = ["mindroom.matrix._owned_session"]
+visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing"]
 
 [[interfaces]]
 expose = ["AuthenticatedToDeviceEvent"]

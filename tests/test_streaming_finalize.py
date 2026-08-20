@@ -1215,7 +1215,7 @@ def test_the_gateway_hands_the_final_transform_to_the_stream() -> None:
     """
     import inspect  # noqa: PLC0415 - reading the construction is this test's whole point
 
-    source = inspect.getsource(DeliveryGateway.deliver_stream)
+    source = inspect.getsource(DeliveryGateway._deliver_stream)
 
     assert "final_text_transform=self._final_text_transform(request.identity)" in source
 
