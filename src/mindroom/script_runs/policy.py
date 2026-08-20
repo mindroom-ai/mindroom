@@ -22,7 +22,7 @@ __all__ = ["resolve_current_script_tool", "resolve_script_launch_grants"]
 
 
 _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
-    {"script", "compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
+    {"browser", "script", "compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
 )
 
 

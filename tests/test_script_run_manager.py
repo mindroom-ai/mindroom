@@ -336,40 +336,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_worker_replacement_waits_for_admitted_launch_and_rejects_racing_launch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A replacement drains an admitted launch before rejecting scripts that race its boundary."""
-    manager, backend, _client = _manager(tmp_path)
-    worker_allocation_started = threading.Event()
-    release_worker_allocation = threading.Event()
-    original_ensure_worker = backend.ensure_worker
-
-    def block_worker_allocation(*args: object, **kwargs: object) -> WorkerHandle:
-        worker_allocation_started.set()
-        assert release_worker_allocation.wait(timeout=5)
-        return original_ensure_worker(*args, **kwargs)
-
-    monkeypatch.setattr(backend, "ensure_worker", block_worker_allocation)
-    admitted_launch = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
-    assert await asyncio.to_thread(worker_allocation_started.wait, 1)
-    boundary = asyncio.create_task(manager.begin_worker_replacement())
-    await asyncio.sleep(0)
-
-    with pytest.raises(ScriptRunManagerError, match="worker replacement is in progress"):
-        await manager.run(_context(tmp_path), source="print('blocked')\n")
-
-    assert len(manager.store.list_runs()) == 1
-    assert boundary.done() is False
-    release_worker_allocation.set()
-    await admitted_launch
-    await boundary
-    await manager.end_worker_replacement()
-
-
-@pytest.mark.asyncio
-async def test_launch_persists_backend_admitted_after_replacement_gate(
+async def test_launch_persists_backend_admitted_after_global_launch_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -382,14 +349,14 @@ async def test_launch_persists_backend_admitted_after_replacement_gate(
     )
     gate_entered = asyncio.Event()
     release_gate = asyncio.Event()
-    admit_worker_launch = ScriptRunManager._admit_worker_launch
+    admit_launch = ScriptRunManager._admit_launch
 
     async def block_before_admission(self: ScriptRunManager) -> None:
         gate_entered.set()
         await release_gate.wait()
-        await admit_worker_launch(self)
+        await admit_launch(self)
 
-    monkeypatch.setattr(ScriptRunManager, "_admit_worker_launch", block_before_admission)
+    monkeypatch.setattr(ScriptRunManager, "_admit_launch", block_before_admission)
     launch = asyncio.create_task(manager.run(_context(tmp_path), source="print('ok')\n"))
     await gate_entered.wait()
     manager.worker_backend = replacement_backend

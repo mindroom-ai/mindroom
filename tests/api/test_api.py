@@ -1248,21 +1248,11 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
+    worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
         workers_api,
-        "get_primary_worker_manager",
-        _fake_get_primary_worker_manager,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
     response = test_client.get("/api/workers")
@@ -1270,18 +1260,17 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.status_code == 200
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] is not None
-    assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dashboard should expose manual idle-worker cleanup."""
+    """Manual cleanup refreshes live-script workers before applying the idle cutoff."""
+    actions: list[tuple[str, object]] = []
 
     class _FakeWorkerManager:
         idle_timeout_seconds = 60.0
 
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            actions.append(("cleanup", self))
             return [
                 WorkerHandle(
                     worker_id="worker-1",
@@ -1295,16 +1284,32 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
+    worker_manager = _FakeWorkerManager()
+
+    class _Lease:
+        released = False
+
+        def __enter__(self) -> _FakeWorkerManager:
+            return worker_manager
+
+        def __exit__(self, *_args: object) -> None:
+            self.released = True
+
+    lease = _Lease()
+    monkeypatch.setattr(
+        workers_api,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: lease,
+    )
+    config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
+        actions.append(("touch", manager))
+    )
 
     response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
+    assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]
+    assert lease.released is True
     assert response.json()["idle_timeout_seconds"] == 60.0
     assert response.json()["cleaned_workers"][0]["status"] == "idle"
 

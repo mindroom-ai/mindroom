@@ -3347,7 +3347,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
         assert orchestrator.config is current_config
-        assert runtime.manager.worker_replacement_in_progress is False
+        assert runtime._worker_replacement_pending is False
         assert runtime.manager.worker_backend is old_backend
         assert runtime._current_worker_lease is lease
 

@@ -384,6 +384,7 @@ class ScriptRuntimeLifecycle:
     _pending_worker_backend_locator: str | None = field(default=None, init=False, repr=False)
     _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
     _reload_launch_fence_started: bool = field(default=False, init=False, repr=False)
+    _worker_replacement_pending: bool = field(default=False, init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -553,14 +554,14 @@ class ScriptRuntimeLifecycle:
     async def complete_worker_replacement(self) -> None:
         """Reopen safely, then publish the backend for the config visible now."""
         try:
-            if not self.manager.worker_replacement_in_progress:
+            if not self._worker_replacement_pending:
                 return
+            self._worker_replacement_pending = False
 
             retired_lease = self._current_worker_lease
             self._clear_current_worker_backend()
             self._worker_config_epoch += 1
             release_task = None if retired_lease is None else _release_worker_lease_later(retired_lease)
-            await run_coroutine_until_complete(self.manager.end_worker_replacement())
             if release_task is not None:
                 await asyncio.shield(release_task)
 
@@ -655,7 +656,7 @@ class ScriptRuntimeLifecycle:
             self._reload_launch_fence_started = True
             if worker_configuration_changed:
                 replacement_started = True
-                await self.manager.begin_worker_replacement()
+                self._worker_replacement_pending = True
             await self._apply_update_pass(
                 removed_agents=removed_agents,
                 isolation_changes=isolation_changes,
@@ -672,7 +673,7 @@ class ScriptRuntimeLifecycle:
             )
         except BaseException as exc:
             if replacement_started:
-                await run_coroutine_until_complete(self.manager.end_worker_replacement())
+                self._worker_replacement_pending = False
             if launch_fence_started:
                 self._reload_launch_fence_started = False
                 await run_coroutine_until_complete(self.manager.end_startup_reconciliation())

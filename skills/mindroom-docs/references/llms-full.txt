@@ -10371,7 +10371,7 @@ MindRoom captures the configured `allowed_tools` value when the script launches.
 A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
 An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
 A later `allowed_tools` expansion cannot widen a running script's unattended approval authority; operator-authored `tool_approval` rules always apply live.
-The `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
+The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
 The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.

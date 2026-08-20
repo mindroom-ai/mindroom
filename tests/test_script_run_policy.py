@@ -116,6 +116,22 @@ def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
     assert all(grant.toolkit_name != "shell" for grant in grants)
 
 
+def test_launch_grants_exclude_stateful_browser_toolkit(tmp_path: Path) -> None:
+    """Background calls reject browser state that cannot survive per-call toolkit rebuilding."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["browser"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert all(grant.toolkit_name != "browser" for grant in grants)
+
+
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:
     """Hot reload removals revoke grants without consulting the launch config again."""
     context = _context_for_config(

@@ -1358,7 +1358,6 @@ async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pend
     manager = SimpleNamespace(
         begin_startup_reconciliation=begin_startup_reconciliation,
         end_startup_reconciliation=end_startup_reconciliation,
-        worker_replacement_in_progress=False,
     )
     config = _config()
     runtime = ScriptRuntimeLifecycle(
@@ -1666,7 +1665,7 @@ async def test_generation_replacement_interrupts_active_worker_script_before_rel
     assert release_observations == [durable]
     assert old_backend.actions[-2:] == [f"retire:{run.worker_key}", "release"]
     assert runtime._current_worker_lease is second
-    assert manager._worker_replacement_in_progress is False
+    assert runtime._worker_replacement_pending is False
     assert identities == ["backend-generation-a", "backend-generation-b"]
 
 
@@ -1702,8 +1701,6 @@ async def test_generation_replacement_aborts_before_every_run_has_durable_revoca
         request_revocation=request_revocation,
         revoke=AsyncMock(),
         reconcile_durable=AsyncMock(),
-        begin_worker_replacement=AsyncMock(),
-        end_worker_replacement=AsyncMock(),
     )
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
@@ -1785,7 +1782,7 @@ async def test_generation_replacement_aborts_when_broker_ownership_cannot_close(
     assert resolver.settlement_attempts == [run.run_id, run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is False
+    assert runtime._worker_replacement_pending is False
 
 
 @pytest.mark.asyncio
@@ -1935,7 +1932,7 @@ async def test_generation_replacement_aborts_when_process_reconciliation_fails(
     assert resolver.settled_runs == [run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is False
+    assert runtime._worker_replacement_pending is False
 
 
 @pytest.mark.asyncio
@@ -1997,7 +1994,7 @@ async def test_generation_replacement_aborts_when_reconciliation_leaves_a_worker
     assert resolver.settled_runs == [run.run_id]
     assert runtime._current_worker_lease is lease
     assert lease.released is False
-    assert manager.worker_replacement_in_progress is False
+    assert runtime._worker_replacement_pending is False
 
 
 @pytest.mark.asyncio
@@ -2077,11 +2074,11 @@ async def test_generation_replacement_drains_an_admitted_launch_before_snapshott
     assert durable.cancel_requested_at is not None
     assert durable.state is ScriptRunState.INTERRUPTED
     assert settlement_resolver.settled_runs == [run.run_id]
-    assert manager._worker_replacement_in_progress is True
+    assert runtime._worker_replacement_pending is True
 
     backend_available = False
     await runtime.complete_worker_replacement()
-    assert manager._worker_replacement_in_progress is False
+    assert runtime._worker_replacement_pending is False
 
     with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
         await manager.run(context, source="print('unavailable')\n")
@@ -2203,7 +2200,7 @@ async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_rel
         worker_lease_provider=lambda _locator: None,
     )
     runtime._current_worker_lease = lease
-    await manager.begin_worker_replacement()
+    runtime._worker_replacement_pending = True
 
     completion = asyncio.create_task(runtime.complete_worker_replacement())
     try:
@@ -2212,7 +2209,7 @@ async def test_cancelled_completion_reopens_admission_before_a_blocked_lease_rel
         with pytest.raises(asyncio.CancelledError):
             await completion
 
-        assert manager.worker_replacement_in_progress is False
+        assert runtime._worker_replacement_pending is False
         assert manager.worker_backend is None
         assert runtime._current_worker_lease is None
         with pytest.raises(ScriptRunManagerError, match="worker backend is unavailable"):
