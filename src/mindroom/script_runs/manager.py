@@ -32,6 +32,7 @@ from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
 from mindroom.shell_supervisor import (
+    background_script_supervision_supported,
     check_command_via_supervisor,
     ensure_shell_supervisor,
     kill_command_via_supervisor,
@@ -284,7 +285,7 @@ class ScriptRunManager:
             if self._worker_launches_in_progress == 0:
                 self._worker_launches_drained.set()
 
-    async def run(
+    async def run(  # noqa: PLR0915
         self,
         context: ToolRuntimeContext,
         *,
@@ -311,15 +312,24 @@ class ScriptRunManager:
             context.runtime_paths,
             worker_backend_configured=worker_backend is not None,
         ):
+            if not self.gateway_url:
+                msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
+                raise ScriptRunManagerError(msg)
             worker_backend = _require_script_worker_backend(worker_backend)
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
+                raise ScriptRunManagerError(msg)
+            if worker_target.private_agent_names:
+                msg = "Background scripts in dedicated workers are not supported for private agents."
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
             worker_backend_locator = worker_backend.cleanup_locator
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
+            if not background_script_supervision_supported():
+                msg = "Background scripts require Linux process-group containment."
+                raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = None
             worker_backend_locator = None
@@ -329,7 +339,7 @@ class ScriptRunManager:
             raise ScriptRunManagerError(msg)
 
         token, token_hash = mint_script_capability()
-        launch_grants = self.grant_resolver(context)
+        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
         if effective_limits.allowed_tools is not None:
             allowed_tools = frozenset(effective_limits.allowed_tools)
             launch_grants = tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
@@ -450,7 +460,7 @@ class ScriptRunManager:
         await self.broker.cancel_run(run.run_id)
         await self._cleanup_owned_resources(durable)
         await asyncio.to_thread(
-            self.store.transition_run,
+            self.store.finalize_cleaned_run,
             run.run_id,
             state=failure_state,
             error=_bounded_error(failure),
@@ -465,7 +475,7 @@ class ScriptRunManager:
         await self.broker.cancel_run(run.run_id)
         await self._cleanup_owned_resources(run)
         return await asyncio.to_thread(
-            self.store.transition_run,
+            self.store.finalize_cleaned_run,
             run.run_id,
             state=_terminal_state_for(run),
         )
@@ -771,7 +781,7 @@ class ScriptRunManager:
         ready = await asyncio.to_thread(self.store.get_run, run.run_id)
         if ready.cancel_requested_at is not None:
             return await self._complete_cancel_before_spawn(ready)
-        socket_path = ensure_shell_supervisor()
+        socket_path = await asyncio.to_thread(ensure_shell_supervisor)
         environment = dict(os.environ)
         environment.update(context.runtime_paths.process_env)
         environment.pop(CONTROL_STATE_PATH_ENV, None)
@@ -860,9 +870,10 @@ class ScriptRunManager:
     async def _process_status(self, run: ScriptRunRecord) -> WorkerScriptStatus:
         supervisor_handle = supervisor_handle_for_run(run.run_id)
         if run.local_unsafe:
+            socket_path = await asyncio.to_thread(ensure_shell_supervisor)
             message = await asyncio.to_thread(
                 check_command_via_supervisor,
-                ensure_shell_supervisor(),
+                socket_path,
                 namespace=_local_namespace(run.run_id),
                 handle=supervisor_handle,
             )
@@ -974,7 +985,7 @@ class ScriptRunManager:
             await self.broker.cancel_run(run.run_id)
         await self._cleanup_owned_resources(run)
         return await asyncio.to_thread(
-            self.store.transition_run,
+            self.store.finalize_cleaned_run,
             run.run_id,
             state=_terminal_state_for(run),
         )
@@ -1035,9 +1046,10 @@ class ScriptRunManager:
     async def _signal_process(self, run: ScriptRunRecord, *, force: bool) -> WorkerScriptCancel:
         supervisor_handle = supervisor_handle_for_run(run.run_id)
         if run.local_unsafe:
+            socket_path = await asyncio.to_thread(ensure_shell_supervisor)
             message = await asyncio.to_thread(
                 kill_command_via_supervisor,
-                ensure_shell_supervisor(),
+                socket_path,
                 namespace=_local_namespace(run.run_id),
                 handle=supervisor_handle,
                 force=force,
@@ -1094,7 +1106,6 @@ class ScriptRunManager:
             if run.worker_key is not None or run.worker_id is not None:
                 msg = "Unsafe-local script run cannot own a dedicated worker."
                 raise ScriptRunManagerError(msg)
-            await asyncio.to_thread(self.store.clear_cleanup_ownership, run.run_id)
             return
         worker_key = run.worker_key
         if worker_key is None or not script_worker_key_belongs_to_run(worker_key, run.run_id):
@@ -1105,7 +1116,6 @@ class ScriptRunManager:
             msg = "Background script worker backend is unavailable; retry cleanup."
             raise ScriptRunManagerError(msg)
         await asyncio.to_thread(backend.retire_worker, worker_key)
-        await asyncio.to_thread(self.store.clear_cleanup_ownership, run.run_id)
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:

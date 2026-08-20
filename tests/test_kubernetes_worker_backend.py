@@ -12,7 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,6 +20,7 @@ from mindroom.config.main import load_config
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    RuntimePaths,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
     sandbox_startup_manifest_path,
@@ -62,8 +63,6 @@ from mindroom.workers.runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from mindroom.constants import RuntimePaths
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
@@ -600,6 +599,49 @@ def _install_real_elapsed_wait_for_ready(
             sleep(poll_interval_seconds)
 
     backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
+
+
+def test_kubernetes_backend_loads_kubeconfig_from_runtime_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary client loading must use the same runtime KUBECONFIG selection as cleanup locators."""
+    kubeconfig_path = tmp_path / "cluster.yaml"
+    kubeconfig_path.write_text("apiVersion: v1\ncurrent-context: test\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"KUBECONFIG={kubeconfig_path}\n", encoding="utf-8")
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=env_path,
+        storage_root=tmp_path / "storage",
+        control_state_root=tmp_path / "control",
+        process_env={},
+        env_file_values={"KUBECONFIG": str(kubeconfig_path)},
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    resources = backend._resources
+    resources.apps_api = None
+    resources.core_api = None
+    resources.api_exception_cls = None
+    kubernetes_config = SimpleNamespace(
+        load_incluster_config=MagicMock(side_effect=RuntimeError("not in cluster")),
+        load_kube_config=MagicMock(),
+    )
+    modules = {
+        "kubernetes.config": kubernetes_config,
+        "kubernetes.client": SimpleNamespace(AppsV1Api=MagicMock(), CoreV1Api=MagicMock()),
+        "kubernetes.client.exceptions": SimpleNamespace(ApiException=_FakeApiError),
+    }
+    monkeypatch.setattr(
+        kubernetes_resources_module.importlib,
+        "import_module",
+        lambda module_name: modules[module_name],
+    )
+
+    resources._load_clients()
+
+    kubernetes_config.load_kube_config.assert_called_once_with(config_file=str(kubeconfig_path.resolve()))
 
 
 def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tmp_path: Path) -> None:  # noqa: PLR0915
@@ -1871,6 +1913,43 @@ router:
     deployment = apps_api.created_bodies[0]
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     assert any(mount.get("subPath") == "knowledge/shared-docs" for mount in volume_mounts)
+
+
+def test_kubernetes_backend_rejects_ambiguous_normalized_agent_names(tmp_path: Path) -> None:
+    """A worker key must never select one arbitrary agent from a normalized-name collision."""
+    knowledge_root = tmp_path / "knowledge"
+    knowledge_root.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  My Agent:
+    display_name: First
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+  My_Agent:
+    display_name: Second
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(WorkerBackendError, match="ambiguous normalized agent name"):
+        backend.ensure_worker(WorkerSpec("v1:tenant-123:shared:My_Agent"), now=10.0)
 
 
 def test_kubernetes_backend_does_not_duplicate_knowledge_already_visible_in_agent_root(tmp_path: Path) -> None:

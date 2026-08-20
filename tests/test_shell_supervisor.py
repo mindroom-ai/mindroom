@@ -150,7 +150,7 @@ async def _assert_linux_pid_not_running(pid: int) -> None:
     for _ in range(40):
         try:
             state = stat_path.read_text(encoding="utf-8").split()[2]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return
         if state == "Z":
             return
@@ -809,6 +809,41 @@ async def test_supervisor_sigterm_preserves_target_graceful_exit(
         assert handled_path.read_text(encoding="utf-8") == "handled"
     finally:
         await _kill(socket_path, handle, force=True)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process-group cleanup regression")
+@pytest.mark.asyncio
+async def test_finished_script_kills_same_group_descendants(
+    manager: _ShellSupervisorManager,
+    tmp_path: Path,
+) -> None:
+    """A script leader cannot leave executing descendants after its handle becomes terminal."""
+    socket_path = manager.ensure()
+    child_pid_path = tmp_path / "child-pid"
+    script = (
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(300)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
+    )
+    result = await _run(socket_path, [sys.executable, "-c", script, str(child_pid_path)], timeout=0)
+    handle = _extract_handle(result)
+    child_pid: int | None = None
+    try:
+        for _ in range(40):
+            if child_pid_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+        assert "FINISHED" in await _wait_for_finished(socket_path, handle)
+        await _assert_linux_pid_not_running(child_pid)
+    finally:
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio

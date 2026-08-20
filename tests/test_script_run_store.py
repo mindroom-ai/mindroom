@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.constants import RuntimePaths
+from mindroom.script_runs import store as store_module
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallState,
@@ -81,6 +82,33 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert len(store.pending_calls(run.run_id)) == 1
 
 
+def test_write_transaction_closes_connection_when_begin_fails(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite lock failure during BEGIN cannot leak its connection."""
+    store = ScriptRunStore(runtime_paths)
+
+    class BeginFailure:
+        closed = False
+
+        def execute(self, statement: str) -> None:
+            assert statement == "BEGIN IMMEDIATE"
+            msg = "database is locked"
+            raise sqlite3.OperationalError(msg)
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = BeginFailure()
+    monkeypatch.setattr(store_module, "_connect", lambda _path: connection)
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"), store._write_transaction():
+        pass
+
+    assert connection.closed is True
+
+
 def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths: RuntimePaths) -> None:
     """Launch snapshot ownership is a storage-relative, containment-checked fact."""
     store = ScriptRunStore(runtime_paths)
@@ -116,6 +144,35 @@ def test_observed_exit_revokes_and_retains_output_before_terminal_transition(run
     assert observed.output == "finished"
     terminal = store.transition_run(run.run_id, state=ScriptRunState.EXITED)
     assert terminal.output == "finished"
+
+
+def test_terminal_transition_atomically_clears_cleanup_ownership(runtime_paths: RuntimePaths) -> None:
+    """A crash cannot expose cleared ownership before the terminal state is durable."""
+    store = ScriptRunStore(runtime_paths)
+    created = store.create_run(
+        replace(
+            _new_run(),
+            worker_key="v1:t:user_agent:alice:run-1:watcher",
+            worker_id="worker-1",
+            worker_backend_locator="locator-a",
+            snapshot_locator="workers/worker-1/workspace/.mindroom/script-runs/run-1",
+        ),
+    )
+    store.record_process_exit(
+        created.run_id,
+        exit_code=0,
+        error=None,
+        output="finished",
+        cancellation_reason="Background script process exited.",
+    )
+
+    terminal = store.finalize_cleaned_run(created.run_id, state=ScriptRunState.EXITED)
+
+    assert terminal.state is ScriptRunState.EXITED
+    assert terminal.worker_key is None
+    assert terminal.worker_id is None
+    assert terminal.worker_backend_locator is None
+    assert terminal.snapshot_locator is None
 
 
 def test_run_store_rejects_oversized_terminal_output(runtime_paths: RuntimePaths) -> None:

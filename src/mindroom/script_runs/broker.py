@@ -677,7 +677,11 @@ class ScriptToolBroker:
         correlation_id: str,
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
-        if self.runtime_resolver.is_authorized(run, config=context.current_config) is not True:
+        authorization_state = self.runtime_resolver.is_authorized(run, config=context.current_config)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if authorization_state is False:
             raise _CurrentGrantRevokedError
         if call.grant not in run.grants:
             raise _CurrentGrantRevokedError

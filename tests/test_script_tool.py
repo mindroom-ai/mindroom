@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -74,6 +74,7 @@ def _run(*, state: ScriptRunState = ScriptRunState.RUNNING) -> ScriptRunRecord:
 class _Manager:
     limits: ScriptRunLimits | None = None
     calls: builtins.list[str] = field(default_factory=list)
+    run_record: ScriptRunRecord = field(default_factory=_run)
 
     async def run(
         self,
@@ -87,12 +88,12 @@ class _Manager:
         del context, source, path, name
         self.limits = limits
         self.calls.append("run")
-        return _run()
+        return self.run_record
 
     async def status(self, context: ToolRuntimeContext, *, run_id: str) -> ScriptRunStatus:
         del context, run_id
         self.calls.append("status")
-        return ScriptRunStatus(run=_run(), output="watching")
+        return ScriptRunStatus(run=self.run_record, output="watching")
 
     async def cancel(
         self,
@@ -188,6 +189,29 @@ async def test_script_tool_public_run_uses_derived_execution_mode_without_redund
         max_tool_calls_per_minute=7,
         max_runtime_hours=3,
     )
+
+
+@pytest.mark.asyncio
+async def test_script_tool_keeps_worker_mode_after_terminal_cleanup(
+    script_context: ToolRuntimeContext,
+) -> None:
+    """Cleared worker ownership must not relabel a completed worker run as unsafe local."""
+    terminal = replace(
+        _run(state=ScriptRunState.EXITED),
+        worker_key=None,
+        worker_id=None,
+        snapshot_locator=None,
+        finished_at=_run().created_at,
+    )
+    manager = _Manager(run_record=terminal)
+    bind_script_run_manager(manager)
+    try:
+        with tool_runtime_context(script_context):
+            payload = json.loads(await ScriptTools().status_script(run_id=terminal.run_id))
+    finally:
+        bind_script_run_manager(None)
+
+    assert payload["run"]["execution_mode"] == "worker"
 
 
 @pytest.mark.asyncio

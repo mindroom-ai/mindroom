@@ -199,6 +199,7 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
 Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
+Dedicated-worker script launch currently rejects private agents because their canonical private workspace cannot be projected into a run-specific worker without weakening isolation.
 The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
 The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
 The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
@@ -211,6 +212,7 @@ Brokered tool calls still use the durable requester-and-agent execution identity
 
 Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` permits local execution instead of a worker.
 Local execution is marked unsafe, runs under the primary host account, inherits the primary process environment, and makes no secret-isolation claim.
+Background scripts require Linux process-group containment and return an error on unsupported platforms.
 Use local execution only for trusted development scripts.
 
 ## Lifecycle And Failure Semantics

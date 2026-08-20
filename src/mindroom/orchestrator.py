@@ -2176,7 +2176,10 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
-        await self._script_runtime.shutdown()
+        try:
+            await self._script_runtime.shutdown()
+        except Exception:
+            logger.exception("Background script runtime shutdown failed")
         await self._approval_transport.close()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
@@ -2306,7 +2309,15 @@ async def _run_api_server(
 
     async def on_started(bound_host: str, bound_port: int) -> None:
         if script_runtime is not None:
-            script_runtime.bind_api(await script_gateway_url(runtime_paths, host=bound_host, port=bound_port))
+            try:
+                gateway_url = await script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
+            except ValueError:
+                explicit_url = (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip()
+                public_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
+                if explicit_url or public_url:
+                    raise
+                gateway_url = ""
+            script_runtime.bind_api(gateway_url)
 
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())

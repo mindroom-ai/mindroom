@@ -1342,6 +1342,44 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_maintenance_interrupts_run_when_its_agent_was_removed(tmp_path: Path) -> None:
+    """A removed agent is durable revocation, not transient bot unavailability."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run = _stored_run(store, runtime_paths)
+
+    def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
+        return store.request_cancel(run_id, reason=reason)
+
+    async def reconcile_durable(*, run_id: str, broker_revoked: bool = False) -> ScriptRunRecord:
+        assert broker_revoked is True
+        return store.transition_run(run_id, state=ScriptRunState.INTERRUPTED)
+
+    manager = SimpleNamespace(
+        worker_backend=None,
+        request_revocation=MagicMock(side_effect=request_revocation),
+        revoke=AsyncMock(return_value=run),
+        reconcile_revoked_process=AsyncMock(return_value=run),
+        reconcile_durable=AsyncMock(side_effect=reconcile_durable),
+    )
+    resolver = SimpleNamespace(is_authorized=MagicMock(return_value=None))
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=store,
+        broker=MagicMock(),
+        manager=manager,
+        resolver=resolver,
+        config_provider=lambda: Config(agents={}, defaults={"tools": []}),
+        worker_lease_provider=lambda _locator: None,
+    )
+
+    await runtime.reconcile_once()
+
+    manager.request_revocation.assert_called_once()
+    assert store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
 async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(tmp_path: Path) -> None:
     """A transient bot restart is not denial, but it cannot authorize a broker call."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -3295,8 +3333,14 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
     store = ScriptRunStore(runtime_paths)
     run_id = f"script-{'e' * 32}"
     running = _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id)
-    running = store.clear_cleanup_ownership(running.run_id)
-    terminal = store.transition_run(running.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    store.record_process_exit(
+        running.run_id,
+        exit_code=0,
+        error=None,
+        output="",
+        cancellation_reason="Background script process exited.",
+    )
+    terminal = store.finalize_cleaned_run(running.run_id, state=ScriptRunState.EXITED)
     assert terminal.finished_at is not None
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,

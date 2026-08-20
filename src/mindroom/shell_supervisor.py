@@ -72,6 +72,11 @@ class ShellSupervisorStartupError(RuntimeError):
     """The shell supervisor process failed to start or become ready."""
 
 
+def background_script_supervision_supported() -> bool:
+    """Return whether hard supervisor death also kills its script process group."""
+    return sys.platform.startswith("linux")
+
+
 @dataclass(frozen=True, slots=True)
 class _ShellSupervisorStatus:
     """Canonical interpretation of one shell-supervisor status reply."""
@@ -115,7 +120,7 @@ async def _handle_run(
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
     command_argv = [str(item) for item in argv_payload]
-    if sys.platform.startswith("linux"):
+    if background_script_supervision_supported():
         command_argv = [
             sys.executable,
             "-m",

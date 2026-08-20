@@ -449,6 +449,67 @@ class TestAgentBot(AgentBotTestBase):
         unbind_script_runtime.assert_called_once_with(ANY)
 
     @pytest.mark.asyncio
+    async def test_run_api_server_starts_without_optional_worker_script_gateway(self, tmp_path: Path) -> None:
+        """An unused worker-script callback must not make the whole API unavailable."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                self.on_started = on_started
+
+            async def serve(self) -> None:
+                assert callable(self.on_started)
+                await self.on_started("127.0.0.1", 43210)
+
+        runtime_paths = RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path / "storage",
+            control_state_root=tmp_path / "control",
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+                "MINDROOM_WORKER_BACKEND": "static_runner",
+                "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            },
+        )
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        script_runtime = SimpleNamespace(
+            broker=MagicMock(),
+            bind_api=MagicMock(),
+            unbind_api=AsyncMock(),
+            touch_live_workers=MagicMock(),
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime"),
+            patch("mindroom.api.main.unbind_script_runtime"),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                script_runtime=script_runtime,
+                shutdown_requested=shutdown_requested,
+            )
+
+        script_runtime.bind_api.assert_called_once_with("")
+        script_runtime.unbind_api.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
         """server.serve() returning after an intentional shutdown should not be fatal."""
 
@@ -3006,10 +3067,20 @@ class TestMultiAgentOrchestrator:
             msg = "mcp shutdown failed"
             raise RuntimeError(msg)
 
+        async def _shutdown_scripts() -> None:
+            calls.append("scripts")
+            msg = "script shutdown failed"
+            raise RuntimeError(msg)
+
         orchestrator._knowledge_refresh_scheduler = MagicMock()
         orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
 
         with (
+            patch.object(
+                type(orchestrator._script_runtime),
+                "shutdown",
+                new=AsyncMock(side_effect=_shutdown_scripts),
+            ),
             patch(
                 "mindroom.orchestrator.shutdown_approval_runtime",
                 new=AsyncMock(side_effect=_shutdown_approvals),
@@ -3029,7 +3100,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
-        assert calls == ["transport", "approvals", "mcp"]
+        assert calls == ["scripts", "transport", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
 
     @pytest.mark.asyncio

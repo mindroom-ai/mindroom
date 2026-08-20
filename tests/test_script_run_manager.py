@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -671,12 +672,46 @@ async def test_script_process_scope_is_user_agent_independent_of_tool_scope(
 
 @pytest.mark.asyncio
 async def test_script_process_target_preserves_private_agent_visibility(tmp_path: Path) -> None:
-    """Dedicated script workers retain the private-agent visibility required by their workspace."""
+    """Private-agent scripts fail closed rather than mounting a fresh empty state projection."""
     manager, backend, _client = _manager(tmp_path)
 
-    await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
+    with pytest.raises(ScriptRunManagerError, match="private agents"):
+        await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
 
-    assert backend.specs[-1].private_agent_names == frozenset({"watcher"})
+    assert backend.specs == []
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_worker_launch_rejects_missing_script_gateway_before_durable_work(tmp_path: Path) -> None:
+    """A missing optional gateway disables script launch without breaking the rest of MindRoom."""
+    manager, backend, _client = _manager(tmp_path)
+    manager.gateway_url = ""
+
+    with pytest.raises(ScriptRunManagerError, match="MINDROOM_SCRIPT_GATEWAY_URL"):
+        await manager.run(_context(tmp_path), source="print('ok')\n")
+
+    assert backend.specs == []
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_unsafe_local_launch_rejects_uncontained_platform_before_durable_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsafe-local scripts fail closed when supervisor hard-crash containment is unavailable."""
+    manager, backend, _client = _manager(tmp_path, mode="off")
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: False, raising=False)
+    launch = AsyncMock(return_value=f"Handle: shell:{'a' * 32}")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch)
+
+    with pytest.raises(ScriptRunManagerError, match="Linux"):
+        await manager.run(_context(tmp_path, mode="off"), source="print('ok')\n")
+
+    launch.assert_not_awaited()
+    assert backend.specs == []
+    assert manager.store.list_runs() == []
 
 
 @pytest.mark.asyncio

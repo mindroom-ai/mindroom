@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.tools import Toolkit
@@ -412,6 +412,24 @@ async def test_script_broker_keeps_valid_capability_retryable_while_bot_is_unava
         await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert broker.store.pending_calls("run-1") == []
+
+
+@pytest.mark.asyncio
+async def test_script_broker_does_not_misreport_dispatch_unavailability_as_revocation(tmp_path: Path) -> None:
+    """A bot restart between claim and dispatch remains a retryable runtime failure."""
+    broker, token = _broker(tmp_path, events=[])
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    resolver.is_authorized = MagicMock(side_effect=[True, None])
+
+    accepted = await broker.accept_authenticated(_request(), f"Bearer {token}")
+    receipt = await broker._tasks[(accepted.run_id, accepted.call_id)]
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "runtime_failure",
+        "message": "Background script owner runtime is temporarily unavailable.",
+        "retryable": True,
+    }
 
 
 def _replace_calculator_toolkit(

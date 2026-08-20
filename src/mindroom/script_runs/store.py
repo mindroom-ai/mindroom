@@ -57,6 +57,7 @@ _RUN_TRANSITIONS = {
     ScriptRunState.STARTING: frozenset(
         {
             ScriptRunState.RUNNING,
+            ScriptRunState.EXITED,
             ScriptRunState.FAILED,
             ScriptRunState.CANCELLED,
             ScriptRunState.INTERRUPTED,
@@ -476,15 +477,34 @@ class ScriptRunStore:
             )
         return updated
 
-    def clear_cleanup_ownership(self, run_id: str) -> ScriptRunRecord:
-        """Clear durable snapshot and worker ownership only after exact cleanup succeeds."""
+    def finalize_cleaned_run(
+        self,
+        run_id: str,
+        *,
+        state: ScriptRunState,
+        error: str | None = None,
+    ) -> ScriptRunRecord:
+        """Atomically publish terminal state and clear externally cleaned ownership."""
+        if state not in _TERMINAL_RUN_STATES:
+            msg = f"Script run '{run_id}' cleanup can finalize only to a terminal state."
+            raise ScriptRunStoreError(msg)
         with self._write_transaction() as connection:
             row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 raise ScriptRunNotFoundError(run_id)
             run = _run_from_row(row)
+            if run.state in _TERMINAL_RUN_STATES:
+                return run
+            if state not in _RUN_TRANSITIONS[run.state]:
+                msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
+                raise ScriptRunStoreError(msg)
+            finished_at = run.finished_at or _utc_now()
+            final_error = run.error if error is None else error
             updated = replace(
                 run,
+                state=state,
+                finished_at=finished_at,
+                error=final_error,
                 worker_key=None,
                 worker_id=None,
                 worker_backend_locator=None,
@@ -493,12 +513,12 @@ class ScriptRunStore:
             connection.execute(
                 """
                 UPDATE script_runs
-                SET worker_key = NULL, worker_id = NULL,
+                SET state = ?, finished_at = ?, error = ?, worker_key = NULL, worker_id = NULL,
                     worker_backend_locator = NULL,
                     snapshot_locator = NULL
                 WHERE run_id = ?
                 """,
-                (run_id,),
+                (state.value, finished_at, final_error, run_id),
             )
         return updated
 
@@ -611,14 +631,15 @@ class ScriptRunStore:
     @contextmanager
     def _write_transaction(self) -> Iterator[sqlite3.Connection]:
         connection = _connect(self.database_path)
-        connection.execute("BEGIN IMMEDIATE")
         try:
-            yield connection
-        except BaseException:
-            connection.execute("ROLLBACK")
-            raise
-        else:
-            connection.execute("COMMIT")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            else:
+                connection.execute("COMMIT")
         finally:
             connection.close()
 

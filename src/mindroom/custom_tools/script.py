@@ -143,7 +143,7 @@ def _public_run(run: ScriptRunRecord) -> dict[str, object]:
         "agent_name": run.agent_name,
         "name": run.name,
         "state": run.state.value,
-        "execution_mode": "worker" if run.worker_key is not None else "unsafe_local",
+        "execution_mode": "unsafe_local" if run.local_unsafe else "worker",
         "local_unsafe": run.local_unsafe,
         "created_at": run.created_at,
         "started_at": run.started_at,

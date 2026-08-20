@@ -15,13 +15,14 @@ from fastapi.testclient import TestClient
 
 from mindroom import shell_supervisor as shell_supervisor_module
 from mindroom.api import sandbox_runner as sandbox_runner_module
+from mindroom.api import sandbox_runner_scripts as sandbox_runner_scripts_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.shell_supervisor import _ShellSupervisorManager
+from mindroom.shell_supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
 from mindroom.workers.backends import local as local_workers_module
 
 if TYPE_CHECKING:
@@ -123,6 +124,65 @@ def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
         headers=_HEADERS,
         json={"worker_key": _WORKER_KEY, "force": True},
     )
+
+
+def test_worker_script_endpoint_rejects_uncontained_platform(
+    runner_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker scripts fail closed where supervisor hard-crash containment is unavailable."""
+    client, workspace = runner_client
+    run_id = f"script-{'b' * 32}"
+    payload = _run_payload(workspace, run_id=run_id, source="print('must not run')\n")
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "background_script_supervision_supported",
+        lambda: False,
+        raising=False,
+    )
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "error": "Background scripts require Linux process-group containment.",
+        "failure_kind": "worker",
+    }
+
+
+@pytest.mark.parametrize("operation", ["status", "cancel"])
+def test_worker_script_controls_report_supervisor_startup_failure(
+    runner_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Control routes return a worker failure instead of leaking supervisor startup errors."""
+    client, _workspace = runner_client
+    run_id = f"script-{'c' * 32}"
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        lambda: (_ for _ in ()).throw(ShellSupervisorStartupError("supervisor unavailable")),
+    )
+
+    if operation == "status":
+        response = client.get(
+            f"/api/sandbox-runner/scripts/{run_id}",
+            headers=_HEADERS,
+            params={"worker_key": _WORKER_KEY},
+        )
+    else:
+        response = client.post(
+            f"/api/sandbox-runner/scripts/{run_id}/cancel",
+            headers=_HEADERS,
+            json={"worker_key": _WORKER_KEY, "force": False},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["error"] == "supervisor unavailable"
+    assert response.json()["failure_kind"] == "worker"
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs.models import supervisor_handle_for_run
 from mindroom.shell_supervisor import (
     ShellSupervisorStartupError,
+    background_script_supervision_supported,
     check_command_via_supervisor,
     ensure_shell_supervisor,
     kill_command_via_supervisor,
@@ -322,6 +323,12 @@ def _parse_cancel_message(message: str) -> SandboxScriptCancelResponse:
 @router.post("/run", response_model=SandboxScriptRunResponse)
 async def run_script_in_worker(request: Request, payload: SandboxScriptRunRequest) -> SandboxScriptRunResponse:
     """Launch one verified source snapshot under the existing shell supervisor."""
+    if not background_script_supervision_supported():
+        return SandboxScriptRunResponse(
+            ok=False,
+            error="Background scripts require Linux process-group containment.",
+            failure_kind="worker",
+        )
     prepared = _prepare_worker(
         request,
         worker_key=payload.worker_key,
@@ -338,7 +345,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
     environment = {**base_environment, **execution_environment, **script_environment}
     environment.pop(CONTROL_STATE_PATH_ENV, None)
     try:
-        socket_path = ensure_shell_supervisor()
+        socket_path = await asyncio.to_thread(ensure_shell_supervisor)
     except ShellSupervisorStartupError as exc:
         return SandboxScriptRunResponse(ok=False, error=str(exc), failure_kind="worker")
     message = await run_command_via_supervisor(
@@ -362,7 +369,15 @@ async def status_script_in_worker(
 ) -> SandboxScriptStatusResponse:
     """Poll one namespaced supervisor handle without owning lifecycle state."""
     normalized_worker_key = _normalized_worker_key(request, worker_key)
-    socket_path = ensure_shell_supervisor()
+    try:
+        socket_path = await asyncio.to_thread(ensure_shell_supervisor)
+    except ShellSupervisorStartupError as exc:
+        return SandboxScriptStatusResponse(
+            ok=False,
+            state="unknown",
+            error=str(exc),
+            failure_kind="worker",
+        )
     message = await asyncio.to_thread(
         check_command_via_supervisor,
         socket_path,
@@ -380,7 +395,15 @@ async def cancel_script_in_worker(
 ) -> SandboxScriptCancelResponse:
     """Signal one namespaced supervisor handle without changing durable desired state."""
     normalized_worker_key = _normalized_worker_key(request, payload.worker_key)
-    socket_path = ensure_shell_supervisor()
+    try:
+        socket_path = await asyncio.to_thread(ensure_shell_supervisor)
+    except ShellSupervisorStartupError as exc:
+        return SandboxScriptCancelResponse(
+            ok=False,
+            cancel_requested=False,
+            error=str(exc),
+            failure_kind="worker",
+        )
     message = await asyncio.to_thread(
         kill_command_via_supervisor,
         socket_path,

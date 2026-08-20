@@ -869,7 +869,13 @@ class ScriptRuntimeLifecycle:
         except WorkerBackendError:
             logger.warning("script_worker_backend_refresh_pending", exc_info=True)
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        unauthorized = [run for run in runs if self.resolver.is_authorized(run) is False]
+        current_config = self.config_provider()
+        unauthorized = [
+            run
+            for run in runs
+            if (current_config is not None and run.agent_name not in current_config.agents)
+            or self.resolver.is_authorized(run, config=current_config) is False
+        ]
         if unauthorized:
             await self._interrupt_runs(
                 unauthorized,
