@@ -139,9 +139,9 @@ class ConfigReloadLifecycle:
         self._requested_at = None
         await cancel_logged_task(task)
 
-    async def _update_config(self) -> bool:
-        """Reload configuration from disk and dispatch the resulting update plan."""
-        async with self._response_admission_apply_lock, self.config_update_lock:
+    async def _update_config(self) -> bool | None:
+        """Reload config, returning whether agents changed or ``None`` when superseded."""
+        async with self._response_admission_apply_lock:
             # Config validation executes plugin modules and walks the filesystem;
             # keep it off the event loop (#1260). Admission stays open because
             # nothing is published until loading and planning both succeed.
@@ -155,14 +155,15 @@ class ConfigReloadLifecycle:
 
                 async def load_initial_config() -> None:
                     nonlocal updated
-                    updated = await self.load_initial_config(new_config)
+                    async with self.config_update_lock:
+                        updated = await self.load_initial_config(new_config)
 
-                await self._apply_after_response_drain(
+                applied = await self._apply_after_response_drain(
                     load_initial_config,
                     operation_name="configuration reload",
                     request_is_current=self._reload_publication_is_current,
                 )
-                return updated
+                return updated if applied else None
 
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and
@@ -195,14 +196,15 @@ class ConfigReloadLifecycle:
 
             async def apply_update_plan() -> None:
                 nonlocal updated
-                updated = await self.apply_update_plan(current_config, plan, plugin_changes)
+                async with self.config_update_lock:
+                    updated = await self.apply_update_plan(current_config, plan, plugin_changes)
 
-            await self._apply_after_response_drain(
+            applied = await self._apply_after_response_drain(
                 apply_update_plan,
                 operation_name="configuration reload",
                 request_is_current=self._reload_publication_is_current,
             )
-            return updated
+            return updated if applied else None
 
     def _reload_publication_is_current(self) -> bool:
         """Allow direct updates, but skip queued snapshots superseded before publication."""
@@ -328,8 +330,8 @@ class ConfigReloadLifecycle:
         *,
         operation_name: str,
         request_is_current: Callable[[], bool],
-    ) -> None:
-        """Drain responses and apply while the caller owns replacement serialization."""
+    ) -> bool:
+        """Drain responses and report whether the serialized operation was applied."""
         loop = asyncio.get_running_loop()
         drain_state = _ReplacementDrainState()
         while request_is_current():
@@ -350,9 +352,10 @@ class ConfigReloadLifecycle:
             self.response_admission_gate.close()
             break
         else:
-            return
+            return False
 
         await self._apply_with_closed_admission(operation)
+        return True
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""
@@ -369,7 +372,9 @@ class ConfigReloadLifecycle:
             if failed_files is not None:
                 self.failed_reload_source_files = failed_files
             return
-        if updated:
+        if updated is None:
+            logger.info("Configuration reload superseded before publication; skipping")
+        elif updated:
             logger.info("Configuration update applied to affected agents")
         else:
             logger.info("No agent changes detected in configuration update")

@@ -172,6 +172,43 @@ async def test_reload_drains_active_responses_before_applying(
 
 
 @pytest.mark.asyncio
+async def test_reload_does_not_hold_config_lock_while_draining_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Response drain must not block unrelated config-lock owners."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
+    gate = ResponseAdmissionGate()
+    assert gate.admit()
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    load_started = threading.Event()
+
+    def observed_load_config(*_args: object, **_kwargs: object) -> Config:
+        load_started.set()
+        return new_config
+
+    load_config_mock = MagicMock(side_effect=observed_load_config)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        current_config=current_config,
+        response_admission_gate=gate,
+    )
+
+    update_task = asyncio.create_task(lifecycle._update_config())
+    assert await asyncio.to_thread(load_started.wait, 1)
+    await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(lifecycle.config_update_lock.acquire(), timeout=0.1)
+    lifecycle.config_update_lock.release()
+    lifecycle.apply_update_plan.assert_not_awaited()
+
+    gate.release()
+    assert await asyncio.wait_for(update_task, timeout=1) is True
+
+
+@pytest.mark.asyncio
 async def test_semantic_noop_reload_does_not_wait_for_active_responses(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -357,6 +394,8 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     """A newer config change should not make an active response reload early."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.005)
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
     gate = ResponseAdmissionGate()
     assert gate.admit()
     current_config = Config()
@@ -383,6 +422,7 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     await asyncio.wait_for(task, timeout=1)
 
     lifecycle.apply_update_plan.assert_awaited_once()
+    logger_mock.info.assert_any_call("Configuration reload superseded before publication; skipping")
 
 
 @pytest.mark.asyncio
@@ -791,11 +831,11 @@ async def test_update_config_loads_config_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_update_config_waits_for_lock_before_loading(
+async def test_update_config_loads_before_waiting_for_publication_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config loading must not start until the shared update lock is available."""
+    """Config loading may proceed while another shared-lock owner is active."""
     lock = asyncio.Lock()
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
@@ -814,11 +854,11 @@ async def test_update_config_waits_for_lock_before_loading(
 
     await lock.acquire()
     update_task = asyncio.create_task(lifecycle._update_config())
-    await asyncio.sleep(0)
-    assert not to_thread_started.is_set()
+    await asyncio.wait_for(to_thread_started.wait(), timeout=1.0)
+    assert not update_task.done()
+    lifecycle.apply_update_plan.assert_not_awaited()
 
     lock.release()
-    await asyncio.wait_for(to_thread_started.wait(), timeout=1.0)
     assert await update_task is True
     load_config_mock.assert_called_once()
     lifecycle.apply_update_plan.assert_awaited_once()
