@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from mindroom.cancellation import TaskCancelSource
 
 __all__ = [
@@ -22,6 +25,7 @@ __all__ = [
     "RuntimeShutdownIntent",
     "ShutdownBudget",
     "StopReason",
+    "gather_shutdown_phase",
     "restart_reason_category_for",
     "shutdown_intent_for_entity",
 ]
@@ -30,6 +34,17 @@ StopReason = Literal["restart", "entity_removed", "shutdown"]
 
 SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS = 5.0
 RESPONSE_FINALIZATION_TIMEOUT_SECONDS = 15.0
+
+
+async def gather_shutdown_phase(
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Gather and finish one ownership-release phase if its caller is cancelled."""
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    try:
+        return list(await asyncio.shield(phase)), None
+    except asyncio.CancelledError as cancellation:
+        return list(await phase), cancellation
 
 
 class ResponseShutdownTimeoutError(RuntimeError):

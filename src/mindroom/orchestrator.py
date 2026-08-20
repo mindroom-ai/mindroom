@@ -69,6 +69,7 @@ from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     ResponseShutdownTimeoutError,
+    gather_shutdown_phase,
 )
 from mindroom.runtime_state import (
     clear_api_server_address,
@@ -171,15 +172,47 @@ _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
 
 
-async def _gather_shutdown_phase(
+async def _gather_periodic_shutdown_phase(
+    bots: Iterable[AgentBot],
+    event: str,
+    phase_count_field: str,
     *awaitables: Awaitable[object],
 ) -> tuple[list[object], asyncio.CancelledError | None]:
-    """Finish one ownership-release phase even if its caller is cancelled."""
+    """Finish one observed shutdown phase while preserving cancellation semantics."""
+    bots = tuple(bots)
     phase = asyncio.gather(*awaitables, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    timer: asyncio.TimerHandle | None = None
+
+    def log_pending_phases() -> None:
+        nonlocal timer
+        if phase.done():
+            return
+        pending_response_owner_count = sum(
+            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        logger.warning(
+            event,
+            live_response_owner_count=pending_response_owner_count,
+            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
+            **{phase_count_field: _aggregate_deferred_stop_phase_counts(bots)},
+        )
+        timer = loop.call_later(
+            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+            log_pending_phases,
+        )
+
+    timer = loop.call_later(
+        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+        log_pending_phases,
+    )
     try:
-        return list(await asyncio.shield(phase)), None
-    except asyncio.CancelledError as cancellation:
-        return list(await phase), cancellation
+        try:
+            return list(await asyncio.shield(phase)), None
+        except asyncio.CancelledError as cancellation:
+            return list(await phase), cancellation
+    finally:
+        timer.cancel()
 
 
 async def _gather_bot_shutdown_phase(
@@ -187,40 +220,12 @@ async def _gather_bot_shutdown_phase(
     *awaitables: Awaitable[object],
 ) -> tuple[list[object], asyncio.CancelledError | None]:
     """Finish initial bot stops while periodically exposing fixed phases."""
-    bots = tuple(bots)
-    phase = asyncio.gather(*awaitables, return_exceptions=True)
-    loop = asyncio.get_running_loop()
-    timer: asyncio.TimerHandle | None = None
-
-    def log_pending_phases() -> None:
-        nonlocal timer
-        if phase.done():
-            return
-        pending_response_owner_count = sum(
-            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
-        )
-        logger.warning(
-            "orchestrator_bot_stop_pending",
-            live_response_owner_count=pending_response_owner_count,
-            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
-            pending_bot_stop_phase_counts=_aggregate_deferred_stop_phase_counts(bots),
-        )
-        timer = loop.call_later(
-            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
-            log_pending_phases,
-        )
-
-    timer = loop.call_later(
-        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
-        log_pending_phases,
+    return await _gather_periodic_shutdown_phase(
+        bots,
+        "orchestrator_bot_stop_pending",
+        "pending_bot_stop_phase_counts",
+        *awaitables,
     )
-    try:
-        try:
-            return list(await asyncio.shield(phase)), None
-        except asyncio.CancelledError as cancellation:
-            return list(await phase), cancellation
-    finally:
-        timer.cancel()
 
 
 async def _gather_deferred_shutdown_phase(
@@ -228,40 +233,12 @@ async def _gather_deferred_shutdown_phase(
     *awaitables: Awaitable[object],
 ) -> tuple[list[object], asyncio.CancelledError | None]:
     """Finish deferred releases while periodically exposing aggregate phases."""
-    bots = tuple(bots)
-    phase = asyncio.gather(*awaitables, return_exceptions=True)
-    loop = asyncio.get_running_loop()
-    timer: asyncio.TimerHandle | None = None
-
-    def log_pending_phases() -> None:
-        nonlocal timer
-        if phase.done():
-            return
-        pending_response_owner_count = sum(
-            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
-        )
-        logger.warning(
-            "orchestrator_deferred_response_owners_pending",
-            live_response_owner_count=pending_response_owner_count,
-            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
-            pending_deferred_stop_phase_counts=_aggregate_deferred_stop_phase_counts(bots),
-        )
-        timer = loop.call_later(
-            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
-            log_pending_phases,
-        )
-
-    timer = loop.call_later(
-        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
-        log_pending_phases,
+    return await _gather_periodic_shutdown_phase(
+        bots,
+        "orchestrator_deferred_response_owners_pending",
+        "pending_deferred_stop_phase_counts",
+        *awaitables,
     )
-    try:
-        try:
-            return list(await asyncio.shield(phase)), None
-        except asyncio.CancelledError as cancellation:
-            return list(await phase), cancellation
-    finally:
-        timer.cancel()
 
 
 async def _run_shutdown_step[Result](
@@ -2143,7 +2120,7 @@ class _MultiAgentOrchestrator:
         phase_cancellations: list[asyncio.CancelledError] = []
         quiesce_results, cancellation = await _run_shutdown_step(
             "source_quiesce",
-            _gather_shutdown_phase(
+            gather_shutdown_phase(
                 *(bot._quiesce_matrix_ingestion() for bot in self.agent_bots.values()),
             ),
         )
@@ -2154,7 +2131,7 @@ class _MultiAgentOrchestrator:
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         cancel_results, cancellation = await _run_shutdown_step(
             "sync_tasks",
-            _gather_shutdown_phase(
+            gather_shutdown_phase(
                 *(cancel_sync_task(entity_name, self._sync_tasks) for entity_name in list(self._sync_tasks)),
             ),
         )
@@ -2212,7 +2189,7 @@ class _MultiAgentOrchestrator:
             journal, self._open_journal = self._open_journal, None
             close_results, cancellation = await _run_shutdown_step(
                 "event_journal",
-                _gather_shutdown_phase(journal.close()),
+                gather_shutdown_phase(journal.close()),
             )
             if cancellation is not None:
                 phase_cancellations.append(cancellation)

@@ -18,6 +18,7 @@ from nio.ingest.model import TransportKind
 from nio.store._sync_journal_values import _FrameCompletion
 from structlog.testing import capture_logs
 
+from mindroom import runtime_shutdown
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -3544,6 +3545,30 @@ async def test_bot_stop_diagnostic_gather_preserves_second_cancellation() -> Non
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shared_shutdown_gather_keeps_child_owned_after_first_cancellation() -> None:
+    """The shared gather must finish an owned child before returning cancellation."""
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def child() -> None:
+        child_started.set()
+        await release_child.wait()
+
+    gather_phase = runtime_shutdown.gather_shutdown_phase
+    task = asyncio.create_task(gather_phase(child()))
+    await child_started.wait()
+    task.cancel("shutdown")
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release_child.set()
+    results, cancellation = await task
+
+    assert results == [None]
+    assert isinstance(cancellation, asyncio.CancelledError)
 
 
 @pytest.mark.asyncio

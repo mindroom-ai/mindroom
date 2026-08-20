@@ -41,6 +41,7 @@ from mindroom.runtime_shutdown import (
     RestartReasonCategory,
     RuntimeLifecycleAction,
     RuntimeShutdownIntent,
+    gather_shutdown_phase,
     shutdown_intent_for_entity,
 )
 from mindroom.runtime_state import set_runtime_starting
@@ -663,17 +664,6 @@ async def cancel_sync_task(
     await cancel_task(task, shutdown_intent=shutdown_intent)
 
 
-async def _gather_shutdown_phase(
-    *awaitables: Awaitable[object],
-) -> tuple[list[object], asyncio.CancelledError | None]:
-    """Finish one ownership-release phase even if its caller is cancelled."""
-    phase = asyncio.gather(*awaitables, return_exceptions=True)
-    try:
-        return list(await asyncio.shield(phase)), None
-    except asyncio.CancelledError as cancellation:
-        return list(await phase), cancellation
-
-
 async def stop_entities(
     entities_to_stop: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
@@ -690,7 +680,7 @@ async def stop_entities(
     entity_names = sorted(entities_to_stop)
     bots_to_stop = [agent_bots[entity_name] for entity_name in entity_names if entity_name in agent_bots]
     phase_cancellations: list[asyncio.CancelledError] = []
-    quiesce_results, cancellation = await _gather_shutdown_phase(
+    quiesce_results, cancellation = await gather_shutdown_phase(
         *(bot._quiesce_matrix_ingestion() for bot in bots_to_stop),
     )
     if cancellation is not None:
@@ -698,7 +688,7 @@ async def stop_entities(
     quiesce_failures = [result for result in quiesce_results if isinstance(result, BaseException)]
     # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
     # appear after the checkpoint decision.
-    cancel_results, cancellation = await _gather_shutdown_phase(
+    cancel_results, cancellation = await gather_shutdown_phase(
         *(
             cancel_sync_task(
                 entity_name,
@@ -710,7 +700,7 @@ async def stop_entities(
     )
     if cancellation is not None:
         phase_cancellations.append(cancellation)
-    prepare_results, cancellation = await _gather_shutdown_phase(
+    prepare_results, cancellation = await gather_shutdown_phase(
         *(
             agent_bots[entity_name].prepare_for_sync_shutdown(
                 shutdown_intent=shutdown_intents[entity_name],
@@ -721,7 +711,7 @@ async def stop_entities(
     )
     if cancellation is not None:
         phase_cancellations.append(cancellation)
-    stop_results, cancellation = await _gather_shutdown_phase(
+    stop_results, cancellation = await gather_shutdown_phase(
         *(
             agent_bots[entity_name].stop(shutdown_intent=shutdown_intents[entity_name])
             for entity_name in entity_names
