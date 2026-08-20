@@ -114,12 +114,10 @@ class MindRoomTools:
             except MindRoomToolCallError as exc:
                 if not exc.retryable:
                     raise
-                if self._poll_interval_seconds > 0:
-                    time.sleep(self._poll_interval_seconds)
+                time.sleep(self._poll_interval_seconds)
 
         while receipt.state == "pending":
-            if self._poll_interval_seconds > 0:
-                time.sleep(self._poll_interval_seconds)
+            time.sleep(self._poll_interval_seconds)
             try:
                 receipt = self._poll(
                     call_id,
@@ -262,7 +260,7 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
-        )
+        ).encode("utf-8")
         wire_arguments = json.loads(encoded)
     except (RecursionError, TypeError, ValueError):
         raise MindRoomToolCallError(

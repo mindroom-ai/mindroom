@@ -130,7 +130,7 @@ class ScriptRunStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_database()
 
-    def create_run(self, run: ScriptRunRecord) -> ScriptRunRecord:  # noqa: Vulture
+    def create_run(self, run: ScriptRunRecord) -> ScriptRunRecord:
         """Atomically store a new starting run before any worker action."""
         if run.state is not ScriptRunState.STARTING:
             msg = "A new script run must begin in the starting state."
@@ -167,7 +167,7 @@ class ScriptRunStore:
             raise ScriptRunNotFoundError(run_id)
         return _run_from_row(row)
 
-    def list_runs(  # noqa: Vulture
+    def list_runs(
         self,
         *,
         agent_name: str | None = None,
@@ -194,7 +194,7 @@ class ScriptRunStore:
             ).fetchall()
         return [_run_from_row(row) for row in rows]
 
-    def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:  # noqa: Vulture
+    def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:
         """Authenticate a token and reject runs that may no longer start calls."""
         run = self.get_run(run_id)
         if not hmac.compare_digest(run.token_hash, _capability_hash(token)):
@@ -216,7 +216,7 @@ class ScriptRunStore:
             raise ScriptCapabilityError(_REVOKED_CAPABILITY)
         return run
 
-    def claim_call(  # noqa: Vulture
+    def claim_call(
         self,
         *,
         run_id: str,
@@ -293,7 +293,7 @@ class ScriptRunStore:
             created=True,
         )
 
-    def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:  # noqa: Vulture
+    def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
         """Return one durable logical call receipt."""
         with self._read_connection() as connection:
             row = connection.execute(
@@ -353,7 +353,7 @@ class ScriptRunStore:
             error=stored_error,
         )
 
-    def publish_call_result(  # noqa: Vulture
+    def publish_call_result(
         self,
         *,
         run_id: str,
@@ -391,7 +391,7 @@ class ScriptRunStore:
         stored_result, stored_error = _receipt_values(receipt_json)
         return replace(existing, state=state, result=stored_result, error=stored_error)
 
-    def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:  # noqa: Vulture
+    def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:
         """Durably revoke a run before any cancellation signal is sent."""
         with self._write_transaction() as connection:
             row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -526,7 +526,7 @@ class ScriptRunStore:
             )
         return updated
 
-    def transition_run(  # noqa: Vulture
+    def transition_run(
         self,
         run_id: str,
         *,
@@ -695,7 +695,7 @@ _SCHEMA_STATEMENTS = (
 
 def _connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path, isolation_level=None, timeout=10)
-    connection.row_factory = sqlite3.Row  # noqa: Vulture
+    connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 10000")
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = FULL")
@@ -809,9 +809,10 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
             ensure_ascii=False,
             sort_keys=True,
         )
+        serialized_bytes = serialized.encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ScriptRunStoreError(_RECEIPT_NOT_SERIALIZABLE) from exc
-    if len(serialized.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+    if len(serialized_bytes) > _MAX_RECEIPT_BYTES:
         msg = f"Script call receipt exceeds the {_MAX_RECEIPT_BYTES}-byte limit."
         raise ScriptReceiptTooLargeError(msg)
     return serialized

@@ -230,8 +230,9 @@ Call states are `pending`, `completed`, `failed`, and `indeterminate`.
 Call receipts are durable so a script can poll one accepted call without replaying it.
 Calls are serialized within one run to keep approval and side-effect order predictable.
 
-Scripts do not survive primary-runtime restart, upgrade, worker loss, or worker replacement, and MindRoom never adopts, resumes, or automatically relaunches their Python source.
-Startup fences new launches, durably revokes every inherited nonterminal run, terminates reachable processes, removes private snapshots, and retires exact dedicated workers before reopening.
+MindRoom never adopts, resumes, or automatically relaunches Python source after a primary-runtime restart, upgrade, worker loss, or worker replacement.
+Startup fences new launches, durably revokes every inherited nonterminal run, terminates processes reachable through the exact currently configured backend, removes private snapshots, and retires exact dedicated workers before reopening.
+If the worker backend configuration changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior backend configuration or retire that worker manually, then restart.
 MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.

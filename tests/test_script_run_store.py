@@ -432,3 +432,25 @@ def test_run_store_rejects_nonfinite_terminal_receipt(runtime_paths: RuntimePath
             state=ScriptCallState.COMPLETED,
             result=result,
         )
+
+
+def test_run_store_rejects_terminal_receipt_that_cannot_be_encoded_as_utf8(
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Receipt validation must convert invalid Unicode into the store's typed error."""
+    store = ScriptRunStore(runtime_paths)
+    store.create_run(_new_run())
+    store.claim_call(
+        run_id="run-1",
+        call_id="call-1",
+        grant=ScriptToolGrant("website", "read_url"),
+        arguments_digest="digest-a",
+    )
+
+    with pytest.raises(ScriptRunStoreError, match="JSON serializable"):
+        store.publish_call_result(
+            run_id="run-1",
+            call_id="call-1",
+            state=ScriptCallState.COMPLETED,
+            result="\udcff",
+        )

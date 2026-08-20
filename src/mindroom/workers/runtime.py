@@ -17,13 +17,6 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend, docker_backend_config_signature
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
-from mindroom.workers.cleanup_locator import (
-    DockerWorkerCleanupLocator,
-    docker_cleanup_runtime_paths,
-    docker_worker_cleanup_locator,
-    parse_worker_cleanup_locator,
-    serialize_worker_cleanup_locator,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -93,25 +86,6 @@ class PrimaryWorkerManagerLease:
             return
         self._released = True
         _release_primary_worker_manager_entry(self._entry)
-
-
-@dataclass(slots=True)
-class _ReconstructedWorkerManagerLease:
-    """Detached lease for one exact durable cleanup locator."""
-
-    manager: WorkerBackend
-
-    def __enter__(self) -> WorkerBackend:
-        """Enter the detached lease context and return its cleanup manager."""
-        return self.manager
-
-    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
-        """Release the detached lease when its context exits."""
-        self.release()
-        return False
-
-    def release(self) -> None:
-        """Drop the detached cleanup manager without broad backend shutdown."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,24 +253,16 @@ def lease_configured_primary_worker_manager(
     *,
     runtime_config: Config | None,
     required_backend_locator: str | None = None,
-) -> PrimaryWorkerManagerLease | _ReconstructedWorkerManagerLease | None:
-    """Lease the current or one exactly reconstructible durable worker manager."""
-    if required_backend_locator is not None:
-        from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
-
-        proxy_token = sandbox_proxy_config(runtime_paths).proxy_token
-        if not proxy_token:
-            return None
-        return _reconstruct_worker_manager_lease(
-            runtime_paths,
-            serialized_locator=required_backend_locator,
-            proxy_token=proxy_token,
-        )
-
+) -> PrimaryWorkerManagerLease | None:
+    """Lease the current worker manager when it owns the requested durable identity."""
     inputs = _configured_primary_worker_manager_inputs(runtime_paths, runtime_config)
     if inputs is None:
         return None
-    return _lease_configured_primary_worker_manager(runtime_paths, inputs)
+    lease = _lease_configured_primary_worker_manager(runtime_paths, inputs)
+    if required_backend_locator is None or lease.manager.cleanup_locator == required_backend_locator:
+        return lease
+    lease.release()
+    return None
 
 
 def _lease_configured_primary_worker_manager(
@@ -313,25 +279,6 @@ def _lease_configured_primary_worker_manager(
         kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
         worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
-
-
-def _reconstruct_worker_manager_lease(
-    runtime_paths: RuntimePaths,
-    *,
-    serialized_locator: str,
-    proxy_token: str,
-) -> _ReconstructedWorkerManagerLease | None:
-    """Recreate only the backend client and selectors needed for exact cleanup."""
-    locator = parse_worker_cleanup_locator(serialized_locator)
-    cleanup_paths = docker_cleanup_runtime_paths(runtime_paths, locator)
-    manager: WorkerBackend = DockerWorkerBackend.from_runtime(
-        cleanup_paths,
-        auth_token=proxy_token,
-        storage_path=cleanup_paths.storage_root,
-        worker_grantable_credentials=frozenset(),
-    )
-    manager.cleanup_locator = serialized_locator
-    return _ReconstructedWorkerManagerLease(manager=manager)
 
 
 def configured_primary_worker_manager_identity(
@@ -529,24 +476,7 @@ def _build_primary_worker_manager(
     else:
         msg = f"Unsupported worker backend: {backend_name}"
         raise WorkerBackendError(msg)
-    locator = _worker_cleanup_locator_for_runtime(
-        runtime_paths,
-        backend_name=backend_name,
-        storage_root=resolved_storage_root,
-    )
-    manager.cleanup_locator = serialize_worker_cleanup_locator(locator) if locator is not None else None
     return manager
-
-
-def _worker_cleanup_locator_for_runtime(
-    runtime_paths: RuntimePaths,
-    *,
-    backend_name: str,
-    storage_root: Path,
-) -> DockerWorkerCleanupLocator | None:
-    if backend_name == "docker":
-        return docker_worker_cleanup_locator(runtime_paths, storage_root=storage_root)
-    return None
 
 
 def _shutdown_worker_manager_now(
@@ -713,6 +643,7 @@ def _resolve_primary_worker_manager_entry(
             kubernetes_config_snapshot=kubernetes_config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
+        built_manager.cleanup_locator = _stable_json_digest(config_signature)
     except Exception:
         with _PRIMARY_WORKER_MANAGER_CONDITION:
             _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)

@@ -1534,7 +1534,7 @@ def test_snapshot_cleanup_does_not_follow_parent_swap(
         dir_fd: int | None = None,
         follow_symlinks: bool = True,
     ) -> os.stat_result:
-        if path == "capability" and dir_fd is not None and not swapped:
+        if path == "run-race" and dir_fd is not None and not swapped:
             swap_directory()
         return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
@@ -1580,33 +1580,6 @@ def test_snapshot_cleanup_removes_nested_content_and_partial_snapshot_without_fo
     assert not directory_token.parent.exists()
     assert not partial_run.exists()
     assert outside_file.read_text(encoding="utf-8") == "keep"
-
-
-def test_snapshot_cleanup_ignores_descriptor_close_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Descriptor close errors cannot replace the best-effort cleanup outcome."""
-    workspace = tmp_path / "workspace"
-    token = workspace / ".mindroom" / "script-runs" / "run-close" / "capability"
-    token.parent.mkdir(parents=True)
-    token.write_text("secret", encoding="utf-8")
-    original_close = manager_module.os.close
-
-    def close_then_fail(descriptor: int) -> None:
-        original_close(descriptor)
-        message = "close failed"
-        raise OSError(message)
-
-    monkeypatch.setattr(manager_module.os, "close", close_then_fail)
-
-    cleaned = manager_module._remove_snapshot(
-        tmp_path,
-        "workspace/.mindroom/script-runs/run-close",
-    )
-
-    assert cleaned is True
-    assert not token.parent.exists()
 
 
 @pytest.mark.asyncio
@@ -1670,6 +1643,40 @@ async def test_source_path_is_snapshotted_before_launch(tmp_path: Path) -> None:
 
     snapshot, _token = client.launch_paths[run.run_id]
     assert snapshot.read_text(encoding="utf-8") == "print('ok')\n"
+
+
+@pytest.mark.asyncio
+async def test_source_path_leaf_swap_cannot_redirect_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checked source leaf cannot be swapped to an outside symlink before it is read."""
+    manager, _backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    workspace = agent_workspace_root_path(context.runtime_paths.storage_root, "watcher")
+    workspace.mkdir(parents=True, exist_ok=True)
+    source_path = workspace / "watch.py"
+    source_path.write_text("print('ok')\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+    original_open = Path.open
+    swapped = False
+
+    def swap_before_path_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
+        nonlocal swapped
+        if path == source_path and not swapped:
+            source_path.rename(workspace / "watch-original.py")
+            source_path.symlink_to(outside)
+            swapped = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swap_before_path_open)
+
+    run = await manager.run(context, path="watch.py")
+
+    snapshot, _token = client.launch_paths[run.run_id]
+    assert snapshot.read_text(encoding="utf-8") == "print('ok')\n"
+    assert swapped is False
 
 
 @pytest.mark.asyncio

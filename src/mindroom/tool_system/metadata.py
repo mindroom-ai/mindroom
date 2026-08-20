@@ -390,7 +390,7 @@ def coerce_optional_finite_number(value: object) -> int | float | None:
         raise TypeError
     if isinstance(value, int | float):
         if math.isfinite(value):
-            return value
+            return int(value) if isinstance(value, float) and value.is_integer() else value
         raise OverflowError
     if isinstance(value, str):
         raw_value = value.strip()

@@ -1705,6 +1705,28 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
 
 
 @pytest.mark.asyncio
+async def test_script_broker_rechecks_live_authority_off_event_loop(tmp_path: Path) -> None:
+    """The final live resolver pass must not block the primary event loop."""
+    broker, token = _broker(tmp_path, events=[])
+    resolver = cast("_RuntimeResolver", broker.runtime_resolver)
+    original_resolve = resolver.resolve
+    request_loop_thread = threading.get_ident()
+    resolver_threads: list[int] = []
+
+    def record_resolve(run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+        resolver_threads.append(threading.get_ident())
+        return original_resolve(run, correlation_id=correlation_id)
+
+    resolver.resolve = record_resolve
+
+    receipt = await _call_through_gateway(broker, _request(call_id="offloaded-authority"), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert len(resolver_threads) == 2
+    assert all(thread_id != request_loop_thread for thread_id in resolver_threads)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field_name", "mismatched_value"),
     [
@@ -1895,6 +1917,34 @@ async def test_script_broker_never_publishes_nonfinite_completed_receipt(
     assert receipt.state is ScriptCallState.FAILED
     json.dumps(receipt.result, allow_nan=False)
     json.dumps(receipt.error, allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_script_broker_rejects_result_that_cannot_be_encoded_as_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid Unicode output must become a readable terminal tool-result failure."""
+
+    class InvalidUnicodeToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        def add(self, a: int, b: int) -> str:
+            del a, b
+            return "\udcff"
+
+    _replace_calculator_toolkit(monkeypatch, InvalidUnicodeToolkit)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(call_id="invalid-unicode"), token)
+
+    assert receipt.state is ScriptCallState.FAILED
+    assert receipt.error == {
+        "kind": "invalid_tool_result",
+        "message": "The tool returned a result that cannot be represented as strict JSON.",
+        "retryable": False,
+    }
 
 
 @pytest.mark.asyncio

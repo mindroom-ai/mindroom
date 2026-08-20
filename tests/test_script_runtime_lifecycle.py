@@ -882,21 +882,17 @@ async def test_startup_revokes_and_retires_inherited_running_process(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_startup_routes_inherited_cleanup_to_its_durable_backend_locator(tmp_path: Path) -> None:
-    """An offline backend-kind change must still interrupt and retire through the launch owner."""
+async def test_startup_fails_closed_when_the_durable_backend_is_no_longer_configured(tmp_path: Path) -> None:
+    """An offline backend change leaves the revoked run visible for operator cleanup."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run_pinned_to_worker(store, runtime_paths, run_id=f"script-{'7' * 32}")
-    owner_backend = _Backend([_worker(run)], cleanup_locator="locator-a")
     current_backend = _Backend([], cleanup_locator="locator-b")
-    owner_lease = _Lease(owner_backend)
     current_lease = _Lease(current_backend)
     requested_locators: list[str | None] = []
 
     def lease_provider(required_locator: str | None = None) -> _Lease | None:
         requested_locators.append(required_locator)
-        if required_locator == "locator-a":
-            return owner_lease
         if required_locator is None:
             return current_lease
         return None
@@ -930,82 +926,13 @@ async def test_startup_routes_inherited_cleanup_to_its_durable_backend_locator(t
         await runtime.start()
 
         durable = store.get_run(run.run_id)
-        assert durable.state is ScriptRunState.INTERRUPTED
-        assert durable.exit_code == 143
-        assert owner_backend.actions == [f"retire:{run.worker_key}"]
-        assert current_backend.actions == []
-        assert requested_locators[:2] == ["locator-a", None]
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_startup_routes_changed_same_kind_cleanup_to_the_reachable_old_owner(tmp_path: Path) -> None:
-    """A same-kind config change still retires the worker through its durable old locator."""
-    runtime_paths = _runtime_paths(tmp_path)
-    store = ScriptRunStore(runtime_paths)
-    run = _stored_run_pinned_to_worker(
-        store,
-        runtime_paths,
-        run_id=f"script-{'6' * 32}",
-        worker_backend_locator="locator-a-old-config",
-    )
-    owner_backend = _Backend(
-        [_worker(run)],
-        cleanup_locator="locator-a-old-config",
-        backend_name="same-kind",
-    )
-    current_backend = _Backend(
-        [],
-        cleanup_locator="locator-a-new-config",
-        backend_name="same-kind",
-    )
-    owner_lease = _Lease(owner_backend)
-    current_lease = _Lease(current_backend)
-    requested_locators: list[str | None] = []
-
-    def lease_provider(required_locator: str | None = None) -> _Lease | None:
-        requested_locators.append(required_locator)
-        if required_locator == "locator-a-old-config":
-            return owner_lease
-        return current_lease if required_locator is None else None
-
-    worker_client = _TerminatingWorkerClient()
-    broker = ScriptToolBroker(store=store, runtime_resolver=_ApprovalSettlementResolver())
-    manager = ScriptRunManager(
-        store=store,
-        broker=broker,
-        worker_client=worker_client,  # type: ignore[arg-type]
-        worker_backend=current_backend,
-        gateway_url="http://primary.test/api/script-gateway",
-        cancellation_grace_seconds=0,
-        cancellation_poll_interval_seconds=0,
-    )
-    runtime = ScriptRuntimeLifecycle(
-        runtime_paths=runtime_paths,
-        store=store,
-        broker=broker,
-        manager=manager,
-        resolver=SimpleNamespace(
-            is_authorized=MagicMock(return_value=True),
-            prune_approvals=AsyncMock(return_value=True),
-        ),
-        config_provider=_config,
-        worker_lease_provider=lease_provider,  # type: ignore[arg-type]
-    )
-    runtime.bind_api("http://primary.test/api/script-gateway")
-
-    try:
-        await runtime.start()
-
-        durable = store.get_run(run.run_id)
         assert durable.cancel_requested_at is not None
-        assert durable.state is ScriptRunState.INTERRUPTED
-        assert durable.finished_at is not None
-        assert worker_client.exited is True
-        assert owner_backend.actions == [f"retire:{run.worker_key}"]
+        assert durable.state is ScriptRunState.RUNNING
+        assert durable.finished_at is None
+        assert worker_client.exited is False
         assert current_backend.actions == []
-        assert requested_locators[:2] == ["locator-a-old-config", None]
+        assert requested_locators == ["locator-a"]
+        assert broker._call_admission_open.is_set() is False
     finally:
         await runtime.shutdown()
 
@@ -1380,6 +1307,33 @@ async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tm
 
     with pytest.raises(RuntimeError, match="Plugin reload did not interrupt every active background script"):
         await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+
+
+@pytest.mark.asyncio
+async def test_reload_cannot_release_an_unfinished_startup_cleanup_fence(tmp_path: Path) -> None:
+    """A reload fence cannot reopen launches while inherited-run cleanup still owns it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = SimpleNamespace(
+        begin_startup_reconciliation=AsyncMock(),
+        end_startup_reconciliation=AsyncMock(),
+        worker_replacement_in_progress=False,
+    )
+    config = _config()
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=runtime_paths,
+        store=ScriptRunStore(runtime_paths),
+        broker=MagicMock(),
+        manager=manager,
+        resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
+        config_provider=lambda: config,
+        worker_lease_provider=lambda _locator: None,
+    )
+    runtime._startup_cleanup_pending = True
+
+    await runtime.apply_update_plan(_plan(config, config), plugins_changed=True)
+    await runtime.complete_worker_replacement()
+
+    manager.end_startup_reconciliation.assert_not_awaited()
 
 
 def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Path) -> None:

@@ -607,7 +607,7 @@ class ScriptToolBroker:
                 prepend_tool_hook_bridge(toolkit, bridge)
                 # Durable receipts are the idempotency boundary for background calls.
                 # Agno's result cache returns before hooks, approval, and live authority checks.
-                function.cache_results = False  # noqa: Vulture
+                function.cache_results = False
                 return await FunctionCall(
                     function=function,
                     arguments=arguments,
@@ -662,6 +662,20 @@ class ScriptToolBroker:
             durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, run.run_id)
         except ScriptCapabilityError as exc:
             raise _CurrentGrantRevokedError from exc
+        await asyncio.to_thread(
+            self._require_current_live_execution_authority,
+            prepared,
+            durable_run,
+            call,
+        )
+
+    def _require_current_live_execution_authority(
+        self,
+        prepared: _PreparedExecution,
+        durable_run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> None:
+        """Rebuild and validate live authority without blocking the request loop."""
         current_context = self.runtime_resolver.resolve(
             durable_run,
             correlation_id=prepared.correlation_id,
@@ -1034,7 +1048,12 @@ async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
 def _strict_json_result(result: object) -> object:
     normalized = to_json_compatible(result)
     try:
-        json.dumps(normalized, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+        json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise _InvalidToolResultError from exc
     return normalized

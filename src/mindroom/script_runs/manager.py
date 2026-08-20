@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import stat
 import sys
 import uuid
 from contextlib import suppress
@@ -287,7 +288,7 @@ class ScriptRunManager:
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope."""
         effective_limits = limits or ScriptRunLimits()
-        source_bytes = self._resolve_source(context, source=source, path=path)
+        source_bytes = await asyncio.to_thread(self._resolve_source, context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = build_execution_identity_from_runtime_context(context)
         worker_target = build_agent_toolkit_worker_target(
@@ -315,7 +316,6 @@ class ScriptRunManager:
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
-            worker_backend_locator = worker_backend.cleanup_locator
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
             if not background_script_supervision_supported():
@@ -323,7 +323,6 @@ class ScriptRunManager:
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = None
-            worker_backend_locator = None
             local_unsafe = True
         else:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
@@ -346,7 +345,7 @@ class ScriptRunManager:
             token_hash=token_hash,
             preapprove_launch_grants=effective_limits.allowed_tools is not None,
             worker_key=worker_key,
-            worker_backend_locator=worker_backend_locator,
+            worker_backend_locator=None,
             name=_validated_name(name),
             local_unsafe=local_unsafe,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
@@ -718,6 +717,20 @@ class ScriptRunManager:
         except BaseException as exc:
             await self._preserve_ambiguous_launch(context, run.run_id)
             raise _AmbiguousLaunchError(exc) from exc
+        return await self._settle_spawned_run(
+            context,
+            run,
+            worker_id=worker.worker_id,
+        )
+
+    async def _settle_spawned_run(
+        self,
+        context: ToolRuntimeContext,
+        run: ScriptRunRecord,
+        *,
+        worker_id: str | None = None,
+    ) -> ScriptRunRecord:
+        """Publish one spawned process or preserve a concurrent cancellation."""
         launched = await asyncio.to_thread(self.store.get_run, run.run_id)
         if launched.cancel_requested_at is not None:
             await self._preserve_ambiguous_launch(context, run.run_id)
@@ -727,19 +740,27 @@ class ScriptRunManager:
                 self.store.transition_run,
                 run.run_id,
                 state=ScriptRunState.RUNNING,
-                worker_id=worker.worker_id,
+                worker_id=worker_id,
             )
         except BaseException as exc:
-            durable: ScriptRunRecord | None = None
-            with suppress(Exception):
-                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-            if durable is not None and durable.cancel_requested_at is not None:
-                if durable.state not in _TERMINAL_STATES:
-                    await self._preserve_ambiguous_launch(context, run.run_id)
-                    durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-                return durable
-            await self._preserve_ambiguous_launch(context, run.run_id)
-            raise _AmbiguousLaunchError(exc) from exc
+            return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
+
+    async def _resolve_ambiguous_launch_failure(
+        self,
+        context: ToolRuntimeContext,
+        run_id: str,
+        failure: BaseException,
+    ) -> ScriptRunRecord:
+        durable: ScriptRunRecord | None = None
+        with suppress(Exception):
+            durable = await asyncio.to_thread(self.store.get_run, run_id)
+        if durable is not None and durable.cancel_requested_at is not None:
+            if durable.state not in _TERMINAL_STATES:
+                await self._preserve_ambiguous_launch(context, run_id)
+                durable = await asyncio.to_thread(self.store.get_run, run_id)
+            return durable
+        await self._preserve_ambiguous_launch(context, run_id)
+        raise _AmbiguousLaunchError(failure) from failure
 
     async def _preserve_ambiguous_launch(self, context: ToolRuntimeContext, run_id: str) -> None:
         try:
@@ -798,26 +819,9 @@ class ScriptRunManager:
                 handle=supervisor_handle,
             )
             _validate_local_launch_message(message, expected_handle=supervisor_handle)
-            launched = await asyncio.to_thread(self.store.get_run, run.run_id)
-            if launched.cancel_requested_at is not None:
-                await self._preserve_ambiguous_launch(context, run.run_id)
-                return await asyncio.to_thread(self.store.get_run, run.run_id)
-            return await asyncio.to_thread(
-                self.store.transition_run,
-                run.run_id,
-                state=ScriptRunState.RUNNING,
-            )
         except BaseException as exc:
-            durable: ScriptRunRecord | None = None
-            with suppress(Exception):
-                durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-            if durable is not None and durable.cancel_requested_at is not None:
-                if durable.state not in _TERMINAL_STATES:
-                    await self._preserve_ambiguous_launch(context, run.run_id)
-                    durable = await asyncio.to_thread(self.store.get_run, run.run_id)
-                return durable
-            await self._preserve_ambiguous_launch(context, run.run_id)
-            raise _AmbiguousLaunchError(exc) from exc
+            return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
+        return await self._settle_spawned_run(context, run)
 
     async def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
         not_found = f"Background script '{run_id}' was not found."
@@ -838,16 +842,7 @@ class ScriptRunManager:
         else:
             workspace = _agent_workspace(context)
             try:
-                source_path = resolve_workspace_relative_path(
-                    workspace,
-                    path or "",
-                    field_name="Script source path",
-                )
-                if source_path.is_symlink() or not source_path.is_file():
-                    msg = "Script source path must be a regular file in the agent workspace."
-                    raise ScriptRunManagerError(msg)
-                with source_path.open("rb") as source_file:
-                    source_bytes = source_file.read(_MAX_SOURCE_BYTES + 1)
+                source_bytes = _read_workspace_source(workspace, path or "")
             except (OSError, ValueError) as exc:
                 raise ScriptRunManagerError(str(exc)) from exc
         if not source_bytes:
@@ -1153,6 +1148,45 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
 
 def _snapshot_relative_dir(run_id: str) -> Path:
     return Path(".mindroom") / "script-runs" / run_id
+
+
+def _read_workspace_source(workspace: Path, relative_path: str) -> bytes:
+    """Read one bounded regular file through no-follow workspace descriptors."""
+    relative = Path(relative_path)
+    if relative.is_absolute() or relative == Path() or ".." in relative.parts:
+        msg = "Script source path must stay within the workspace root."
+        raise ValueError(msg)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        current_descriptor = os.open(workspace, directory_flags)
+        descriptors.append(current_descriptor)
+        for part in relative.parts[:-1]:
+            current_descriptor = os.open(part, directory_flags, dir_fd=current_descriptor)
+            descriptors.append(current_descriptor)
+        source_descriptor = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=current_descriptor,
+        )
+        descriptors.append(source_descriptor)
+        metadata = os.fstat(source_descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            msg = "Script source path must be a regular file in the agent workspace."
+            raise ValueError(msg)
+        chunks: list[bytes] = []
+        remaining = _MAX_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(source_descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def _snapshot_locator(storage_root: Path, workspace: Path, run_id: str) -> str:

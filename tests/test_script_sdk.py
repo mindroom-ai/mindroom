@@ -141,6 +141,7 @@ def test_script_sdk_digests_the_json_wire_argument_representation(
         {"payload": {1: "integer", "2": "string"}},
         {"payload": float("nan")},
         {"payload": object()},
+        {"payload": "\udcff"},
     ],
 )
 def test_script_sdk_rejects_invalid_arguments_before_post(

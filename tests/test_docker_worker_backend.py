@@ -2231,7 +2231,7 @@ def test_docker_backend_refuses_worker_root_swapped_after_identity_validation(
     with pytest.raises(WorkerBackendError, match="changed during retirement"):
         backend.retire_worker(run_key)
 
-    assert fake_client.containers.by_name[handle.worker_id].removed == 1
+    assert fake_client.containers.by_name[handle.worker_id].removed == 0
     assert swapped is True
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
@@ -2280,35 +2280,6 @@ def test_docker_backend_refuses_projection_root_swapped_after_validation(
     assert swapped is True
     assert worker_root_path(tmp_path, run_key).is_dir()
     assert (projection_root / "keep.txt").read_text(encoding="utf-8") == "keep"
-
-
-def test_docker_backend_normalizes_retirement_recursion_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A depth failure crosses the Docker backend boundary as a typed retryable error."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-    run_key = script_worker_key_for_run("v1:t:user_agent:alice:watcher", f"script-{'5' * 32}")
-    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
-    state_root = worker_root_path(tmp_path, run_key)
-    identity_file = state_root / "metadata" / "worker.json"
-    exact_identity = identity_file.read_bytes()
-    original_listdir = worker_retirement_module.os.listdir
-
-    def fail_worker_traversal(path: int) -> list[str]:
-        descriptor_root = Path(f"/proc/self/fd/{path}").resolve()
-        if descriptor_root == state_root:
-            msg = "injected retirement depth failure"
-            raise RecursionError(msg)
-        return original_listdir(path)
-
-    monkeypatch.setattr(worker_retirement_module.os, "listdir", fail_worker_traversal)
-
-    with pytest.raises(WorkerBackendError, match="injected retirement depth failure"):
-        backend.retire_worker(run_key)
-
-    assert fake_client.containers.by_name[handle.worker_id].removed == 1
-    assert identity_file.read_bytes() == exact_identity
 
 
 def test_docker_backend_records_failure_and_stops_container(
