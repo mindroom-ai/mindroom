@@ -80,6 +80,7 @@ def _context(
     requester_id: str = "@alice:example.test",
     mode: str | None = "all",
     private: bool = False,
+    private_scope: str = "user_agent",
     worker_scope: str = "user_agent",
     backend: str | None = None,
     isolated_script_gateway: bool = False,
@@ -97,7 +98,7 @@ def _context(
     }
     if private:
         watcher.pop("worker_scope")
-        watcher["private"] = {"per": "user_agent", "root": "private/watcher"}
+        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
     config = Config(
         agents={
             "watcher": watcher,
@@ -215,6 +216,7 @@ class _WorkerBackend:
 class _WorkerClient:
     store: ScriptRunStore
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
+    launch_state_scope_worker_keys: list[str | None] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
     cancel_handles: list[str] = field(default_factory=list)
@@ -236,9 +238,11 @@ class _WorkerClient:
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
+        self.launch_state_scope_worker_keys.append(state_scope_worker_key)
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
@@ -778,7 +782,7 @@ async def test_script_process_scope_is_user_agent_independent_of_tool_scope(
 @pytest.mark.asyncio
 async def test_script_process_target_preserves_private_agent_visibility(tmp_path: Path) -> None:
     """A private script keeps a run-specific worker but mounts its owning private state scope."""
-    manager, backend, _client = _manager(tmp_path)
+    manager, backend, client = _manager(tmp_path)
 
     run = await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
 
@@ -791,6 +795,23 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
             state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
         ),
     ]
+    assert client.launch_state_scope_worker_keys == ["v1:default:user_agent:@alice:example.test:watcher"]
+
+
+@pytest.mark.asyncio
+async def test_private_user_scope_rejects_background_worker_before_persisting_run(tmp_path: Path) -> None:
+    """A script worker must not project the broader requester scope as an agent-specific workspace."""
+    manager, backend, client = _manager(tmp_path)
+
+    with pytest.raises(ScriptRunManagerError, match=r"private\.per=user_agent"):
+        await manager.run(
+            _context(tmp_path, private=True, private_scope="user"),
+            source="print('ok')\n",
+        )
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
 
 
 @pytest.mark.asyncio

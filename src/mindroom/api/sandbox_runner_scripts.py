@@ -16,9 +16,14 @@ from fastapi.routing import APIRoute
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
-from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
+from mindroom.api.sandbox_runner import (
+    app_runner_token,
+    app_runtime_paths,
+    resolve_script_state_workspace,
+    validate_runner_token,
+)
 from mindroom.constants import CONTROL_STATE_PATH_ENV
-from mindroom.script_runs.models import supervisor_handle_for_run
+from mindroom.script_runs.models import script_worker_key_for_run, supervisor_handle_for_run
 from mindroom.shell_supervisor import (
     ShellSupervisorStartupError,
     background_script_supervision_supported,
@@ -125,6 +130,7 @@ class SandboxScriptRunRequest(BaseModel):
 
     run_id: _RunId
     worker_key: str = Field(min_length=1, max_length=1024)
+    state_scope_worker_key: str | None = Field(default=None, min_length=1, max_length=1024)
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     gateway_url: str = Field(min_length=1, max_length=2048)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
@@ -254,7 +260,40 @@ def _script_snapshot_paths(workspace: Path, run_id: str) -> tuple[Path, Path]:
     )
 
 
-def _script_environment(payload: SandboxScriptRunRequest, *, workspace: Path, token_path: Path) -> dict[str, str]:
+def _script_execution_workspace(
+    request: Request,
+    payload: SandboxScriptRunRequest,
+    *,
+    snapshot_workspace: Path,
+) -> Path:
+    state_scope_worker_key = payload.state_scope_worker_key
+    if state_scope_worker_key is None:
+        return snapshot_workspace
+    try:
+        expected_worker_key = script_worker_key_for_run(state_scope_worker_key, payload.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Script state scope is invalid for this run.") from exc
+    if not secrets.compare_digest(expected_worker_key, payload.worker_key):
+        raise HTTPException(status_code=400, detail="Script state scope does not own this run worker.")
+
+    try:
+        return resolve_script_state_workspace(
+            request.app,
+            state_scope_worker_key=state_scope_worker_key,
+            agent_name=state_scope_worker_key.rsplit(":", maxsplit=1)[-1],
+            private_agent_names=frozenset(payload.private_agent_names or ()),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _script_environment(
+    payload: SandboxScriptRunRequest,
+    *,
+    workspace: Path,
+    snapshot_workspace: Path,
+    token_path: Path,
+) -> dict[str, str]:
     parsed_url = urlsplit(payload.gateway_url)
     if (
         parsed_url.scheme not in {"http", "https"}
@@ -267,6 +306,7 @@ def _script_environment(payload: SandboxScriptRunRequest, *, workspace: Path, to
         "MINDROOM_SCRIPT_GATEWAY_URL": payload.gateway_url.rstrip("/"),
         "MINDROOM_SCRIPT_RUN_ID": payload.run_id,
         "MINDROOM_SCRIPT_SOURCE_DIGEST": payload.source_digest,
+        "MINDROOM_SCRIPT_SNAPSHOT_ROOT": str(snapshot_workspace),
         "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
         "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
     }
@@ -330,10 +370,16 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         worker_key=payload.worker_key,
         private_agent_names=payload.private_agent_names,
     )
-    workspace = prepared.paths.workspace.resolve()
-    source_path, token_path = _script_snapshot_paths(workspace, payload.run_id)
+    snapshot_workspace = prepared.paths.workspace.resolve()
+    source_path, token_path = _script_snapshot_paths(snapshot_workspace, payload.run_id)
     _validate_source_digest(source_path, payload.source_digest)
-    script_environment = _script_environment(payload, workspace=workspace, token_path=token_path)
+    workspace = _script_execution_workspace(request, payload, snapshot_workspace=snapshot_workspace)
+    script_environment = _script_environment(
+        payload,
+        workspace=workspace,
+        snapshot_workspace=snapshot_workspace,
+        token_path=token_path,
+    )
     python_executable, base_environment, _cwd = sandbox_exec.resolve_subprocess_worker_context(prepared.paths)
     if python_executable is None or base_environment is None:
         return SandboxScriptRunResponse(ok=False, error="Worker Python runtime is unavailable.", failure_kind="worker")

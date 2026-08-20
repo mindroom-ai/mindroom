@@ -270,6 +270,7 @@ class ScriptRunManager:
             context.runtime_paths,
             worker_backend_configured=worker_backend is not None,
         ):
+            _require_supported_private_script_worker_scope(context)
             if not self.gateway_url:
                 msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
                 raise ScriptRunManagerError(msg)
@@ -675,6 +676,7 @@ class ScriptRunManager:
                 run_id=run.run_id,
                 source_digest=run.source_digest,
                 gateway_url=self.gateway_url,
+                state_scope_worker_key=worker_spec.state_scope_worker_key,
                 private_agent_names=(
                     tuple(sorted(worker_spec.private_agent_names))
                     if worker_spec.private_agent_names is not None
@@ -777,6 +779,7 @@ class ScriptRunManager:
                 "MINDROOM_SCRIPT_GATEWAY_URL": self.gateway_url.rstrip("/"),
                 "MINDROOM_SCRIPT_RUN_ID": run.run_id,
                 "MINDROOM_SCRIPT_SOURCE_DIGEST": run.source_digest,
+                "MINDROOM_SCRIPT_SNAPSHOT_ROOT": str(workspace),
                 "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
                 "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
             },
@@ -1100,6 +1103,15 @@ def _agent_workspace(context: ToolRuntimeContext) -> Path:
     )
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace.resolve()
+
+
+def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
+    agent_config = context.config.get_agent(context.agent_name)
+    if agent_config.private is not None and context.config.resolve_entity(context.agent_name).execution_scope != (
+        "user_agent"
+    ):
+        msg = "Background-script workers for private agents require private.per=user_agent."
+        raise ScriptRunManagerError(msg)
 
 
 def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path:

@@ -66,6 +66,7 @@ class ScriptWorkerClient:
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
         """Launch the run's fixed source snapshot under its derived handle."""
@@ -76,6 +77,7 @@ class ScriptWorkerClient:
             json={
                 "run_id": run_id,
                 "worker_key": worker.worker_key,
+                "state_scope_worker_key": state_scope_worker_key,
                 "source_digest": source_digest,
                 "gateway_url": gateway_url,
                 "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,

@@ -214,6 +214,7 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 
 Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
 The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
+Private agents are supported in worker mode when they use `private.per: user_agent`; broader requester-wide private scopes remain unavailable to background-script workers.
 The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
 The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
 MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.
