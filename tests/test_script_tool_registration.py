@@ -13,8 +13,8 @@ def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> Non
     assert metadata.default_execution_target is ToolExecutionTarget.PRIMARY
     assert metadata.requires_room_context is True
     assert metadata.function_names == (
-        "run_script",
-        "status_script",
+        "start_script",
+        "get_script",
         "cancel_script",
         "list_scripts",
     )

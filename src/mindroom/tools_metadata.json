@@ -5867,8 +5867,8 @@
       "display_name": "Background Scripts",
       "docs_url": null,
       "function_names": [
-        "run_script",
-        "status_script",
+        "start_script",
+        "get_script",
         "cancel_script",
         "list_scripts"
       ],

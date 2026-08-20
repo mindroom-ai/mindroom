@@ -44,10 +44,10 @@ class ScriptTools(Toolkit):
         )
         super().__init__(
             name="script",
-            tools=[self.run_script, self.status_script, self.cancel_script, self.list_scripts],
+            tools=[self.start_script, self.get_script, self.cancel_script, self.list_scripts],
         )
 
-    async def run_script(
+    async def start_script(
         self,
         source: str | None = None,
         path: str | None = None,
@@ -74,11 +74,11 @@ class ScriptTools(Toolkit):
             return _payload("error", message=str(exc))
         return _payload("ok", action="run", run=_public_run(run))
 
-    async def status_script(self, run_id: str) -> str:
+    async def get_script(self, run_id: str) -> str:
         """Return durable state and recent process output for one owned script.
 
         Args:
-            run_id: Identifier returned by `run_script`.
+            run_id: Identifier returned by `start_script`.
 
         """
         resolved = _runtime()
@@ -95,7 +95,7 @@ class ScriptTools(Toolkit):
         """Cancel one owned background script after revoking its tool capability.
 
         Args:
-            run_id: Identifier returned by `run_script`.
+            run_id: Identifier returned by `start_script`.
             force: Force-kill the supervised process instead of requesting graceful termination.
 
         """

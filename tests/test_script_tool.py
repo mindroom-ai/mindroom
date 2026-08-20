@@ -124,9 +124,9 @@ def test_script_tool_interface_exists() -> None:
 
     assert set(toolkit.async_functions) == {
         "cancel_script",
+        "get_script",
         "list_scripts",
-        "run_script",
-        "status_script",
+        "start_script",
     }
 
 
@@ -142,7 +142,7 @@ async def test_script_tool_requires_live_room_context() -> None:
     """Detached construction cannot bypass requester and room ownership."""
     bind_script_run_manager(_Manager())
     try:
-        payload = json.loads(await ScriptTools().run_script(source="print('ok')"))
+        payload = json.loads(await ScriptTools().start_script(source="print('ok')"))
     finally:
         bind_script_run_manager(None)
 
@@ -167,7 +167,7 @@ async def test_script_tool_public_run_uses_derived_execution_mode_without_redund
     )
     try:
         with tool_runtime_context(script_context):
-            payload = json.loads(await toolkit.run_script(source="print('ok')", name="watcher"))
+            payload = json.loads(await toolkit.start_script(source="print('ok')", name="watcher"))
     finally:
         bind_script_run_manager(None)
 
@@ -207,7 +207,7 @@ async def test_script_tool_keeps_worker_mode_after_terminal_cleanup(
     bind_script_run_manager(manager)
     try:
         with tool_runtime_context(script_context):
-            payload = json.loads(await ScriptTools().status_script(run_id=terminal.run_id))
+            payload = json.loads(await ScriptTools().get_script(run_id=terminal.run_id))
     finally:
         bind_script_run_manager(None)
 
@@ -222,7 +222,7 @@ async def test_script_tool_controls_use_bound_manager(script_context: ToolRuntim
     toolkit = ScriptTools()
     try:
         with tool_runtime_context(script_context):
-            status = json.loads(await toolkit.status_script(run_id="script-1"))
+            status = json.loads(await toolkit.get_script(run_id="script-1"))
             cancelled = json.loads(await toolkit.cancel_script(run_id="script-1", force=True))
             listed = json.loads(await toolkit.list_scripts(include_finished=False))
     finally:

@@ -8,8 +8,8 @@ def test_background_script_docs_cover_security_and_lifecycle() -> None:
     text = Path("docs/tools/background-scripts.md").read_text(encoding="utf-8")
 
     for required in (
-        "run_script",
-        "status_script",
+        "start_script",
+        "get_script",
         "cancel_script",
         "list_scripts",
         "allowed_tools",

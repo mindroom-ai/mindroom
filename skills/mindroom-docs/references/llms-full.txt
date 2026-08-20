@@ -10386,19 +10386,19 @@ The limits are captured with each run.
 The agent receives four control functions.
 
 ```text
-run_script(source: str | None = None, path: str | None = None, name: str | None = None)
-status_script(run_id: str)
+start_script(source: str | None = None, path: str | None = None, name: str | None = None)
+get_script(run_id: str)
 cancel_script(run_id: str, force: bool = False)
 list_scripts(include_finished: bool = True)
 ```
 
-`run_script` requires exactly one of `source` or `path`.
+`start_script` requires exactly one of `source` or `path`.
 `source` accepts inline Python source.
 `path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
 Source is limited to 128 KiB.
 `name` is an optional short label shown in status and list results.
 
-`status_script` returns durable run state plus the supervisor's recent process output when it is available.
+`get_script` returns durable run state plus the supervisor's recent process output when it is available.
 `list_scripts` returns only runs owned by the current requester and agent.
 `cancel_script` revokes the tool capability before it signals the process.
 Normal cancellation requests graceful termination, waits for a short bounded grace period, escalates to a force kill when needed, and publishes `cancelled` only after process exit is confirmed.
@@ -10562,7 +10562,7 @@ MindRoom durably revokes every affected run before process reconciliation, and p
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
 Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
 
-Terminal process output is retained durably with a 64 KiB bound and remains available from `status_script(run_id)` after maintenance observes the exit.
+Terminal process output is retained durably with a 64 KiB bound and remains available from `get_script(run_id)` after maintenance observes the exit.
 Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
 When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
 
