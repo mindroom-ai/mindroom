@@ -184,6 +184,7 @@ class _FakeAppsApi:
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
+        self.deleted_propagation_policies: list[str | None] = []
         self.list_label_selectors: list[str] = []
         self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
@@ -237,9 +238,16 @@ class _FakeAppsApi:
         deployment.status.observed_generation = deployment.metadata.generation
         return deployment
 
-    def delete_namespaced_deployment(self, name: str, namespace: str) -> None:
+    def delete_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        *,
+        propagation_policy: str | None = None,
+    ) -> None:
         _ = namespace
         self.deleted_names.append(name)
+        self.deleted_propagation_policies.append(propagation_policy)
         if self.delete_read_lag_by_name.get(name, 0) > 0:
             self._active_delete_read_lag_by_name[name] = self.delete_read_lag_by_name[name]
             return
@@ -1015,6 +1023,83 @@ def test_kubernetes_backend_cleanup_removes_only_own_key_from_tenant_auth_secret
     assert handle.worker_id not in tenant_secret.data
     assert f"{handle.worker_id}.credentials-encryption-key" not in tenant_secret.data
     assert tenant_secret.data[other_worker_id] == "preexisting"
+
+
+def test_kubernetes_backend_retires_only_one_exact_run_worker_idempotently(tmp_path: Path) -> None:
+    """Script retirement removes one run worker while preserving its canonical worker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    base_key = "v1:test:user_agent:@alice:example.test:watcher"
+    run_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    ordinary = backend.ensure_worker(WorkerSpec(base_key, private_agent_names=frozenset()), now=1.0)
+    retired = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    ordinary_root = backend.storage_root / backend._state_subpath(base_key)
+    retired_root = backend.storage_root / backend._state_subpath(run_key)
+
+    backend.retire_worker(run_key)
+    backend.retire_worker(run_key)
+
+    assert retired.worker_id not in apps_api.deployments
+    assert retired.worker_id not in core_api.services
+    assert retired.worker_id not in core_api.secrets
+    assert retired_root.exists() is False
+    assert apps_api.deleted_propagation_policies[-2:] == ["Foreground", "Foreground"]
+    assert ordinary.worker_id in apps_api.deployments
+    assert ordinary.worker_id in core_api.services
+    assert ordinary.worker_id in core_api.secrets
+    assert ordinary_root.is_dir()
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_kubernetes_backend_refuses_retirement_when_deployment_key_mismatches(tmp_path: Path) -> None:
+    """A colliding Deployment name cannot authorize deletion for another worker key."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run(
+        "v1:test:user_agent:@alice:example.test:watcher",
+        f"script-{'d' * 32}",
+    )
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    apps_api.deployments[handle.worker_id].metadata.annotations[ANNOTATION_WORKER_KEY] = "another-worker"
+    state_root = backend.storage_root / backend._state_subpath(run_key)
+
+    with pytest.raises(WorkerBackendError, match="does not match retirement key"):
+        backend.retire_worker(run_key)
+
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id in core_api.services
+    assert handle.worker_id in core_api.secrets
+    assert state_root.is_dir()
+
+
+def test_kubernetes_backend_refuses_retirement_without_exact_state_identity(tmp_path: Path) -> None:
+    """Run state must identify its exact worker key before recursive deletion."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run(
+        "v1:test:user_agent:@alice:example.test:watcher",
+        f"script-{'e' * 32}",
+    )
+    handle = backend.ensure_worker(WorkerSpec(run_key, private_agent_names=frozenset()), now=1.0)
+    state_root = backend.storage_root / backend._state_subpath(run_key)
+    sandbox_startup_manifest_path(state_root).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="exact worker key"):
+        backend.retire_worker(run_key)
+
+    assert handle.worker_id in apps_api.deployments
+    assert handle.worker_id in core_api.services
+    assert handle.worker_id in core_api.secrets
+    assert state_root.is_dir()
 
 
 def test_kubernetes_backend_reapply_without_encryption_removes_worker_secret_key(tmp_path: Path) -> None:

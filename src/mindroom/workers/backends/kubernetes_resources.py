@@ -291,7 +291,12 @@ class _AppsApiProtocol(Protocol):
         body: dict[str, object],
     ) -> KubernetesDeployment: ...
 
-    def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
+    def delete_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        **kwargs: str,
+    ) -> None: ...
 
     def list_namespaced_deployment(
         self,
@@ -868,7 +873,20 @@ class KubernetesResourceManager:
 
     def _delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
-        self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
+        try:
+            self._apps.delete_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                propagation_policy="Foreground",
+            )
+        except self._api_exception as exc:
+            if exc.status != 404:
+                raise
+
+    def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Delete one worker Deployment after its dependent pods terminate."""
+        self._delete_deployment(deployment_name)
+        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""

@@ -611,6 +611,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
         ScriptToolGrant("calculator", "add"),
         ScriptToolGrant("website", "read_url"),
     )
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})
 
     run = await manager.run(
         _context(tmp_path),
@@ -623,11 +624,28 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_path: Path) -> None:
+    """A degraded optional integration must not make the entire allowlist invalid."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.grant_resolver = lambda _context: (ScriptToolGrant("calculator", "add"),)
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "temporarily-empty"})
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        limits=ScriptRunLimits(allowed_tools=("calculator", "temporarily-empty")),
+    )
+
+    assert run.grants == (ScriptToolGrant("calculator", "add"),)
+    assert run.preapprove_launch_grants is True
+
+
+@pytest.mark.asyncio
 async def test_launch_rejects_unknown_allowed_toolkit_before_durable_work(tmp_path: Path) -> None:
     """A typo in the authored SDK allowlist must fail clearly instead of granting an empty surface."""
     manager, backend, _client = _manager(tmp_path)
 
-    with pytest.raises(ScriptRunManagerError, match=r"unknown toolkit.*typo-tool"):
+    with pytest.raises(ScriptRunManagerError, match=r"unknown or ineligible toolkit.*typo-tool"):
         await manager.run(
             _context(tmp_path),
             source="print('ok')\n",
@@ -675,6 +693,7 @@ async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_pat
         ScriptToolGrant("calculator", "add"),
         ScriptToolGrant("website", "read_url"),
     )
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})
     context = _context(tmp_path)
 
     broad = await manager.run(

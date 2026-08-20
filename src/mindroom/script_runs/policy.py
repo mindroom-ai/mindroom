@@ -18,7 +18,11 @@ if TYPE_CHECKING:
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["resolve_current_script_tool", "resolve_script_launch_grants"]
+__all__ = [
+    "resolve_current_script_tool",
+    "resolve_script_launch_grants",
+    "resolve_script_launch_toolkit_names",
+]
 
 
 _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
@@ -34,6 +38,11 @@ def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToo
         for toolkit_name, toolkit in toolkits.items()
         for function_name in _visible_function_names(context, toolkit)
     )
+
+
+def resolve_script_launch_toolkit_names(context: ToolRuntimeContext) -> frozenset[str]:
+    """Resolve eligible toolkit names independently of their current function catalogs."""
+    return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config))
 
 
 def resolve_current_script_tool(

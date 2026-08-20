@@ -12,6 +12,7 @@ from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
@@ -30,6 +31,7 @@ from mindroom.workers.models import (
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.worker_retirement import open_worker_state_root
 
 from . import kubernetes_resources as resources
 from .kubernetes_config import (
@@ -554,6 +556,51 @@ class KubernetesWorkerBackend:
         """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
         return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Remove one exact Kubernetes worker and all backend-owned state."""
+        with self._worker_lock(worker_key):
+            worker_id = self._worker_id(worker_key)
+            state_subpath = self._state_subpath(worker_key)
+            state_parts = tuple(part for part in state_subpath.split("/") if part)
+            if not state_parts:
+                msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
+                raise WorkerBackendError(msg)
+            deployment = self._resources.read_deployment(worker_id)
+            if deployment is not None:
+                annotations = dict(deployment.metadata.annotations or {})
+                if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
+                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_key}'."
+                    raise WorkerBackendError(msg)
+                if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
+                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_key}'."
+                    raise WorkerBackendError(msg)
+            try:
+                with open_worker_state_root(
+                    self.storage_root,
+                    workers_subpath=state_parts[:-1],
+                    worker_name=state_parts[-1],
+                    expected_worker_key=worker_key,
+                    identity_path=(".runtime", "startup_manifest.json"),
+                    identity_field_path=(
+                        "runtime_paths",
+                        "process_env",
+                        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+                    ),
+                ) as state:
+                    self._invalidate_ready_worker(worker_key)
+                    self._resources.delete_service(worker_id)
+                    self._resources.delete_deployment(
+                        worker_id,
+                        timeout_seconds=self.config.ready_timeout_seconds,
+                    )
+                    self._resources.delete_secret(worker_id)
+                    state.remove()
+            except WorkerBackendError:
+                raise
+            except (OSError, RecursionError, TypeError, ValueError) as exc:
+                msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
 
     def _cleanup_idle_deployments(
         self,

@@ -29,7 +29,7 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
-from mindroom.script_runs.policy import resolve_script_launch_grants
+from mindroom.script_runs.policy import resolve_script_launch_grants, resolve_script_launch_toolkit_names
 from mindroom.script_runs.reasons import (
     AMBIGUOUS_LAUNCH,
     INTERRUPTION_REASONS,
@@ -184,6 +184,7 @@ class ScriptRunManager:
     worker_backend: WorkerBackend | None
     gateway_url: str
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
+    toolkit_name_resolver: Callable[[ToolRuntimeContext], frozenset[str]] = resolve_script_launch_toolkit_names
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -243,6 +244,24 @@ class ScriptRunManager:
             if self._launches_in_progress == 0:
                 self._launches_drained.set()
 
+    async def _resolve_launch_grants(
+        self,
+        context: ToolRuntimeContext,
+        limits: ScriptRunLimits,
+    ) -> tuple[ScriptToolGrant, ...]:
+        """Resolve one launch snapshot and apply its authored toolkit allowlist."""
+        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
+        if limits.allowed_tools is None:
+            return launch_grants
+        allowed_tools = frozenset(limits.allowed_tools)
+        eligible_toolkits = await asyncio.to_thread(self.toolkit_name_resolver, context)
+        unknown_toolkits = allowed_tools - eligible_toolkits
+        if unknown_toolkits:
+            names = ", ".join(sorted(unknown_toolkits))
+            msg = f"Background script allowed_tools contains unknown or ineligible toolkit names: {names}."
+            raise ScriptRunManagerError(msg)
+        return tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
+
     async def run(
         self,
         context: ToolRuntimeContext,
@@ -292,17 +311,7 @@ class ScriptRunManager:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
-        if effective_limits.allowed_tools is not None:
-            allowed_tools = frozenset(effective_limits.allowed_tools)
-            unknown_toolkits = allowed_tools - {grant.toolkit_name for grant in launch_grants}
-            if unknown_toolkits:
-                names = ", ".join(sorted(unknown_toolkits))
-                msg = (
-                    f"Background script allowed_tools contains unknown toolkit names or unavailable toolkits: {names}."
-                )
-                raise ScriptRunManagerError(msg)
-            launch_grants = tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
+        launch_grants = await self._resolve_launch_grants(context, effective_limits)
         token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
             run_id=run_id,
