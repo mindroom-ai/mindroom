@@ -12,6 +12,7 @@ import pytest
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import kubernetes_config as kubernetes_config_module
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
 from mindroom.workers.backends.docker_config import (
     docker_backend_cleanup_signature,
@@ -337,10 +338,24 @@ def test_kubernetes_signature_changes_with_cluster_context(tmp_path: Path) -> No
     )
 
 
-def test_kubernetes_cleanup_signature_ignores_credentials_but_tracks_selected_cluster(tmp_path: Path) -> None:
-    """Credential rotation retains cleanup access while a cluster endpoint change does not."""
+def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing in-cluster credentials use kubeconfig without tracking user credentials."""
     kubeconfig = tmp_path / "kubeconfig.yaml"
-    env = {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(kubeconfig)}
+    env = {
+        **_MINIMAL_KUBERNETES_ENV,
+        "KUBECONFIG": str(kubeconfig),
+        "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
+        "KUBERNETES_SERVICE_PORT": "443",
+    }
+    monkeypatch.setattr(
+        kubernetes_config_module,
+        "_in_cluster_credentials_available",
+        lambda: False,
+        raising=False,
+    )
 
     def write_kubeconfig(server: str, token: str) -> None:
         kubeconfig.write_text(

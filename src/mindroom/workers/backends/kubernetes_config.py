@@ -53,6 +53,8 @@ _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 _SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
 _DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
+_IN_CLUSTER_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+_IN_CLUSTER_CERT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
 _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX = "agent-vault"
 _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
@@ -518,11 +520,9 @@ def kubernetes_backend_cleanup_signature(
 
 def _kubernetes_cleanup_client_identity(runtime_paths: RuntimePaths) -> str:
     """Return a Kubernetes cleanup identity that ignores mutable user credentials."""
-    env = runtime_env_values(runtime_paths)
-    service_host = env.get("KUBERNETES_SERVICE_HOST")
-    service_port = env.get("KUBERNETES_SERVICE_PORT")
-    if service_host and service_port:
-        return f"in-cluster:{service_host}:{service_port}"
+    in_cluster_identity = _in_cluster_client_identity(runtime_paths)
+    if in_cluster_identity is not None:
+        return in_cluster_identity
 
     contexts: dict[str, dict[str, object]] = {}
     clusters: dict[str, dict[str, object]] = {}
@@ -568,11 +568,9 @@ def _merge_named_kubeconfig_entries(
 
 def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
     """Return a non-secret cache fingerprint for the selected Kubernetes control plane."""
-    env = runtime_env_values(runtime_paths)
-    service_host = env.get("KUBERNETES_SERVICE_HOST")
-    service_port = env.get("KUBERNETES_SERVICE_PORT")
-    if service_host and service_port:
-        return f"in-cluster:{service_host}:{service_port}"
+    in_cluster_identity = _in_cluster_client_identity(runtime_paths)
+    if in_cluster_identity is not None:
+        return in_cluster_identity
     identities: list[str] = []
     for kubeconfig_path in resolve_kubeconfig_paths(runtime_paths):
         try:
@@ -581,6 +579,28 @@ def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
             kubeconfig_digest = "unavailable"
         identities.append(f"{kubeconfig_path}:{kubeconfig_digest}")
     return "kubeconfig:" + os.pathsep.join(identities)
+
+
+def _in_cluster_client_identity(runtime_paths: RuntimePaths) -> str | None:
+    """Return the in-cluster identity only when its required credentials are available."""
+    env = runtime_env_values(runtime_paths)
+    service_host = env.get("KUBERNETES_SERVICE_HOST")
+    service_port = env.get("KUBERNETES_SERVICE_PORT")
+    if service_host and service_port and _in_cluster_credentials_available():
+        return f"in-cluster:{service_host}:{service_port}"
+    return None
+
+
+def _in_cluster_credentials_available() -> bool:
+    """Return whether the Kubernetes client can read its required service-account files."""
+    try:
+        for path in (_IN_CLUSTER_TOKEN_PATH, _IN_CLUSTER_CERT_PATH):
+            with path.open("rb") as credential_file:
+                if not credential_file.read(1):
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def resolve_kubeconfig_paths(runtime_paths: RuntimePaths) -> tuple[Path, ...]:
