@@ -187,14 +187,23 @@ class ConfigReloadLifecycle:
                     requested=describe_event_journal(new_config.event_journal, self.runtime_paths),
                 )
 
-            if current_config.authored_model_dump() == new_config.authored_model_dump():
+            current_authored_config = current_config.authored_model_dump()
+            new_authored_config = new_config.authored_model_dump()
+            runtime_authored_config = runtime_config.authored_model_dump() if runtime_config is not None else None
+            if current_authored_config == new_authored_config == runtime_authored_config:
                 logger.info("Configuration content unchanged; skipping publication")
                 return False
+            repairing_partial_publication = current_authored_config == new_authored_config
+            if repairing_partial_publication:
+                logger.warning("config_reload_repairing_partial_publication")
+            plan_base_config = (
+                runtime_config if repairing_partial_publication and runtime_config is not None else current_config
+            )
 
             agent_bots = self.agent_bots()
-            plugin_changes = plugin_change_paths(current_config, new_config)
+            plugin_changes = plugin_change_paths(plan_base_config, new_config)
             plan = build_config_update_plan(
-                current_config=current_config,
+                current_config=plan_base_config,
                 new_config=new_config,
                 configured_entities=set(configured_entity_names(new_config)),
                 existing_entities=set(agent_bots.keys()),
@@ -208,7 +217,7 @@ class ConfigReloadLifecycle:
             async def apply_update_plan() -> None:
                 nonlocal updated
                 async with self.config_update_lock:
-                    updated = await self.apply_update_plan(current_config, plan, plugin_changes)
+                    updated = await self.apply_update_plan(plan_base_config, plan, plugin_changes)
                     self._fully_applied_config = new_config
 
             applied = await self._apply_after_response_drain(

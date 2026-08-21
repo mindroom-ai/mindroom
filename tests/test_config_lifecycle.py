@@ -791,6 +791,50 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
 
 
 @pytest.mark.asyncio
+async def test_failed_partial_publication_allows_rollback_to_last_successful_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Restoring the last-good file must repair a partially published runtime."""
+    current_config = Config()
+    failed_config = Config(defaults={"enable_streaming": False})
+    loaded_config = failed_config
+    live_config = current_config
+    applied_from: list[Config] = []
+    applied_configs: list[Config] = []
+    monkeypatch.setattr(
+        "mindroom.orchestration.config_lifecycle.load_config",
+        lambda *_args, **_kwargs: loaded_config,
+    )
+    lifecycle = _make_lifecycle(tmp_path, current_config=current_config)
+    lifecycle.current_config = lambda: live_config
+
+    async def apply_plan(
+        applied_config: Config,
+        plan: ConfigUpdatePlan,
+        _plugin_changes: tuple[str, ...],
+    ) -> bool:
+        nonlocal live_config
+        applied_from.append(applied_config)
+        applied_configs.append(plan.new_config)
+        live_config = plan.new_config
+        if len(applied_configs) == 1:
+            msg = "failed after config publication"
+            raise RuntimeError(msg)
+        return True
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+
+    with pytest.raises(RuntimeError, match="failed after config publication"):
+        await lifecycle._update_config()
+
+    loaded_config = current_config
+    assert await lifecycle._update_config() is True
+    assert applied_from == [current_config, failed_config]
+    assert applied_configs == [failed_config, current_config]
+
+
+@pytest.mark.asyncio
 async def test_update_config_plugin_changes_restart_all_bots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

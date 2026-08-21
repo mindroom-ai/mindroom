@@ -143,59 +143,16 @@ def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[st
         logger.info(
             "call_manager_configuration_changed_restart_required",
             agents=sorted(changed_agents),
+            reason="active call tooling captures the authored configuration snapshot",
         )
     return changed_agents
 
 
-def _call_manager_signature(config: Config, agent_name: str) -> tuple[object, ...] | None:
-    """Return config captured by one call manager and its active call tooling."""
+def _call_manager_signature(config: Config, agent_name: str) -> object | None:
+    """Return the authored config captured by one active call agent."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
         return None
-    call_config = config.calls.resolve_agent_config(agent_name)
-    agent_config = config.get_agent(agent_name)
-    entity_view = config.resolve_entity(agent_name)
-    configured_worker_tools = agent_config.worker_tools
-    if configured_worker_tools is None:
-        configured_worker_tools = config.defaults.worker_tools
-    effective_worker_tools = (
-        None if configured_worker_tools is None else tuple(config.expand_tool_names(configured_worker_tools))
-    )
-    effective_worker_scope = entity_view.execution_scope
-    effective_allow_self_config = (
-        agent_config.allow_self_config
-        if agent_config.allow_self_config is not None
-        else config.defaults.allow_self_config
-    )
-    call_agent_model_signature: object
-    if call_config.backend == "cascaded" and call_config.model is not None:
-        call_agent_model_signature = ("explicit", call_config.model, config.models[call_config.model])
-    else:
-        call_agent_model_signature = (
-            "dynamic",
-            entity_view.model_name,
-            tuple(sorted(config.room_models.items())),
-            tuple(sorted(config.models.items())),
-        )
-    return (
-        call_config,
-        config.calls.livekit_service_url,
-        call_agent_model_signature,
-        tuple(entity_view.tool_configs),
-        effective_worker_tools,
-        effective_worker_scope,
-        config.get_worker_grantable_credentials() if effective_worker_scope is not None else None,
-        effective_allow_self_config,
-        config.authorization,
-        config.tool_approval,
-        config.matrix_room_access.encrypt_managed_rooms,
-        tuple(
-            sorted(
-                (room_name, room_config.encrypted)
-                for room_name, room_config in config.rooms.items()
-                if room_config.encrypted is not None
-            ),
-        ),
-    )
+    return config.authored_model_dump()
 
 
 def _get_changed_agents(

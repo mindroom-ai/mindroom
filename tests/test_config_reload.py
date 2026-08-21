@@ -20,6 +20,7 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.config.voice import SpeechServiceConfig
@@ -2277,6 +2278,73 @@ def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_cha
     )
 
     assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_knowledge_definition_changes() -> None:
+    """Active call tooling must not keep a captured stale knowledge definition."""
+    common = {
+        "agents": {
+            "general": AgentConfig(
+                display_name="General Agent",
+                knowledge_bases=["docs"],
+            ),
+        },
+        "calls": _calls_for("general"),
+        "router": RouterConfig(model="default"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            **common,
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./old-docs")},
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            **common,
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./new-docs")},
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
+    """Replacing a call agent must terminate sessions in rooms it leaves."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["project"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
 def test_config_update_plan_reconciles_agent_and_router_room_changes_without_restarts() -> None:
