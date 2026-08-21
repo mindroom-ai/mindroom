@@ -132,3 +132,12 @@ def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:
         return script_worker_key_for_run(base_worker_key, run_id) == worker_key
     except ValueError:
         return False
+
+
+def script_run_id_from_worker_key(worker_key: str) -> str | None:
+    """Return the run ID encoded by a valid run-pinned script worker key."""
+    parts = worker_key.split(":")
+    if len(parts) < 6:
+        return None
+    run_id = parts[-2]
+    return run_id if script_worker_key_belongs_to_run(worker_key, run_id) else None

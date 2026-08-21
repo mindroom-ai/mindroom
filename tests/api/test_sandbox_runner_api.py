@@ -27,6 +27,7 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
+import mindroom.api.sandbox_runner_scripts as sandbox_runner_scripts_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
@@ -48,6 +49,7 @@ from mindroom.credentials import (
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolMetadata, ToolStatus
 from mindroom.tool_system.metadata import (
@@ -210,6 +212,31 @@ def _initialize_runner_app_from_env() -> RuntimePaths:
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
     )
     return runtime_paths
+
+
+def _lifespan_app_for_dedicated_worker(
+    tmp_path: Path,
+    *,
+    worker_key: str,
+) -> FastAPI:
+    worker_root = tmp_path / "dedicated-worker"
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=worker_root,
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+        },
+    )
+    app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    return app
 
 
 def _invalid_plugin_config_path(tmp_path: Path) -> Path:
@@ -497,6 +524,70 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
     assert response.status_code == 200
     assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == preserved_runner_token
     assert sandbox_runner_module.app_runtime_config(sandbox_runner_app) == config
+
+
+def test_lifespan_prepares_script_worker_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cold script worker must finish setup before its readiness endpoint is served."""
+    run_id = f"script-{'a' * 32}"
+    worker_key = script_worker_key_for_run(
+        "v1:tenant:user_agent:alice:assistant",
+        run_id,
+    )
+    app = _lifespan_app_for_dedicated_worker(tmp_path, worker_key=worker_key)
+    startup_steps: list[str] = []
+
+    def prepare_worker_state(_paths: object) -> None:
+        startup_steps.append("worker-state")
+
+    def prepare_shell_supervisor() -> str:
+        assert startup_steps == ["worker-state"]
+        startup_steps.append("shell-supervisor")
+        return "unused-test-socket"
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "ensure_local_worker_state_locked",
+        prepare_worker_state,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        prepare_shell_supervisor,
+    )
+
+    with TestClient(app):
+        assert startup_steps == ["worker-state", "shell-supervisor"]
+
+
+def test_lifespan_does_not_eagerly_prepare_regular_dedicated_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ordinary tool workers should retain lazy initialization."""
+    app = _lifespan_app_for_dedicated_worker(
+        tmp_path,
+        worker_key="v1:tenant:user_agent:alice:assistant",
+    )
+
+    def unexpected_startup(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("regular dedicated workers must stay lazily initialized")
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "ensure_local_worker_state_locked",
+        unexpected_startup,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        unexpected_startup,
+    )
+
+    with TestClient(app):
+        pass
 
 
 def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(

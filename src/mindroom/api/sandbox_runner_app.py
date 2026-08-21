@@ -15,6 +15,9 @@ from mindroom.api.sandbox_runner import (
     startup_runner_token_from_env,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
+from mindroom.api.sandbox_runner_scripts import (
+    prepare_script_worker_before_serving,
+)
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.workers.compatibility import worker_health_payload
 
@@ -35,6 +38,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         config=config,
         runner_token=runner_token,
     )
+    await prepare_script_worker_before_serving(app)
     yield
 
 
