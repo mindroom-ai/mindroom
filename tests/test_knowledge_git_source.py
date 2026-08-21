@@ -649,6 +649,32 @@ async def test_git_lfs_pull_resolves_github_app_credentials_for_each_operation(
     _assert_github_app_auth_env(lfs_envs[0])
 
 
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "git@github.com:example/private.git",
+        "https://embedded-token@github.com/example/private.git",
+        "https://example.com/example/private.git",
+        "not-a-remote",
+    ],
+)
+@pytest.mark.asyncio
+async def test_github_app_credentials_fail_closed_for_noncanonical_remotes(
+    tmp_path: Path,
+    repo_url: str,
+) -> None:
+    """Selecting App auth must never fall back to ambient or embedded credentials."""
+    manager, _git_config = _github_app_manager(tmp_path)
+
+    with pytest.raises(ValueError, match=r"canonical https://github.com"):
+        await knowledge_git_source_module._resolved_git_auth_env(
+            repo_url,
+            "github_app",
+            manager.runtime_paths,
+            manager.git_source._github_app_token_provider,
+        )
+
+
 @pytest.mark.asyncio
 async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     tmp_path: Path,

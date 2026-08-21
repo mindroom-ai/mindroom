@@ -219,21 +219,14 @@ async def _resolved_git_auth_env(
     github_app_token_provider: GitHubAppTokenProvider,
 ) -> dict[str, str] | None:
     """Resolve refreshable App credentials or retain existing static Git auth."""
-    clean_url = credential_free_repo_url(repo_url)
-    try:
-        parsed_clean_url = urlparse(clean_url)
-    except ValueError:
-        return _git_auth_env(repo_url, credentials_service, runtime_paths)
-
-    if (
-        embedded_http_userinfo(repo_url) is None
-        and credentials_service
-        and parsed_clean_url.scheme in {"http", "https"}
-    ):
-        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-        if credentials.get("auth_type") == "github_app":
-            username, token = await github_app_token_provider.resolve(repo_url, credentials)
-            return _git_http_basic_auth_env(clean_url, username, token)
+    credentials = (
+        get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+        if credentials_service
+        else {}
+    )
+    if credentials.get("auth_type") == "github_app":
+        username, token = await github_app_token_provider.resolve(repo_url, credentials)
+        return _git_http_basic_auth_env(credential_free_repo_url(repo_url), username, token)
 
     return _git_auth_env(repo_url, credentials_service, runtime_paths)
 
