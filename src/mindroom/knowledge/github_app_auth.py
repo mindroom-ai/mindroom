@@ -76,7 +76,7 @@ def _github_repository(repo_url: str) -> tuple[str, str]:
         msg = "GitHub App credentials require a canonical https://github.com/<owner>/<repository> remote"
         raise ValueError(msg) from exc
 
-    parts = [part for part in parsed.path.split("/") if part]
+    parts = parsed.path.split("/")
     if (
         parsed.scheme != "https"
         or parsed.hostname != "github.com"
@@ -85,12 +85,13 @@ def _github_repository(repo_url: str) -> tuple[str, str]:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or len(parts) != 2
+        or len(parts) != 3
+        or parts[0]
     ):
         msg = "GitHub App credentials require a canonical https://github.com/<owner>/<repository> remote"
         raise ValueError(msg)
 
-    owner, repository = parts
+    _, owner, repository = parts
     repository = repository.removesuffix(".git")
     if (
         not owner

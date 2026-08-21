@@ -79,6 +79,8 @@ async def test_github_app_credentials_fail_closed_for_invalid_fields(
         "https://github.com/example/private.git#secret",
         "https://github.com/example",
         "https://github.com/example/private/extra",
+        "https://github.com/example//private.git",
+        "https://github.com/example/private.git/",
     ],
 )
 @pytest.mark.asyncio
