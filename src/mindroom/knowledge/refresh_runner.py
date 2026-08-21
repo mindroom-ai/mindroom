@@ -26,7 +26,10 @@ from mindroom.constants import (
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.github_app_auth import get_runtime_github_app_token_provider
+from mindroom.knowledge.github_app_auth import (
+    GitHubAppTokenBinding,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -88,6 +91,7 @@ class KnowledgeRefreshResult:
 class _SubprocessGitHubAppToken:
     token: str = field(repr=False)
     expires_at_epoch: int
+    binding: GitHubAppTokenBinding
 
 
 @dataclass(frozen=True)
@@ -175,10 +179,12 @@ async def _resolve_subprocess_github_app_token(
     if binding is None:
         return None
     repo_url, credentials = binding
-    resolved = await get_runtime_github_app_token_provider().resolve_token(repo_url, credentials)
+    provider = get_runtime_github_app_token_provider()
+    resolved = await provider.resolve_token(repo_url, credentials)
     return _SubprocessGitHubAppToken(
         token=resolved.token,
         expires_at_epoch=int(resolved.expires_at.timestamp()),
+        binding=provider.binding_for(repo_url, credentials),
     )
 
 
@@ -1105,6 +1111,40 @@ async def _reconcile_cancelled_refresh(
     await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
 
 
+def _load_subprocess_github_app_binding(raw_binding_payload: object) -> GitHubAppTokenBinding:
+    if not isinstance(raw_binding_payload, dict):
+        msg = "Knowledge refresh subprocess request github_app_token.binding must be an object"
+        raise TypeError(msg)
+    binding_payload = cast("dict[str, object]", raw_binding_payload)
+    raw_app_id = binding_payload.get("app_id")
+    raw_installation_id = binding_payload.get("installation_id")
+    raw_owner = binding_payload.get("owner")
+    raw_repository = binding_payload.get("repository")
+    raw_private_key_file = binding_payload.get("private_key_file")
+    if not isinstance(raw_app_id, int) or isinstance(raw_app_id, bool) or raw_app_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.app_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_installation_id, int) or isinstance(raw_installation_id, bool) or raw_installation_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.installation_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_owner, str) or not raw_owner:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.owner must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_repository, str) or not raw_repository:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.repository must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_private_key_file, str) or not raw_private_key_file:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.private_key_file must be non-empty"
+        raise TypeError(msg)
+    return GitHubAppTokenBinding(
+        app_id=raw_app_id,
+        installation_id=raw_installation_id,
+        owner=raw_owner,
+        repository=raw_repository,
+        private_key_file=raw_private_key_file,
+    )
+
+
 def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessGitHubAppToken | None:
     if raw_token_payload is None:
         return None
@@ -1123,6 +1163,7 @@ def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessG
     return _SubprocessGitHubAppToken(
         token=raw_token,
         expires_at_epoch=raw_expires_at_epoch,
+        binding=_load_subprocess_github_app_binding(token_payload.get("binding")),
     )
 
 
@@ -1182,15 +1223,17 @@ async def _prime_subprocess_github_app_token(
         runtime_paths=runtime_paths,
     )
     if binding is None:
-        msg = "Knowledge refresh subprocess GitHub App token does not match the configured credential service"
-        raise TypeError(msg)
+        return
     try:
         expires_at = datetime.fromtimestamp(request.github_app_token.expires_at_epoch, tz=UTC)
     except (OSError, OverflowError, ValueError) as exc:
         msg = "Knowledge refresh subprocess GitHub App token expiry is invalid"
         raise TypeError(msg) from exc
     repo_url, credentials = binding
-    get_runtime_github_app_token_provider().prime(
+    provider = get_runtime_github_app_token_provider()
+    if provider.binding_for(repo_url, credentials) != request.github_app_token.binding:
+        return
+    provider.prime(
         repo_url,
         credentials,
         token=request.github_app_token.token,

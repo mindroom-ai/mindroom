@@ -424,6 +424,7 @@ The remote must use the canonical `https://github.com/<owner>/<repository>` form
 MindRoom reads the key when needed and mints a repository-scoped installation token with read-only Contents permission.
 The control-plane runtime caches that token until shortly before GitHub's reported expiry.
 Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
+The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
 MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration

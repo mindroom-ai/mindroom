@@ -35,21 +35,27 @@ class _GitHubAppToken:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class GitHubAppTokenBinding:
+    """Non-secret identity that binds a token to one App repository scope."""
+
+    app_id: int
+    installation_id: int
+    owner: str
+    repository: str
+    private_key_file: str
+
+
 _TokenCacheKey = tuple[int, int, str, str, Path]
 
 
-def _token_cache_key(
-    credentials: _GitHubAppCredentials,
-    *,
-    owner: str,
-    repository: str,
-) -> _TokenCacheKey:
+def _token_cache_key(binding: GitHubAppTokenBinding) -> _TokenCacheKey:
     return (
-        credentials.app_id,
-        credentials.installation_id,
-        owner.casefold(),
-        repository.casefold(),
-        credentials.private_key_file,
+        binding.app_id,
+        binding.installation_id,
+        binding.owner.casefold(),
+        binding.repository.casefold(),
+        Path(binding.private_key_file),
     )
 
 
@@ -92,9 +98,9 @@ def _github_repository(repo_url: str) -> tuple[str, str]:
     try:
         parsed = urlsplit(repo_url)
         port = parsed.port
-    except ValueError as exc:
+    except ValueError:
         msg = "GitHub App credentials require a canonical https://github.com/<owner>/<repository> remote"
-        raise ValueError(msg) from exc
+        raise ValueError(msg) from None
 
     parts = parsed.path.split("/")
     if (
@@ -130,9 +136,9 @@ def _parse_expiry(value: object) -> datetime:
         raise TypeError(msg)
     try:
         expires_at = datetime.fromisoformat(value)
-    except ValueError as exc:
+    except ValueError:
         msg = "expires_at must be an RFC3339 timestamp"
-        raise ValueError(msg) from exc
+        raise ValueError(msg) from None
     if expires_at.tzinfo is None:
         msg = "expires_at must include a timezone"
         raise ValueError(msg)
@@ -158,15 +164,23 @@ class GitHubAppTokenProvider:
         resolved = await self.resolve_token(repo_url, credentials)
         return "x-access-token", resolved.token
 
+    def binding_for(self, repo_url: str, credentials: Mapping[str, Any]) -> GitHubAppTokenBinding:
+        """Return the non-secret identity a minted token is authorized for."""
+        parsed_credentials = _parse_credentials(credentials)
+        owner, repository = _github_repository(repo_url)
+        return GitHubAppTokenBinding(
+            app_id=parsed_credentials.app_id,
+            installation_id=parsed_credentials.installation_id,
+            owner=owner,
+            repository=repository,
+            private_key_file=str(parsed_credentials.private_key_file),
+        )
+
     async def resolve_token(self, repo_url: str, credentials: Mapping[str, Any]) -> _GitHubAppToken:
         """Return one cached or newly minted installation token."""
         parsed_credentials = _parse_credentials(credentials)
-        owner, repository = _github_repository(repo_url)
-        cache_key = _token_cache_key(
-            parsed_credentials,
-            owner=owner,
-            repository=repository,
-        )
+        binding = self.binding_for(repo_url, credentials)
+        cache_key = _token_cache_key(binding)
         cached = self._cache.get(cache_key)
         now = self._now().astimezone(UTC)
         if cached is not None and now < cached.expires_at - _TOKEN_REFRESH_MARGIN:
@@ -179,7 +193,7 @@ class GitHubAppTokenProvider:
                 return cached
             minted = await self._mint_token(
                 parsed_credentials,
-                repository=repository,
+                repository=binding.repository,
                 now=now,
             )
             self._cache[cache_key] = minted
@@ -200,13 +214,8 @@ class GitHubAppTokenProvider:
         if expires_at.tzinfo is None:
             msg = "GitHub App installation token expiry must include a timezone"
             raise ValueError(msg)
-        parsed_credentials = _parse_credentials(credentials)
-        owner, repository = _github_repository(repo_url)
-        cache_key = _token_cache_key(
-            parsed_credentials,
-            owner=owner,
-            repository=repository,
-        )
+        binding = self.binding_for(repo_url, credentials)
+        cache_key = _token_cache_key(binding)
         self._cache[cache_key] = _GitHubAppToken(
             token=token,
             expires_at=expires_at.astimezone(UTC),
@@ -262,9 +271,9 @@ class GitHubAppTokenProvider:
             raise RuntimeError(msg)
         try:
             response_payload = response.json()
-        except ValueError as exc:
+        except ValueError:
             msg = "GitHub returned an invalid token response for the App installation"
-            raise RuntimeError(msg) from exc
+            raise RuntimeError(msg) from None
         token = response_payload.get("token") if isinstance(response_payload, Mapping) else None
         expires_at_value = response_payload.get("expires_at") if isinstance(response_payload, Mapping) else None
         if not isinstance(token, str) or not token:
@@ -272,9 +281,9 @@ class GitHubAppTokenProvider:
             raise RuntimeError(msg)
         try:
             expires_at = _parse_expiry(expires_at_value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError):
             msg = "GitHub returned an invalid token response for the App installation"
-            raise RuntimeError(msg) from exc
+            raise RuntimeError(msg) from None
         return _GitHubAppToken(token=token, expires_at=expires_at)
 
 

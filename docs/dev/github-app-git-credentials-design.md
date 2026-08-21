@@ -34,6 +34,8 @@ The clean remote URL remains the only persisted URL.
 The control-plane runtime caches each repository-scoped token until five minutes before GitHub's reported expiry.
 Before starting a scheduled refresh child, the control plane resolves that cached token and sends the token plus its expiry only through the existing stdin request pipe.
 The child primes its process-local provider before Git synchronization, so refresh subprocess isolation does not cause another token mint.
+The handoff also identifies the App, installation, repository, and key path that authorized the token, and the child primes its provider only while its current credentials still match that identity.
+If credentials rotate between the parent mint and child startup, the child ignores the handed-off token and mints one for the current credentials.
 The parent-child handoff remains only in process memory and never uses a credential file, Git configuration, checkout metadata, refresh-child launch environment variable, or log.
 When token refresh is required, MindRoom reads the private-key file again, so key rotation takes effect without rewriting runtime credential metadata.
 Concurrent resolutions for one repository share one refresh operation.

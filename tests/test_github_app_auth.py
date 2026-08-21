@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import get_ident
@@ -94,6 +95,20 @@ async def test_github_app_credentials_reject_noncanonical_github_remotes(
         await GitHubAppTokenProvider().resolve(repo_url, _credentials(key_path))
 
     assert "secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_github_app_url_parse_traceback_does_not_include_credentials(tmp_path: Path) -> None:
+    """Parser causes must not leak embedded credentials through exception logs."""
+    key_path = tmp_path / "private-key.pem"
+    canary = "url" + "-credential-canary"
+    repo_url = f"https://user:{canary}@github.com{chr(0xFF0F)}example/private.git"
+
+    with pytest.raises(ValueError, match="canonical") as exc_info:
+        await GitHubAppTokenProvider().resolve(repo_url, _credentials(key_path))
+
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    assert canary not in rendered
 
 
 @pytest.mark.asyncio
@@ -324,3 +339,32 @@ async def test_github_app_token_endpoint_rejects_invalid_success_payload_without
             await provider.resolve("https://github.com/example/private.git", _credentials(key_path))
 
     assert "secret-token" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_github_app_invalid_expiry_traceback_does_not_include_response_value(tmp_path: Path) -> None:
+    """Malformed expiry causes must not leak response data through exception logs."""
+    key_path = tmp_path / "private-key.pem"
+    _private_key(key_path)
+    canary = "expiry" + "-response-canary"
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "token": "secret-token",
+                "expires_at": canary,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        provider = GitHubAppTokenProvider(
+            client=client,
+            now=lambda: datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        )
+        with pytest.raises(RuntimeError, match="invalid token response") as exc_info:
+            await provider.resolve("https://github.com/example/private.git", _credentials(key_path))
+
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    assert canary not in rendered
+    assert "secret-token" not in rendered
