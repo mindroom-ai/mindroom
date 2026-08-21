@@ -42,7 +42,7 @@ defaults:
 ```
 
 `allowed_tools` contains toolkit names, not function names.
-Unknown or unavailable toolkit names, including `*`, reject the launch with a clear error.
+Unknown or ineligible toolkit names, including `*`, reject the launch with a clear error.
 It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
 Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
 MindRoom captures the configured `allowed_tools` value when the script launches.
@@ -61,10 +61,16 @@ The limits are captured with each run.
 
 ## Control Functions
 
-The agent receives four control functions.
+The agent receives five control functions.
 
 ```text
-start_script(source: str | None = None, path: str | None = None, name: str | None = None)
+start_script(
+    source: str | None = None,
+    path: str | None = None,
+    name: str | None = None,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
+)
+get_script_resource_profiles()
 get_script(run_id: str)
 cancel_script(run_id: str, force: bool = False)
 list_scripts(include_finished: bool = True)
@@ -75,6 +81,11 @@ list_scripts(include_finished: bool = True)
 `path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
 Source is limited to 128 KiB.
 `name` is an optional short label shown in status and list results.
+On Kubernetes, `resource_profile` selects one of three administrator-bounded profiles.
+Omitting it uses the configured default.
+Call `get_script_resource_profiles` first to see the live default and exact CPU and memory requests and limits.
+The selected profile and its exact quantities are also returned by start, status, and list operations.
+An explicit profile fails when the active worker backend cannot enforce resource profiles.
 
 `get_script` returns durable run state plus the supervisor's recent process output when it is available.
 `list_scripts` returns only runs owned by the current requester and agent.
@@ -178,14 +189,17 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 
 ## Worker And Network Requirements
 
-The supported safe deployment uses the dedicated Docker backend described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
-The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured dedicated worker state root.
+The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
+The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured worker-state root.
 The worker must also reach the primary script gateway over an authenticated network path.
-Kubernetes background scripts currently return an error because the primary Kubernetes Service exposes more than the capability-gated script gateway on one listener.
-They will remain disabled until the chart provides a gateway-only listener and NetworkPolicy target.
+Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
+They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
+Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
+Kubernetes background scripts are not supported while `MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true` because run-specific external vault identities cannot yet be retired exactly.
 
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
-Alternatively, set `MINDROOM_PUBLIC_URL` to the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
+For Docker only, `MINDROOM_PUBLIC_URL` can instead name the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
+Kubernetes always requires an explicit `MINDROOM_SCRIPT_GATEWAY_URL` naming its gateway-only listener.
 Worker mode rejects missing, malformed, credential-bearing, unresolved, unspecified, or loopback gateway addresses.
 A query string or fragment is also rejected because the SDK appends receipt endpoint paths to this base.
 
@@ -196,6 +210,14 @@ export MINDROOM_SANDBOX_PROXY_TOKEN=replace-with-a-long-random-token
 export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gateway
 ```
 
+For Kubernetes, configure the dedicated backend and isolated gateway attestation instead:
+
+```bash
+export MINDROOM_WORKER_BACKEND=kubernetes
+export MINDROOM_SCRIPT_GATEWAY_URL=https://script-gateway.example.org/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
+```
+
 Build the worker image from the same source checkout when testing unreleased code.
 
 ```bash
@@ -203,8 +225,8 @@ docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
 Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
-Dedicated-worker script launch currently rejects private agents because their canonical private workspace cannot be projected into a run-specific worker without weakening isolation.
 The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
+Private agents are supported in worker mode when they use `private.per: user_agent`; broader requester-wide private scopes remain unavailable to background-script workers.
 The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
 The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
 MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.

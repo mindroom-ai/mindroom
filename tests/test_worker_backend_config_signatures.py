@@ -12,6 +12,7 @@ import pytest
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import kubernetes_config as kubernetes_config_module
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
 from mindroom.workers.backends.docker_config import (
     docker_backend_cleanup_signature,
@@ -20,6 +21,7 @@ from mindroom.workers.backends.docker_config import (
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
     credentials_encryption_key_hash,
+    kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
 
@@ -108,6 +110,11 @@ def _legacy_kubernetes_backend_config_signature(
     extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
     resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
+    script_resource_profiles_json = json.dumps(
+        config.script_resource_profiles,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "kubernetes",
         config.namespace,
@@ -134,6 +141,8 @@ def _legacy_kubernetes_backend_config_signature(
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
+        script_resource_profiles_json,
+        config.default_script_resource_profile,
         str(config.enable_service_links),
         config.auth_secret_name or "",
         str(config.reconcile_pod_templates),
@@ -327,6 +336,63 @@ def test_kubernetes_signature_changes_with_cluster_context(tmp_path: Path) -> No
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
     )
+
+
+def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kubeconfig fallback tracks the API server, not rotating credentials or CA data."""
+    kubeconfig = tmp_path / "kubeconfig.yaml"
+    env = {
+        **_MINIMAL_KUBERNETES_ENV,
+        "KUBECONFIG": str(kubeconfig),
+        "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
+        "KUBERNETES_SERVICE_PORT": "443",
+    }
+    monkeypatch.setattr(
+        kubernetes_config_module,
+        "_in_cluster_credentials_available",
+        lambda: True,
+    )
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("KUBERNETES_SERVICE_PORT", raising=False)
+
+    def write_kubeconfig(server: str, token: str, certificate_authority_data: str) -> None:
+        kubeconfig.write_text(
+            (
+                "apiVersion: v1\n"
+                "kind: Config\n"
+                "current-context: active\n"
+                "clusters:\n"
+                "  - name: selected\n"
+                f"    cluster:\n      server: {server}\n      certificate-authority-data: {certificate_authority_data}\n"
+                "contexts:\n"
+                "  - name: active\n"
+                "    context:\n"
+                "      cluster: selected\n"
+                "      user: operator\n"
+                "users:\n"
+                "  - name: operator\n"
+                f"    user:\n      token: {token}\n"
+            ),
+            encoding="utf-8",
+        )
+
+    write_kubeconfig("https://cluster-a.example.test", "token-a", "ca-a")
+    runtime_paths = _runtime_paths(tmp_path, env)
+    base = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+
+    write_kubeconfig("https://cluster-a.example.test", "token-b", "ca-b")
+    rotated_credentials = kubernetes_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=runtime_paths.storage_root,
+    )
+    write_kubeconfig("https://cluster-b.example.test", "token-b", "ca-b")
+    changed_cluster = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+
+    assert rotated_credentials == base
+    assert changed_cluster != base
 
 
 def test_docker_signature_is_stable_for_identical_config(tmp_path: Path) -> None:

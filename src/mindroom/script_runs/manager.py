@@ -14,12 +14,13 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import (
     ScriptRunRecord,
@@ -29,7 +30,7 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
-from mindroom.script_runs.policy import resolve_script_launch_grants
+from mindroom.script_runs.policy import resolve_script_launch_grants, resolve_script_launch_toolkit_names
 from mindroom.script_runs.reasons import (
     AMBIGUOUS_LAUNCH,
     INTERRUPTION_REASONS,
@@ -55,7 +56,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 from mindroom.workspaces import resolve_workspace_relative_path
 
@@ -90,6 +91,7 @@ _TERMINAL_STATES = frozenset(
         ScriptRunState.INTERRUPTED,
     },
 )
+_SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
 
 
 class ScriptRunManagerError(ValueError):
@@ -107,6 +109,22 @@ class _AmbiguousLaunchError(Exception):
 class _ScriptBroker(Protocol):
     async def cancel_run(self, run_id: str) -> None:
         """Cancel in-process broker executions for one revoked run."""
+
+
+@runtime_checkable
+class _ScriptResourceProfileBackend(Protocol):
+    def script_resource_profiles(self) -> dict[str, object] | None:
+        """Return the bounded resource profiles this backend can enforce."""
+
+
+class _ScriptResourceProfile(TypedDict):
+    requests: dict[str, str]
+    limits: dict[str, str]
+
+
+class _ScriptResourceProfilesPayload(TypedDict):
+    default_profile: ScriptResourceProfileName
+    profiles: dict[str, _ScriptResourceProfile]
 
 
 @runtime_checkable
@@ -184,6 +202,7 @@ class ScriptRunManager:
     worker_backend: WorkerBackend | None
     gateway_url: str
     grant_resolver: Callable[[ToolRuntimeContext], tuple[ScriptToolGrant, ...]] = resolve_script_launch_grants
+    toolkit_name_resolver: Callable[[ToolRuntimeContext], frozenset[str]] = resolve_script_launch_toolkit_names
     cancellation_grace_seconds: float = 2.0
     cancellation_poll_interval_seconds: float = 0.05
     _launch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -201,6 +220,17 @@ class ScriptRunManager:
     def __post_init__(self) -> None:
         """Mark the empty admission set as drained before any launch begins."""
         self._launches_drained.set()
+
+    def resource_profiles(self, context: ToolRuntimeContext) -> dict[str, object]:
+        """Return the exact bounded profiles available for this runtime."""
+        del context
+        payload = _validated_script_resource_profiles(self._worker_backend_for(None))
+        if payload is None:
+            return {"default_profile": None, "profiles": {}}
+        return {
+            "default_profile": payload["default_profile"],
+            "profiles": payload["profiles"],
+        }
 
     async def begin_shutdown(self) -> None:
         """Permanently reject new launches and drain every already-admitted launch."""
@@ -243,13 +273,32 @@ class ScriptRunManager:
             if self._launches_in_progress == 0:
                 self._launches_drained.set()
 
-    async def run(  # noqa: PLR0915
+    async def _resolve_launch_grants(
+        self,
+        context: ToolRuntimeContext,
+        limits: ScriptRunLimits,
+    ) -> tuple[ScriptToolGrant, ...]:
+        """Resolve one launch snapshot and apply its authored toolkit allowlist."""
+        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
+        if limits.allowed_tools is None:
+            return launch_grants
+        allowed_tools = frozenset(limits.allowed_tools)
+        eligible_toolkits = await asyncio.to_thread(self.toolkit_name_resolver, context)
+        unknown_toolkits = allowed_tools - eligible_toolkits
+        if unknown_toolkits:
+            names = ", ".join(sorted(unknown_toolkits))
+            msg = f"Background script allowed_tools contains unknown or ineligible toolkit names: {names}."
+            raise ScriptRunManagerError(msg)
+        return tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
+
+    async def run(
         self,
         context: ToolRuntimeContext,
         *,
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
+        resource_profile: ScriptResourceProfileName | None = None,
         limits: ScriptRunLimits | None = None,
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope."""
@@ -270,41 +319,38 @@ class ScriptRunManager:
             context.runtime_paths,
             worker_backend_configured=worker_backend is not None,
         ):
+            _require_supported_private_script_worker_scope(context)
             if not self.gateway_url:
                 msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
                 raise ScriptRunManagerError(msg)
-            worker_backend = _require_script_worker_backend(worker_backend)
+            worker_backend = _require_script_launch_backend(worker_backend, context.runtime_paths)
+            selected_profile = None
+            resource_requests: dict[str, str] = {}
+            resource_limits: dict[str, str] = {}
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
-                raise ScriptRunManagerError(msg)
-            if worker_target.private_agent_names:
-                msg = "Background scripts in dedicated workers are not supported for private agents."
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
+            if resource_profile is not None:
+                msg = "Resource profiles require a worker backend that advertises enforceable profiles."
+                raise ScriptRunManagerError(msg)
             if not background_script_supervision_supported():
                 msg = "Background scripts require Linux process-group containment."
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = None
             local_unsafe = True
+            selected_profile = None
+            resource_requests = {}
+            resource_limits = {}
         else:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        launch_grants = await asyncio.to_thread(self.grant_resolver, context)
-        if effective_limits.allowed_tools is not None:
-            allowed_tools = frozenset(effective_limits.allowed_tools)
-            unknown_toolkits = allowed_tools - {grant.toolkit_name for grant in launch_grants}
-            if unknown_toolkits:
-                names = ", ".join(sorted(unknown_toolkits))
-                msg = (
-                    f"Background script allowed_tools contains unknown toolkit names or unavailable toolkits: {names}."
-                )
-                raise ScriptRunManagerError(msg)
-            launch_grants = tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
+        launch_grants = await self._resolve_launch_grants(context, effective_limits)
         token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
             run_id=run_id,
@@ -321,6 +367,9 @@ class ScriptRunManager:
             worker_backend_locator=None,
             name=_validated_name(name),
             local_unsafe=local_unsafe,
+            resource_profile=selected_profile,
+            resource_requests=resource_requests,
+            resource_limits=resource_limits,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
             max_runtime_seconds=max(1, round(effective_limits.max_runtime_hours * 60 * 60)),
         )
@@ -331,6 +380,8 @@ class ScriptRunManager:
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
                 mirrored_credential_services=frozenset(),
+                state_scope_worker_key=worker_target.worker_key,
+                resource_profile=selected_profile,
             )
         )
         await self._admit_launch()
@@ -344,8 +395,12 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            admitted_backend = _require_script_worker_backend(self._worker_backend_for(None))
-            run = replace(run, worker_backend_locator=admitted_backend.cleanup_locator)
+            run, worker_spec = self._bind_admitted_worker_profile(
+                context,
+                run=run,
+                worker_spec=_require_worker_spec(worker_spec),
+                requested_profile=resource_profile,
+            )
             return await self._create_and_launch(
                 context,
                 run=run,
@@ -356,6 +411,28 @@ class ScriptRunManager:
             )
         finally:
             await self._release_launch_admission()
+
+    def _bind_admitted_worker_profile(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        run: ScriptRunRecord,
+        worker_spec: WorkerSpec,
+        requested_profile: ScriptResourceProfileName | None,
+    ) -> tuple[ScriptRunRecord, WorkerSpec]:
+        """Bind persisted quantities to the same refreshed backend that creates the worker."""
+        backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
+        profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
+        return (
+            replace(
+                run,
+                worker_backend_locator=backend.cleanup_locator,
+                resource_profile=profile,
+                resource_requests=requests,
+                resource_limits=limits,
+            ),
+            replace(worker_spec, resource_profile=profile),
+        )
 
     async def _create_and_launch(
         self,
@@ -677,6 +754,7 @@ class ScriptRunManager:
                 run_id=run.run_id,
                 source_digest=run.source_digest,
                 gateway_url=self.gateway_url,
+                state_scope_worker_key=worker_spec.state_scope_worker_key,
                 private_agent_names=(
                     tuple(sorted(worker_spec.private_agent_names))
                     if worker_spec.private_agent_names is not None
@@ -779,6 +857,7 @@ class ScriptRunManager:
                 "MINDROOM_SCRIPT_GATEWAY_URL": self.gateway_url.rstrip("/"),
                 "MINDROOM_SCRIPT_RUN_ID": run.run_id,
                 "MINDROOM_SCRIPT_SOURCE_DIGEST": run.source_digest,
+                "MINDROOM_SCRIPT_SNAPSHOT_ROOT": str(workspace),
                 "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
                 "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
             },
@@ -1104,6 +1183,80 @@ def _agent_workspace(context: ToolRuntimeContext) -> Path:
     return workspace.resolve()
 
 
+def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
+    agent_config = context.config.get_agent(context.agent_name)
+    if agent_config.private is not None and context.config.resolve_entity(context.agent_name).execution_scope != (
+        "user_agent"
+    ):
+        msg = "Background-script workers for private agents require private.per=user_agent."
+        raise ScriptRunManagerError(msg)
+
+
+def _validated_script_resource_profiles(backend: object | None) -> _ScriptResourceProfilesPayload | None:
+    if backend is None or not isinstance(backend, _ScriptResourceProfileBackend):
+        return None
+    raw = backend.script_resource_profiles()
+    if raw is None:
+        return None
+    default_profile = raw.get("default_profile")
+    profiles = raw.get("profiles")
+    if (
+        not isinstance(default_profile, str)
+        or default_profile not in _SCRIPT_RESOURCE_PROFILE_NAMES
+        or not isinstance(profiles, dict)
+        or set(profiles) != _SCRIPT_RESOURCE_PROFILE_NAMES
+    ):
+        msg = "Background script resource profiles must define small, standard, and large with a valid default."
+        raise ScriptRunManagerError(msg)
+    profiles_mapping = cast("dict[str, object]", profiles)
+    normalized: dict[str, _ScriptResourceProfile] = {}
+    for profile_name in sorted(_SCRIPT_RESOURCE_PROFILE_NAMES):
+        profile = profiles_mapping[profile_name]
+        if not isinstance(profile, dict):
+            msg = f"Background script resource profile '{profile_name}' must be an object."
+            raise ScriptRunManagerError(msg)
+        profile_mapping = cast("dict[str, object]", profile)
+        requests = profile_mapping.get("requests")
+        limits = profile_mapping.get("limits")
+        if not _valid_resource_quantities(requests) or not _valid_resource_quantities(limits):
+            msg = f"Background script resource profile '{profile_name}' must define CPU and memory requests and limits."
+            raise ScriptRunManagerError(msg)
+        normalized[profile_name] = {
+            "requests": dict(cast("dict[str, str]", requests)),
+            "limits": dict(cast("dict[str, str]", limits)),
+        }
+    return {
+        "default_profile": cast("ScriptResourceProfileName", default_profile),
+        "profiles": normalized,
+    }
+
+
+def _valid_resource_quantities(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"cpu", "memory"}
+        and all(isinstance(quantity, str) and quantity.strip() for quantity in value.values())
+    )
+
+
+def _resolve_script_resource_profile(
+    backend: object,
+    requested_profile: ScriptResourceProfileName | None,
+) -> tuple[ScriptResourceProfileName | None, dict[str, str], dict[str, str]]:
+    payload = _validated_script_resource_profiles(backend)
+    if payload is None:
+        if requested_profile is not None:
+            msg = "Resource profiles require a worker backend that advertises enforceable profiles."
+            raise ScriptRunManagerError(msg)
+        return None, {}, {}
+    selected = requested_profile or payload["default_profile"]
+    profiles = payload["profiles"]
+    profile = profiles[selected]
+    requests = profile["requests"]
+    limits = profile["limits"]
+    return selected, dict(requests), dict(limits)
+
+
 def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path:
     state_root = worker.debug_metadata.get("state_root")
     if state_root is not None:
@@ -1302,20 +1455,16 @@ def _raise_concurrent_run_limit() -> None:
     raise ScriptRunManagerError(msg)
 
 
-def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWorkerBackend:
+def _require_script_worker_backend(
+    backend: WorkerBackend | None,
+) -> _RetiringWorkerBackend:
     if backend is None:
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
     if isinstance(backend, StaticSandboxRunnerBackend):
         msg = (
             "Background scripts cannot use the shared static sandbox runner; configure explicit "
-            "unsafe-local mode or a Docker worker backend."
-        )
-        raise ScriptRunManagerError(msg)
-    if backend.backend_name == "kubernetes":
-        msg = (
-            "Kubernetes background scripts require a gateway-only listener; "
-            "use Docker or explicit unsafe-local mode until that boundary is configured."
+            "unsafe-local mode or a dedicated Docker or isolated Kubernetes worker backend."
         )
         raise ScriptRunManagerError(msg)
     if backend.cleanup_locator is None:
@@ -1325,6 +1474,28 @@ def _require_script_worker_backend(backend: WorkerBackend | None) -> _RetiringWo
         msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
+
+
+def _require_script_launch_backend(
+    backend: WorkerBackend | None,
+    runtime_paths: RuntimePaths,
+) -> _RetiringWorkerBackend:
+    admitted_backend = _require_script_worker_backend(backend)
+    isolated_kubernetes_gateway = runtime_paths.env_flag(
+        "MINDROOM_SCRIPT_GATEWAY_ISOLATED",
+    ) and bool((runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
+    if admitted_backend.backend_name == "kubernetes" and not isolated_kubernetes_gateway:
+        msg = (
+            "Kubernetes background scripts require a gateway-only listener; "
+            "use Docker or explicit unsafe-local mode until that boundary is configured."
+        )
+        raise ScriptRunManagerError(msg)
+    if admitted_backend.backend_name == "kubernetes" and runtime_paths.env_flag(
+        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"],
+    ):
+        msg = "Kubernetes background scripts are not supported while Agent Vault is enabled."
+        raise ScriptRunManagerError(msg)
+    return admitted_backend
 
 
 def _terminal_state_for(run: ScriptRunRecord) -> ScriptRunState:

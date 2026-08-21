@@ -34,6 +34,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_visible_state_roots,
+    resolve_state_scope_worker_key,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
@@ -454,6 +455,7 @@ class DockerWorkerBackend:
                 metadata,
                 paths,
                 private_agent_names=spec.private_agent_names,
+                state_scope_worker_key=spec.state_scope_worker_key,
             )
             lifecycle_state = prepare_worker_ensure_lifecycle(
                 read_lifecycle_state(metadata),
@@ -481,6 +483,7 @@ class DockerWorkerBackend:
                     metadata,
                     paths,
                     private_agent_names=spec.private_agent_names,
+                    state_scope_worker_key=spec.state_scope_worker_key,
                     launch_config=launch_config,
                 )
                 try:
@@ -501,6 +504,7 @@ class DockerWorkerBackend:
                         metadata,
                         paths,
                         private_agent_names=spec.private_agent_names,
+                        state_scope_worker_key=spec.state_scope_worker_key,
                         stale_error=stale_error,
                     )
                     endpoint = self._wait_for_ready(container)
@@ -751,6 +755,7 @@ class DockerWorkerBackend:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
     ) -> bool:
         container = self._read_container(metadata.container_name)
         if metadata.status == "failed":
@@ -762,6 +767,7 @@ class DockerWorkerBackend:
             container,
             paths,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
         ):
             return True
         return not self._container_is_running(container)
@@ -773,6 +779,7 @@ class DockerWorkerBackend:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
     ) -> bool:
         compatible_launch_config_hashes = self._compatible_launch_config_hashes(container)
         if metadata.launch_config_hash not in compatible_launch_config_hashes:
@@ -801,6 +808,7 @@ class DockerWorkerBackend:
             self._scoped_storage_mount_specs(
                 metadata.worker_key,
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
             ),
         )
         mount_checks.extend(config_mount_specs)
@@ -812,6 +820,7 @@ class DockerWorkerBackend:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
         launch_config: _DockerLaunchConfig,
     ) -> _DockerContainer:
         paths.root.mkdir(parents=True, exist_ok=True)
@@ -821,6 +830,7 @@ class DockerWorkerBackend:
             container,
             paths,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
         ):
             self._remove_container(container)
             container = None
@@ -830,6 +840,7 @@ class DockerWorkerBackend:
                 paths,
                 worker_key=metadata.worker_key,
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
             )
             self._prepare_nested_storage_mount_targets(paths, volumes)
             container = self._client.containers.run(
@@ -865,6 +876,7 @@ class DockerWorkerBackend:
         paths: LocalWorkerStatePaths,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None,
         stale_error: WorkerBackendError,
     ) -> tuple[_DockerContainer, _DockerLaunchConfig]:
         """Pull the configured image once and relaunch after a protocol mismatch.
@@ -892,6 +904,7 @@ class DockerWorkerBackend:
                 metadata,
                 paths,
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
                 launch_config=launch_config,
             ),
             launch_config,
@@ -1058,6 +1071,7 @@ class DockerWorkerBackend:
         *,
         worker_key: str | None = None,
         private_agent_names: frozenset[str] | None = None,
+        state_scope_worker_key: str | None = None,
     ) -> dict[str, dict[str, str]]:
         volumes = {
             str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
@@ -1066,6 +1080,7 @@ class DockerWorkerBackend:
             for host_path, container_path, read_only in self._scoped_storage_mount_specs(
                 worker_key,
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
             ):
                 volumes[str(host_path)] = {
                     "bind": container_path,
@@ -1110,11 +1125,12 @@ class DockerWorkerBackend:
         worker_key: str,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None = None,
     ) -> list[tuple[Path, str, bool]]:
         mount_specs = [
             (planned_root.local_path, str(planned_root.worker_visible_path), False)
             for planned_root in plan_scoped_visible_state_roots(
-                worker_key=worker_key,
+                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=private_agent_names,

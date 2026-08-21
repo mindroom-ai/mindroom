@@ -6,7 +6,7 @@ import asyncio
 import stat
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -36,7 +36,7 @@ from mindroom.script_runs.worker_client import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
@@ -51,10 +51,18 @@ def _runtime_paths(
     *,
     mode: str | None = "all",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> RuntimePaths:
     process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": mode} if mode is not None else {}
     if backend is not None:
         process_env["MINDROOM_WORKER_BACKEND"] = backend
+    if isolated_script_gateway:
+        process_env.update(
+            {
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+                "MINDROOM_SCRIPT_GATEWAY_URL": "http://script-gateway.test/api/script-gateway",
+            },
+        )
     return RuntimePaths(
         config_path=tmp_path / "config.yaml",
         config_dir=tmp_path,
@@ -72,10 +80,17 @@ def _context(
     requester_id: str = "@alice:example.test",
     mode: str | None = "all",
     private: bool = False,
+    private_scope: str = "user_agent",
     worker_scope: str = "user_agent",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> ToolRuntimeContext:
-    runtime_paths = _runtime_paths(tmp_path, mode=mode, backend=backend)
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        mode=mode,
+        backend=backend,
+        isolated_script_gateway=isolated_script_gateway,
+    )
     watcher: dict[str, object] = {
         "display_name": "Watcher",
         "worker_scope": worker_scope,
@@ -83,7 +98,7 @@ def _context(
     }
     if private:
         watcher.pop("worker_scope")
-        watcher["private"] = {"per": "user_agent", "root": "private/watcher"}
+        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
     config = Config(
         agents={
             "watcher": watcher,
@@ -144,6 +159,10 @@ class _WorkerBackend:
     saw_starting: bool = False
     list_worker_thread_ids: list[int] = field(default_factory=list)
     retired_worker_keys: list[str] = field(default_factory=list)
+    resource_profiles_payload: dict[str, object] | None = None
+
+    def script_resource_profiles(self) -> dict[str, object] | None:
+        return self.resource_profiles_payload
 
     def ensure_worker(
         self,
@@ -201,6 +220,7 @@ class _WorkerBackend:
 class _WorkerClient:
     store: ScriptRunStore
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
+    launch_state_scope_worker_keys: list[str | None] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
     cancel_handles: list[str] = field(default_factory=list)
@@ -222,9 +242,11 @@ class _WorkerClient:
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
+        self.launch_state_scope_worker_keys.append(state_scope_worker_key)
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
         assert starting.worker_id == worker.worker_id
@@ -280,8 +302,14 @@ def _manager(
     *,
     mode: str | None = "all",
     backend: str | None = None,
+    isolated_script_gateway: bool = False,
 ) -> tuple[ScriptRunManager, _WorkerBackend, _WorkerClient]:
-    context = _context(tmp_path, mode=mode, backend=backend)
+    context = _context(
+        tmp_path,
+        mode=mode,
+        backend=backend,
+        isolated_script_gateway=isolated_script_gateway,
+    )
     store = ScriptRunStore(context.runtime_paths)
     backend = _WorkerBackend(store=store, runtime_paths=context.runtime_paths)
     client = _WorkerClient(store=store)
@@ -290,7 +318,11 @@ def _manager(
         broker=_Broker(store),
         worker_client=client,
         worker_backend=backend,
-        gateway_url="http://primary.test/api/script-gateway",
+        gateway_url=(
+            "http://script-gateway.test/api/script-gateway"
+            if isolated_script_gateway
+            else "http://primary.test/api/script-gateway"
+        ),
         grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
         cancellation_grace_seconds=0,
         cancellation_poll_interval_seconds=0,
@@ -325,6 +357,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
             run.worker_key,
             private_agent_names=frozenset(),
             mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
         ),
     ]
     assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
@@ -333,6 +366,122 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
     assert run.snapshot_locator is not None
     assert (context.runtime_paths.storage_root / run.snapshot_locator / "source.py").is_file()
     assert client.launch_paths[run.run_id][0].is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_profile", "selected_profile", "expected_requests", "expected_limits"),
+    [
+        (None, "small", {"cpu": "100m", "memory": "256Mi"}, {"cpu": "500m", "memory": "1Gi"}),
+        ("standard", "standard", {"cpu": "250m", "memory": "512Mi"}, {"cpu": "1", "memory": "2Gi"}),
+    ],
+)
+async def test_launch_snapshots_selected_resource_profile_before_worker_creation(
+    tmp_path: Path,
+    requested_profile: ScriptResourceProfileName | None,
+    selected_profile: ScriptResourceProfileName,
+    expected_requests: dict[str, str],
+    expected_limits: dict[str, str],
+) -> None:
+    """An explicit or default profile resolves to administrator-owned quantities before durable launch."""
+    manager, backend, _client = _manager(tmp_path)
+    backend.resource_profiles_payload = {
+        "default_profile": "small",
+        "profiles": {
+            "small": {
+                "requests": {"cpu": "100m", "memory": "256Mi"},
+                "limits": {"cpu": "500m", "memory": "1Gi"},
+            },
+            "standard": {
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+                "limits": {"cpu": "1", "memory": "2Gi"},
+            },
+            "large": {
+                "requests": {"cpu": "500m", "memory": "2Gi"},
+                "limits": {"cpu": "2", "memory": "8Gi"},
+            },
+        },
+    }
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        resource_profile=requested_profile,
+    )
+
+    assert backend.specs[-1].resource_profile == selected_profile
+    assert run.resource_profile == selected_profile
+    assert run.resource_requests == expected_requests
+    assert run.resource_limits == expected_limits
+    assert manager.store.get_run(run.run_id) == run
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_explicit_profile_without_backend_support(tmp_path: Path) -> None:
+    """An agent cannot turn a profile name into unenforced local or backend-specific resources."""
+    manager, backend, _client = _manager(tmp_path)
+
+    with pytest.raises(
+        ScriptRunManagerError,
+        match="Resource profiles require a worker backend that advertises enforceable profiles",
+    ):
+        await manager.run(
+            _context(tmp_path),
+            source="print('ok')\n",
+            resource_profile="large",
+        )
+
+    assert backend.specs == []
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_launch_snapshots_profile_from_the_backend_admitted_after_launch_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config refresh during admission cannot make persisted quantities differ from the worker backend."""
+    manager, first_backend, client = _manager(tmp_path)
+    first_backend.resource_profiles_payload = {
+        "default_profile": "small",
+        "profiles": {
+            "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
+            "standard": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "1", "memory": "2Gi"}},
+            "large": {"requests": {"cpu": "500m", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+        },
+    }
+    admitted_backend = _WorkerBackend(
+        store=manager.store,
+        runtime_paths=first_backend.runtime_paths,
+        cleanup_locator="locator-b",
+        resource_profiles_payload={
+            "default_profile": "small",
+            "profiles": {
+                "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
+                "standard": {"requests": {"cpu": "400m", "memory": "1Gi"}, "limits": {"cpu": "1", "memory": "3Gi"}},
+                "large": {"requests": {"cpu": "800m", "memory": "3Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+            },
+        },
+    )
+    original_admit = ScriptRunManager._admit_launch
+
+    async def admit_and_refresh(self: ScriptRunManager) -> None:
+        await original_admit(self)
+        self.worker_backend = admitted_backend
+
+    monkeypatch.setattr(ScriptRunManager, "_admit_launch", admit_and_refresh)
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        resource_profile="standard",
+    )
+
+    assert run.worker_backend_locator == "locator-b"
+    assert run.resource_requests == {"cpu": "400m", "memory": "1Gi"}
+    assert run.resource_limits == {"cpu": "1", "memory": "3Gi"}
+    assert admitted_backend.specs[-1].resource_profile == "standard"
+    assert client.requested_handles
 
 
 @pytest.mark.asyncio
@@ -435,7 +584,7 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     )
     manager.worker_backend = static_backend
 
-    with pytest.raises(ScriptRunManagerError, match="unsafe-local mode or a Docker worker"):
+    with pytest.raises(ScriptRunManagerError, match="dedicated Docker or isolated Kubernetes worker backend"):
         await manager.run(_context(tmp_path, backend="static"), source="print('unavailable')\n")
 
     assert manager.store.list_runs() == []
@@ -451,6 +600,104 @@ async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener
 
     with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
         await manager.run(_context(tmp_path, backend="kubernetes"), source="print('unavailable')\n")
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gateway(tmp_path: Path) -> None:
+    """An operator-attested path-only listener admits a run without weakening the default."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+
+    run = await manager.run(
+        _context(
+            tmp_path,
+            backend="kubernetes",
+            isolated_script_gateway=True,
+        ),
+        source="print('ok')\n",
+    )
+
+    assert run.state is ScriptRunState.RUNNING
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key or "",
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        ),
+    ]
+    assert len(client.requested_handles) == 1
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_rejects_scripts_when_agent_vault_is_enabled(tmp_path: Path) -> None:
+    """Run-specific workers must not create external identities that exact retirement cannot delete."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+    context = _context(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    context = replace(
+        context,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env={
+                **context.runtime_paths.process_env,
+                "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
+            },
+        ),
+    )
+
+    with pytest.raises(ScriptRunManagerError, match="Agent Vault"):
+        await manager.run(context, source="print('ok')\n")
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_requires_an_explicit_gateway_with_isolation_attestation(tmp_path: Path) -> None:
+    """The isolation flag alone must not reinterpret a general API URL as a gateway-only listener."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+    context = _context(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    context = replace(
+        context,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+                "MINDROOM_WORKER_BACKEND": "kubernetes",
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+            },
+        ),
+    )
+
+    with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
+        await manager.run(context, source="print('ok')\n")
 
     assert manager.store.list_runs() == []
     assert backend.specs == []
@@ -517,6 +764,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
         ScriptToolGrant("calculator", "add"),
         ScriptToolGrant("website", "read_url"),
     )
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})
 
     run = await manager.run(
         _context(tmp_path),
@@ -529,11 +777,28 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_path: Path) -> None:
+    """A degraded optional integration must not make the entire allowlist invalid."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.grant_resolver = lambda _context: (ScriptToolGrant("calculator", "add"),)
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "temporarily-empty"})
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        limits=ScriptRunLimits(allowed_tools=("calculator", "temporarily-empty")),
+    )
+
+    assert run.grants == (ScriptToolGrant("calculator", "add"),)
+    assert run.preapprove_launch_grants is True
+
+
+@pytest.mark.asyncio
 async def test_launch_rejects_unknown_allowed_toolkit_before_durable_work(tmp_path: Path) -> None:
     """A typo in the authored SDK allowlist must fail clearly instead of granting an empty surface."""
     manager, backend, _client = _manager(tmp_path)
 
-    with pytest.raises(ScriptRunManagerError, match=r"unknown toolkit.*typo-tool"):
+    with pytest.raises(ScriptRunManagerError, match=r"unknown or ineligible toolkit.*typo-tool"):
         await manager.run(
             _context(tmp_path),
             source="print('ok')\n",
@@ -581,6 +846,7 @@ async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_pat
         ScriptToolGrant("calculator", "add"),
         ScriptToolGrant("website", "read_url"),
     )
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})
     context = _context(tmp_path)
 
     broad = await manager.run(
@@ -687,14 +953,37 @@ async def test_script_process_scope_is_user_agent_independent_of_tool_scope(
 
 @pytest.mark.asyncio
 async def test_script_process_target_preserves_private_agent_visibility(tmp_path: Path) -> None:
-    """Private-agent scripts fail closed rather than mounting a fresh empty state projection."""
-    manager, backend, _client = _manager(tmp_path)
+    """A private script keeps a run-specific worker but mounts its owning private state scope."""
+    manager, backend, client = _manager(tmp_path)
 
-    with pytest.raises(ScriptRunManagerError, match="private agents"):
-        await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
+    run = await manager.run(_context(tmp_path, private=True), source="print('ok')\n")
 
-    assert backend.specs == []
+    assert run.worker_key is not None
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key,
+            private_agent_names=frozenset({"watcher"}),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        ),
+    ]
+    assert client.launch_state_scope_worker_keys == ["v1:default:user_agent:@alice:example.test:watcher"]
+
+
+@pytest.mark.asyncio
+async def test_private_user_scope_rejects_background_worker_before_persisting_run(tmp_path: Path) -> None:
+    """A script worker must not project the broader requester scope as an agent-specific workspace."""
+    manager, backend, client = _manager(tmp_path)
+
+    with pytest.raises(ScriptRunManagerError, match=r"private\.per=user_agent"):
+        await manager.run(
+            _context(tmp_path, private=True, private_scope="user"),
+            source="print('ok')\n",
+        )
+
     assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
 
 
 @pytest.mark.asyncio

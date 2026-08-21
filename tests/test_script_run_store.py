@@ -82,6 +82,94 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert len(store.pending_calls(run.run_id)) == 1
 
 
+def test_run_store_migrates_existing_table_for_resource_snapshots(runtime_paths: RuntimePaths) -> None:
+    """An existing script database gains profile columns before the first profiled launch."""
+    database_path = runtime_paths.control_state_root / "script_runs" / "script_runs.sqlite3"
+    database_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE script_runs (
+                run_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                thread_root_event_id TEXT,
+                execution_identity_json TEXT NOT NULL,
+                source_digest TEXT NOT NULL,
+                grants_json TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                preapprove_launch_grants INTEGER NOT NULL,
+                worker_key TEXT,
+                worker_id TEXT,
+                worker_backend_locator TEXT,
+                snapshot_locator TEXT,
+                name TEXT,
+                local_unsafe INTEGER NOT NULL,
+                max_tool_calls_per_minute INTEGER NOT NULL,
+                max_runtime_seconds INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                exit_code INTEGER,
+                error TEXT,
+                output TEXT NOT NULL,
+                cancel_requested_at TEXT,
+                cancellation_reason TEXT
+            )
+            """,
+        )
+        connection.execute(
+            """
+            INSERT INTO script_runs (
+                run_id, agent_name, owner_user_id, room_id,
+                execution_identity_json, source_digest, grants_json, token_hash,
+                preapprove_launch_grants, local_unsafe,
+                max_tool_calls_per_minute, max_runtime_seconds,
+                state, created_at, output
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-run",
+                "watcher",
+                "@alice:example.test",
+                "!room:example.test",
+                "{}",
+                "source-digest",
+                "[]",
+                "capability-digest",
+                0,
+                0,
+                30,
+                3600,
+                "starting",
+                "2026-08-20T00:00:00Z",
+                "",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = ScriptRunStore(runtime_paths)
+    legacy = store.get_run("legacy-run")
+    profiled = replace(
+        _new_run(),
+        resource_profile="standard",
+        resource_requests={"cpu": "250m", "memory": "512Mi"},
+        resource_limits={"cpu": "1", "memory": "2Gi"},
+    )
+
+    store.create_run(profiled)
+
+    assert legacy.resource_profile is None
+    assert legacy.resource_requests == {}
+    assert legacy.resource_limits == {}
+    assert store.get_run(profiled.run_id) == profiled
+
+
 def test_write_transaction_closes_connection_when_begin_fails(
     runtime_paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

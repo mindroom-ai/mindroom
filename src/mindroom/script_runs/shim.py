@@ -13,6 +13,7 @@ from pathlib import Path
 
 _CONTROL_STATE_PATH_ENV = "MINDROOM_CONTROL_STATE_PATH"
 _SOURCE_DIGEST_ENV = "MINDROOM_SCRIPT_SOURCE_DIGEST"
+_SNAPSHOT_ROOT_ENV = "MINDROOM_SCRIPT_SNAPSHOT_ROOT"
 _TOKEN_PATH_ENV = "MINDROOM_SCRIPT_TOKEN_PATH"  # noqa: S105 - this names a path, not a token.
 _WORKSPACE_ROOT_ENV = "MINDROOM_SCRIPT_WORKSPACE_ROOT"
 _MAX_SOURCE_BYTES = 128 * 1024
@@ -91,17 +92,22 @@ def _main(argv: list[str]) -> int:
         msg = f"{_WORKSPACE_ROOT_ENV} must be set for a supervised script run."
         raise ValueError(msg)
     workspace_root = Path(raw_workspace_root).resolve(strict=True)
-    token_entry = _trusted_token_entry(argv[2], workspace_root=workspace_root)
+    if not workspace_root.is_dir():
+        msg = f"{_WORKSPACE_ROOT_ENV} must name a directory."
+        raise ValueError(msg)
+    raw_snapshot_root = os.environ.get(_SNAPSHOT_ROOT_ENV, "").strip() or raw_workspace_root
+    snapshot_root = Path(raw_snapshot_root).resolve(strict=True)
+    token_entry = _trusted_token_entry(argv[2], workspace_root=snapshot_root)
     try:
         token_path = _validated_file(
             argv[2],
-            workspace_root=workspace_root,
+            workspace_root=snapshot_root,
             label="Script capability file",
             byte_limit=_MAX_TOKEN_BYTES,
         )
         source_path = _validated_file(
             argv[1],
-            workspace_root=workspace_root,
+            workspace_root=snapshot_root,
             label="Script source",
             byte_limit=_MAX_SOURCE_BYTES,
         )
@@ -115,7 +121,7 @@ def _main(argv: list[str]) -> int:
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
-        _remove_token_entry(token_entry, workspace_root=workspace_root)
+        _remove_token_entry(token_entry, workspace_root=snapshot_root)
     return 0
 
 

@@ -49,6 +49,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
+    resolve_state_scope_worker_key,
     resolved_agent_policies_from_config_data,
     validate_unique_worker_visible_paths,
 )
@@ -94,6 +95,8 @@ _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
 _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH = "mindroom.ai/credentials-encryption-key-hash"
 _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
+_ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
+_ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -289,7 +292,12 @@ class _AppsApiProtocol(Protocol):
         body: dict[str, object],
     ) -> KubernetesDeployment: ...
 
-    def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
+    def delete_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        **kwargs: str,
+    ) -> None: ...
 
     def list_namespaced_deployment(
         self,
@@ -478,6 +486,18 @@ def parse_private_agent_names_annotation(annotations: dict[str, str]) -> frozens
     if not isinstance(parsed, list):
         return None
     return frozenset(name for name in parsed if isinstance(name, str))
+
+
+def parse_state_scope_worker_key_annotation(annotations: dict[str, str]) -> str | None:
+    """Parse the persisted state-scope worker key, ``None`` when absent."""
+    value = annotations.get(_ANNOTATION_STATE_SCOPE_WORKER_KEY)
+    return value or None
+
+
+def parse_resource_profile_annotation(annotations: dict[str, str]) -> str | None:
+    """Parse the persisted bounded resource profile, ``None`` for ordinary workers."""
+    value = annotations.get(_ANNOTATION_RESOURCE_PROFILE)
+    return value or None
 
 
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
@@ -797,6 +817,8 @@ class KubernetesResourceManager:
         annotations: dict[str, str],
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
+        state_scope_worker_key: str | None = None,
+        resource_profile: str | None = None,
     ) -> DeploymentApplyResult:
         """Create-or-patch one worker Deployment."""
         manifest = self._deployment_manifest(
@@ -806,6 +828,8 @@ class KubernetesResourceManager:
             annotations=annotations,
             replicas=replicas,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+            resource_profile=resource_profile,
         )
         existing = self.read_deployment(worker_id)
         if existing is not None:
@@ -858,7 +882,20 @@ class KubernetesResourceManager:
 
     def _delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
-        self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
+        try:
+            self._apps.delete_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                propagation_policy="Foreground",
+            )
+        except self._api_exception as exc:
+            if exc.status != 404:
+                raise
+
+    def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Delete one worker Deployment after its dependent pods terminate."""
+        self._delete_deployment(deployment_name)
+        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""
@@ -1195,6 +1232,8 @@ class KubernetesResourceManager:
         worker_id: str,
         state_subpath: str,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None = None,
+        resource_profile: str | None = None,
     ) -> bool:
         """Return whether one Deployment's recorded pod template differs from current config."""
         startup_manifest_path, startup_manifest_hash = self._startup_manifest_path_and_hash(
@@ -1208,6 +1247,8 @@ class KubernetesResourceManager:
             startup_manifest_path=startup_manifest_path,
             startup_manifest_hash=startup_manifest_hash,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+            resource_profile=resource_profile,
         )
         recorded_hash = dict(deployment.metadata.annotations or {}).get(_ANNOTATION_TEMPLATE_HASH)
         return recorded_hash != _template_hash(template)
@@ -1221,7 +1262,10 @@ class KubernetesResourceManager:
         startup_manifest_path: str,
         startup_manifest_hash: str,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None = None,
+        resource_profile: str | None = None,
     ) -> dict[str, object]:
+        resource_requests, resource_limits = self.config.resources_for_profile(resource_profile)
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
@@ -1259,7 +1303,12 @@ class KubernetesResourceManager:
                         state_subpath=state_subpath,
                         startup_manifest_path=startup_manifest_path,
                     ),
-                    "volumeMounts": self._volume_mounts(worker_key, state_subpath, private_agent_names),
+                    "volumeMounts": self._volume_mounts(
+                        worker_key,
+                        state_subpath,
+                        private_agent_names,
+                        state_scope_worker_key=state_scope_worker_key,
+                    ),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
                         "periodSeconds": 5,
@@ -1276,8 +1325,8 @@ class KubernetesResourceManager:
                         "failureThreshold": 6,
                     },
                     "resources": {
-                        "requests": dict(self.config.resource_requests),
-                        "limits": dict(self.config.resource_limits),
+                        "requests": resource_requests,
+                        "limits": resource_limits,
                     },
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
@@ -1315,6 +1364,8 @@ class KubernetesResourceManager:
         annotations: dict[str, str],
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
+        state_scope_worker_key: str | None = None,
+        resource_profile: str | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
@@ -1329,6 +1380,8 @@ class KubernetesResourceManager:
             startup_manifest_path=startup_manifest_path,
             startup_manifest_hash=startup_manifest_hash,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+            resource_profile=resource_profile,
         )
         metadata: dict[str, object] = {
             "name": worker_id,
@@ -1345,6 +1398,14 @@ class KubernetesResourceManager:
                 sorted(private_agent_names),
                 separators=(",", ":"),
             )
+        if state_scope_worker_key is not None:
+            desired_annotations[_ANNOTATION_STATE_SCOPE_WORKER_KEY] = state_scope_worker_key
+        else:
+            desired_annotations.pop(_ANNOTATION_STATE_SCOPE_WORKER_KEY, None)
+        if resource_profile is not None:
+            desired_annotations[_ANNOTATION_RESOURCE_PROFILE] = resource_profile
+        else:
+            desired_annotations.pop(_ANNOTATION_RESOURCE_PROFILE, None)
         metadata["annotations"] = desired_annotations
 
         return {
@@ -1525,11 +1586,14 @@ class KubernetesResourceManager:
         worker_key: str,
         state_subpath: str,
         private_agent_names: frozenset[str] | None,
+        *,
+        state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         mounts = self._scoped_storage_mounts(
             worker_key,
             state_subpath,
             private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
         )
         if self.config.config_map_name is None:
             mounts.extend(self._file_config_storage_mounts())
@@ -1694,6 +1758,7 @@ class KubernetesResourceManager:
         state_subpath: str,
         *,
         private_agent_names: frozenset[str] | None,
+        state_scope_worker_key: str | None = None,
     ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
         mounts: list[dict[str, object]] = [
@@ -1703,7 +1768,7 @@ class KubernetesResourceManager:
                 "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
             for planned_root in plan_scoped_visible_state_roots(
-                worker_key=worker_key,
+                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
                 local_shared_storage_root=self.storage_root,
                 worker_visible_shared_storage_root=mounted_storage_root,
                 private_agent_names=private_agent_names,

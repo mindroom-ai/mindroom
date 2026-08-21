@@ -73,8 +73,29 @@ def _run(*, state: ScriptRunState = ScriptRunState.RUNNING) -> ScriptRunRecord:
 @dataclass
 class _Manager:
     limits: ScriptRunLimits | None = None
+    requested_resource_profile: str | None = None
     calls: builtins.list[str] = field(default_factory=list)
     run_record: ScriptRunRecord = field(default_factory=_run)
+
+    def resource_profiles(self, context: ToolRuntimeContext) -> dict[str, object]:
+        del context
+        return {
+            "default_profile": "small",
+            "profiles": {
+                "small": {
+                    "requests": {"cpu": "100m", "memory": "256Mi"},
+                    "limits": {"cpu": "500m", "memory": "1Gi"},
+                },
+                "standard": {
+                    "requests": {"cpu": "250m", "memory": "512Mi"},
+                    "limits": {"cpu": "1", "memory": "2Gi"},
+                },
+                "large": {
+                    "requests": {"cpu": "500m", "memory": "2Gi"},
+                    "limits": {"cpu": "2", "memory": "8Gi"},
+                },
+            },
+        }
 
     async def run(
         self,
@@ -83,10 +104,12 @@ class _Manager:
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
+        resource_profile: str | None = None,
         limits: ScriptRunLimits | None = None,
     ) -> ScriptRunRecord:
         del context, source, path, name
         self.limits = limits
+        self.requested_resource_profile = resource_profile
         self.calls.append("run")
         return self.run_record
 
@@ -119,11 +142,12 @@ class _Manager:
 
 
 def test_script_tool_interface_exists() -> None:
-    """The registered toolkit exposes exactly the four script controls."""
+    """The registered toolkit exposes exactly the five script controls."""
     toolkit = ScriptTools()
 
     assert set(toolkit.async_functions) == {
         "cancel_script",
+        "get_script_resource_profiles",
         "get_script",
         "list_scripts",
         "start_script",
@@ -149,6 +173,40 @@ async def test_script_tool_requires_live_room_context() -> None:
     assert payload == {
         "message": "Background script controls require an active room context.",
         "status": "error",
+        "tool": "script",
+    }
+
+
+@pytest.mark.asyncio
+async def test_script_tool_shows_exact_resources_before_launch(
+    script_context: ToolRuntimeContext,
+) -> None:
+    """The model can compare every bounded profile before reserving a worker."""
+    bind_script_run_manager(_Manager())
+    try:
+        with tool_runtime_context(script_context):
+            payload = json.loads(await ScriptTools().get_script_resource_profiles())
+    finally:
+        bind_script_run_manager(None)
+
+    assert payload == {
+        "action": "resource_profiles",
+        "default_profile": "small",
+        "profiles": {
+            "small": {
+                "limits": {"cpu": "500m", "memory": "1Gi"},
+                "requests": {"cpu": "100m", "memory": "256Mi"},
+            },
+            "standard": {
+                "limits": {"cpu": "1", "memory": "2Gi"},
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+            },
+            "large": {
+                "limits": {"cpu": "2", "memory": "8Gi"},
+                "requests": {"cpu": "500m", "memory": "2Gi"},
+            },
+        },
+        "status": "ok",
         "tool": "script",
     }
 
@@ -189,6 +247,36 @@ async def test_script_tool_public_run_uses_derived_execution_mode_without_redund
         max_tool_calls_per_minute=7,
         max_runtime_hours=3,
     )
+
+
+@pytest.mark.asyncio
+async def test_script_tool_selects_and_reports_exact_resource_profile(
+    script_context: ToolRuntimeContext,
+) -> None:
+    """The selected bounded profile and its exact reservation remain visible after launch."""
+    run = replace(
+        _run(),
+        resource_profile="large",
+        resource_requests={"cpu": "500m", "memory": "2Gi"},
+        resource_limits={"cpu": "2", "memory": "8Gi"},
+    )
+    manager = _Manager(run_record=run)
+    bind_script_run_manager(manager)
+    try:
+        with tool_runtime_context(script_context):
+            payload = json.loads(
+                await ScriptTools().start_script(
+                    source="print('ok')",
+                    resource_profile="large",
+                ),
+            )
+    finally:
+        bind_script_run_manager(None)
+
+    assert manager.requested_resource_profile == "large"
+    assert payload["run"]["resource_profile"] == "large"
+    assert payload["run"]["resource_requests"] == {"cpu": "500m", "memory": "2Gi"}
+    assert payload["run"]["resource_limits"] == {"cpu": "2", "memory": "8Gi"}
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -392,6 +393,49 @@ def test_configured_worker_lease_requires_the_current_durable_backend_identity(
     assert matched is lease
     assert mismatched is None
     lease.release.assert_called_once_with()
+
+
+def test_kubernetes_cleanup_identity_ignores_launch_config_but_tracks_resource_owner(tmp_path: Path) -> None:
+    """Routine config changes retain cleanup access without crossing resource owners."""
+    storage_root = tmp_path / "shared-storage"
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+        },
+    )
+    other_namespace_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "MINDROOM_KUBERNETES_WORKER_NAMESPACE": "other-namespace",
+        },
+    )
+
+    base = workers_runtime_module._primary_worker_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=storage_root,
+        config_signature=("launch-config-a",),
+    )
+
+    assert base == workers_runtime_module._primary_worker_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=storage_root,
+        config_signature=("launch-config-b",),
+    )
+    assert base != workers_runtime_module._primary_worker_backend_cleanup_signature(
+        other_namespace_paths,
+        storage_root=storage_root,
+        config_signature=("launch-config-a",),
+    )
+    assert base != workers_runtime_module._primary_worker_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=tmp_path / "other-storage",
+        config_signature=("launch-config-a",),
+    )
 
 
 def test_configured_primary_worker_manager_lease_skips_kubernetes_without_runtime_config(

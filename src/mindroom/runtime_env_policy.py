@@ -166,6 +166,8 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "memory_limit": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
         "cpu_request": "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST",
         "cpu_limit": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+        "script_resource_profiles_json": "MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON",
+        "default_script_resource_profile": "MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE",
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
         "agent_vault_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED",

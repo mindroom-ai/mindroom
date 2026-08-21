@@ -23,7 +23,9 @@ from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shell_supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
+from mindroom.tool_system.worker_routing import _private_instance_state_root_path
 from mindroom.workers.backends import local as local_workers_module
 
 if TYPE_CHECKING:
@@ -293,6 +295,128 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
     assert status.json()["exit_code"] == 0
     assert "overlay=from-hook" in status.json()["output"]
     assert f"run_id={run_id}" in status.json()["output"]
+
+
+def test_private_worker_script_executes_in_canonical_requester_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private script uses its mounted requester workspace, not the run snapshot scratch directory."""
+    run_id = f"script-{'a' * 32}"
+    state_scope_worker_key = "v1:test:user_agent:@alice:example.test:watcher"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
+    shared_storage_root = tmp_path / "storage"
+    dedicated_root = tmp_path / "dedicated-worker"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watch for changes.
+    model: default
+    private:
+      per: user_agent
+      root: private-workspace
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=dedicated_root,
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
+        },
+    )
+    monkeypatch.setattr(local_workers_module.venv.EnvBuilder, "create", _fake_local_worker_venv_create)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+    app = FastAPI()
+    app.include_router(sandbox_runner_scripts_router)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=_TOKEN,
+    )
+    prepared = prepare_worker_request(
+        worker_key=worker_key,
+        tool_init_overrides={},
+        runtime_paths=runtime_paths,
+        private_agent_names=frozenset({"watcher"}),
+        runner_token=_TOKEN,
+    )
+    private_workspace = (
+        _private_instance_state_root_path(
+            shared_storage_root,
+            worker_key=state_scope_worker_key,
+            agent_name="watcher",
+        )
+        / "private-workspace"
+    )
+    private_workspace.mkdir(parents=True)
+    hook_path = private_workspace / ".mindroom" / "worker-env.sh"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_text("export SCRIPT_TEST_OVERLAY=private-workspace\n", encoding="utf-8")
+    source = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "workspace = Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'])\n"
+        "workspace.joinpath('script-result.txt').write_text(\n"
+        "    f\"{os.environ['SCRIPT_TEST_OVERLAY']}|{Path.cwd()}\",\n"
+        "    encoding='utf-8',\n"
+        ")\n"
+    )
+    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
+    supervisor = _ShellSupervisorManager()
+    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/sandbox-runner/scripts/run",
+            headers=_HEADERS,
+            json={
+                "run_id": run_id,
+                "worker_key": worker_key,
+                "state_scope_worker_key": state_scope_worker_key,
+                "source_digest": source_digest,
+                "gateway_url": "http://primary:8765/api/script-gateway",
+                "private_agent_names": ["watcher"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+        deadline = time.monotonic() + 5
+        status = client.get(
+            f"/api/sandbox-runner/scripts/{run_id}",
+            headers=_HEADERS,
+            params={"worker_key": worker_key},
+        )
+        while status.json()["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            status = client.get(
+                f"/api/sandbox-runner/scripts/{run_id}",
+                headers=_HEADERS,
+                params={"worker_key": worker_key},
+            )
+
+        assert status.json()["state"] == "exited"
+        assert status.json()["exit_code"] == 0
+        assert (private_workspace / "script-result.txt").read_text(encoding="utf-8") == (
+            f"private-workspace|{private_workspace}"
+        )
+        assert not (prepared.paths.workspace / "script-result.txt").exists()
+    finally:
+        supervisor.shutdown()
 
 
 def test_worker_script_endpoint_rejects_source_digest_mismatch(

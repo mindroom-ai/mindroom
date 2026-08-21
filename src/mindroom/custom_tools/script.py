@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from agno.tools import Toolkit
 
@@ -44,14 +44,29 @@ class ScriptTools(Toolkit):
         )
         super().__init__(
             name="script",
-            tools=[self.start_script, self.get_script, self.cancel_script, self.list_scripts],
+            tools=[
+                self.start_script,
+                self.get_script_resource_profiles,
+                self.get_script,
+                self.cancel_script,
+                self.list_scripts,
+            ],
         )
+
+    async def get_script_resource_profiles(self) -> str:
+        """Return the exact CPU and memory reservations available to background scripts."""
+        resolved = _runtime()
+        if isinstance(resolved, str):
+            return resolved
+        manager, context = resolved
+        return _payload("ok", action="resource_profiles", **manager.resource_profiles(context))
 
     async def start_script(
         self,
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
+        resource_profile: Literal["small", "standard", "large"] | None = None,
     ) -> str:
         """Run a Python script in the background.
 
@@ -62,6 +77,8 @@ class ScriptTools(Toolkit):
             source: Inline Python source code.
             path: Workspace-relative path to a Python source file.
             name: Optional short label shown by status and list operations.
+            resource_profile: Optional bounded Kubernetes profile. Call get_script_resource_profiles to inspect the
+                exact resources, or omit it to use the configured default.
 
         """
         resolved = _runtime()
@@ -69,7 +86,14 @@ class ScriptTools(Toolkit):
             return resolved
         manager, context = resolved
         try:
-            run = await manager.run(context, source=source, path=path, name=name, limits=self.limits)
+            run = await manager.run(
+                context,
+                source=source,
+                path=path,
+                name=name,
+                resource_profile=resource_profile,
+                limits=self.limits,
+            )
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
         return _payload("ok", action="run", run=_public_run(run))
@@ -145,6 +169,9 @@ def _public_run(run: ScriptRunRecord) -> dict[str, object]:
         "state": run.state.value,
         "execution_mode": "unsafe_local" if run.local_unsafe else "worker",
         "local_unsafe": run.local_unsafe,
+        "resource_profile": run.resource_profile,
+        "resource_requests": dict(run.resource_requests),
+        "resource_limits": dict(run.resource_limits),
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,

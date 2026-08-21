@@ -70,7 +70,13 @@ if TYPE_CHECKING:
     ],
     dependencies=["agno"],
     requires_room_context=True,
-    function_names=("start_script", "get_script", "cancel_script", "list_scripts"),
+    function_names=(
+        "start_script",
+        "get_script_resource_profiles",
+        "get_script",
+        "cancel_script",
+        "list_scripts",
+    ),
     supports_toolkit_filters=False,
 )
 def script_tools() -> type[ScriptTools]:
