@@ -422,7 +422,9 @@ Store this object under the service named by `credentials_service`.
 `private_key_file` must be an absolute path to a read-only secret mount; do not put the PEM contents in the credential object.
 The remote must use the canonical `https://github.com/<owner>/<repository>` form.
 MindRoom reads the key when needed and mints a repository-scoped installation token with read-only Contents permission.
-It caches that token until shortly before GitHub's reported expiry and passes it only to the Git subprocess, never to the checkout config or credential store.
+The control-plane runtime caches that token until shortly before GitHub's reported expiry.
+Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
+MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 

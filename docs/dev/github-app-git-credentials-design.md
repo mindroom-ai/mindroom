@@ -31,9 +31,12 @@ The token request names exactly the repository from the remote and requests only
 The returned token is supplied to Git as process-local HTTP Basic authentication with username `x-access-token`.
 The clean remote URL remains the only persisted URL.
 
-Each knowledge source caches its repository-scoped token until five minutes before GitHub's reported expiry.
-A refresh reads the private-key file again, so key rotation takes effect without rewriting runtime credential metadata.
-Concurrent resolutions for one source share one refresh operation.
+The control-plane runtime caches each repository-scoped token until five minutes before GitHub's reported expiry.
+Before starting a scheduled refresh child, the control plane resolves that cached token and sends the token plus its expiry only through the existing stdin request pipe.
+The child primes its process-local provider before Git synchronization, so refresh subprocess isolation does not cause another token mint.
+The parent-child handoff remains only in process memory and never uses a credential file, Git configuration, checkout metadata, refresh-child launch environment variable, or log.
+When token refresh is required, MindRoom reads the private-key file again, so key rotation takes effect without rewriting runtime credential metadata.
+Concurrent resolutions for one repository share one refresh operation.
 
 ## Failure behavior
 
@@ -47,13 +50,14 @@ Once refresh is required, authentication fails rather than falling back to anony
 
 ## Structure
 
-- `mindroom.knowledge.github_app_auth` owns credential parsing, repository extraction, JWT creation, token minting, expiry handling, and caching.
+- `mindroom.knowledge.github_app_auth` owns credential parsing, repository extraction, JWT creation, token minting, expiry handling, process-lifetime caching, and child-cache priming.
 - `mindroom.knowledge.git_source` selects static credentials or the GitHub App provider and injects the resulting secret into each Git subprocess.
+- `mindroom.knowledge.refresh_runner` resolves cached tokens in the control plane and hands them to scheduled refresh children through the existing stdin request pipe.
 - `KnowledgeGitConfig.credentials_service` remains the public configuration surface; no repository configuration schema change is required.
 
 ## Tests
 
-Unit tests cover credential validation, GitHub URL validation, JWT/token request shape, least-privilege repository and permission scoping, cache reuse, expiry refresh, key rereading, concurrency, and redacted errors.
+Unit tests cover credential validation, GitHub URL validation, JWT/token request shape, least-privilege repository and permission scoping, cache reuse, expiry refresh, key rereading, concurrency, subprocess handoff, and redacted errors.
 Git source tests prove clone/fetch/LFS request fresh credentials through the resolver while static credentials and secret non-persistence remain unchanged.
 
 Deployment tests must prove credential seeds contain metadata only, the private key is mounted read-only only in the control plane, and rendered resources never place private-key material in environment variables or ConfigMaps.

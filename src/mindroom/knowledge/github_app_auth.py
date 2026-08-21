@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,9 +28,29 @@ class _GitHubAppCredentials:
 
 
 @dataclass(frozen=True)
-class _CachedToken:
-    token: str
+class _GitHubAppToken:
+    """One repository-scoped installation token and its GitHub expiry."""
+
+    token: str = field(repr=False)
     expires_at: datetime
+
+
+_TokenCacheKey = tuple[int, int, str, str, Path]
+
+
+def _token_cache_key(
+    credentials: _GitHubAppCredentials,
+    *,
+    owner: str,
+    repository: str,
+) -> _TokenCacheKey:
+    return (
+        credentials.app_id,
+        credentials.installation_id,
+        owner.casefold(),
+        repository.casefold(),
+        credentials.private_key_file,
+    )
 
 
 def _positive_int(value: object, *, field_name: str) -> int:
@@ -130,37 +150,67 @@ class GitHubAppTokenProvider:
     ) -> None:
         self._client = client
         self._now = now or (lambda: datetime.now(tz=UTC))
-        self._cache: dict[tuple[int, int, str, str, Path], _CachedToken] = {}
+        self._cache: dict[_TokenCacheKey, _GitHubAppToken] = {}
         self._refresh_lock = asyncio.Lock()
 
     async def resolve(self, repo_url: str, credentials: Mapping[str, Any]) -> tuple[str, str]:
         """Return HTTP Basic userinfo for one GitHub repository."""
+        resolved = await self.resolve_token(repo_url, credentials)
+        return "x-access-token", resolved.token
+
+    async def resolve_token(self, repo_url: str, credentials: Mapping[str, Any]) -> _GitHubAppToken:
+        """Return one cached or newly minted installation token."""
         parsed_credentials = _parse_credentials(credentials)
         owner, repository = _github_repository(repo_url)
-        cache_key = (
-            parsed_credentials.app_id,
-            parsed_credentials.installation_id,
-            owner.casefold(),
-            repository.casefold(),
-            parsed_credentials.private_key_file,
+        cache_key = _token_cache_key(
+            parsed_credentials,
+            owner=owner,
+            repository=repository,
         )
         cached = self._cache.get(cache_key)
         now = self._now().astimezone(UTC)
         if cached is not None and now < cached.expires_at - _TOKEN_REFRESH_MARGIN:
-            return "x-access-token", cached.token
+            return cached
 
         async with self._refresh_lock:
             cached = self._cache.get(cache_key)
             now = self._now().astimezone(UTC)
             if cached is not None and now < cached.expires_at - _TOKEN_REFRESH_MARGIN:
-                return "x-access-token", cached.token
+                return cached
             minted = await self._mint_token(
                 parsed_credentials,
                 repository=repository,
                 now=now,
             )
             self._cache[cache_key] = minted
-            return "x-access-token", minted.token
+            return minted
+
+    def prime(
+        self,
+        repo_url: str,
+        credentials: Mapping[str, Any],
+        *,
+        token: str,
+        expires_at: datetime,
+    ) -> None:
+        """Seed a child runtime with a parent-resolved installation token."""
+        if not token:
+            msg = "GitHub App installation token must be non-empty"
+            raise ValueError(msg)
+        if expires_at.tzinfo is None:
+            msg = "GitHub App installation token expiry must include a timezone"
+            raise ValueError(msg)
+        parsed_credentials = _parse_credentials(credentials)
+        owner, repository = _github_repository(repo_url)
+        cache_key = _token_cache_key(
+            parsed_credentials,
+            owner=owner,
+            repository=repository,
+        )
+        self._cache[cache_key] = _GitHubAppToken(
+            token=token,
+            expires_at=expires_at.astimezone(UTC),
+        )
 
     async def _mint_token(
         self,
@@ -168,7 +218,7 @@ class GitHubAppTokenProvider:
         *,
         repository: str,
         now: datetime,
-    ) -> _CachedToken:
+    ) -> _GitHubAppToken:
         try:
             private_key = await asyncio.to_thread(credentials.private_key_file.read_text, encoding="utf-8")
         except (OSError, UnicodeError) as exc:
@@ -225,4 +275,12 @@ class GitHubAppTokenProvider:
         except (TypeError, ValueError) as exc:
             msg = "GitHub returned an invalid token response for the App installation"
             raise RuntimeError(msg) from exc
-        return _CachedToken(token=token, expires_at=expires_at)
+        return _GitHubAppToken(token=token, expires_at=expires_at)
+
+
+_RUNTIME_GITHUB_APP_TOKEN_PROVIDER = GitHubAppTokenProvider()
+
+
+def get_runtime_github_app_token_provider() -> GitHubAppTokenProvider:
+    """Return the process-lifetime provider shared by Git knowledge sources."""
+    return _RUNTIME_GITHUB_APP_TOKEN_PROVIDER

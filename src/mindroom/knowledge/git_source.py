@@ -31,7 +31,10 @@ from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
     include_knowledge_relative_path,
 )
-from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.github_app_auth import (
+    GitHubAppTokenProvider,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.redaction import (
     MAX_REDACTABLE_TOKEN_LENGTH,
     credential_free_repo_url,
@@ -410,7 +413,7 @@ class GitKnowledgeSource:
     lfs_hydrated_head_path: Path
     _sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _github_app_token_provider: GitHubAppTokenProvider = field(
-        default_factory=GitHubAppTokenProvider,
+        default_factory=get_runtime_github_app_token_provider,
         init=False,
         repr=False,
     )
