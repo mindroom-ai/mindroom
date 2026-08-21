@@ -549,7 +549,7 @@ def test_lifespan_prepares_script_worker_before_serving(
 
     monkeypatch.setattr(
         sandbox_worker_prep_module,
-        "ensure_local_worker_state_locked",
+        "ensure_local_script_worker_state_locked",
         prepare_worker_state,
     )
     monkeypatch.setattr(
@@ -560,6 +560,55 @@ def test_lifespan_prepares_script_worker_before_serving(
 
     with TestClient(app):
         assert startup_steps == ["worker-state", "shell-supervisor"]
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_lifespan_prepares_script_worker_without_seeding_pip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run-scoped workers should avoid the expensive pip bootstrap before readiness."""
+    run_id = f"script-{'b' * 32}"
+    worker_key = script_worker_key_for_run(
+        "v1:tenant:user_agent:alice:assistant",
+        run_id,
+    )
+    app = _lifespan_app_for_dedicated_worker(tmp_path, worker_key=worker_key)
+    monkeypatch.setenv("UV_VENV_SEED", "1")
+    monkeypatch.setattr(
+        sandbox_runner_scripts_module,
+        "ensure_shell_supervisor",
+        lambda: "unused-test-socket",
+    )
+
+    with TestClient(app):
+        pass
+
+    venv_dir = tmp_path / "dedicated-worker" / "venv"
+    assert (venv_dir / "bin" / "python").exists()
+    assert not (venv_dir / "bin" / "pip").exists()
+    assert not (venv_dir / "bin" / "pip3").exists()
+    assert (
+        "include-system-site-packages = true"
+        in (venv_dir / "pyvenv.cfg")
+        .read_text(
+            encoding="utf-8",
+        )
+        .lower()
+    )
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "dedicated-worker")
+    python_executable, environment, cwd = sandbox_exec_module.resolve_subprocess_worker_context(worker_paths)
+    assert python_executable is not None
+    assert environment is not None
+    completed = subprocess.run(
+        [python_executable, "-c", "from mindroom.script_sdk import MindRoomTools; print(MindRoomTools.__name__)"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=environment,
+    )
+    assert completed.stdout.strip() == "MindRoomTools"
 
 
 def test_lifespan_does_not_eagerly_prepare_regular_dedicated_worker(

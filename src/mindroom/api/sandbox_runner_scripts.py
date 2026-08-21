@@ -75,7 +75,7 @@ async def prepare_script_worker_before_serving(app: FastAPI) -> None:
         return
 
     await asyncio.to_thread(
-        sandbox_worker_prep.prepare_worker,
+        sandbox_worker_prep.prepare_script_worker,
         worker_key,
         runtime_paths,
         runner_token=app_runner_token(app),
