@@ -3056,6 +3056,57 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
 
 
 @pytest.mark.asyncio
+async def test_recovery_skips_auto_resume_when_resume_identity_is_not_joined(tmp_path: Path) -> None:
+    """A resume identity must not read or write a room it is not joined to."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {
+        "@actual_router:localhost": router_client,
+        BOT_USER_ID: agent_client,
+    }
+    interrupted = InterruptedThread(
+        room_id=ROOM_ID,
+        thread_id="$thread",
+        target_event_id="$target",
+        partial_text="Partial",
+        agent_name="test_agent",
+    )
+
+    async def joined_rooms(client: object) -> list[str]:
+        if client is router_client:
+            return []
+        assert client is agent_client
+        return [ROOM_ID]
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(1, [interrupted])),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
+            new=AsyncMock(return_value=1),
+        ) as auto_resume,
+    ):
+        scanned_room_ids: set[str] = set()
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=scanned_room_ids,
+        )
+
+    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
+    assert scanned_room_ids == {ROOM_ID}
+    auto_resume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last(tmp_path: Path) -> None:
     """Completion order must not impose a hidden total resume cap."""
     config = _make_config(tmp_path)

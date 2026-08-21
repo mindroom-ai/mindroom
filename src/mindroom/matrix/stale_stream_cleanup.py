@@ -156,6 +156,26 @@ def _cleanup_scan_policy(
     )
 
 
+def _auto_resume_threads_for_room(
+    room_id: str,
+    interrupted_threads: list[_InterruptedThread],
+    *,
+    resume_client: nio.AsyncClient | None,
+    resume_user_id: str | None,
+    joined_actors: dict[str, nio.AsyncClient],
+) -> list[_InterruptedThread]:
+    """Keep auto-resume work only where its Matrix identity is joined."""
+    if not interrupted_threads or resume_client is None or resume_user_id in joined_actors:
+        return interrupted_threads
+    logger.info(
+        "Skipping auto-resume because resume identity is not joined",
+        room_id=room_id,
+        resume_user_id=resume_user_id,
+        interrupted_count=len(interrupted_threads),
+    )
+    return []
+
+
 def _requester_resolution_message(
     *,
     event_id: str,
@@ -212,7 +232,7 @@ async def recover_stale_streaming_messages(
             scan_client = joined_actors[min(joined_actors)]
         async with semaphore:
             try:
-                return await _cleanup_stale_streaming_room(
+                cleaned_count, interrupted_threads = await _cleanup_stale_streaming_room(
                     scan_client,
                     room_id=room_id,
                     actors=joined_actors,
@@ -226,6 +246,15 @@ async def recover_stale_streaming_messages(
                 scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
                 return 0, []
+            else:
+                interrupted_threads = _auto_resume_threads_for_room(
+                    room_id,
+                    interrupted_threads,
+                    resume_client=resume_client,
+                    resume_user_id=resume_user_id,
+                    joined_actors=joined_actors,
+                )
+                return cleaned_count, interrupted_threads
 
     tasks = [
         asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
