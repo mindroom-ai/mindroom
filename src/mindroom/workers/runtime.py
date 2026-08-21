@@ -19,7 +19,11 @@ from mindroom.workers.backends.docker_config import (
     docker_backend_cleanup_signature,
     docker_backend_config_signature,
 )
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend
+from mindroom.workers.backends.kubernetes_config import (
+    kubernetes_backend_cleanup_signature,
+    kubernetes_backend_config_signature,
+)
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 
 if TYPE_CHECKING:
@@ -443,6 +447,11 @@ def _primary_worker_backend_cleanup_signature(
         return docker_backend_cleanup_signature(
             runtime_paths,
             storage_path=(storage_root or runtime_paths.storage_root).expanduser().resolve(),
+        )
+    if primary_worker_backend_name(runtime_paths) == "kubernetes":
+        return kubernetes_backend_cleanup_signature(
+            runtime_paths,
+            storage_root=(storage_root or runtime_paths.storage_root).expanduser().resolve(),
         )
     return config_signature
 

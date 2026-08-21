@@ -464,7 +464,7 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     )
     manager.worker_backend = static_backend
 
-    with pytest.raises(ScriptRunManagerError, match="unsafe-local mode or a Docker worker"):
+    with pytest.raises(ScriptRunManagerError, match="dedicated Docker or isolated Kubernetes worker backend"):
         await manager.run(_context(tmp_path, backend="static"), source="print('unavailable')\n")
 
     assert manager.store.list_runs() == []
@@ -515,6 +515,39 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
         ),
     ]
     assert len(client.requested_handles) == 1
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_worker_rejects_scripts_when_agent_vault_is_enabled(tmp_path: Path) -> None:
+    """Run-specific workers must not create external identities that exact retirement cannot delete."""
+    manager, backend, client = _manager(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    backend.backend_name = "kubernetes"
+    context = _context(
+        tmp_path,
+        backend="kubernetes",
+        isolated_script_gateway=True,
+    )
+    context = replace(
+        context,
+        runtime_paths=replace(
+            context.runtime_paths,
+            process_env={
+                **context.runtime_paths.process_env,
+                "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
+            },
+        ),
+    )
+
+    with pytest.raises(ScriptRunManagerError, match="Agent Vault"):
+        await manager.run(context, source="print('ok')\n")
+
+    assert manager.store.list_runs() == []
+    assert backend.specs == []
+    assert client.requested_handles == []
 
 
 @pytest.mark.asyncio

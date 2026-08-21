@@ -10365,7 +10365,7 @@ defaults:
 ```
 
 `allowed_tools` contains toolkit names, not function names.
-Unknown or unavailable toolkit names, including `*`, reject the launch with a clear error.
+Unknown or ineligible toolkit names, including `*`, reject the launch with a clear error.
 It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
 Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
 MindRoom captures the configured `allowed_tools` value when the script launches.
@@ -10507,6 +10507,7 @@ The worker must also reach the primary script gateway over an authenticated netw
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
 Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
+Kubernetes background scripts are not supported while `MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true` because run-specific external vault identities cannot yet be retired exactly.
 
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
 For Docker only, `MINDROOM_PUBLIC_URL` can instead name the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.

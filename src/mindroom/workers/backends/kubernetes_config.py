@@ -401,6 +401,25 @@ def kubernetes_backend_config_signature(
     )
 
 
+def kubernetes_backend_cleanup_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    storage_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Return the stable fields needed to find and retire an existing Kubernetes worker."""
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    return (
+        "kubernetes",
+        config.namespace,
+        config.name_prefix,
+        config.storage_pvc_name,
+        config.storage_subpath_prefix,
+        config.auth_secret_name or "",
+        _kubernetes_client_identity(runtime_paths),
+        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+    )
+
+
 def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
     """Return a non-secret cache fingerprint for the selected Kubernetes control plane."""
     env = runtime_env_values(runtime_paths)
