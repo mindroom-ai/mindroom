@@ -218,6 +218,27 @@ async def test_github_app_token_endpoint_error_does_not_include_response_body(tm
     assert "secret response detail" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize("key_contents", [None, "secret invalid private key contents"])
+@pytest.mark.asyncio
+async def test_github_app_private_key_errors_are_redacted(
+    tmp_path: Path,
+    key_contents: str | None,
+) -> None:
+    """Unreadable and invalid private keys must fail without key or library detail."""
+    key_path = tmp_path / "private-key.pem"
+    if key_contents is not None:
+        key_path.write_text(key_contents, encoding="utf-8")
+
+    expected = "could not be read" if key_contents is None else "does not contain a usable RSA private key"
+    with pytest.raises(ValueError, match=expected) as exc_info:
+        await GitHubAppTokenProvider().resolve(
+            "https://github.com/example/private.git",
+            _credentials(key_path),
+        )
+
+    assert "secret invalid" not in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "response_json",
     [

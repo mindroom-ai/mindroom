@@ -183,7 +183,7 @@ class GitHubAppTokenProvider:
                 private_key,
                 algorithm="RS256",
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, jwt.exceptions.PyJWTError) as exc:
             msg = "GitHub App private_key_file does not contain a usable RSA private key"
             raise ValueError(msg) from exc
 
