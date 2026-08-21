@@ -193,39 +193,69 @@ class ConfigReloadLifecycle:
             if current_authored_config == new_authored_config == runtime_authored_config:
                 logger.info("Configuration content unchanged; skipping publication")
                 return False
-            repairing_partial_publication = current_authored_config == new_authored_config
-            if repairing_partial_publication:
-                logger.warning("config_reload_repairing_partial_publication")
-            plan_base_config = (
-                runtime_config if repairing_partial_publication and runtime_config is not None else current_config
+            repair_config = (
+                runtime_config
+                if runtime_config is not None and runtime_authored_config != current_authored_config
+                else None
             )
-
-            agent_bots = self.agent_bots()
-            plugin_changes = plugin_change_paths(plan_base_config, new_config)
-            plan = build_config_update_plan(
-                current_config=plan_base_config,
-                new_config=new_config,
-                configured_entities=set(configured_entity_names(new_config)),
-                existing_entities=set(agent_bots.keys()),
-                agent_bots=agent_bots,
-            )
-            if plugin_changes:
-                plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
+            if repair_config is not None:
+                logger.warning(
+                    "config_reload_repairing_partial_publication",
+                    action="restore last successful config before applying requested config",
+                )
 
             updated = False
 
-            async def apply_update_plan() -> None:
+            async def apply_update_steps() -> None:
                 nonlocal updated
-                async with self.config_update_lock:
-                    updated = await self.apply_update_plan(plan_base_config, plan, plugin_changes)
-                    self._fully_applied_config = new_config
+                updated = await self._apply_config_update_steps(
+                    fully_applied_config=current_config,
+                    requested_config=new_config,
+                    repair_config=repair_config,
+                )
 
             applied = await self._apply_after_response_drain(
-                apply_update_plan,
+                apply_update_steps,
                 operation_name="configuration reload",
                 request_is_current=self._reload_publication_is_current,
             )
             return updated if applied else None
+
+    async def _apply_config_update_steps(
+        self,
+        *,
+        fully_applied_config: Config,
+        requested_config: Config,
+        repair_config: Config | None,
+    ) -> bool:
+        """Restore the last-good state when needed, then apply the requested config."""
+        updated = False
+        async with self.config_update_lock:
+            if repair_config is not None:
+                updated = await self._apply_config_transition(repair_config, fully_applied_config)
+            if fully_applied_config.authored_model_dump() != requested_config.authored_model_dump():
+                requested_updated = await self._apply_config_transition(fully_applied_config, requested_config)
+                updated = updated or requested_updated
+            self._fully_applied_config = requested_config
+        return updated
+
+    async def _apply_config_transition(self, current_config: Config, new_config: Config) -> bool:
+        """Build and apply one normal config transition against the current bot inventory."""
+        agent_bots = self.agent_bots()
+        plugin_changes = plugin_change_paths(current_config, new_config)
+        plan = build_config_update_plan(
+            current_config=current_config,
+            new_config=new_config,
+            configured_entities=set(configured_entity_names(new_config)),
+            existing_entities=set(agent_bots.keys()),
+            agent_bots=agent_bots,
+        )
+        if plugin_changes:
+            plan = replace(
+                plan,
+                entities_to_restart=plan.entities_to_restart | set(agent_bots),
+            )
+        return await self.apply_update_plan(current_config, plan, plugin_changes)
 
     def _reload_publication_is_current(self) -> bool:
         """Allow direct updates, but skip queued snapshots superseded before publication."""

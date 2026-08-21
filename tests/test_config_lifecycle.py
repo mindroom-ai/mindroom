@@ -760,7 +760,7 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
     live_config = current_config
-    applied_from: list[Config] = []
+    applied_steps: list[tuple[Config, Config]] = []
     monkeypatch.setattr(
         "mindroom.orchestration.config_lifecycle.load_config",
         lambda *_args, **_kwargs: new_config,
@@ -770,13 +770,13 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
 
     async def apply_plan(
         applied_config: Config,
-        _plan: ConfigUpdatePlan,
+        plan: ConfigUpdatePlan,
         _plugin_changes: tuple[str, ...],
     ) -> bool:
         nonlocal live_config
-        applied_from.append(applied_config)
-        live_config = new_config
-        if len(applied_from) == 1:
+        applied_steps.append((applied_config, plan.new_config))
+        live_config = plan.new_config
+        if len(applied_steps) == 1:
             msg = "failed after config publication"
             raise RuntimeError(msg)
         return True
@@ -787,7 +787,11 @@ async def test_failed_partial_publication_retries_from_last_successful_config(
         await lifecycle._update_config()
 
     assert await lifecycle._update_config() is True
-    assert applied_from == [current_config, current_config]
+    assert applied_steps == [
+        (current_config, new_config),
+        (new_config, current_config),
+        (current_config, new_config),
+    ]
 
 
 @pytest.mark.asyncio
@@ -832,6 +836,55 @@ async def test_failed_partial_publication_allows_rollback_to_last_successful_con
     assert await lifecycle._update_config() is True
     assert applied_from == [current_config, failed_config]
     assert applied_configs == [failed_config, current_config]
+
+
+@pytest.mark.asyncio
+async def test_failed_partial_publication_repairs_before_applying_corrected_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A corrected third snapshot must apply only after restoring the last-good state."""
+    current_config = Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["lobby"])})
+    failed_config = Config(agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["project"])})
+    corrected_config = Config(
+        agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["lobby"])},
+        defaults={"enable_streaming": False},
+    )
+    loaded_config = failed_config
+    live_config = current_config
+    applied_steps: list[tuple[Config, Config]] = []
+    monkeypatch.setattr(
+        "mindroom.orchestration.config_lifecycle.load_config",
+        lambda *_args, **_kwargs: loaded_config,
+    )
+    lifecycle = _make_lifecycle(tmp_path, current_config=current_config)
+    lifecycle.current_config = lambda: live_config
+
+    async def apply_plan(
+        applied_config: Config,
+        plan: ConfigUpdatePlan,
+        _plugin_changes: tuple[str, ...],
+    ) -> bool:
+        nonlocal live_config
+        applied_steps.append((applied_config, plan.new_config))
+        live_config = plan.new_config
+        if len(applied_steps) == 1:
+            msg = "failed after config publication"
+            raise RuntimeError(msg)
+        return True
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+
+    with pytest.raises(RuntimeError, match="failed after config publication"):
+        await lifecycle._update_config()
+
+    loaded_config = corrected_config
+    assert await lifecycle._update_config() is True
+    assert applied_steps == [
+        (current_config, failed_config),
+        (failed_config, current_config),
+        (current_config, corrected_config),
+    ]
 
 
 @pytest.mark.asyncio
