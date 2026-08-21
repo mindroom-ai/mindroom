@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -415,9 +416,59 @@ def kubernetes_backend_cleanup_signature(
         config.storage_pvc_name,
         config.storage_subpath_prefix,
         config.auth_secret_name or "",
-        _kubernetes_client_identity(runtime_paths),
+        _kubernetes_cleanup_client_identity(runtime_paths),
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+
+
+def _kubernetes_cleanup_client_identity(runtime_paths: RuntimePaths) -> str:
+    """Return a Kubernetes cleanup identity that ignores mutable user credentials."""
+    env = runtime_env_values(runtime_paths)
+    service_host = env.get("KUBERNETES_SERVICE_HOST")
+    service_port = env.get("KUBERNETES_SERVICE_PORT")
+    if service_host and service_port:
+        return f"in-cluster:{service_host}:{service_port}"
+
+    contexts: dict[str, dict[str, object]] = {}
+    clusters: dict[str, dict[str, object]] = {}
+    current_context: str | None = None
+    for kubeconfig_path in resolve_kubeconfig_paths(runtime_paths):
+        try:
+            document = yaml_io.safe_load(kubeconfig_path.read_bytes())
+        except OSError:
+            continue
+        if not isinstance(document, dict):
+            continue
+        configured_context = document.get("current-context")
+        if isinstance(configured_context, str):
+            current_context = configured_context
+        _merge_named_kubeconfig_entries(contexts, document.get("contexts"), "context")
+        _merge_named_kubeconfig_entries(clusters, document.get("clusters"), "cluster")
+
+    context = contexts.get(current_context or "")
+    cluster_name = context.get("cluster") if context is not None else None
+    cluster = clusters.get(cluster_name) if isinstance(cluster_name, str) else None
+    if cluster is None:
+        return _kubernetes_client_identity(runtime_paths)
+    return "kubeconfig-cluster:" + stable_signature_json(cluster)
+
+
+def _merge_named_kubeconfig_entries(
+    destination: dict[str, dict[str, object]],
+    entries: object,
+    value_key: str,
+) -> None:
+    """Merge named kubeconfig entries with the client's first-name-wins semantics."""
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_mapping = cast("dict[str, object]", entry)
+        name = entry_mapping.get("name")
+        value = entry_mapping.get(value_key)
+        if isinstance(name, str) and isinstance(value, dict) and name not in destination:
+            destination[name] = cast("dict[str, object]", value)
 
 
 def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:

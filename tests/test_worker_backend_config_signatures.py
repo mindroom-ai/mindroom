@@ -20,6 +20,7 @@ from mindroom.workers.backends.docker_config import (
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
     credentials_encryption_key_hash,
+    kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
 
@@ -327,6 +328,48 @@ def test_kubernetes_signature_changes_with_cluster_context(tmp_path: Path) -> No
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
     )
+
+
+def test_kubernetes_cleanup_signature_ignores_credentials_but_tracks_selected_cluster(tmp_path: Path) -> None:
+    """Credential rotation retains cleanup access while a cluster endpoint change does not."""
+    kubeconfig = tmp_path / "kubeconfig.yaml"
+    env = {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(kubeconfig)}
+
+    def write_kubeconfig(server: str, token: str) -> None:
+        kubeconfig.write_text(
+            (
+                "apiVersion: v1\n"
+                "kind: Config\n"
+                "current-context: active\n"
+                "clusters:\n"
+                "  - name: selected\n"
+                f"    cluster:\n      server: {server}\n"
+                "contexts:\n"
+                "  - name: active\n"
+                "    context:\n"
+                "      cluster: selected\n"
+                "      user: operator\n"
+                "users:\n"
+                "  - name: operator\n"
+                f"    user:\n      token: {token}\n"
+            ),
+            encoding="utf-8",
+        )
+
+    write_kubeconfig("https://cluster-a.example.test", "token-a")
+    runtime_paths = _runtime_paths(tmp_path, env)
+    base = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+
+    write_kubeconfig("https://cluster-a.example.test", "token-b")
+    rotated_credentials = kubernetes_backend_cleanup_signature(
+        runtime_paths,
+        storage_root=runtime_paths.storage_root,
+    )
+    write_kubeconfig("https://cluster-b.example.test", "token-b")
+    changed_cluster = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+
+    assert rotated_credentials == base
+    assert changed_cluster != base
 
 
 def test_docker_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
