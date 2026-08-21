@@ -31,6 +31,7 @@ from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
     include_knowledge_relative_path,
 )
+from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.redaction import (
     MAX_REDACTABLE_TOKEN_LENGTH,
     credential_free_repo_url,
@@ -211,6 +212,32 @@ def _git_auth_env(
     }
 
 
+async def _resolved_git_auth_env(
+    repo_url: str,
+    credentials_service: str | None,
+    runtime_paths: RuntimePaths,
+    github_app_token_provider: GitHubAppTokenProvider,
+) -> dict[str, str] | None:
+    """Resolve refreshable App credentials or retain existing static Git auth."""
+    clean_url = credential_free_repo_url(repo_url)
+    try:
+        parsed_clean_url = urlparse(clean_url)
+    except ValueError:
+        return _git_auth_env(repo_url, credentials_service, runtime_paths)
+
+    if (
+        embedded_http_userinfo(repo_url) is None
+        and credentials_service
+        and parsed_clean_url.scheme in {"http", "https"}
+    ):
+        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+        if credentials.get("auth_type") == "github_app":
+            username, token = await github_app_token_provider.resolve(repo_url, credentials)
+            return _git_http_basic_auth_env(clean_url, username, token)
+
+    return _git_auth_env(repo_url, credentials_service, runtime_paths)
+
+
 #: scp-style SSH syntax (``git@github.com:org/repo.git``), which ``urlparse``
 #: reports as a bare path rather than a URL, plus the same form with the
 #: username left off (``github.com:org/repo.git``), which Git clones as the
@@ -377,6 +404,11 @@ class GitKnowledgeSource:
     #: restart does not re-pull every object for an unchanged checkout.
     lfs_hydrated_head_path: Path
     _sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _github_app_token_provider: GitHubAppTokenProvider = field(
+        default_factory=GitHubAppTokenProvider,
+        init=False,
+        repr=False,
+    )
     _last_synced_head: str | None = field(default=None, init=False)
     _lfs_checked: bool = field(default=False, init=False)
     _lfs_repository_ready: bool = field(default=False, init=False)
@@ -652,7 +684,12 @@ class GitKnowledgeSource:
         await self._run_git(
             self._lfs_pull_args(git_config),
             cwd=repo_root or self.source_path,
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
+            env=await _resolved_git_auth_env(
+                git_config.repo_url,
+                git_config.credentials_service,
+                self.runtime_paths,
+                self._github_app_token_provider,
+            ),
         )
         if resolved_head is None:
             resolved_head = await self._rev_parse("HEAD")
@@ -706,7 +743,12 @@ class GitKnowledgeSource:
             ],
             cwd=knowledge_root.parent,
             env=_merge_git_env(
-                _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
+                await _resolved_git_auth_env(
+                    git_config.repo_url,
+                    git_config.credentials_service,
+                    runtime_paths,
+                    self._github_app_token_provider,
+                ),
                 self._lfs_skip_smudge_env(git_config),
             ),
         )
@@ -726,7 +768,12 @@ class GitKnowledgeSource:
         remote_ref = f"origin/{git_config.branch}"
         await self._run_git(
             ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
+            env=await _resolved_git_auth_env(
+                git_config.repo_url,
+                git_config.credentials_service,
+                self.runtime_paths,
+                self._github_app_token_provider,
+            ),
         )
         remote_head = await self._rev_parse(remote_ref)
         if remote_head is None:
