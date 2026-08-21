@@ -638,8 +638,8 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
 
 
 @pytest.mark.asyncio
-async def test_kubernetes_worker_rejects_scripts_when_agent_vault_is_enabled(tmp_path: Path) -> None:
-    """Run-specific workers must not create external identities that exact retirement cannot delete."""
+async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp_path: Path) -> None:
+    """Run-specific workers may launch when their pod omits external vault identity material."""
     manager, backend, client = _manager(
         tmp_path,
         backend="kubernetes",
@@ -662,12 +662,18 @@ async def test_kubernetes_worker_rejects_scripts_when_agent_vault_is_enabled(tmp
         ),
     )
 
-    with pytest.raises(ScriptRunManagerError, match="Agent Vault"):
-        await manager.run(context, source="print('ok')\n")
+    run = await manager.run(context, source="print('ok')\n")
 
-    assert manager.store.list_runs() == []
-    assert backend.specs == []
-    assert client.requested_handles == []
+    assert run.state is ScriptRunState.RUNNING
+    assert backend.specs == [
+        WorkerSpec(
+            run.worker_key or "",
+            private_agent_names=frozenset(),
+            mirrored_credential_services=frozenset(),
+            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+        ),
+    ]
+    assert len(client.requested_handles) == 1
 
 
 @pytest.mark.asyncio
