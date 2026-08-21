@@ -142,6 +142,22 @@ class HookMatrixAdmin(Protocol):
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return joined members for one room, or ``None`` when the fetch fails."""
 
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+
+    async def get_room_state_event(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return ``(readable, content)`` for one state event.
+
+        ``(True, None)`` means the homeserver confirmed that the event is
+        missing. ``(False, None)`` means the read failed and callers must not
+        infer that the event is absent.
+        """
+
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room into one Space."""
 
