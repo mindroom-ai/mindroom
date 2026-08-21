@@ -112,6 +112,13 @@ class ConfigReloadLifecycle:
     # Owned by ``_update_config``, which is the only place that knows whether
     # an attempt was adopted.
     failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
+    # Source topology from the latest config that loaded successfully, even
+    # when its effective authored content did not require publication.
+    loaded_source_files: frozenset[Path] | None = field(default=None, init=False)
+    # The last config whose complete update plan returned successfully.
+    _fully_applied_config: Config | None = field(default=None, init=False, repr=False)
+    # A transition target that may have published only part of its runtime state.
+    _incomplete_config: Config | None = field(default=None, init=False, repr=False)
 
     def request_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""
@@ -136,17 +143,41 @@ class ConfigReloadLifecycle:
         self._requested_at = None
         await cancel_logged_task(task)
 
-    async def _update_config(self) -> bool:
-        """Reload configuration from disk and dispatch the resulting update plan."""
-        async with self.config_update_lock:
+    async def _update_config(self) -> bool | None:
+        """Reload config, returning whether agents changed or ``None`` when superseded."""
+        async with self._response_admission_apply_lock:
             # Config validation executes plugin modules and walks the filesystem;
-            # keep it off the event loop (#1260).
-            new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
-            current_config = self.current_config()
-            if current_config is None:
-                self.failed_reload_source_files = None
-                return await self.load_initial_config(new_config)
+            # keep it off the event loop (#1260). Admission stays open because
+            # nothing is published until loading and planning both succeed.
+            async with self.config_update_lock:
+                new_config = await asyncio.to_thread(
+                    load_config,
+                    self.runtime_paths,
+                    tolerate_plugin_load_errors=True,
+                )
+            self.loaded_source_files = new_config.source_files
+            runtime_config = self.current_config()
+            if self._fully_applied_config is None:
+                self._fully_applied_config = runtime_config
+            current_config = self._fully_applied_config
             self.failed_reload_source_files = None
+
+            if current_config is None:
+                updated = False
+
+                async def load_initial_config() -> None:
+                    nonlocal updated
+                    async with self.config_update_lock:
+                        updated = await self.load_initial_config(new_config)
+                        self._fully_applied_config = new_config
+
+                applied = await self._apply_after_response_drain(
+                    load_initial_config,
+                    operation_name="configuration reload",
+                    request_is_current=self._reload_publication_is_current,
+                )
+                return updated if applied else None
+
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and
                 # every bot borrows that one, so no reload can move it and the
@@ -158,18 +189,90 @@ class ConfigReloadLifecycle:
                     requested=describe_event_journal(new_config.event_journal, self.runtime_paths),
                 )
 
-            agent_bots = self.agent_bots()
-            plugin_changes = plugin_change_paths(current_config, new_config)
-            plan = build_config_update_plan(
-                current_config=current_config,
-                new_config=new_config,
-                configured_entities=set(configured_entity_names(new_config)),
-                existing_entities=set(agent_bots.keys()),
-                agent_bots=agent_bots,
+            current_authored_config = current_config.authored_model_dump()
+            new_authored_config = new_config.authored_model_dump()
+            runtime_authored_config = runtime_config.authored_model_dump() if runtime_config is not None else None
+            if (
+                self._incomplete_config is None
+                and current_authored_config == new_authored_config == runtime_authored_config
+            ):
+                logger.info("Configuration content unchanged; skipping publication")
+                return False
+            repair_config = self._incomplete_config
+            if (
+                repair_config is None
+                and runtime_config is not None
+                and runtime_authored_config != current_authored_config
+            ):
+                repair_config = runtime_config
+            if repair_config is not None:
+                logger.warning(
+                    "config_reload_repairing_partial_publication",
+                    action="restore last successful config before applying requested config",
+                )
+
+            updated = False
+
+            async def apply_update_steps() -> None:
+                nonlocal updated
+                updated = await self._apply_config_update_steps(
+                    fully_applied_config=current_config,
+                    requested_config=new_config,
+                    repair_config=repair_config,
+                )
+
+            applied = await self._apply_after_response_drain(
+                apply_update_steps,
+                operation_name="configuration reload",
+                request_is_current=self._reload_publication_is_current,
             )
-            if plugin_changes:
-                plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
-            return await self.apply_update_plan(current_config, plan, plugin_changes)
+            return updated if applied else None
+
+    async def _apply_config_update_steps(
+        self,
+        *,
+        fully_applied_config: Config,
+        requested_config: Config,
+        repair_config: Config | None,
+    ) -> bool:
+        """Restore the last-good state when needed, then apply the requested config."""
+        updated = False
+        async with self.config_update_lock:
+            if repair_config is not None:
+                self._incomplete_config = repair_config
+                updated = await self._apply_config_transition(repair_config, fully_applied_config)
+                self._incomplete_config = None
+            if fully_applied_config.authored_model_dump() != requested_config.authored_model_dump():
+                self._incomplete_config = requested_config
+                requested_updated = await self._apply_config_transition(fully_applied_config, requested_config)
+                updated = updated or requested_updated
+                self._incomplete_config = None
+            self._fully_applied_config = requested_config
+        return updated
+
+    async def _apply_config_transition(self, current_config: Config, new_config: Config) -> bool:
+        """Build and apply one normal config transition against the current bot inventory."""
+        agent_bots = self.agent_bots()
+        plugin_changes = plugin_change_paths(current_config, new_config)
+        plan = build_config_update_plan(
+            current_config=current_config,
+            new_config=new_config,
+            configured_entities=set(configured_entity_names(new_config)),
+            existing_entities=set(agent_bots.keys()),
+            agent_bots=agent_bots,
+        )
+        if plugin_changes:
+            plan = replace(
+                plan,
+                entities_to_restart=plan.entities_to_restart | set(agent_bots),
+            )
+        return await self.apply_update_plan(current_config, plan, plugin_changes)
+
+    def _reload_publication_is_current(self) -> bool:
+        """Allow direct updates, but skip queued snapshots superseded before publication."""
+        if asyncio.current_task() is not self._reload_task:
+            return True
+        return self.is_running() and self._requested_at is None
 
     async def _wait_for_reload_debounce(
         self,
@@ -271,35 +374,51 @@ class ConfigReloadLifecycle:
     ) -> None:
         """Run one global serialized replacement after a bounded response drain.
 
-        Config reloads call this from their debounced task. MCP catalog changes
-        call it from an orchestrator-owned background task so an admitted tool
-        call cannot wait on its own slot. The drain defers for at most 600
-        seconds before closing admission over a forced apply.
+        Config reloads acquire the same serialization lock from their debounced
+        task and use the same drain helper. MCP catalog changes call this from
+        an orchestrator-owned background task so an admitted tool call cannot
+        wait on its own slot. The drain defers for at most 600 seconds before
+        closing admission over a forced apply.
         """
+        async with self._response_admission_apply_lock:
+            await self._apply_after_response_drain(
+                operation,
+                operation_name=operation_name,
+                request_is_current=request_is_current,
+            )
+
+    async def _apply_after_response_drain(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        operation_name: str,
+        request_is_current: Callable[[], bool],
+    ) -> bool:
+        """Drain responses and report whether the serialized operation was applied."""
         loop = asyncio.get_running_loop()
         drain_state = _ReplacementDrainState()
-        async with self._response_admission_apply_lock:
-            while request_is_current():
-                if self.response_admission_gate.close_if_idle():
-                    if drain_state.waiting_for_idle:
-                        logger.info(
-                            "Active responses finished; applying replacement",
-                            operation=operation_name,
-                        )
-                    break
-                if await self._should_defer_replacement_for_active_responses(
-                    drain_state=drain_state,
-                    active_response_count=self.response_admission_gate.in_flight_response_count,
-                    loop=loop,
-                    operation_name=operation_name,
-                ):
-                    continue
-                self.response_admission_gate.close()
+        while request_is_current():
+            if self.response_admission_gate.close_if_idle():
+                if drain_state.waiting_for_idle:
+                    logger.info(
+                        "Active responses finished; applying replacement",
+                        operation=operation_name,
+                    )
                 break
-            else:
-                return
+            if await self._should_defer_replacement_for_active_responses(
+                drain_state=drain_state,
+                active_response_count=self.response_admission_gate.in_flight_response_count,
+                loop=loop,
+                operation_name=operation_name,
+            ):
+                continue
+            self.response_admission_gate.close()
+            break
+        else:
+            return False
 
-            await self._apply_with_closed_admission(operation)
+        await self._apply_with_closed_admission(operation)
+        return True
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""
@@ -316,7 +435,9 @@ class ConfigReloadLifecycle:
             if failed_files is not None:
                 self.failed_reload_source_files = failed_files
             return
-        if updated:
+        if updated is None:
+            logger.info("Configuration reload superseded before publication; skipping")
+        elif updated:
             logger.info("Configuration update applied to affected agents")
         else:
             logger.info("No agent changes detected in configuration update")
@@ -334,11 +455,7 @@ class ConfigReloadLifecycle:
                     # A newer config change superseded the current one.
                     continue
 
-                await self.apply_with_response_admission(
-                    self._apply_queued_config_reload,
-                    operation_name="configuration reload",
-                    request_is_current=lambda requested_at=requested_at: self._requested_at == requested_at,
-                )
+                await self._apply_queued_config_reload()
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None

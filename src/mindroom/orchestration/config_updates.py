@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 
@@ -57,11 +58,14 @@ class ConfigUpdatePlan:
     authorization_changed: bool
     room_metadata_changed: bool = False
     added_entities: set[str] = field(default_factory=set)
+    entities_to_reconcile_rooms: set[str] = field(default_factory=set)
 
     @property
     def _has_entity_changes(self) -> bool:
-        """Return whether any bots must be created, restarted, or removed."""
-        return bool(self.entities_to_restart or self.new_entities or self.removed_entities)
+        """Return whether any bots must be created, restarted, removed, or reconciled."""
+        return bool(
+            self.entities_to_restart or self.new_entities or self.removed_entities or self.entities_to_reconcile_rooms,
+        )
 
     @property
     def only_support_service_changes(self) -> bool:
@@ -91,11 +95,19 @@ def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str
     return tuple(sorted(changed_paths))
 
 
-def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | None) -> bool:
+def _config_entries_differ(
+    old_entry: BaseModel | None,
+    new_entry: BaseModel | None,
+    *,
+    exclude: set[str] | None = None,
+) -> bool:
     """Compare optional config models using the same shape as persisted YAML."""
     if old_entry is None or new_entry is None:
         return old_entry != new_entry
-    return old_entry.model_dump(exclude_none=True) != new_entry.model_dump(exclude_none=True)
+    return old_entry.model_dump(exclude_none=True, exclude=exclude) != new_entry.model_dump(
+        exclude_none=True,
+        exclude=exclude,
+    )
 
 
 def _identify_entities_to_restart(
@@ -113,19 +125,34 @@ def _identify_entities_to_restart(
     if changed_mcp_servers:
         entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
-    if _router_needs_restart(config, new_config):
-        entities_to_restart.add("router")
-
     return entities_to_restart
 
 
 def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
-    """Return call agents whose managers captured an obsolete config snapshot."""
-    if config is None or config.authored_model_dump() == new_config.authored_model_dump():
+    """Return call agents whose effective call-manager configuration changed."""
+    if config is None:
         return set()
     old_agents = set(config.calls.agents) if config.calls.enabled else set()
     new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
-    return old_agents | new_agents
+    changed_agents = {
+        agent_name
+        for agent_name in old_agents | new_agents
+        if _call_manager_signature(config, agent_name) != _call_manager_signature(new_config, agent_name)
+    }
+    if changed_agents:
+        logger.info(
+            "call_manager_configuration_changed_restart_required",
+            agents=sorted(changed_agents),
+            reason="active call tooling captures the authored configuration snapshot",
+        )
+    return changed_agents
+
+
+def _call_manager_signature(config: Config, agent_name: str) -> object | None:
+    """Return the authored config captured by one active call agent."""
+    if not config.calls.enabled or agent_name not in config.calls.agents:
+        return None
+    return config.authored_model_dump()
 
 
 def _get_changed_agents(
@@ -144,7 +171,7 @@ def _get_changed_agents(
         old_agent = config.agents.get(agent_name)
         new_agent = new_config.agents.get(agent_name)
 
-        agents_differ = _config_entries_differ(old_agent, new_agent)
+        agents_differ = _config_entries_differ(old_agent, new_agent, exclude={"rooms"})
         old_culture = _culture_signature_for_agent(agent_name, config) if old_agent else None
         new_culture = _culture_signature_for_agent(agent_name, new_config) if new_agent else None
         culture_differ = old_culture != new_culture
@@ -188,7 +215,7 @@ def _get_changed_teams(
     for team_name in all_teams:
         old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
-        teams_differ = _config_entries_differ(old_team, new_team)
+        teams_differ = _config_entries_differ(old_team, new_team, exclude={"rooms"})
 
         if teams_differ and (team_name in agent_bots or new_team is not None):
             changed.add(team_name)
@@ -196,14 +223,19 @@ def _get_changed_teams(
     return changed
 
 
-def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
-    """Check if router needs restart due to room changes."""
-    if not config:
-        return False
-
-    old_rooms = config.get_all_configured_rooms()
-    new_rooms = new_config.get_all_configured_rooms()
-    return old_rooms != new_rooms
+def _entities_with_room_changes(
+    config: Config,
+    new_config: Config,
+    *,
+    configured_entities: set[str],
+    existing_entities: set[str],
+) -> set[str]:
+    """Return live entities whose desired Matrix room memberships changed."""
+    return {
+        entity_name
+        for entity_name in configured_entities & existing_entities
+        if set(get_rooms_for_entity(entity_name, config)) != set(get_rooms_for_entity(entity_name, new_config))
+    }
 
 
 def _room_metadata_changed(config: Config, new_config: Config) -> bool:
@@ -307,6 +339,16 @@ def build_config_update_plan(
             )
         entities_to_restart |= sync_affected_entities
 
+    entities_to_reconcile_rooms = (
+        _entities_with_room_changes(
+            current_config,
+            new_config,
+            configured_entities=configured_entities,
+            existing_entities=existing_entities,
+        )
+        - entities_to_restart
+    )
+
     added_entities = configured_entities - existing_entities
     new_entities = added_entities - entities_to_restart
 
@@ -323,4 +365,5 @@ def build_config_update_plan(
         authorization_changed=current_config.authorization != new_config.authorization,
         room_metadata_changed=_room_metadata_changed(current_config, new_config),
         added_entities=added_entities,
+        entities_to_reconcile_rooms=entities_to_reconcile_rooms,
     )
