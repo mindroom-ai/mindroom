@@ -24,7 +24,7 @@ from mindroom.api.sandbox_runner import (
 )
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.script_runs.models import (
-    script_worker_key_belongs_to_run,
+    script_run_id_from_worker_key,
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
@@ -71,8 +71,7 @@ async def prepare_script_worker_before_serving(app: FastAPI) -> None:
     worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
     if worker_key is None:
         return
-    parts = worker_key.split(":")
-    if len(parts) < 6 or not script_worker_key_belongs_to_run(worker_key, parts[-2]):
+    if script_run_id_from_worker_key(worker_key) is None:
         return
 
     await asyncio.to_thread(
