@@ -3899,9 +3899,18 @@ visibility = ["mindroom.knowledge.manager"]
 path = "mindroom.knowledge.git_source"
 depends_on = [
     "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.redaction",
 ]
 visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.github_app_auth"
+depends_on = []
+visibility = [
+    "mindroom.knowledge.git_source",
+    "mindroom.knowledge.refresh_runner",
+]
 
 [[modules]]
 path = "mindroom.knowledge.registry"
@@ -3987,7 +3996,9 @@ path = "mindroom.knowledge.refresh_runner"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.credentials",
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.github_app_auth",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",

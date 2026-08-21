@@ -17,7 +17,7 @@ from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -60,6 +60,7 @@ from mindroom.knowledge.file_listing import (
     list_knowledge_files,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
+from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
@@ -5772,6 +5773,281 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["runtime_knowledge_base"] is None
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_refreshes_reuse_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consecutive refresh workers must receive one runtime-cached App token."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://github.com/example/private.git",
+                credentials_service="github_app",
+            ),
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "github_app",
+        {
+            "auth_type": "github_app",
+            "app_id": 12345,
+            "installation_id": 67890,
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    )
+    mint_count = 0
+    payloads: list[dict[str, object]] = []
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="parent-cached-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        return process
+
+    async def _fake_send(_process: object, payload: bytes) -> None:
+        payloads.append(json.loads(payload))
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_send_subprocess_refresh_request", _fake_send)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert mint_count == 1
+    assert [payload["github_app_token"]["token"] for payload in payloads] == [
+        "parent-cached-token",
+        "parent-cached-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_primes_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh child must use its parent-provided token without reminting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "github-app.pem"),
+    }
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("github_app", credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    }
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="unexpected-remint",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            credentials,
+        )
+        assert resolved == ("x-access-token", "parent-cached-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 0
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child must not bind an App token to credentials changed after minting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    parent_credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "parent.pem"),
+    }
+    current_credentials = {
+        "auth_type": "github_app",
+        "app_id": 54321,
+        "installation_id": 9876,
+        "private_key_file": str(tmp_path / "current.pem"),
+    }
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("github_app", parent_credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "parent.pem"),
+        },
+    }
+    credentials_manager.save_credentials("github_app", current_credentials)
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="current-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            current_credentials,
+        )
+        assert resolved == ("x-access-token", "current-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 1
 
 
 @pytest.mark.asyncio

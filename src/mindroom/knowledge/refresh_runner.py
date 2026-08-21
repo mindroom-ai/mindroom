@@ -10,10 +10,10 @@ import os
 import signal
 import sys
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -24,7 +24,12 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_env_values,
 )
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.github_app_auth import (
+    GitHubAppTokenBinding,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -83,6 +88,13 @@ class KnowledgeRefreshResult:
 
 
 @dataclass(frozen=True)
+class _SubprocessGitHubAppToken:
+    token: str = field(repr=False)
+    expires_at_epoch: int
+    binding: GitHubAppTokenBinding
+
+
+@dataclass(frozen=True)
 class _SubprocessRefreshRequest:
     base_id: str
     config_data: dict[str, object]
@@ -90,6 +102,7 @@ class _SubprocessRefreshRequest:
     storage_root: str
     runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
+    github_app_token: _SubprocessGitHubAppToken | None = None
     force_reindex: bool = False
 
 
@@ -130,6 +143,51 @@ _REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS = frozenset(
 )
 
 
+async def _github_app_refresh_binding(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, dict[str, Any]] | None:
+    git_config = config.get_knowledge_base_config(base_id).git
+    if git_config is None or git_config.credentials_service is None:
+        return None
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials = (
+        await asyncio.to_thread(
+            credentials_manager.load_credentials,
+            git_config.credentials_service,
+        )
+        or {}
+    )
+    if credentials.get("auth_type") != "github_app":
+        return None
+    return git_config.repo_url, credentials
+
+
+async def _resolve_subprocess_github_app_token(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _SubprocessGitHubAppToken | None:
+    binding = await _github_app_refresh_binding(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if binding is None:
+        return None
+    repo_url, credentials = binding
+    provider = get_runtime_github_app_token_provider()
+    resolved = await provider.resolve_token(repo_url, credentials)
+    return _SubprocessGitHubAppToken(
+        token=resolved.token,
+        expires_at_epoch=int(resolved.expires_at.timestamp()),
+        binding=provider.binding_for(repo_url, credentials),
+    )
+
+
 async def refresh_knowledge_binding_in_subprocess(
     base_id: str,
     *,
@@ -153,24 +211,34 @@ async def refresh_knowledge_binding_in_subprocess(
         create=True,
     )
     initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    request_payload = _serialize_subprocess_refresh_request(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        force_reindex=force_reindex,
-    )
+    try:
+        github_app_token = await _resolve_subprocess_github_app_token(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        request_payload = _serialize_subprocess_refresh_request(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            github_app_token=github_app_token,
+            force_reindex=force_reindex,
+        )
+        # Resolved before the spawn so a malformed window rejects the refresh
+        # instead of leaving a child nobody is waiting on.
+        timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+    except Exception as exc:
+        await _reconcile_failed_refresh_subprocess(
+            key,
+            initial_state=initial_state,
+            error=redact_credentials_in_text(str(exc)),
+        )
+        raise
     env = dict(runtime_env_values(runtime_paths))
     env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
     env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
-    # Resolved before the spawn so a malformed window rejects the refresh
-    # instead of leaving a child nobody is waiting on.
-    try:
-        timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
-    except ValueError as exc:
-        await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=str(exc))
-        raise
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -236,6 +304,7 @@ def _serialize_subprocess_refresh_request(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    github_app_token: _SubprocessGitHubAppToken | None = None,
     force_reindex: bool,
 ) -> bytes:
     runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
@@ -252,9 +321,13 @@ def _serialize_subprocess_refresh_request(
         execution_identity=None
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
+        github_app_token=github_app_token,
         force_reindex=force_reindex,
     )
-    return json.dumps(asdict(payload), sort_keys=True).encode()
+    serialized_payload = asdict(payload)
+    if github_app_token is None:
+        del serialized_payload["github_app_token"]
+    return json.dumps(serialized_payload, sort_keys=True).encode()
 
 
 async def _send_subprocess_refresh_request(
@@ -1038,6 +1111,62 @@ async def _reconcile_cancelled_refresh(
     await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
 
 
+def _load_subprocess_github_app_binding(raw_binding_payload: object) -> GitHubAppTokenBinding:
+    if not isinstance(raw_binding_payload, dict):
+        msg = "Knowledge refresh subprocess request github_app_token.binding must be an object"
+        raise TypeError(msg)
+    binding_payload = cast("dict[str, object]", raw_binding_payload)
+    raw_app_id = binding_payload.get("app_id")
+    raw_installation_id = binding_payload.get("installation_id")
+    raw_owner = binding_payload.get("owner")
+    raw_repository = binding_payload.get("repository")
+    raw_private_key_file = binding_payload.get("private_key_file")
+    if not isinstance(raw_app_id, int) or isinstance(raw_app_id, bool) or raw_app_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.app_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_installation_id, int) or isinstance(raw_installation_id, bool) or raw_installation_id <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.installation_id must be positive"
+        raise TypeError(msg)
+    if not isinstance(raw_owner, str) or not raw_owner:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.owner must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_repository, str) or not raw_repository:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.repository must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_private_key_file, str) or not raw_private_key_file:
+        msg = "Knowledge refresh subprocess request github_app_token.binding.private_key_file must be non-empty"
+        raise TypeError(msg)
+    return GitHubAppTokenBinding(
+        app_id=raw_app_id,
+        installation_id=raw_installation_id,
+        owner=raw_owner,
+        repository=raw_repository,
+        private_key_file=raw_private_key_file,
+    )
+
+
+def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessGitHubAppToken | None:
+    if raw_token_payload is None:
+        return None
+    if not isinstance(raw_token_payload, dict):
+        msg = "Knowledge refresh subprocess request github_app_token must be an object when present"
+        raise TypeError(msg)
+    token_payload = cast("dict[str, object]", raw_token_payload)
+    raw_token = token_payload.get("token")
+    raw_expires_at_epoch = token_payload.get("expires_at_epoch")
+    if not isinstance(raw_token, str) or not raw_token:
+        msg = "Knowledge refresh subprocess request github_app_token.token must be non-empty"
+        raise TypeError(msg)
+    if not isinstance(raw_expires_at_epoch, int) or isinstance(raw_expires_at_epoch, bool) or raw_expires_at_epoch <= 0:
+        msg = "Knowledge refresh subprocess request github_app_token.expires_at_epoch must be positive"
+        raise TypeError(msg)
+    return _SubprocessGitHubAppToken(
+        token=raw_token,
+        expires_at_epoch=raw_expires_at_epoch,
+        binding=_load_subprocess_github_app_binding(token_payload.get("binding")),
+    )
+
+
 def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshRequest:
     raw_payload = json.loads(payload.decode())
     if not isinstance(raw_payload, dict):
@@ -1075,7 +1204,40 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         storage_root=raw_storage_root,
         runtime_knowledge_base=cast("dict[str, object] | None", raw_runtime_knowledge_base),
         execution_identity=raw_execution_identity,
+        github_app_token=_load_subprocess_github_app_token(raw_payload.get("github_app_token")),
         force_reindex=bool(raw_force_reindex),
+    )
+
+
+async def _prime_subprocess_github_app_token(
+    request: _SubprocessRefreshRequest,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    if request.github_app_token is None:
+        return
+    binding = await _github_app_refresh_binding(
+        request.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if binding is None:
+        return
+    try:
+        expires_at = datetime.fromtimestamp(request.github_app_token.expires_at_epoch, tz=UTC)
+    except (OSError, OverflowError, ValueError) as exc:
+        msg = "Knowledge refresh subprocess GitHub App token expiry is invalid"
+        raise TypeError(msg) from exc
+    repo_url, credentials = binding
+    provider = get_runtime_github_app_token_provider()
+    if provider.binding_for(repo_url, credentials) != request.github_app_token.binding:
+        return
+    provider.prime(
+        repo_url,
+        credentials,
+        token=request.github_app_token.token,
+        expires_at=expires_at,
     )
 
 
@@ -1090,6 +1252,11 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
     if request.runtime_knowledge_base is not None:
         base_config = KnowledgeBaseConfig.model_validate(request.runtime_knowledge_base)
         config = config.with_runtime_knowledge_base_overlay(request.base_id, base_config)
+    await _prime_subprocess_github_app_token(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
     execution_identity = (
         None
         if request.execution_identity is None
