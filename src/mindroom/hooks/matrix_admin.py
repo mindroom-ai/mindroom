@@ -96,6 +96,13 @@ class _BoundHookMatrixAdmin:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
 
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+        response = await self.client.get_profile(user_id)
+        if isinstance(response, nio.ProfileGetResponse):
+            return response.avatar_url
+        return None
+
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room under an existing Matrix Space."""
         server_name = extract_server_name_from_homeserver(

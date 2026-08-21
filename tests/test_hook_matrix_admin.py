@@ -160,6 +160,49 @@ async def test_build_hook_matrix_admin_resolve_alias_returns_none_on_error(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_get_profile_avatar_returns_content_uri(tmp_path: Path) -> None:
+    """Profile avatar reads should expose the Matrix content URI."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.get_profile.return_value = nio.ProfileGetResponse(
+        displayname="Ada",
+        avatar_url="mxc://localhost/ada",
+    )
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_profile_avatar("@ada:localhost") == "mxc://localhost/ada"
+    client.get_profile.assert_awaited_once_with("@ada:localhost")
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_get_profile_avatar_returns_none_without_avatar(tmp_path: Path) -> None:
+    """Profiles without avatars should remain unset."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.get_profile.return_value = nio.ProfileGetResponse(displayname="Ada")
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_profile_avatar("@ada:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_get_profile_avatar_returns_none_on_error(tmp_path: Path) -> None:
+    """Profile lookup errors should fail closed."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.get_profile.return_value = nio.ProfileGetError("not found", status_code="M_NOT_FOUND")
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_profile_avatar("@missing:localhost") is None
+
+
+@pytest.mark.asyncio
 async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path: Path) -> None:
     """The hook builder should reuse the existing Matrix helper functions."""
     module = _matrix_admin_module()

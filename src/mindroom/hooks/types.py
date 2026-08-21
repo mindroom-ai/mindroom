@@ -142,6 +142,9 @@ class HookMatrixAdmin(Protocol):
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return joined members for one room, or ``None`` when the fetch fails."""
 
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room into one Space."""
 
