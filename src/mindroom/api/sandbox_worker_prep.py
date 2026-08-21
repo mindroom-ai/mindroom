@@ -184,6 +184,16 @@ def _prepare_worker(
     return get_local_worker_manager(runtime_paths).ensure_worker(WorkerSpec(worker_key))
 
 
+def prepare_worker(
+    worker_key: str,
+    runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
+) -> WorkerHandle:
+    """Prepare worker state outside a request dispatch."""
+    return _prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
+
+
 def normalize_request_worker_key(
     worker_key: str | None,
     runtime_paths: RuntimePaths,

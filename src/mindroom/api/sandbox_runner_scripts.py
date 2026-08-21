@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.routing import APIRoute
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -23,7 +23,11 @@ from mindroom.api.sandbox_runner import (
     validate_runner_token,
 )
 from mindroom.constants import CONTROL_STATE_PATH_ENV
-from mindroom.script_runs.models import script_worker_key_for_run, supervisor_handle_for_run
+from mindroom.script_runs.models import (
+    script_worker_key_belongs_to_run,
+    script_worker_key_for_run,
+    supervisor_handle_for_run,
+)
 from mindroom.shell_supervisor import (
     ShellSupervisorStartupError,
     background_script_supervision_supported,
@@ -54,10 +58,30 @@ __all__ = [
     "SandboxScriptRunResponse",
     "SandboxScriptStatusResponse",
     "cancel_script_in_worker",
+    "prepare_script_worker_before_serving",
     "router",
     "run_script_in_worker",
     "status_script_in_worker",
 ]
+
+
+async def prepare_script_worker_before_serving(app: FastAPI) -> None:
+    """Finish cold script-worker setup before the runner advertises readiness."""
+    runtime_paths = app_runtime_paths(app)
+    worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    if worker_key is None:
+        return
+    parts = worker_key.split(":")
+    if len(parts) < 6 or not script_worker_key_belongs_to_run(worker_key, parts[-2]):
+        return
+
+    await asyncio.to_thread(
+        sandbox_worker_prep.prepare_worker,
+        worker_key,
+        runtime_paths,
+        runner_token=app_runner_token(app),
+    )
+    await asyncio.to_thread(ensure_shell_supervisor)
 
 
 async def _bounded_replay_request(request: Request) -> Request:
