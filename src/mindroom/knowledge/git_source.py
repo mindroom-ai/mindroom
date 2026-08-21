@@ -664,9 +664,8 @@ class GitKnowledgeSource:
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
         self._lfs_repository_ready = True
 
-    def _lfs_skip_smudge_env(self, git_config: KnowledgeGitConfig) -> dict[str, str] | None:
-        if not git_config.lfs:
-            return None
+    def _lfs_skip_smudge_env(self) -> dict[str, str]:
+        """Prevent implicit LFS downloads; enabled repositories hydrate explicitly."""
         return {"GIT_LFS_SKIP_SMUDGE": "1"}
 
     def _lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
@@ -754,7 +753,7 @@ class GitKnowledgeSource:
                     runtime_paths,
                     self._github_app_token_provider,
                 ),
-                self._lfs_skip_smudge_env(git_config),
+                self._lfs_skip_smudge_env(),
             ),
         )
         await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
@@ -793,11 +792,11 @@ class GitKnowledgeSource:
 
         await self._run_git(
             ["checkout", "--force", "-B", git_config.branch, remote_ref],
-            env=self._lfs_skip_smudge_env(git_config),
+            env=self._lfs_skip_smudge_env(),
         )
         # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
         # intentional way to realign it with the configured remote state.
-        await self._run_git(["reset", "--hard", remote_ref], env=self._lfs_skip_smudge_env(git_config))
+        await self._run_git(["reset", "--hard", remote_ref], env=self._lfs_skip_smudge_env())
         await self._hydrate_lfs_worktree(git_config, current_head=remote_head)
 
         after_files = await self._list_tracked_files()

@@ -820,7 +820,7 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
     serialized_clone_call = json.dumps({"args": clone_args, "env": clone_env}, sort_keys=True)
 
     assert result.index_published is True
-    assert clone_env is None
+    assert clone_env == {"GIT_LFS_SKIP_SMUDGE": "1"}
     assert clean_url in clone_args
     assert raw_url not in serialized_clone_call
     assert "secret-token" not in serialized_clone_call
@@ -1550,12 +1550,21 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
 
 
 @pytest.mark.asyncio
-async def test_sync_git_source_once_pulls_lfs_after_reset(
+@pytest.mark.parametrize(
+    ("lfs", "expects_lfs_pull"),
+    [
+        pytest.param(True, True, id="lfs-enabled"),
+        pytest.param(False, False, id="lfs-disabled"),
+    ],
+)
+async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lfs: bool,
+    expects_lfs_pull: bool,
 ) -> None:
-    """LFS-enabled repos should explicitly pull LFS objects after resetting to the remote branch."""
-    manager = _git_manager(tmp_path, lfs=True)
+    """Updates should suppress implicit smudging and hydrate only when LFS is enabled."""
+    manager = _git_manager(tmp_path, lfs=lfs)
     git_calls: list[list[str]] = []
     git_envs: list[tuple[list[str], dict[str, str] | None]] = []
 
@@ -1596,7 +1605,7 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
     assert updated is True
     assert changed_files == {"doc.md"}
     assert removed_files == set()
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
     assert (
         ["checkout", "--force", "-B", "main", "origin/main"],
         {"GIT_LFS_SKIP_SMUDGE": "1"},
@@ -1649,12 +1658,21 @@ async def test_ensure_git_lfs_available_raises_clear_runtime_error(
 
 
 @pytest.mark.asyncio
-async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
+@pytest.mark.parametrize(
+    ("lfs", "expects_lfs_pull"),
+    [
+        pytest.param(True, True, id="lfs-enabled"),
+        pytest.param(False, False, id="lfs-disabled"),
+    ],
+)
+async def test_ensure_git_repository_clones_with_explicit_lfs_hydration_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lfs: bool,
+    expects_lfs_pull: bool,
 ) -> None:
-    """Initial LFS clones should hydrate even if an old hydrated-head marker matches the cloned commit."""
-    manager = _git_manager(tmp_path, lfs=True)
+    """Clones should suppress implicit smudging and hydrate only when LFS is enabled."""
+    manager = _git_manager(tmp_path, lfs=lfs)
     clone_envs: list[dict[str, str] | None] = []
     git_calls: list[list[str]] = []
     manager.git_source.lfs_hydrated_head_path.write_text("same", encoding="utf-8")
@@ -1681,7 +1699,7 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
 
     assert cloned is True
     assert clone_envs == [{"GIT_LFS_SKIP_SMUDGE": "1"}]
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
 
 
 @pytest.mark.asyncio
