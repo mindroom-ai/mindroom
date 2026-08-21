@@ -140,6 +140,14 @@ class _CleanupScanPolicy:
     max_extra_old_pages: int
 
 
+@dataclass(frozen=True)
+class _JoinedRoomState:
+    """Actor rooms to scan plus the independent resume identity membership."""
+
+    room_actors: dict[str, dict[str, nio.AsyncClient]]
+    resume_room_ids: frozenset[str] | None
+
+
 def _cleanup_scan_policy(
     config: Config,
     *,
@@ -160,17 +168,25 @@ def _auto_resume_threads_for_room(
     room_id: str,
     interrupted_threads: list[_InterruptedThread],
     *,
+    auto_resume_enabled: bool,
     resume_client: nio.AsyncClient | None,
-    resume_user_id: str | None,
-    joined_actors: dict[str, nio.AsyncClient],
+    resume_room_ids: frozenset[str] | None,
+    scanned_room_ids: set[str],
 ) -> list[_InterruptedThread]:
-    """Keep auto-resume work only where its Matrix identity is joined."""
-    if not interrupted_threads or resume_client is None or resume_user_id in joined_actors:
+    """Keep eligible work and leave membership-deferred rooms retryable."""
+    if (
+        not auto_resume_enabled
+        or not interrupted_threads
+        or resume_client is None
+        or (resume_room_ids is not None and room_id in resume_room_ids)
+    ):
         return interrupted_threads
+    scanned_room_ids.discard(room_id)
     logger.info(
-        "Skipping auto-resume because resume identity is not joined",
+        "Deferring auto-resume until resume identity membership is available",
         room_id=room_id,
-        resume_user_id=resume_user_id,
+        resume_user_id=resume_client.user_id,
+        membership_known=resume_room_ids is not None,
         interrupted_count=len(interrupted_threads),
     )
     return []
@@ -210,9 +226,10 @@ async def recover_stale_streaming_messages(
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
+    joined_room_state = await _joined_room_actors(actors, resume_client=resume_client)
     room_actors = {
         room_id: joined_actors
-        for room_id, joined_actors in (await _joined_room_actors(actors)).items()
+        for room_id, joined_actors in joined_room_state.room_actors.items()
         if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
     scanned_room_ids.update(room_actors)
@@ -250,9 +267,10 @@ async def recover_stale_streaming_messages(
                 interrupted_threads = _auto_resume_threads_for_room(
                     room_id,
                     interrupted_threads,
+                    auto_resume_enabled=config.defaults.auto_resume_after_restart,
                     resume_client=resume_client,
-                    resume_user_id=resume_user_id,
-                    joined_actors=joined_actors,
+                    resume_room_ids=joined_room_state.resume_room_ids,
+                    scanned_room_ids=scanned_room_ids,
                 )
                 return cleaned_count, interrupted_threads
 
@@ -290,13 +308,15 @@ async def recover_stale_streaming_messages(
 
 async def _joined_room_actors(
     actors: dict[str, nio.AsyncClient],
-) -> dict[str, dict[str, nio.AsyncClient]]:
-    """Return each joined room once with every available bot account in it."""
+    *,
+    resume_client: nio.AsyncClient | None,
+) -> _JoinedRoomState:
+    """Discover actor scan rooms and resume membership without widening scans."""
 
     async def joined_rooms_for_actor(
         bot_user_id: str,
         client: nio.AsyncClient,
-    ) -> tuple[str, nio.AsyncClient, list[str]]:
+    ) -> tuple[str, nio.AsyncClient, list[str] | None]:
         try:
             joined_rooms = await get_joined_rooms(client)
         except Exception:
@@ -306,16 +326,25 @@ async def _joined_room_actors(
                 exc_info=True,
             )
             joined_rooms = None
-        return bot_user_id, client, joined_rooms or []
+        return bot_user_id, client, joined_rooms
 
+    membership_clients = dict(actors)
+    resume_user_id = resume_client.user_id if resume_client is not None else None
+    if isinstance(resume_user_id, str) and resume_client is not None:
+        membership_clients[resume_user_id] = resume_client
     joined_room_results = await asyncio.gather(
-        *(joined_rooms_for_actor(bot_user_id, client) for bot_user_id, client in actors.items()),
+        *(joined_rooms_for_actor(bot_user_id, client) for bot_user_id, client in membership_clients.items()),
     )
     room_actors: dict[str, dict[str, nio.AsyncClient]] = {}
+    resume_room_ids: frozenset[str] | None = None
     for bot_user_id, client, joined_room_ids in joined_room_results:
-        for room_id in joined_room_ids:
+        if bot_user_id == resume_user_id and joined_room_ids is not None:
+            resume_room_ids = frozenset(joined_room_ids)
+        if bot_user_id not in actors:
+            continue
+        for room_id in joined_room_ids or []:
             room_actors.setdefault(room_id, {})[bot_user_id] = client
-    return room_actors
+    return _JoinedRoomState(room_actors=room_actors, resume_room_ids=resume_room_ids)
 
 
 async def _auto_resume_interrupted_threads(
