@@ -80,6 +80,8 @@ collection_formats  # unused variable (src/mindroom/workers/backends/kubernetes_
 _.invite_user  # unused method (src/mindroom/hooks/types.py)
 _.force_join_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py)
 _.kick_user  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py)
+_.get_profile_avatar  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py)
+_.get_room_state_event  # hook plugins call this public Matrix admin method (src/mindroom/hooks/types.py)
 _.make_request  # unused method (src/mindroom/tools/custom_api.py)
 _._async_crawl  # unused method (src/mindroom/tools/crawl4ai.py)
 _.redirect_request  # unused method (src/mindroom/tools/approved_egress.py)
