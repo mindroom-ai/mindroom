@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from threading import get_ident
+from typing import Any
 
 import httpx
 import jwt
@@ -13,10 +15,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
 
 
 def _private_key(path: Path) -> rsa.RSAPrivateKey:
@@ -176,17 +174,27 @@ async def test_github_app_key_read_and_signing_run_off_event_loop(
     """Secret-file I/O and RSA signing must not block unrelated async work."""
     key_path = tmp_path / "private-key.pem"
     _private_key(key_path)
-    offloaded: list[str] = []
-    real_to_thread = asyncio.to_thread
+    loop_thread_id = get_ident()
+    offloaded: list[tuple[str, int]] = []
+    real_read_text = Path.read_text
+    real_encode = jwt.encode
 
-    async def _tracked_to_thread(
-        function: Callable[..., object],
-        /,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        offloaded.append(getattr(function, "__name__", type(function).__name__))
-        return await real_to_thread(function, *args, **kwargs)
+    def _tracked_read_text(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        offloaded.append(("read_text", get_ident()))
+        return real_read_text(path, encoding=encoding, errors=errors, newline=newline)
+
+    def _tracked_encode(
+        payload: dict[str, Any],
+        key: str | bytes,
+        algorithm: str | None = None,
+    ) -> str:
+        offloaded.append(("encode", get_ident()))
+        return real_encode(payload, key, algorithm=algorithm)
 
     async def _handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -197,7 +205,8 @@ async def test_github_app_key_read_and_signing_run_off_event_loop(
             },
         )
 
-    monkeypatch.setattr(asyncio, "to_thread", _tracked_to_thread)
+    monkeypatch.setattr(Path, "read_text", _tracked_read_text)
+    monkeypatch.setattr(jwt, "encode", _tracked_encode)
     async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
         provider = GitHubAppTokenProvider(
             client=client,
@@ -208,7 +217,8 @@ async def test_github_app_key_read_and_signing_run_off_event_loop(
             _credentials(key_path),
         )
 
-    assert offloaded == ["read_text", "encode"]
+    assert [operation for operation, _thread_id in offloaded] == ["read_text", "encode"]
+    assert all(thread_id != loop_thread_id for _operation, thread_id in offloaded)
 
 
 @pytest.mark.asyncio
