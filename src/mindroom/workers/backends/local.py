@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
 import threading
 import time
 import venv
@@ -131,11 +135,15 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     return local_worker_state_paths_for_root(Path(state_root))
 
 
-def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
-    """Create the persistent directories and venv for one worker runtime root."""
+def _ensure_local_worker_directories(paths: LocalWorkerStatePaths) -> None:
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
+    """Create the persistent directories and venv for one worker runtime root."""
+    _ensure_local_worker_directories(paths)
     if (paths.venv_dir / "bin" / "python").exists():
         return
 
@@ -143,10 +151,46 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
     builder.create(paths.venv_dir)
 
 
+def _ensure_local_script_worker_state(paths: LocalWorkerStatePaths) -> None:
+    """Create run-scoped worker state with a fast unseeded uv virtualenv."""
+    _ensure_local_worker_directories(paths)
+    if (paths.venv_dir / "bin" / "python").exists():
+        return
+
+    uv_path = shutil.which("uv")
+    if uv_path is None:
+        msg = "uv is required to prepare run-scoped script workers."
+        raise WorkerBackendError(msg)
+    env = dict(os.environ)
+    env.pop("UV_VENV_SEED", None)
+    subprocess.run(
+        [
+            uv_path,
+            "venv",
+            "--no-project",
+            "--no-config",
+            "--offline",
+            "--no-python-downloads",
+            "--system-site-packages",
+            "--python",
+            sys.executable,
+            str(paths.venv_dir),
+        ],
+        check=True,
+        env=env,
+    )
+
+
 def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create one worker runtime root under a shared per-worker initialization lock."""
     with _shared_worker_initialization_lock(paths):
         _ensure_local_worker_state(paths)
+
+
+def ensure_local_script_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
+    """Create run-scoped worker state under the shared initialization lock."""
+    with _shared_worker_initialization_lock(paths):
+        _ensure_local_script_worker_state(paths)
 
 
 def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
