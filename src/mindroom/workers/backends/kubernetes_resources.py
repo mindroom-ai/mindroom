@@ -1266,6 +1266,8 @@ class KubernetesResourceManager:
         resource_profile: str | None = None,
     ) -> dict[str, object]:
         resource_requests, resource_limits = self.config.resources_for_profile(resource_profile)
+        owns_state_scope = resolve_state_scope_worker_key(worker_key, state_scope_worker_key) == worker_key
+        include_agent_vault = self.config.agent_vault is not None and owns_state_scope
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
@@ -1302,12 +1304,14 @@ class KubernetesResourceManager:
                         worker_id=worker_id,
                         state_subpath=state_subpath,
                         startup_manifest_path=startup_manifest_path,
+                        include_agent_vault=include_agent_vault,
                     ),
                     "volumeMounts": self._volume_mounts(
                         worker_key,
                         state_subpath,
                         private_agent_names,
                         state_scope_worker_key=state_scope_worker_key,
+                        include_agent_vault=include_agent_vault,
                     ),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
@@ -1334,7 +1338,7 @@ class KubernetesResourceManager:
                     },
                 },
             ],
-            "volumes": self._volumes(),
+            "volumes": self._volumes(include_agent_vault=include_agent_vault),
         }
         containers = cast("list[dict[str, object]]", template_spec["containers"])
         _extend_unique_named_pod_entries(
@@ -1342,7 +1346,7 @@ class KubernetesResourceManager:
             self.config.extra_containers,
             field_name="extra_containers",
         )
-        if self.config.agent_vault is not None:
+        if include_agent_vault:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
         node_name = self._worker_node_name_or_none()
         if node_name is not None:
@@ -1426,6 +1430,7 @@ class KubernetesResourceManager:
         worker_id: str,
         state_subpath: str,
         startup_manifest_path: str,
+        include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
         venv_path = f"{dedicated_root}/venv"
@@ -1454,7 +1459,8 @@ class KubernetesResourceManager:
         if credentials_encryption_key_env is not None:
             env.append(credentials_encryption_key_env)
 
-        env.extend(self._agent_vault_main_env(worker_key=worker_key))
+        if include_agent_vault:
+            env.extend(self._agent_vault_main_env(worker_key=worker_key))
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
@@ -1588,6 +1594,7 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         *,
         state_scope_worker_key: str | None = None,
+        include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         mounts = self._scoped_storage_mounts(
             worker_key,
@@ -1606,7 +1613,7 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
-        if self.config.agent_vault is not None:
+        if include_agent_vault:
             mounts.append(
                 {
                     "name": AGENT_VAULT_TOKEN_VOLUME_NAME,
@@ -1614,7 +1621,7 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
-        if self._agent_vault_worker_ca_configmap_name() is not None:
+        if include_agent_vault and self._agent_vault_worker_ca_configmap_name() is not None:
             mounts.append(
                 {
                     "name": AGENT_VAULT_CA_VOLUME_NAME,
@@ -1662,7 +1669,7 @@ class KubernetesResourceManager:
             },
         ]
 
-    def _volumes(self) -> list[dict[str, object]]:
+    def _volumes(self, *, include_agent_vault: bool) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1676,8 +1683,9 @@ class KubernetesResourceManager:
                     "configMap": {"name": self.config.config_map_name},
                 },
             )
-        volumes.extend(self._agent_vault_volumes())
-        ca_configmap_name = self._agent_vault_worker_ca_configmap_name()
+        if include_agent_vault:
+            volumes.extend(self._agent_vault_volumes())
+        ca_configmap_name = self._agent_vault_worker_ca_configmap_name() if include_agent_vault else None
         if ca_configmap_name is not None:
             volumes.append(
                 {

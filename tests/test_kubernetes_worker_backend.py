@@ -4303,6 +4303,41 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert backend._resources._agent_vault_vault_name(worker_key) == expected_vault
 
 
+def test_kubernetes_script_worker_omits_agent_vault_identity_material(tmp_path: Path) -> None:
+    """A run-scoped process pod must not mint an external identity that retirement cannot delete."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
+    )
+    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
+    worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
+
+    handle = backend.ensure_worker(
+        WorkerSpec(
+            worker_key,
+            private_agent_names=frozenset({"mind"}),
+            state_scope_worker_key=state_scope_worker_key,
+        ),
+        now=10.0,
+    )
+
+    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
+    template_spec = deployment["spec"]["template"]["spec"]
+    main = template_spec["containers"][0]
+    main_env_names = {entry["name"] for entry in main["env"]}
+    main_mount_names = {mount["name"] for mount in main["volumeMounts"]}
+    volume_names = {volume["name"] for volume in template_spec["volumes"]}
+
+    assert "initContainers" not in template_spec
+    assert not any(name.startswith("MINDROOM_WORKER_EGRESS_PROXY_") for name in main_env_names)
+    assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & main_mount_names
+    assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & volume_names
+
+
 def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
     """The defensive vault-name guard should include the worker key that failed."""
     runtime_paths = resolve_primary_runtime_paths(

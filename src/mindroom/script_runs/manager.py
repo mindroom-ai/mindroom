@@ -20,7 +20,6 @@ from weakref import WeakValueDictionary
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.logging_config import get_logger
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import (
     ScriptRunRecord,
@@ -1489,11 +1488,6 @@ def _require_script_launch_backend(
             "Kubernetes background scripts require a gateway-only listener; "
             "use Docker or explicit unsafe-local mode until that boundary is configured."
         )
-        raise ScriptRunManagerError(msg)
-    if admitted_backend.backend_name == "kubernetes" and runtime_paths.env_flag(
-        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"],
-    ):
-        msg = "Kubernetes background scripts are not supported while Agent Vault is enabled."
         raise ScriptRunManagerError(msg)
     return admitted_backend
 
