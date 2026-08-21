@@ -342,7 +342,7 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Service variables outside process env use kubeconfig without tracking user credentials."""
+    """Kubeconfig fallback tracks the API server, not rotating credentials or CA data."""
     kubeconfig = tmp_path / "kubeconfig.yaml"
     env = {
         **_MINIMAL_KUBERNETES_ENV,
@@ -358,7 +358,7 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     monkeypatch.delenv("KUBERNETES_SERVICE_PORT", raising=False)
 
-    def write_kubeconfig(server: str, token: str) -> None:
+    def write_kubeconfig(server: str, token: str, certificate_authority_data: str) -> None:
         kubeconfig.write_text(
             (
                 "apiVersion: v1\n"
@@ -366,7 +366,7 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
                 "current-context: active\n"
                 "clusters:\n"
                 "  - name: selected\n"
-                f"    cluster:\n      server: {server}\n"
+                f"    cluster:\n      server: {server}\n      certificate-authority-data: {certificate_authority_data}\n"
                 "contexts:\n"
                 "  - name: active\n"
                 "    context:\n"
@@ -379,16 +379,16 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
             encoding="utf-8",
         )
 
-    write_kubeconfig("https://cluster-a.example.test", "token-a")
+    write_kubeconfig("https://cluster-a.example.test", "token-a", "ca-a")
     runtime_paths = _runtime_paths(tmp_path, env)
     base = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
 
-    write_kubeconfig("https://cluster-a.example.test", "token-b")
+    write_kubeconfig("https://cluster-a.example.test", "token-b", "ca-b")
     rotated_credentials = kubernetes_backend_cleanup_signature(
         runtime_paths,
         storage_root=runtime_paths.storage_root,
     )
-    write_kubeconfig("https://cluster-b.example.test", "token-b")
+    write_kubeconfig("https://cluster-b.example.test", "token-b", "ca-b")
     changed_cluster = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
 
     assert rotated_credentials == base

@@ -543,9 +543,10 @@ def _kubernetes_cleanup_client_identity(runtime_paths: RuntimePaths) -> str:
     context = contexts.get(current_context or "")
     cluster_name = context.get("cluster") if context is not None else None
     cluster = clusters.get(cluster_name) if isinstance(cluster_name, str) else None
-    if cluster is None:
+    cluster_server = cluster.get("server") if cluster is not None else None
+    if not isinstance(cluster_server, str) or not cluster_server:
         return _kubernetes_client_identity(runtime_paths)
-    return "kubeconfig-cluster:" + stable_signature_json(cluster)
+    return "kubeconfig-cluster:" + stable_signature_json({"server": cluster_server})
 
 
 def _merge_named_kubeconfig_entries(
