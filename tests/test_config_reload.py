@@ -2240,6 +2240,45 @@ def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_mode
     assert plan.entities_to_restart == {"general"}
 
 
+@pytest.mark.parametrize(
+    "encryption_config",
+    [
+        {"matrix_room_access": {"encrypt_managed_rooms": True}},
+        {"rooms": {"lobby": {"encrypted": True}}},
+    ],
+)
+def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_changes(
+    encryption_config: dict[str, object],
+) -> None:
+    """Call sessions must rebuild when their rooms switch to encrypted media."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+            **encryption_config,
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
 def test_config_update_plan_reconciles_agent_and_router_room_changes_without_restarts() -> None:
     """Room-list edits should update memberships without replacing Matrix clients."""
     old_config = _runtime_bound_config(

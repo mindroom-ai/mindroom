@@ -752,6 +752,45 @@ async def test_update_config_builds_plan_and_dispatches(
 
 
 @pytest.mark.asyncio
+async def test_failed_partial_publication_retries_from_last_successful_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A partially published config must not make its retry look unchanged."""
+    current_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
+    live_config = current_config
+    applied_from: list[Config] = []
+    monkeypatch.setattr(
+        "mindroom.orchestration.config_lifecycle.load_config",
+        lambda *_args, **_kwargs: new_config,
+    )
+    lifecycle = _make_lifecycle(tmp_path, current_config=current_config)
+    lifecycle.current_config = lambda: live_config
+
+    async def apply_plan(
+        applied_config: Config,
+        _plan: ConfigUpdatePlan,
+        _plugin_changes: tuple[str, ...],
+    ) -> bool:
+        nonlocal live_config
+        applied_from.append(applied_config)
+        live_config = new_config
+        if len(applied_from) == 1:
+            msg = "failed after config publication"
+            raise RuntimeError(msg)
+        return True
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+
+    with pytest.raises(RuntimeError, match="failed after config publication"):
+        await lifecycle._update_config()
+
+    assert await lifecycle._update_config() is True
+    assert applied_from == [current_config, current_config]
+
+
+@pytest.mark.asyncio
 async def test_update_config_plugin_changes_restart_all_bots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -831,11 +870,11 @@ async def test_update_config_loads_config_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_update_config_loads_before_waiting_for_publication_lock(
+async def test_update_config_waits_for_shared_lock_before_plugin_aware_loading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config loading may proceed while another shared-lock owner is active."""
+    """Config loading must not overlap another plugin/config publication owner."""
     lock = asyncio.Lock()
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
@@ -854,11 +893,13 @@ async def test_update_config_loads_before_waiting_for_publication_lock(
 
     await lock.acquire()
     update_task = asyncio.create_task(lifecycle._update_config())
-    await asyncio.wait_for(to_thread_started.wait(), timeout=1.0)
-    assert not update_task.done()
-    lifecycle.apply_update_plan.assert_not_awaited()
-
-    lock.release()
+    await asyncio.sleep(0)
+    try:
+        assert not to_thread_started.is_set()
+        assert not update_task.done()
+        lifecycle.apply_update_plan.assert_not_awaited()
+    finally:
+        lock.release()
     assert await update_task is True
     load_config_mock.assert_called_once()
     lifecycle.apply_update_plan.assert_awaited_once()

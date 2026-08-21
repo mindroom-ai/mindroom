@@ -1759,6 +1759,41 @@ class TestMultiAgentOrchestrator:
         assert set(setup_rooms.await_args.args[0]) == {router_bot, general_bot}
 
     @pytest.mark.asyncio
+    async def test_reconcile_post_update_rooms_restarts_sliding_subscriptions(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Room-only edits must refresh explicit sliding-sync subscriptions."""
+        config = _runtime_bound_config(Config(matrix_sync={"mode": "sliding"}), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        general_bot = MagicMock(agent_name="general", config=config, running=True)
+        orchestrator.agent_bots = {"general": general_bot}
+        plan = ConfigUpdatePlan(
+            new_config=config,
+            changed_mcp_servers=set(),
+            configured_entities={"general"},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+            entities_to_reconcile_rooms={"general"},
+        )
+
+        with (
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch("mindroom.orchestrator.cancel_sync_task", new=AsyncMock()) as cancel_sync,
+            patch.object(orchestrator, "_start_sync_task") as start_sync,
+        ):
+            await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+        cancel_sync.assert_awaited_once_with("general", orchestrator._sync_tasks)
+        start_sync.assert_called_once_with("general", general_bot)
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.orchestrator.load_config")

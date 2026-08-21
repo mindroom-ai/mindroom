@@ -115,6 +115,8 @@ class ConfigReloadLifecycle:
     # Source topology from the latest config that loaded successfully, even
     # when its effective authored content did not require publication.
     loaded_source_files: frozenset[Path] | None = field(default=None, init=False)
+    # The last config whose complete update plan returned successfully.
+    _fully_applied_config: Config | None = field(default=None, init=False, repr=False)
 
     def request_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""
@@ -145,9 +147,17 @@ class ConfigReloadLifecycle:
             # Config validation executes plugin modules and walks the filesystem;
             # keep it off the event loop (#1260). Admission stays open because
             # nothing is published until loading and planning both succeed.
-            new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+            async with self.config_update_lock:
+                new_config = await asyncio.to_thread(
+                    load_config,
+                    self.runtime_paths,
+                    tolerate_plugin_load_errors=True,
+                )
             self.loaded_source_files = new_config.source_files
-            current_config = self.current_config()
+            runtime_config = self.current_config()
+            if self._fully_applied_config is None:
+                self._fully_applied_config = runtime_config
+            current_config = self._fully_applied_config
             self.failed_reload_source_files = None
 
             if current_config is None:
@@ -157,6 +167,7 @@ class ConfigReloadLifecycle:
                     nonlocal updated
                     async with self.config_update_lock:
                         updated = await self.load_initial_config(new_config)
+                        self._fully_applied_config = new_config
 
                 applied = await self._apply_after_response_drain(
                     load_initial_config,
@@ -198,6 +209,7 @@ class ConfigReloadLifecycle:
                 nonlocal updated
                 async with self.config_update_lock:
                     updated = await self.apply_update_plan(current_config, plan, plugin_changes)
+                    self._fully_applied_config = new_config
 
             applied = await self._apply_after_response_drain(
                 apply_update_plan,

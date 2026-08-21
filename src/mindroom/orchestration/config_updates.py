@@ -134,11 +134,17 @@ def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[st
         return set()
     old_agents = set(config.calls.agents) if config.calls.enabled else set()
     new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
-    return {
+    changed_agents = {
         agent_name
         for agent_name in old_agents | new_agents
         if _call_manager_signature(config, agent_name) != _call_manager_signature(new_config, agent_name)
     }
+    if changed_agents:
+        logger.info(
+            "call_manager_configuration_changed_restart_required",
+            agents=sorted(changed_agents),
+        )
+    return changed_agents
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> tuple[object, ...] | None:
@@ -181,6 +187,14 @@ def _call_manager_signature(config: Config, agent_name: str) -> tuple[object, ..
         effective_allow_self_config,
         config.authorization,
         config.tool_approval,
+        config.matrix_room_access.encrypt_managed_rooms,
+        tuple(
+            sorted(
+                (room_name, room_config.encrypted)
+                for room_name, room_config in config.rooms.items()
+                if room_config.encrypted is not None
+            ),
+        ),
     )
 
 
