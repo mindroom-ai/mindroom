@@ -275,6 +275,20 @@ class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = "kubernetes"
+
+    def script_resource_profiles(self) -> dict[str, object]:
+        """Return the fixed profile names and exact configured quantities."""
+        return {
+            "default_profile": self.config.default_script_resource_profile,
+            "profiles": {
+                name: {
+                    "requests": dict(profile["requests"]),
+                    "limits": dict(profile["limits"]),
+                }
+                for name, profile in self.config.script_resource_profiles.items()
+            },
+        }
+
     cleanup_locator: str | None = None
 
     def __init__(
@@ -445,6 +459,7 @@ class KubernetesWorkerBackend:
                         replicas=1,
                         private_agent_names=spec.private_agent_names,
                         state_scope_worker_key=spec.state_scope_worker_key,
+                        resource_profile=spec.resource_profile,
                     )
                     startup_triggered = should_restart or deployment_apply.recreated
                     destructive_failure_allowed = destructive_failure_allowed or startup_triggered
@@ -694,6 +709,7 @@ class KubernetesWorkerBackend:
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
         state_scope_worker_key = resources.parse_state_scope_worker_key_annotation(annotations)
+        resource_profile = resources.parse_resource_profile_annotation(annotations)
         if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
             # Deployments created before visibility persistence cannot be rebuilt
             # deterministically; the ensure-time hash check recreates them on next use.
@@ -710,6 +726,7 @@ class KubernetesWorkerBackend:
                 state_subpath=self._state_subpath(handle.worker_key),
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
+                resource_profile=resource_profile,
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
@@ -737,6 +754,7 @@ class KubernetesWorkerBackend:
                 replicas=0,
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
                 state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
+                resource_profile=resources.parse_resource_profile_annotation(annotations),
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)

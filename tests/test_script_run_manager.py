@@ -36,7 +36,7 @@ from mindroom.script_runs.worker_client import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
@@ -159,6 +159,10 @@ class _WorkerBackend:
     saw_starting: bool = False
     list_worker_thread_ids: list[int] = field(default_factory=list)
     retired_worker_keys: list[str] = field(default_factory=list)
+    resource_profiles_payload: dict[str, object] | None = None
+
+    def script_resource_profiles(self) -> dict[str, object] | None:
+        return self.resource_profiles_payload
 
     def ensure_worker(
         self,
@@ -362,6 +366,122 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
     assert run.snapshot_locator is not None
     assert (context.runtime_paths.storage_root / run.snapshot_locator / "source.py").is_file()
     assert client.launch_paths[run.run_id][0].is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_profile", "selected_profile", "expected_requests", "expected_limits"),
+    [
+        (None, "small", {"cpu": "100m", "memory": "256Mi"}, {"cpu": "500m", "memory": "1Gi"}),
+        ("standard", "standard", {"cpu": "250m", "memory": "512Mi"}, {"cpu": "1", "memory": "2Gi"}),
+    ],
+)
+async def test_launch_snapshots_selected_resource_profile_before_worker_creation(
+    tmp_path: Path,
+    requested_profile: ScriptResourceProfileName | None,
+    selected_profile: ScriptResourceProfileName,
+    expected_requests: dict[str, str],
+    expected_limits: dict[str, str],
+) -> None:
+    """An explicit or default profile resolves to administrator-owned quantities before durable launch."""
+    manager, backend, _client = _manager(tmp_path)
+    backend.resource_profiles_payload = {
+        "default_profile": "small",
+        "profiles": {
+            "small": {
+                "requests": {"cpu": "100m", "memory": "256Mi"},
+                "limits": {"cpu": "500m", "memory": "1Gi"},
+            },
+            "standard": {
+                "requests": {"cpu": "250m", "memory": "512Mi"},
+                "limits": {"cpu": "1", "memory": "2Gi"},
+            },
+            "large": {
+                "requests": {"cpu": "500m", "memory": "2Gi"},
+                "limits": {"cpu": "2", "memory": "8Gi"},
+            },
+        },
+    }
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        resource_profile=requested_profile,
+    )
+
+    assert backend.specs[-1].resource_profile == selected_profile
+    assert run.resource_profile == selected_profile
+    assert run.resource_requests == expected_requests
+    assert run.resource_limits == expected_limits
+    assert manager.store.get_run(run.run_id) == run
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_explicit_profile_without_backend_support(tmp_path: Path) -> None:
+    """An agent cannot turn a profile name into unenforced local or backend-specific resources."""
+    manager, backend, _client = _manager(tmp_path)
+
+    with pytest.raises(
+        ScriptRunManagerError,
+        match="Resource profiles require a worker backend that advertises enforceable profiles",
+    ):
+        await manager.run(
+            _context(tmp_path),
+            source="print('ok')\n",
+            resource_profile="large",
+        )
+
+    assert backend.specs == []
+    assert manager.store.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_launch_snapshots_profile_from_the_backend_admitted_after_launch_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config refresh during admission cannot make persisted quantities differ from the worker backend."""
+    manager, first_backend, client = _manager(tmp_path)
+    first_backend.resource_profiles_payload = {
+        "default_profile": "small",
+        "profiles": {
+            "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
+            "standard": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "1", "memory": "2Gi"}},
+            "large": {"requests": {"cpu": "500m", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+        },
+    }
+    admitted_backend = _WorkerBackend(
+        store=manager.store,
+        runtime_paths=first_backend.runtime_paths,
+        cleanup_locator="locator-b",
+        resource_profiles_payload={
+            "default_profile": "small",
+            "profiles": {
+                "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
+                "standard": {"requests": {"cpu": "400m", "memory": "1Gi"}, "limits": {"cpu": "1", "memory": "3Gi"}},
+                "large": {"requests": {"cpu": "800m", "memory": "3Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+            },
+        },
+    )
+    original_admit = ScriptRunManager._admit_launch
+
+    async def admit_and_refresh(self: ScriptRunManager) -> None:
+        await original_admit(self)
+        self.worker_backend = admitted_backend
+
+    monkeypatch.setattr(ScriptRunManager, "_admit_launch", admit_and_refresh)
+
+    run = await manager.run(
+        _context(tmp_path),
+        source="print('ok')\n",
+        resource_profile="standard",
+    )
+
+    assert run.worker_backend_locator == "locator-b"
+    assert run.resource_requests == {"cpu": "400m", "memory": "1Gi"}
+    assert run.resource_limits == {"cpu": "1", "memory": "3Gi"}
+    assert admitted_backend.specs[-1].resource_profile == "standard"
+    assert client.requested_handles
 
 
 @pytest.mark.asyncio

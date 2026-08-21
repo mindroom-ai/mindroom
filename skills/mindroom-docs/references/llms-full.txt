@@ -1101,6 +1101,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
+| `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
+| `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining exact CPU and memory requests and limits for the fixed `small`, `standard`, and `large` background-script profiles | Built-in bounded profiles |
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Finite positive seconds to retain terminal background-script runs, tool-call receipts, approval rows, and durable approval records before lifecycle pruning | `2592000` (30 days) |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
@@ -10384,10 +10386,16 @@ The limits are captured with each run.
 
 ## Control Functions
 
-The agent receives four control functions.
+The agent receives five control functions.
 
 ```text
-start_script(source: str | None = None, path: str | None = None, name: str | None = None)
+start_script(
+    source: str | None = None,
+    path: str | None = None,
+    name: str | None = None,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
+)
+get_script_resource_profiles()
 get_script(run_id: str)
 cancel_script(run_id: str, force: bool = False)
 list_scripts(include_finished: bool = True)
@@ -10398,6 +10406,11 @@ list_scripts(include_finished: bool = True)
 `path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
 Source is limited to 128 KiB.
 `name` is an optional short label shown in status and list results.
+On Kubernetes, `resource_profile` selects one of three administrator-bounded profiles.
+Omitting it uses the configured default.
+Call `get_script_resource_profiles` first to see the live default and exact CPU and memory requests and limits.
+The selected profile and its exact quantities are also returned by start, status, and list operations.
+An explicit profile fails when the active worker backend cannot enforce resource profiles.
 
 `get_script` returns durable run state plus the supervisor's recent process output when it is available.
 `list_scripts` returns only runs owned by the current requester and agent.

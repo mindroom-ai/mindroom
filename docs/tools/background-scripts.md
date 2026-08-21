@@ -61,10 +61,16 @@ The limits are captured with each run.
 
 ## Control Functions
 
-The agent receives four control functions.
+The agent receives five control functions.
 
 ```text
-start_script(source: str | None = None, path: str | None = None, name: str | None = None)
+start_script(
+    source: str | None = None,
+    path: str | None = None,
+    name: str | None = None,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
+)
+get_script_resource_profiles()
 get_script(run_id: str)
 cancel_script(run_id: str, force: bool = False)
 list_scripts(include_finished: bool = True)
@@ -75,6 +81,11 @@ list_scripts(include_finished: bool = True)
 `path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
 Source is limited to 128 KiB.
 `name` is an optional short label shown in status and list results.
+On Kubernetes, `resource_profile` selects one of three administrator-bounded profiles.
+Omitting it uses the configured default.
+Call `get_script_resource_profiles` first to see the live default and exact CPU and memory requests and limits.
+The selected profile and its exact quantities are also returned by start, status, and list operations.
+An explicit profile fails when the active worker backend cannot enforce resource profiles.
 
 `get_script` returns durable run state plus the supervisor's recent process output when it is available.
 `list_scripts` returns only runs owned by the current requester and agent.

@@ -147,10 +147,11 @@ class ScriptRunStore:
                         execution_identity_json, source_digest, grants_json, token_hash, preapprove_launch_grants,
                         worker_key, worker_id, worker_backend_locator,
                         snapshot_locator, name, local_unsafe,
+                        resource_profile, resource_requests_json, resource_limits_json,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, output,
                         cancel_requested_at, cancellation_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -612,6 +613,12 @@ class ScriptRunStore:
         with self._write_transaction() as connection:
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            existing_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(script_runs)").fetchall()
+            }
+            for column_name, statement in _SCRIPT_RUN_COLUMN_MIGRATIONS:
+                if column_name not in existing_columns:
+                    connection.execute(statement)
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -656,6 +663,9 @@ _SCHEMA_STATEMENTS = (
                     snapshot_locator TEXT,
                     name TEXT,
                     local_unsafe INTEGER NOT NULL,
+                    resource_profile TEXT,
+                    resource_requests_json TEXT NOT NULL DEFAULT '{}',
+                    resource_limits_json TEXT NOT NULL DEFAULT '{}',
                     max_tool_calls_per_minute INTEGER NOT NULL,
                     max_runtime_seconds INTEGER NOT NULL,
                     state TEXT NOT NULL,
@@ -690,6 +700,18 @@ _SCHEMA_STATEMENTS = (
                 CREATE INDEX IF NOT EXISTS script_calls_run_created_idx
                     ON script_calls(run_id, created_at)
                 """,
+)
+
+_SCRIPT_RUN_COLUMN_MIGRATIONS = (
+    ("resource_profile", "ALTER TABLE script_runs ADD COLUMN resource_profile TEXT"),
+    (
+        "resource_requests_json",
+        "ALTER TABLE script_runs ADD COLUMN resource_requests_json TEXT NOT NULL DEFAULT '{}'",
+    ),
+    (
+        "resource_limits_json",
+        "ALTER TABLE script_runs ADD COLUMN resource_limits_json TEXT NOT NULL DEFAULT '{}'",
+    ),
 )
 
 
@@ -728,6 +750,9 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         run.snapshot_locator,
         run.name,
         int(run.local_unsafe),
+        run.resource_profile,
+        json.dumps(run.resource_requests, separators=(",", ":"), sort_keys=True),
+        json.dumps(run.resource_limits, separators=(",", ":"), sort_keys=True),
         run.max_tool_calls_per_minute,
         run.max_runtime_seconds,
         run.state.value,
@@ -761,6 +786,9 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         snapshot_locator=_nullable_string(row["snapshot_locator"]),
         name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),
+        resource_profile=_nullable_string(row["resource_profile"]),
+        resource_requests=cast("dict[str, str]", json.loads(str(row["resource_requests_json"]))),
+        resource_limits=cast("dict[str, str]", json.loads(str(row["resource_limits_json"]))),
         max_tool_calls_per_minute=int(row["max_tool_calls_per_minute"]),
         max_runtime_seconds=int(row["max_runtime_seconds"]),
         state=ScriptRunState(str(row["state"])),

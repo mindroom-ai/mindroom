@@ -480,6 +480,8 @@ def _backend(
     worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
+    script_resource_profiles: dict[str, dict[str, dict[str, str]]] | None = None,
+    default_script_resource_profile: str = "small",
     extra_env: dict[str, str] | None = None,
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
@@ -488,6 +490,12 @@ def _backend(
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
+    profile_config: dict[str, object] = {}
+    if script_resource_profiles is not None:
+        profile_config = {
+            "script_resource_profiles": script_resource_profiles,
+            "default_script_resource_profile": default_script_resource_profile,
+        }
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -511,6 +519,7 @@ def _backend(
         owner_deployment_name=owner_deployment_name,
         resource_requests=resource_requests if resource_requests is not None else {"memory": "256Mi", "cpu": "100m"},
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
+        **profile_config,
         enable_service_links=enable_service_links,
         auth_secret_name=auth_secret_name,
         reconcile_pod_templates=reconcile_pod_templates,
@@ -1616,6 +1625,63 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
     assert config.enable_service_links is False
 
 
+def test_kubernetes_backend_config_reads_all_three_script_resource_profiles(tmp_path: Path) -> None:
+    """Runtime configuration carries exact administrator-owned quantities and the selected default."""
+    profiles = {
+        "small": {
+            "requests": {"cpu": "50m", "memory": "128Mi"},
+            "limits": {"cpu": "250m", "memory": "512Mi"},
+        },
+        "standard": {
+            "requests": {"cpu": "200m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "750m", "memory": "2Gi"},
+            "limits": {"cpu": "3", "memory": "10Gi"},
+        },
+    }
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "\n".join(
+            (
+                "MINDROOM_WORKER_BACKEND=kubernetes",
+                "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image",
+                "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc",
+                "MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE=standard",
+                f"MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON={json.dumps(profiles)}",
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    config = KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
+
+    assert config.default_script_resource_profile == "standard"
+    assert config.script_resource_profiles == profiles
+
+
+def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(tmp_path: Path) -> None:
+    """Operators cannot accidentally expose a profile name without bounded quantities."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "MINDROOM_WORKER_BACKEND=kubernetes\n"
+        "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+        'MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON={"small": {}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerBackendError, match="exactly small, standard, and large"):
+        KubernetesWorkerBackendConfig.from_runtime(resolve_primary_runtime_paths(config_path=config_path))
+
+
 def test_kubernetes_backend_config_allows_service_links_override(tmp_path: Path) -> None:
     """Worker service-link env injection remains opt-in."""
     config_dir = tmp_path / "cfg"
@@ -1658,6 +1724,43 @@ def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp
     container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
     assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_script_worker_uses_selected_bounded_resource_profile(tmp_path: Path) -> None:
+    """A script profile selects configured quantities without accepting quantities from the agent."""
+    profiles = {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "1Gi"},
+        },
+        "standard": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        script_resource_profiles=profiles,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A, resource_profile="large"), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"] == profiles["large"]
+    assert deployment["metadata"]["annotations"]["mindroom.ai/resource-profile"] == "large"
+    assert backend.script_resource_profiles() == {
+        "default_profile": "small",
+        "profiles": profiles,
+    }
 
 
 def test_kubernetes_backend_renders_service_links_override_in_worker_template() -> None:

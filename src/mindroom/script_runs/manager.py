@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast, runtime_checkable
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
@@ -56,7 +56,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 from mindroom.workspaces import resolve_workspace_relative_path
 
@@ -91,6 +91,7 @@ _TERMINAL_STATES = frozenset(
         ScriptRunState.INTERRUPTED,
     },
 )
+_SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
 
 
 class ScriptRunManagerError(ValueError):
@@ -108,6 +109,22 @@ class _AmbiguousLaunchError(Exception):
 class _ScriptBroker(Protocol):
     async def cancel_run(self, run_id: str) -> None:
         """Cancel in-process broker executions for one revoked run."""
+
+
+@runtime_checkable
+class _ScriptResourceProfileBackend(Protocol):
+    def script_resource_profiles(self) -> dict[str, object] | None:
+        """Return the bounded resource profiles this backend can enforce."""
+
+
+class _ScriptResourceProfile(TypedDict):
+    requests: dict[str, str]
+    limits: dict[str, str]
+
+
+class _ScriptResourceProfilesPayload(TypedDict):
+    default_profile: ScriptResourceProfileName
+    profiles: dict[str, _ScriptResourceProfile]
 
 
 @runtime_checkable
@@ -204,6 +221,17 @@ class ScriptRunManager:
         """Mark the empty admission set as drained before any launch begins."""
         self._launches_drained.set()
 
+    def resource_profiles(self, context: ToolRuntimeContext) -> dict[str, object]:
+        """Return the exact bounded profiles available for this runtime."""
+        del context
+        payload = _validated_script_resource_profiles(self._worker_backend_for(None))
+        if payload is None:
+            return {"default_profile": None, "profiles": {}}
+        return {
+            "default_profile": payload["default_profile"],
+            "profiles": payload["profiles"],
+        }
+
     async def begin_shutdown(self) -> None:
         """Permanently reject new launches and drain every already-admitted launch."""
         async with self._launch_admission_lock:
@@ -270,6 +298,7 @@ class ScriptRunManager:
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
+        resource_profile: ScriptResourceProfileName | None = None,
         limits: ScriptRunLimits | None = None,
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope."""
@@ -295,6 +324,9 @@ class ScriptRunManager:
                 msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
                 raise ScriptRunManagerError(msg)
             worker_backend = _require_script_launch_backend(worker_backend, context.runtime_paths)
+            selected_profile = None
+            resource_requests: dict[str, str] = {}
+            resource_limits: dict[str, str] = {}
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
@@ -302,12 +334,18 @@ class ScriptRunManager:
             worker_key = script_worker_key_for_run(worker_target.worker_key, run_id)
             local_unsafe = False
         elif execution_mode in _LOCAL_EXECUTION_MODES:
+            if resource_profile is not None:
+                msg = "Resource profiles require a worker backend that advertises enforceable profiles."
+                raise ScriptRunManagerError(msg)
             if not background_script_supervision_supported():
                 msg = "Background scripts require Linux process-group containment."
                 raise ScriptRunManagerError(msg)
             run_id = f"script-{uuid.uuid4().hex}"
             worker_key = None
             local_unsafe = True
+            selected_profile = None
+            resource_requests = {}
+            resource_limits = {}
         else:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
@@ -329,6 +367,9 @@ class ScriptRunManager:
             worker_backend_locator=None,
             name=_validated_name(name),
             local_unsafe=local_unsafe,
+            resource_profile=selected_profile,
+            resource_requests=resource_requests,
+            resource_limits=resource_limits,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
             max_runtime_seconds=max(1, round(effective_limits.max_runtime_hours * 60 * 60)),
         )
@@ -340,6 +381,7 @@ class ScriptRunManager:
                 private_agent_names=worker_target.private_agent_names,
                 mirrored_credential_services=frozenset(),
                 state_scope_worker_key=worker_target.worker_key,
+                resource_profile=selected_profile,
             )
         )
         await self._admit_launch()
@@ -353,8 +395,12 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            admitted_backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
-            run = replace(run, worker_backend_locator=admitted_backend.cleanup_locator)
+            run, worker_spec = self._bind_admitted_worker_profile(
+                context,
+                run=run,
+                worker_spec=_require_worker_spec(worker_spec),
+                requested_profile=resource_profile,
+            )
             return await self._create_and_launch(
                 context,
                 run=run,
@@ -365,6 +411,28 @@ class ScriptRunManager:
             )
         finally:
             await self._release_launch_admission()
+
+    def _bind_admitted_worker_profile(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        run: ScriptRunRecord,
+        worker_spec: WorkerSpec,
+        requested_profile: ScriptResourceProfileName | None,
+    ) -> tuple[ScriptRunRecord, WorkerSpec]:
+        """Bind persisted quantities to the same refreshed backend that creates the worker."""
+        backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
+        profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
+        return (
+            replace(
+                run,
+                worker_backend_locator=backend.cleanup_locator,
+                resource_profile=profile,
+                resource_requests=requests,
+                resource_limits=limits,
+            ),
+            replace(worker_spec, resource_profile=profile),
+        )
 
     async def _create_and_launch(
         self,
@@ -1122,6 +1190,71 @@ def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) 
     ):
         msg = "Background-script workers for private agents require private.per=user_agent."
         raise ScriptRunManagerError(msg)
+
+
+def _validated_script_resource_profiles(backend: object | None) -> _ScriptResourceProfilesPayload | None:
+    if backend is None or not isinstance(backend, _ScriptResourceProfileBackend):
+        return None
+    raw = backend.script_resource_profiles()
+    if raw is None:
+        return None
+    default_profile = raw.get("default_profile")
+    profiles = raw.get("profiles")
+    if (
+        not isinstance(default_profile, str)
+        or default_profile not in _SCRIPT_RESOURCE_PROFILE_NAMES
+        or not isinstance(profiles, dict)
+        or set(profiles) != _SCRIPT_RESOURCE_PROFILE_NAMES
+    ):
+        msg = "Background script resource profiles must define small, standard, and large with a valid default."
+        raise ScriptRunManagerError(msg)
+    profiles_mapping = cast("dict[str, object]", profiles)
+    normalized: dict[str, _ScriptResourceProfile] = {}
+    for profile_name in sorted(_SCRIPT_RESOURCE_PROFILE_NAMES):
+        profile = profiles_mapping[profile_name]
+        if not isinstance(profile, dict):
+            msg = f"Background script resource profile '{profile_name}' must be an object."
+            raise ScriptRunManagerError(msg)
+        profile_mapping = cast("dict[str, object]", profile)
+        requests = profile_mapping.get("requests")
+        limits = profile_mapping.get("limits")
+        if not _valid_resource_quantities(requests) or not _valid_resource_quantities(limits):
+            msg = f"Background script resource profile '{profile_name}' must define CPU and memory requests and limits."
+            raise ScriptRunManagerError(msg)
+        normalized[profile_name] = {
+            "requests": dict(cast("dict[str, str]", requests)),
+            "limits": dict(cast("dict[str, str]", limits)),
+        }
+    return {
+        "default_profile": cast("ScriptResourceProfileName", default_profile),
+        "profiles": normalized,
+    }
+
+
+def _valid_resource_quantities(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"cpu", "memory"}
+        and all(isinstance(quantity, str) and quantity.strip() for quantity in value.values())
+    )
+
+
+def _resolve_script_resource_profile(
+    backend: object,
+    requested_profile: ScriptResourceProfileName | None,
+) -> tuple[ScriptResourceProfileName | None, dict[str, str], dict[str, str]]:
+    payload = _validated_script_resource_profiles(backend)
+    if payload is None:
+        if requested_profile is not None:
+            msg = "Resource profiles require a worker backend that advertises enforceable profiles."
+            raise ScriptRunManagerError(msg)
+        return None, {}, {}
+    selected = requested_profile or payload["default_profile"]
+    profiles = payload["profiles"]
+    profile = profiles[selected]
+    requests = profile["requests"]
+    limits = profile["limits"]
+    return selected, dict(requests), dict(limits)
 
 
 def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path:

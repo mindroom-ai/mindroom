@@ -56,6 +56,9 @@ class ScriptRunRecord:
     snapshot_locator: str | None = None
     name: str | None = None
     local_unsafe: bool = False
+    resource_profile: str | None = None
+    resource_requests: dict[str, str] = field(default_factory=dict)
+    resource_limits: dict[str, str] = field(default_factory=dict)
     max_tool_calls_per_minute: int = 30
     max_runtime_seconds: int = 24 * 60 * 60
     state: ScriptRunState = ScriptRunState.STARTING

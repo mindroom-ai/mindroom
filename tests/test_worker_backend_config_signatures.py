@@ -109,6 +109,11 @@ def _legacy_kubernetes_backend_config_signature(
     extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
     resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
+    script_resource_profiles_json = json.dumps(
+        config.script_resource_profiles,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "kubernetes",
         config.namespace,
@@ -135,6 +140,8 @@ def _legacy_kubernetes_backend_config_signature(
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
+        script_resource_profiles_json,
+        config.default_script_resource_profile,
         str(config.enable_service_links),
         config.auth_secret_name or "",
         str(config.reconcile_pod_templates),

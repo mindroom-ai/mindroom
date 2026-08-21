@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -50,6 +51,8 @@ _DEFAULT_MEMORY_REQUEST = "256Mi"
 _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
+_SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
+_DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
 
 _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX = "agent-vault"
 _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
@@ -84,6 +87,8 @@ _MEMORY_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_reques
 _MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
 _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
+_SCRIPT_RESOURCE_PROFILES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["script_resource_profiles_json"]
+_DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["default_script_resource_profile"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
 _AGENT_VAULT_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"]
@@ -115,6 +120,65 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+
+
+def _default_script_resource_profiles() -> dict[str, dict[str, dict[str, str]]]:
+    return {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "1Gi"},
+        },
+        "standard": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
+
+
+def _normalized_script_resource_profiles(value: object) -> dict[str, dict[str, dict[str, str]]]:
+    if not isinstance(value, dict) or set(value) != _SCRIPT_RESOURCE_PROFILE_NAMES:
+        msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must define exactly small, standard, and large."
+        raise WorkerBackendError(msg)
+    value_mapping = cast("dict[str, object]", value)
+    normalized: dict[str, dict[str, dict[str, str]]] = {}
+    for profile_name in sorted(_SCRIPT_RESOURCE_PROFILE_NAMES):
+        profile = value_mapping[profile_name]
+        if not isinstance(profile, dict) or set(profile) != {"requests", "limits"}:
+            msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV}.{profile_name} must define requests and limits."
+            raise WorkerBackendError(msg)
+        profile_mapping = cast("dict[str, object]", profile)
+        normalized_profile: dict[str, dict[str, str]] = {}
+        for resource_kind in ("requests", "limits"):
+            quantities = profile_mapping[resource_kind]
+            if (
+                not isinstance(quantities, dict)
+                or set(quantities) != {"cpu", "memory"}
+                or any(not isinstance(quantity, str) or not quantity.strip() for quantity in quantities.values())
+            ):
+                msg = (
+                    f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV}.{profile_name}.{resource_kind} "
+                    "must define non-empty cpu and memory quantities."
+                )
+                raise WorkerBackendError(msg)
+            normalized_profile[resource_kind] = dict(cast("dict[str, str]", quantities))
+        normalized[profile_name] = normalized_profile
+    return normalized
+
+
+def _read_script_resource_profiles_env(env: Mapping[str, str]) -> dict[str, dict[str, dict[str, str]]]:
+    raw = read_env(env, _SCRIPT_RESOURCE_PROFILES_JSON_ENV)
+    if not raw:
+        return _default_script_resource_profiles()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must contain a JSON object."
+        raise WorkerBackendError(msg) from exc
+    return _normalized_script_resource_profiles(parsed)
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
@@ -271,6 +335,10 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    script_resource_profiles: dict[str, dict[str, dict[str, str]]] = field(
+        default_factory=_default_script_resource_profiles,
+    )
+    default_script_resource_profile: str = _DEFAULT_SCRIPT_RESOURCE_PROFILE
     reconcile_pod_templates: bool = True
     agent_vault: KubernetesAgentVaultConfig | None = None
     extra_containers: tuple[dict[str, object], ...] = ()
@@ -286,6 +354,21 @@ class KubernetesWorkerBackendConfig:
         ):
             msg = f"{_STORAGE_SUBPATH_PREFIX_ENV} must be a relative path without traversal segments."
             raise WorkerBackendError(msg)
+        normalized_profiles = _normalized_script_resource_profiles(self.script_resource_profiles)
+        if self.default_script_resource_profile not in normalized_profiles:
+            msg = f"{_DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV} must be one of: small, standard, large."
+            raise WorkerBackendError(msg)
+        object.__setattr__(self, "script_resource_profiles", normalized_profiles)
+
+    def resources_for_profile(self, profile_name: str | None) -> tuple[dict[str, str], dict[str, str]]:
+        """Return main-worker resources or one bounded script profile."""
+        if profile_name is None:
+            return dict(self.resource_requests), dict(self.resource_limits)
+        profile = self.script_resource_profiles.get(profile_name)
+        if profile is None:
+            msg = "Worker resource profile must be one of: small, standard, large."
+            raise WorkerBackendError(msg)
+        return dict(profile["requests"]), dict(profile["limits"])
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
@@ -342,6 +425,15 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            script_resource_profiles=_read_script_resource_profiles_env(env),
+            default_script_resource_profile=(
+                read_env(
+                    env,
+                    _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV,
+                    _DEFAULT_SCRIPT_RESOURCE_PROFILE,
+                )
+                or _DEFAULT_SCRIPT_RESOURCE_PROFILE
+            ),
             reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
@@ -364,6 +456,7 @@ def kubernetes_backend_config_signature(
     extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = stable_signature_json(config.resource_requests)
     resource_limits_json = stable_signature_json(config.resource_limits)
+    script_resource_profiles_json = stable_signature_json(config.script_resource_profiles)
     client_identity = _kubernetes_client_identity(runtime_paths)
     return (
         "kubernetes",
@@ -392,6 +485,8 @@ def kubernetes_backend_config_signature(
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
+        script_resource_profiles_json,
+        config.default_script_resource_profile,
         str(config.enable_service_links),
         config.auth_secret_name or "",
         str(config.reconcile_pod_templates),

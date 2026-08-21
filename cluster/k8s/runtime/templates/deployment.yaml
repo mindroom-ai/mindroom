@@ -291,6 +291,10 @@ spec:
               value: {{ .Values.workers.kubernetes.resources.requests.cpu | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_CPU_LIMIT
               value: {{ .Values.workers.kubernetes.resources.limits.cpu | quote }}
+            - name: MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE
+              value: {{ .Values.workers.kubernetes.scriptResources.defaultProfile | quote }}
+            - name: MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON
+              value: {{ toJson .Values.workers.kubernetes.scriptResources.profiles | quote }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}

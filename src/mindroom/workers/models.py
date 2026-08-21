@@ -8,6 +8,7 @@ from typing import Literal
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+ScriptResourceProfileName = Literal["small", "standard", "large"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +19,7 @@ class WorkerSpec:
     private_agent_names: frozenset[str] | None = None
     mirrored_credential_services: frozenset[str] | None = None
     state_scope_worker_key: str | None = None
+    resource_profile: ScriptResourceProfileName | None = None
 
 
 @dataclass(frozen=True, slots=True)
