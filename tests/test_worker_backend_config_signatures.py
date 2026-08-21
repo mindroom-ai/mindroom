@@ -342,7 +342,7 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing in-cluster credentials use kubeconfig without tracking user credentials."""
+    """Service variables outside process env use kubeconfig without tracking user credentials."""
     kubeconfig = tmp_path / "kubeconfig.yaml"
     env = {
         **_MINIMAL_KUBERNETES_ENV,
@@ -353,9 +353,10 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
     monkeypatch.setattr(
         kubernetes_config_module,
         "_in_cluster_credentials_available",
-        lambda: False,
-        raising=False,
+        lambda: True,
     )
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("KUBERNETES_SERVICE_PORT", raising=False)
 
     def write_kubeconfig(server: str, token: str) -> None:
         kubeconfig.write_text(

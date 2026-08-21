@@ -520,7 +520,7 @@ def kubernetes_backend_cleanup_signature(
 
 def _kubernetes_cleanup_client_identity(runtime_paths: RuntimePaths) -> str:
     """Return a Kubernetes cleanup identity that ignores mutable user credentials."""
-    in_cluster_identity = _in_cluster_client_identity(runtime_paths)
+    in_cluster_identity = _in_cluster_client_identity()
     if in_cluster_identity is not None:
         return in_cluster_identity
 
@@ -568,7 +568,7 @@ def _merge_named_kubeconfig_entries(
 
 def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
     """Return a non-secret cache fingerprint for the selected Kubernetes control plane."""
-    in_cluster_identity = _in_cluster_client_identity(runtime_paths)
+    in_cluster_identity = _in_cluster_client_identity()
     if in_cluster_identity is not None:
         return in_cluster_identity
     identities: list[str] = []
@@ -581,11 +581,10 @@ def _kubernetes_client_identity(runtime_paths: RuntimePaths) -> str:
     return "kubeconfig:" + os.pathsep.join(identities)
 
 
-def _in_cluster_client_identity(runtime_paths: RuntimePaths) -> str | None:
+def _in_cluster_client_identity() -> str | None:
     """Return the in-cluster identity only when its required credentials are available."""
-    env = runtime_env_values(runtime_paths)
-    service_host = env.get("KUBERNETES_SERVICE_HOST")
-    service_port = env.get("KUBERNETES_SERVICE_PORT")
+    service_host = os.environ.get("KUBERNETES_SERVICE_HOST")
+    service_port = os.environ.get("KUBERNETES_SERVICE_PORT")
     if service_host and service_port and _in_cluster_credentials_available():
         return f"in-cluster:{service_host}:{service_port}"
     return None
