@@ -43,6 +43,8 @@ from mindroom.knowledge.redaction import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -121,6 +123,8 @@ async def _terminate_git_process(
 def _http_credentials(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
+    *,
+    credentials: Mapping[str, object] | None = None,
 ) -> tuple[str, str] | None:
     """Return HTTP basic-auth userinfo for one credentials service, if any.
 
@@ -132,7 +136,8 @@ def _http_credentials(
     if not credentials_service:
         return None
 
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+    if credentials is None:
+        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")
@@ -163,6 +168,8 @@ def _git_auth_env(
     repo_url: str,
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
+    *,
+    credentials: Mapping[str, object] | None = None,
 ) -> dict[str, str] | None:
     """Return process-local Git config that injects credentials without persisting them.
 
@@ -191,7 +198,9 @@ def _git_auth_env(
         return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
 
     credentials_userinfo = (
-        _http_credentials(credentials_service, runtime_paths) if parsed_clean_url.scheme in {"http", "https"} else None
+        _http_credentials(credentials_service, runtime_paths, credentials=credentials)
+        if parsed_clean_url.scheme in {"http", "https"}
+        else None
     )
     if credentials_userinfo is not None:
         return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
@@ -219,16 +228,19 @@ async def _resolved_git_auth_env(
     github_app_token_provider: GitHubAppTokenProvider,
 ) -> dict[str, str] | None:
     """Resolve refreshable App credentials or retain existing static Git auth."""
-    credentials = (
-        get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-        if credentials_service
-        else {}
-    )
+    credentials: Mapping[str, object] = {}
+    if credentials_service:
+        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     if credentials.get("auth_type") == "github_app":
         username, token = await github_app_token_provider.resolve(repo_url, credentials)
         return _git_http_basic_auth_env(credential_free_repo_url(repo_url), username, token)
 
-    return _git_auth_env(repo_url, credentials_service, runtime_paths)
+    return _git_auth_env(
+        repo_url,
+        credentials_service,
+        runtime_paths,
+        credentials=credentials if credentials_service else None,
+    )
 
 
 #: scp-style SSH syntax (``git@github.com:org/repo.git``), which ``urlparse``

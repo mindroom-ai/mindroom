@@ -169,12 +169,13 @@ class GitHubAppTokenProvider:
         now: datetime,
     ) -> _CachedToken:
         try:
-            private_key = credentials.private_key_file.read_text(encoding="utf-8")
-        except OSError as exc:
+            private_key = await asyncio.to_thread(credentials.private_key_file.read_text, encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
             msg = "GitHub App private_key_file could not be read"
             raise ValueError(msg) from exc
         try:
-            app_jwt = jwt.encode(
+            app_jwt = await asyncio.to_thread(
+                jwt.encode,
                 {
                     "iat": int(now.timestamp()) - 60,
                     "exp": int(now.timestamp()) + 540,

@@ -676,6 +676,38 @@ async def test_github_app_credentials_fail_closed_for_noncanonical_remotes(
 
 
 @pytest.mark.asyncio
+async def test_resolved_git_auth_loads_static_credentials_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspecting auth type must reuse the same static credential snapshot."""
+    manager, _git_config = _github_app_manager(tmp_path)
+    credentials_manager = get_runtime_shared_credentials_manager(manager.runtime_paths)
+    credentials_manager.save_credentials("github_app", {"token": "static-token"})
+    real_load_credentials = credentials_manager.load_credentials
+    load_count = 0
+
+    def _load_credentials(service: str) -> dict[str, object] | None:
+        nonlocal load_count
+        load_count += 1
+        return real_load_credentials(service)
+
+    monkeypatch.setattr(credentials_manager, "load_credentials", _load_credentials)
+
+    env = await knowledge_git_source_module._resolved_git_auth_env(
+        "https://github.com/example/private.git",
+        "github_app",
+        manager.runtime_paths,
+        manager.git_source._github_app_token_provider,
+    )
+
+    assert load_count == 1
+    assert env is not None
+    encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    assert base64.b64decode(encoded).decode() == "x-access-token:static-token"
+
+
+@pytest.mark.asyncio
 async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

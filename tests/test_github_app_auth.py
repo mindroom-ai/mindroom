@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -163,6 +164,49 @@ async def test_github_app_token_is_repository_scoped_read_only_cached_and_rotate
         options={"verify_exp": False, "verify_iat": False},
     )
     assert refreshed_claims["iat"] == int(current_time.timestamp()) - 60
+
+
+@pytest.mark.asyncio
+async def test_github_app_key_read_and_signing_run_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Secret-file I/O and RSA signing must not block unrelated async work."""
+    key_path = tmp_path / "private-key.pem"
+    _private_key(key_path)
+    offloaded: list[str] = []
+    real_to_thread = asyncio.to_thread
+
+    async def _tracked_to_thread(
+        function: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        offloaded.append(getattr(function, "__name__", type(function).__name__))
+        return await real_to_thread(function, *args, **kwargs)
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "token": "installation-token",
+                "expires_at": "2026-08-21T13:00:00Z",
+            },
+        )
+
+    monkeypatch.setattr(asyncio, "to_thread", _tracked_to_thread)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        provider = GitHubAppTokenProvider(
+            client=client,
+            now=lambda: datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        )
+        await provider.resolve(
+            "https://github.com/example/private.git",
+            _credentials(key_path),
+        )
+
+    assert offloaded == ["read_text", "encode"]
 
 
 @pytest.mark.asyncio
