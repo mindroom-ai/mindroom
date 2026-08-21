@@ -822,8 +822,12 @@ async def test_failed_partial_publication_allows_rollback_to_last_successful_con
         applied_from.append(applied_config)
         applied_configs.append(plan.new_config)
         live_config = plan.new_config
-        if len(applied_configs) == 1:
-            msg = "failed after config publication"
+        if len(applied_configs) <= 2:
+            msg = (
+                "failed after config publication"
+                if len(applied_configs) == 1
+                else "failed during partial-publication repair"
+            )
             raise RuntimeError(msg)
         return True
 
@@ -833,9 +837,12 @@ async def test_failed_partial_publication_allows_rollback_to_last_successful_con
         await lifecycle._update_config()
 
     loaded_config = current_config
+    with pytest.raises(RuntimeError, match="failed during partial-publication repair"):
+        await lifecycle._update_config()
+
     assert await lifecycle._update_config() is True
-    assert applied_from == [current_config, failed_config]
-    assert applied_configs == [failed_config, current_config]
+    assert applied_from == [current_config, failed_config, failed_config]
+    assert applied_configs == [failed_config, current_config, current_config]
 
 
 @pytest.mark.asyncio

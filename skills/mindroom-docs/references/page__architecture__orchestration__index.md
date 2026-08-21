@@ -87,7 +87,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
    Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
    The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
-   Config loading and diff planning keep response admission open; only publication closes the gate after current responses drain.
+   Config loading keeps response admission open; after current responses drain, the gate closes for diff planning and publication.
    Holding the gate while loading would block responses for validation work that cannot affect the live runtime.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
@@ -98,7 +98,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
-8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations.
+8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
 9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place while restarting only sliding receive loops to refresh their subscriptions.
 10. Removed entities run `cleanup()` to leave rooms and stop the bot.
 11. New and restarted bots go through room setup.

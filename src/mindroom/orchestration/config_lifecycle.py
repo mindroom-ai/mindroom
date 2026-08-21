@@ -117,6 +117,8 @@ class ConfigReloadLifecycle:
     loaded_source_files: frozenset[Path] | None = field(default=None, init=False)
     # The last config whose complete update plan returned successfully.
     _fully_applied_config: Config | None = field(default=None, init=False, repr=False)
+    # A transition target that may have published only part of its runtime state.
+    _incomplete_config: Config | None = field(default=None, init=False, repr=False)
 
     def request_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""
@@ -190,14 +192,19 @@ class ConfigReloadLifecycle:
             current_authored_config = current_config.authored_model_dump()
             new_authored_config = new_config.authored_model_dump()
             runtime_authored_config = runtime_config.authored_model_dump() if runtime_config is not None else None
-            if current_authored_config == new_authored_config == runtime_authored_config:
+            if (
+                self._incomplete_config is None
+                and current_authored_config == new_authored_config == runtime_authored_config
+            ):
                 logger.info("Configuration content unchanged; skipping publication")
                 return False
-            repair_config = (
-                runtime_config
-                if runtime_config is not None and runtime_authored_config != current_authored_config
-                else None
-            )
+            repair_config = self._incomplete_config
+            if (
+                repair_config is None
+                and runtime_config is not None
+                and runtime_authored_config != current_authored_config
+            ):
+                repair_config = runtime_config
             if repair_config is not None:
                 logger.warning(
                     "config_reload_repairing_partial_publication",
@@ -232,10 +239,14 @@ class ConfigReloadLifecycle:
         updated = False
         async with self.config_update_lock:
             if repair_config is not None:
+                self._incomplete_config = repair_config
                 updated = await self._apply_config_transition(repair_config, fully_applied_config)
+                self._incomplete_config = None
             if fully_applied_config.authored_model_dump() != requested_config.authored_model_dump():
+                self._incomplete_config = requested_config
                 requested_updated = await self._apply_config_transition(fully_applied_config, requested_config)
                 updated = updated or requested_updated
+                self._incomplete_config = None
             self._fully_applied_config = requested_config
         return updated
 
