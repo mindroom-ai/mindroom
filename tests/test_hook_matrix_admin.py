@@ -190,6 +190,19 @@ async def test_hook_matrix_admin_get_profile_avatar_returns_none_without_avatar(
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_get_profile_avatar_normalizes_empty_avatar(tmp_path: Path) -> None:
+    """An empty avatar URL should remain unavailable to hook callers."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.get_profile.return_value = nio.ProfileGetResponse(displayname="Ada", avatar_url="")
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_profile_avatar("@ada:localhost") is None
+
+
+@pytest.mark.asyncio
 async def test_hook_matrix_admin_get_profile_avatar_returns_none_on_error(tmp_path: Path) -> None:
     """Profile lookup errors should fail closed."""
     module = _matrix_admin_module()

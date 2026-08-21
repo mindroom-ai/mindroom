@@ -100,7 +100,7 @@ class _BoundHookMatrixAdmin:
         """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
         response = await self.client.get_profile(user_id)
         if isinstance(response, nio.ProfileGetResponse):
-            return response.avatar_url
+            return response.avatar_url or None
         return None
 
     async def get_room_state_event(
