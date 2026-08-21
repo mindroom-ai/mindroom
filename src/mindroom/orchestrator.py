@@ -1753,6 +1753,7 @@ class _MultiAgentOrchestrator:
                 room_count=len(bot.rooms),
             )
             await cancel_sync_task(bot.agent_name, self._sync_tasks)
+            bot.preserve_reply_memberships_on_next_sync_start()
             self._start_sync_task(bot.agent_name, bot)
         if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()

@@ -1759,20 +1759,20 @@ class TestMultiAgentOrchestrator:
         assert set(setup_rooms.await_args.args[0]) == {router_bot, general_bot}
 
     @pytest.mark.asyncio
-    async def test_reconcile_post_update_rooms_restarts_sliding_subscriptions(
+    async def test_reconcile_post_update_rooms_preserves_router_grants_before_sliding_restart(
         self,
         tmp_path: Path,
     ) -> None:
-        """Room-only edits must refresh explicit sliding-sync subscriptions."""
+        """Room-only edits must preserve refreshed router grants across subscription restart."""
         config = _runtime_bound_config(Config(matrix_sync={"mode": "sliding"}), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
-        general_bot = MagicMock(agent_name="general", config=config, running=True)
-        orchestrator.agent_bots = {"general": general_bot}
+        router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, config=config, running=True)
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
         plan = ConfigUpdatePlan(
             new_config=config,
             changed_mcp_servers=set(),
-            configured_entities={"general"},
+            configured_entities={ROUTER_AGENT_NAME},
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),
@@ -1780,7 +1780,7 @@ class TestMultiAgentOrchestrator:
             matrix_room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={"general"},
+            entities_to_reconcile_rooms={ROUTER_AGENT_NAME},
         )
 
         with (
@@ -1790,8 +1790,9 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
 
-        cancel_sync.assert_awaited_once_with("general", orchestrator._sync_tasks)
-        start_sync.assert_called_once_with("general", general_bot)
+        cancel_sync.assert_awaited_once_with(ROUTER_AGENT_NAME, orchestrator._sync_tasks)
+        router_bot.preserve_reply_memberships_on_next_sync_start.assert_called_once_with()
+        start_sync.assert_called_once_with(ROUTER_AGENT_NAME, router_bot)
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
