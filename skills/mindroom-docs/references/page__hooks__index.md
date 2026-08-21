@@ -573,7 +573,7 @@ The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_l
 Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
 `get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
-`get_room_state_event` returns `(True, content)` for a successful response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix error responses.
+`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
 Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 
