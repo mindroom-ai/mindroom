@@ -374,10 +374,11 @@ class ConfigReloadLifecycle:
     ) -> None:
         """Run one global serialized replacement after a bounded response drain.
 
-        Config reloads call this from their debounced task. MCP catalog changes
-        call it from an orchestrator-owned background task so an admitted tool
-        call cannot wait on its own slot. The drain defers for at most 600
-        seconds before closing admission over a forced apply.
+        Config reloads acquire the same serialization lock from their debounced
+        task and use the same drain helper. MCP catalog changes call this from
+        an orchestrator-owned background task so an admitted tool call cannot
+        wait on its own slot. The drain defers for at most 600 seconds before
+        closing admission over a forced apply.
         """
         async with self._response_admission_apply_lock:
             await self._apply_after_response_drain(
