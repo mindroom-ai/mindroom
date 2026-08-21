@@ -111,7 +111,7 @@ class _BoundHookMatrixAdmin:
     ) -> tuple[bool, dict[str, Any] | None]:
         """Return one state event while distinguishing missing from unreadable."""
         response = await self.client.room_get_state_event(room_id, event_type, state_key)
-        if isinstance(response, nio.RoomGetStateEventResponse):
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
             return True, response.content
         if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
             return True, None

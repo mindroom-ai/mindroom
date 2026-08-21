@@ -272,6 +272,24 @@ async def test_hook_matrix_admin_get_room_state_event_fails_closed(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_get_room_state_event_rejects_malformed_content(tmp_path: Path) -> None:
+    """Successful responses with non-object content should fail closed."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=["not", "an", "object"],
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!personal:localhost",
+    )
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (False, None)
+
+
+@pytest.mark.asyncio
 async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path: Path) -> None:
     """The hook builder should reuse the existing Matrix helper functions."""
     module = _matrix_admin_module()
