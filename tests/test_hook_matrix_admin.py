@@ -203,6 +203,62 @@ async def test_hook_matrix_admin_get_profile_avatar_returns_none_on_error(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_hook_matrix_admin_get_room_state_event_returns_content(tmp_path: Path) -> None:
+    """Single-event reads should expose successful content."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"url": "mxc://localhost/ada"},
+        event_type="m.room.avatar",
+        state_key="",
+        room_id="!personal:localhost",
+    )
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (
+        True,
+        {"url": "mxc://localhost/ada"},
+    )
+    client.room_get_state_event.assert_awaited_once_with("!personal:localhost", "m.room.avatar", "")
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_get_room_state_event_distinguishes_missing(tmp_path: Path) -> None:
+    """A missing state event should be distinguishable from a failed read."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "missing",
+        status_code="M_NOT_FOUND",
+        room_id="!personal:localhost",
+    )
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (True, None)
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_get_room_state_event_fails_closed(tmp_path: Path) -> None:
+    """A failed state read should not look like a confirmed missing event."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!personal:localhost",
+    )
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_room_state_event("!personal:localhost", "m.room.avatar", "") == (False, None)
+
+
+@pytest.mark.asyncio
 async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path: Path) -> None:
     """The hook builder should reuse the existing Matrix helper functions."""
     module = _matrix_admin_module()
