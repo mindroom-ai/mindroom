@@ -239,7 +239,7 @@ Run `git status --short`, scan the exact diff, stage only the seven Task 3 files
 - Test: `tests/test_response_delivery_gateway.py`
 
 **Interfaces:**
-- Consumes: `SILENT_SCHEDULE_SOURCE_KIND` from Task 3.
+- Consumes: `SILENT_SCHEDULE_SOURCE_KIND` from Task 2, preserved through Task 3 dispatch.
 - Produces: `ResponseTurnContext.allow_empty_response: bool = False`.
 - Produces: a non-persistent `EnrichmentItem` keyed `silent_schedule_delivery`.
 - Produces: automatic final suppression only when the source kind is silent scheduled and transformed response text is whitespace-only.
