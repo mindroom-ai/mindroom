@@ -419,7 +419,7 @@ def _knowledge_source_signature(
             else git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
         files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
-    for path in files:
+    for path in sorted(files, key=lambda candidate: candidate.relative_to(root).as_posix()):
         try:
             stat = path.stat()
             relative_path = path.relative_to(root).as_posix()

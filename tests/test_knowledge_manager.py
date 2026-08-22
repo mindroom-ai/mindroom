@@ -8194,6 +8194,24 @@ async def test_reindex_hashes_live_corpus_for_non_git_bases(
 
 
 @pytest.mark.asyncio
+async def test_non_git_refresh_publishes_when_file_and_directory_share_a_stem(tmp_path: Path) -> None:
+    """Stable corpora publish when a file and directory share a stem."""
+    docs_path = tmp_path / "docs"
+    nested_path = docs_path / "topic"
+    nested_path.mkdir(parents=True)
+    (docs_path / "topic.md").write_text("top-level topic", encoding="utf-8")
+    (nested_path / "details.md").write_text("nested topic details", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.indexed_count == 2
+
+
+@pytest.mark.asyncio
 async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
