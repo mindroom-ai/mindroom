@@ -197,11 +197,13 @@ def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> No
     assert once_model.next_run_at == datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
     assert once_model.cron_expression is None
     assert once_model.new_thread is True
+    assert once_model.silent is False
     assert cron_model.cron_expression == "0 9 * * *"
     assert cron_model.cron_description == "At 09:00"
     assert cron_model.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
     assert cron_model.created_by == "@user:server"
     assert cron_model.thread_id == "$thread1"
+    assert cron_model.silent is False
     assert sorted([once_model, cron_model], key=scheduled_task_read_sort_key) == [cron_model, once_model]
 
 
@@ -1805,6 +1807,7 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
     assert call_kwargs["history_limit"] is None
+    assert call_kwargs["silent"] is None
 
 
 @pytest.mark.asyncio
@@ -2365,15 +2368,19 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
             scheduled_by="@alice:server",
             full_text="every 25 minutes poll the queue with only the last 5 messages",
             history_limit=5,
+            silent=True,
         )
 
     assert task_id == "task1234"
     assert "**History:** last 5 messages" in message
+    assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
     assert [task.task_id for task in tasks] == ["task1234"]
     assert tasks[0].workflow.history_limit == 5
+    assert tasks[0].workflow.silent is True
     listed = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread", config=config)
     assert "History: last 5 messages" in listed
+    assert "Mode: Silent" in listed
 
 
 @pytest.mark.asyncio

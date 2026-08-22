@@ -21,6 +21,7 @@ def _task(
     thread_id: str | None = "$thread123",
     new_thread: bool = False,
     history_limit: int | None = None,
+    silent: bool = False,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -37,6 +38,7 @@ def _task(
         room_id=room_id,
         created_by="@user:localhost",
         new_thread=new_thread,
+        silent=silent,
     )
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -81,6 +83,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
             thread_id=None,
             new_thread=True,
             history_limit=5,
+            silent=True,
         ),
     ]
 
@@ -99,10 +102,12 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert tasks_by_id["once1234"]["schedule_type"] == "once"
     assert tasks_by_id["once1234"]["new_thread"] is False
     assert tasks_by_id["once1234"]["history_limit"] is None
+    assert tasks_by_id["once1234"]["silent"] is False
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
     assert tasks_by_id["cron1234"]["new_thread"] is True
     assert tasks_by_id["cron1234"]["thread_id"] is None
     assert tasks_by_id["cron1234"]["history_limit"] == 5
+    assert tasks_by_id["cron1234"]["silent"] is True
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
@@ -152,6 +157,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
         room_id="test_room",
         created_by=existing_task.workflow.created_by,
         new_thread=existing_task.workflow.new_thread,
+        silent=True,
     )
     updated_task = ScheduledTaskRecord(
         task_id="abc12345",
@@ -176,6 +182,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
                 "execute_at": "2026-03-01T10:00:00Z",
                 "message": "@mindroom_test_agent updated",
                 "description": "Updated description",
+                "silent": True,
             },
         )
 
@@ -187,10 +194,12 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert data["description"] == "Updated description"
     assert data["execute_at"] == "2026-03-01T10:00:00Z"
     assert data["new_thread"] is True
+    assert data["silent"] is True
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["task_id"] == "abc12345"
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
+    assert save_mock.await_args.kwargs["workflow"].silent is True
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:
