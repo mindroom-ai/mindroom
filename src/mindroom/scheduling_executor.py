@@ -10,9 +10,10 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
+    SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
 )
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
@@ -221,12 +222,17 @@ async def execute_scheduled_workflow(
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
-            content[SOURCE_KIND_KEY] = SCHEDULED_SOURCE_KIND
-            if workflow.new_thread:
+            content[SOURCE_KIND_KEY] = SILENT_SCHEDULE_SOURCE_KIND if workflow.silent else SCHEDULED_SOURCE_KIND
+            if workflow.new_thread and not workflow.silent:
                 content[PER_FIRE_THREAD_ROOT_KEY] = True
             if workflow.history_limit is not None:
                 content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
-            delivered = await send_matrix_message(client, workflow.room_id, content)
+            delivered = await send_matrix_message(
+                client,
+                workflow.room_id,
+                content,
+                message_type=SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
+            )
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
             logger.info(
