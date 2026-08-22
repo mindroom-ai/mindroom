@@ -783,6 +783,35 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
     ]
 
 
+def test_blocking_allowed_empty_run_completes_without_retry_or_notice() -> None:
+    """An allowed empty completion is a successful first-attempt outcome."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(is_empty=True, session_id="session-live", run_id="run-empty")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_empty_response=True),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == ""
+    assert attempts == 1
+    assert log.discards == []
+    assert log.released == 0
+    assert recorder.completed_calls == [
+        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
+    ]
+
+
 def test_blocking_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
     """One empty retry plus dynamic-tool continuations share the iteration budget."""
     log = _AdapterLog()
@@ -1166,6 +1195,40 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
     assert [discard.run_id for discard in log.discards] == ["run-1"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
+
+
+def test_streaming_allowed_empty_run_completes_without_retry_or_notice() -> None:
+    """An allowed streamed empty completion records success without yielding a notice."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        yield AttemptResolved(CompletedAttempt(is_empty=True, run_id="run-empty"))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(allow_empty_response=True),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == []
+    assert attempts == 1
+    assert log.discards == []
+    assert log.released == 0
+    assert recorder.completed_calls == [
+        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
+    ]
 
 
 def test_streaming_continuation_advances_then_finishes() -> None:

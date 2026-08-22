@@ -12,6 +12,7 @@ import pytest
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import (
@@ -1125,6 +1126,82 @@ class TestAgentBot(AgentBotTestBase):
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         assert send_kwargs["existing_event_id"] == "$placeholder"
         assert send_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
+    async def test_silent_schedule_team_response_is_blocking_and_allows_empty(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Silent scheduled team turns bypass an enabled stream and accept empty completion."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function(None)
+            return "$response"
+
+        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+            yield "stream chunk"
+
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock()
+        mock_team_response = AsyncMock(return_value="Finding")
+        mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
+
+        with (
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=True),
+                typing_indicator=_noop_typing_indicator,
+                team_response_stream=mock_team_response_stream,
+                team_response=mock_team_response,
+            ),
+            patch.object(
+                ResponseRunner,
+                "_run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new=AsyncMock(
+                    return_value=StreamTransportOutcome(
+                        last_physical_stream_event_id="$stream",
+                        terminal_status="completed",
+                        rendered_body="stream chunk",
+                        visible_body_state="visible_body",
+                    ),
+                ),
+            ),
+        ):
+            await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    prompt="Check for updates",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check for updates",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                    ),
+                    correlation_id="corr-silent-team",
+                ),
+                team_agents=[bot.matrix_id],
+                team_mode="coordinate",
+            )
+
+        mock_team_response.assert_awaited_once()
+        mock_team_response_stream.assert_not_called()
+        assert mock_team_response.await_args.kwargs["ctx"].allow_empty_response is True
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_keeps_streamed_visible_reply_when_before_response_suppresses(

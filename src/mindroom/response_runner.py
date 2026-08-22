@@ -38,6 +38,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -330,6 +331,28 @@ def _with_matrix_message_target(
     if target_item is None:
         return filtered_items
     return (*filtered_items, target_item)
+
+
+def _with_silent_schedule_delivery(
+    items: Sequence[EnrichmentItem],
+    envelope: MessageEnvelope,
+) -> tuple[EnrichmentItem, ...]:
+    """Append nonpersistent quiet-delivery guidance only for silent schedules."""
+    enrichment_key = "silent_schedule_delivery"
+    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
+        return tuple(items)
+    filtered_items = tuple(item for item in items if item.key != enrichment_key)
+    return (
+        *filtered_items,
+        EnrichmentItem(
+            key=enrichment_key,
+            text=(
+                "Return no text when this scheduled check completes routinely without findings. "
+                "Report findings or failures normally."
+            ),
+            persist=False,
+        ),
+    )
 
 
 def _timestamp_thread_history_user_turns(
@@ -2491,6 +2514,13 @@ class ResponseRunner:
             )
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
+            request = replace(
+                request,
+                system_enrichment_items=_with_silent_schedule_delivery(
+                    request.system_enrichment_items,
+                    request.response_envelope,
+                ),
+            )
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -2561,6 +2591,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=tuple(system_enrichment_items),
+            allow_empty_response=request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
@@ -3236,11 +3267,14 @@ class ResponseRunner:
         assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
-        use_streaming = await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=requester_user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        use_streaming = (
+            request.response_envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=requester_user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
@@ -3332,6 +3366,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=request.system_enrichment_items,
+            allow_empty_response=request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
@@ -4343,11 +4378,14 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        use_streaming = await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=request.user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        use_streaming = (
+            request.response_envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=request.user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         generation: _ResponseGenerationOutcome | None = None

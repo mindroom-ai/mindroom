@@ -276,6 +276,7 @@ class ResponseTurnContext:
     active_event_ids: frozenset[str] = frozenset()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+    allow_empty_response: bool = False
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -907,6 +908,14 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
+    if resolution.is_empty and ctx.allow_empty_response:
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text="",
+            recorded_tools=(),
+            response_text="",
+        )
     if resolution.is_empty:
         retry_granted = _settle_empty_run(
             ctx,

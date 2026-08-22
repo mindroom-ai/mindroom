@@ -15,6 +15,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
@@ -1192,6 +1193,8 @@ class DeliveryGateway:
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
+        if draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND and not draft.response_text.strip():
+            draft.suppress = True
         if draft.suppress:
             self.deps.logger.info(
                 "Response suppressed by hook",

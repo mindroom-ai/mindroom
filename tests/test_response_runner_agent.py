@@ -34,6 +34,8 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
@@ -49,12 +51,17 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
+from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import _response_outcome_label
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
@@ -138,6 +145,91 @@ class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source_kind", "expects_quiet_instruction"),
+        [
+            (SILENT_SCHEDULE_SOURCE_KIND, True),
+            (SCHEDULED_SOURCE_KIND, False),
+        ],
+    )
+    async def test_payload_preparation_adds_only_silent_schedule_delivery_instruction(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source_kind: str,
+        expects_quiet_instruction: bool,
+    ) -> None:
+        """Only silent scheduled turns receive nonpersistent quiet-delivery guidance."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        target = MessageTarget.resolve("!test:localhost", None, "$event")
+        envelope = request_envelope(
+            room_id=target.room_id,
+            reply_to_event_id="$event",
+            prompt="Check for updates",
+            user_id="@user:localhost",
+            target=target,
+            agent_name=bot.agent_name,
+            source_kind=source_kind,
+        )
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$event",
+            envelope=envelope,
+        )
+        preparation = ResponsePayloadPreparation(
+            dispatch=dispatch,
+            prompt="Check for updates",
+            action_kind="individual",
+            payload_inputs=DispatchPayloadInputs((), (), ()),
+            target_member_names=None,
+            dispatch_started_at=0.0,
+            context_ready_monotonic=0.0,
+        )
+
+        preparer = ResponsePayloadPreparer(
+            normalizer=cast(
+                "Any",
+                SimpleNamespace(
+                    build_dispatch_payload_with_attachments=AsyncMock(
+                        return_value=DispatchPayload(prompt="Check for updates"),
+                    ),
+                ),
+            ),
+            ingress_hook_runner=bot._ingress_hook_runner,
+            agent_name=bot.agent_name,
+            logger=bot.logger,
+        )
+        bot._response_runner.deps = replace(bot._response_runner.deps, request_preparer=preparer)
+        prepared = await bot._response_runner._prepare_request_after_lock(
+            ResponseRequest(
+                thread_history=[],
+                prompt="Check for updates",
+                user_id="@user:localhost",
+                response_envelope=envelope,
+                payload_preparation=preparation,
+            ),
+        )
+
+        delivery_items = [item for item in prepared.system_enrichment_items if item.key == "silent_schedule_delivery"]
+        assert bool(delivery_items) is expects_quiet_instruction
+        if delivery_items:
+            instruction = delivery_items[0]
+            assert instruction.persist is False
+            assert "no text" in instruction.text.lower()
+            assert "findings" in instruction.text.lower()
+            assert "failures" in instruction.text.lower()
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_tool_enabled(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -192,6 +284,53 @@ class TestAgentBot(AgentBotTestBase):
         assert target_item.cache_policy == "stable"
         assert "Matrix room 'Engineering' (room ID !test:localhost)" in target_item.text
         assert "outside any thread" in target_item.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source_kind", "allows_empty_response"),
+        [
+            (SILENT_SCHEDULE_SOURCE_KIND, True),
+            (SCHEDULED_SOURCE_KIND, False),
+        ],
+    )
+    async def test_agent_turn_context_allows_empty_only_for_silent_schedules(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source_kind: str,
+        allows_empty_response: bool,
+    ) -> None:
+        """The immutable response source alone controls first-empty acceptance."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            ai_response=mock_ai,
+        ):
+            await bot._response_runner._process_and_respond(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Check for updates",
+                    reply_to_event_id="$event",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check for updates",
+                        user_id="@user:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=source_kind,
+                    ),
+                ),
+            )
+
+        assert mock_ai.await_args.args[0].allow_empty_response is allows_empty_response
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -2021,6 +2160,65 @@ class TestAgentBot(AgentBotTestBase):
         request = mock_process.await_args.args[0]
         assert request.existing_event_id == "$thinking"
         assert request.existing_event_is_placeholder is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source_kind", "expects_streaming"),
+        [
+            (SILENT_SCHEDULE_SOURCE_KIND, False),
+            (SCHEDULED_SOURCE_KIND, True),
+        ],
+    )
+    async def test_generate_response_disables_streaming_only_for_silent_schedules(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source_kind: str,
+        expects_streaming: bool,
+    ) -> None:
+        """Silent scheduled turns override an enabled room without changing ordinary schedules."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        outcome = _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="Handled",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
+        )
+        blocking = AsyncMock(return_value=outcome)
+        streaming = AsyncMock(return_value=outcome)
+
+        with (
+            patch.object(ResponseRunner, "_process_and_respond", new=blocking),
+            patch.object(ResponseRunner, "_process_and_respond_streaming", new=streaming),
+            patch.object(ResponseRunner, "_memory_persistence", return_value=None),
+            patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True)),
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Check for updates",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check for updates",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=source_kind,
+                    ),
+                ),
+            )
+
+        assert streaming.await_count == int(expects_streaming)
+        assert blocking.await_count == int(not expects_streaming)
 
     @pytest.mark.asyncio
     async def test_generate_response_refreshes_thread_history_after_lock(
