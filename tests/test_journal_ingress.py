@@ -13,6 +13,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    SILENT_SCHEDULE_EVENT_TYPE,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -23,6 +25,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     DeliveryProjectionPendingError,
     DepartureSource,
@@ -87,6 +90,28 @@ def text_event(
         },
     )
     assert isinstance(event, nio.Event)
+    return event
+
+
+def schedule_trigger_event(
+    event_id: str,
+    body: object = "Run the scheduled task",
+    *,
+    event_type: str = SILENT_SCHEDULE_EVENT_TYPE,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.UnknownEvent:
+    """Return a parsed silent scheduled trigger."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": BOT,
+            "origin_server_ts": ts,
+            "type": event_type,
+            "content": {"msgtype": "m.text", "body": body, **(extra_content or {})},
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
     return event
 
 
@@ -1295,6 +1320,63 @@ class TestDurableAdmission:
         await ingress._admit(room(), topic, nio.TimelineEventProvenance.LIVE)
 
         assert await alice.pending() == ()
+
+
+class TestScheduleTriggerAdmission:
+    """Only the exact silent schedule event becomes durable turn work."""
+
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_schedule_trigger_is_admitted_as_actionable_turn_work(
+        self,
+        alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Removing the custom predicate must drop a trigger instead of starting a turn."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        event = schedule_trigger_event(f"$schedule-{provenance.value}")
+
+        await ingress._admit(room(), event, provenance)
+
+        stored = await alice.load_event(event.event_id)
+        assert stored is not None
+        assert stored.kind.value == "schedule_trigger"
+        assert await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_cold_history_settles_without_a_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Treating cold history as actionable would answer a schedule from the past."""
+        admitted_for_callback: list[str] = []
+        ingress = JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            on_event_admitted=lambda _room, event: admitted_for_callback.append(event.event_id),
+        )
+        event = schedule_trigger_event("$schedule-history")
+
+        await ingress._admit(room(), event, nio.TimelineEventProvenance.HISTORY)
+
+        stored = await alice.load_event(event.event_id)
+        assert stored is not None
+        assert stored.kind.value == "schedule_trigger"
+        assert not await alice.is_pending(event.event_id)
+        assert admitted_for_callback == []
+
+    async def test_schedule_trigger_admission_does_not_claim_unrelated_unknown_events(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Broadening the predicate would turn arbitrary custom events into prompts."""
+        ingress = JournalIngress(store=alice, self_sender=BOT)
+        event = schedule_trigger_event("$unrelated", event_type="com.example.unrelated")
+
+        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+
+        assert await alice.load_event(event.event_id) is None
 
 
 class TestPendingEventWorker:
@@ -3258,3 +3340,165 @@ class TestAdmittedWorkReachesItsCallback:
         assert mismatches[0]["kind"] == EventKind.MESSAGE.value
         assert mismatches[0]["payload_type"] == "ReactionEvent"
         assert await alice.unsettled_event_ids() == frozenset()
+
+
+class TestScheduleTriggerDispatch:
+    """Silent schedule work uses the ordinary formatted-message turn path."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        return TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+
+    async def test_schedule_trigger_dispatch_preserves_the_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Dropping metadata or crypto state would make live and replayed turns differ."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            handled.append(event)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        event = schedule_trigger_event(
+            "$schedule-live",
+            "Inspect the durable queue",
+            extra_content={
+                "msgtype": "m.notice",
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                "com.example.request": {"history_limit": 4, "requester": ALICE},
+            },
+            ts=7_654,
+        )
+        event.decrypted = True
+        event.verified = False
+        event.sender_key = "sender-key"
+        event.session_id = "session-id"
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        assert len(handled) == 1
+        delivered = handled[0]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.event_id == event.event_id
+        assert delivered.sender == event.sender
+        assert delivered.server_timestamp == event.server_timestamp
+        assert delivered.body == "Inspect the durable queue"
+        assert delivered.source["type"] == "m.room.message"
+        assert delivered.source["content"] == {
+            "msgtype": "m.text",
+            "body": "Inspect the durable queue",
+            SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+            "com.example.request": {"history_limit": 4, "requester": ALICE},
+        }
+        assert delivered.decrypted is True
+        assert delivered.verified is False
+        assert delivered.sender_key == "sender-key"
+        assert delivered.session_id == "session-id"
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_replay_uses_the_same_message_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A process restart must not strand a valid trigger as an unknown event."""
+        event = schedule_trigger_event(
+            "$schedule-replay",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await JournalIngress(store=alice, self_sender=BOT)._admit(
+            room(),
+            event,
+            nio.TimelineEventProvenance.LIVE,
+        )
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            assert turn_dispatch_recovery_active()
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await dispatcher.drain_once()
+
+        assert [message.event_id for message in handled] == [event.event_id]
+        assert isinstance(handled[0], nio.RoomMessageFormatted)
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_deferred_callback_keeps_the_source_pending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Settling on callback return would lose the turn before its response is durable."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-deferred")
+
+        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        on_message.assert_awaited_once()
+        delivered = on_message.await_args.args[1]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_cold_history_never_reaches_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history must remain inert even though the custom payload is convertible."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-cold")
+
+        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.HISTORY)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    @pytest.mark.parametrize("body", ["", None, 7])
+    async def test_malformed_schedule_trigger_settles_without_body_logging(
+        self,
+        alice: PrincipalStore,
+        body: object,
+    ) -> None:
+        """A bad durable row must not poison later recovery or leak its body."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-malformed", body)
+
+        with capture_logs() as logs:
+            await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "body" not in invalid[0]
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_binding_rejects_the_wrong_custom_type(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt kind label must not promote an unrelated custom event to a message."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-type",
+            "private-body-marker",
+            event_type="com.example.unrelated",
+        )
+
+        with capture_logs() as logs:
+            await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "private-body-marker" not in str(logs)
+        assert not await alice.is_pending(event.event_id)

@@ -950,9 +950,12 @@ class TestWorkflowSerialization:
         workflow = ScheduledWorkflow.model_validate_json(old_payload)
 
         assert workflow.silent is False
-        assert ScheduledWorkflow.model_validate_json(
-            workflow.model_copy(update={"silent": True}).model_dump_json(),
-        ).silent is True
+        assert (
+            ScheduledWorkflow.model_validate_json(
+                workflow.model_copy(update={"silent": True}).model_dump_json(),
+            ).silent
+            is True
+        )
 
         edited = build_edited_scheduled_workflow(workflow, room_id="!room:test", silent=True)
         assert edited.silent is True

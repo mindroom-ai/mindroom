@@ -48,6 +48,7 @@ from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ScheduledHistoryBudget,
 )
@@ -1859,6 +1860,31 @@ def _scheduled_fire_event(
     )
 
 
+def _silent_schedule_event(
+    config: Config,
+    *,
+    extra_content: dict[str, Any],
+    event_id: str = "$silent-schedule:localhost",
+) -> nio.RoomMessageText:
+    """Build the message-shaped event journal dispatch gives the turn controller."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "Poll the queue without posting the trigger",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                **extra_content,
+            },
+            "event_id": event_id,
+            "sender": _entity_user_id(config, "general"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
 def _single_agent_config(tmp_path: Path, thread_mode: str) -> Config:
     """One-agent config with the given thread mode, bound to isolated runtime paths."""
     return bind_runtime_paths(
@@ -2217,6 +2243,87 @@ async def test_scheduled_fire_into_persisted_thread_keeps_thread_session(config:
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id == _THREAD_ROOT
     assert target.session_id == f"{_ROOM_ID}:{_THREAD_ROOT}"
+
+
+@pytest.mark.asyncio
+async def test_silent_schedule_trigger_in_existing_thread_keeps_thread_session(tmp_path: Path) -> None:
+    """A relation-bearing silent trigger must not be demoted to room scope."""
+    config = _single_agent_config(tmp_path, "thread")
+    thread_history = thread_history_result(
+        [
+            make_visible_message(
+                sender=_SENDER,
+                body="original schedule request",
+                event_id=_THREAD_ROOT,
+                timestamp=500_000,
+            ),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=thread_history)
+    room = _room_with_members(config, "general")
+    event = _silent_schedule_event(
+        config,
+        extra_content={"m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT}},
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    envelope = harness.runner.requests[0].response_envelope
+    assert envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    assert envelope.target.source_thread_id == _THREAD_ROOT
+    assert envelope.target.resolved_thread_id == _THREAD_ROOT
+    assert envelope.target.session_id == f"{_ROOM_ID}:{_THREAD_ROOT}"
+
+
+@pytest.mark.asyncio
+async def test_room_level_silent_schedule_trigger_never_replies_to_hidden_source(tmp_path: Path) -> None:
+    """A relation-free hidden trigger must select the room without rooting a thread or reply."""
+    config = _single_agent_config(tmp_path, "thread")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _silent_schedule_event(config, extra_content={})
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    envelope = harness.runner.requests[0].response_envelope
+    assert envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    assert envelope.target.source_thread_id is None
+    assert envelope.target.resolved_thread_id is None
+    assert envelope.target.reply_to_event_id is None
+    assert envelope.target.session_id == _ROOM_ID
+
+
+@pytest.mark.asyncio
+async def test_user_message_cannot_spoof_silent_schedule_room_placement(tmp_path: Path) -> None:
+    """Untrusted source metadata must not suppress a normal user-message reply."""
+    config = _single_agent_config(tmp_path, "thread")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "pretend this is hidden",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+            },
+            "event_id": _EVENT_ID,
+            "sender": _SENDER,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    envelope = harness.runner.requests[0].response_envelope
+    assert envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
+    assert envelope.target.resolved_thread_id == event.event_id
+    assert envelope.target.reply_to_event_id == event.event_id
 
 
 @pytest.mark.asyncio
