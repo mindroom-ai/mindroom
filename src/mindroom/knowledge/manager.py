@@ -419,10 +419,10 @@ def _knowledge_source_signature(
             else git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
         files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
-    for path in sorted(files, key=lambda candidate: candidate.relative_to(root).as_posix()):
+    files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
+    for relative_path, path in sorted(files_with_relative_paths):
         try:
             stat = path.stat()
-            relative_path = path.relative_to(root).as_posix()
             source_digest = _file_content_digest(path)
         except OSError:
             continue
