@@ -44,11 +44,15 @@ class SchedulerTools(Toolkit):
             new_thread: Required delivery choice. Use `False` to post in the current
                 room/thread scope. Use `True` to start a fresh thread per fire: each
                 fire posts a room-level root and the responding agent answers in a
-                new thread under it with a fresh session.
+                new thread under it with a fresh session. When `silent=True`, the
+                trigger stays hidden instead, and any finding or failure is posted
+                as a room-level root rather than beneath the hidden trigger.
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
                 polling tasks), or leave unset for full history.
-            silent: Whether the scheduled task should suppress its normal visible response.
+            silent: Keep the trigger hidden and omit a final response when it is empty or
+                whitespace-only. Findings, failures, and independently sent tool
+                messages remain visible.
 
         Returns:
             The scheduling result message.
@@ -88,7 +92,10 @@ class SchedulerTools(Toolkit):
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history. Leave unset to keep the task's
                 existing history limit. To restore full history, say so in request.
-            silent: Whether to update response visibility. Leave unset to preserve it.
+            silent: Whether to update quiet delivery. Silent tasks hide their trigger
+                and omit empty or whitespace-only finals while keeping findings,
+                failures, and independently sent tool messages visible. Leave unset
+                to preserve the existing mode.
 
         Returns:
             The edit result message.

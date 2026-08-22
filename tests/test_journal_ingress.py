@@ -25,7 +25,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     DeliveryProjectionPendingError,
     DepartureSource,
@@ -98,6 +98,7 @@ def schedule_trigger_event(
     body: object = "Run the scheduled task",
     *,
     event_type: str = SILENT_SCHEDULE_EVENT_TYPE,
+    sender: str = BOT,
     extra_content: dict[str, Any] | None = None,
     ts: int = 1_000,
 ) -> nio.UnknownEvent:
@@ -105,10 +106,15 @@ def schedule_trigger_event(
     event = nio.Event.parse_event(
         {
             "event_id": event_id,
-            "sender": BOT,
+            "sender": sender,
             "origin_server_ts": ts,
             "type": event_type,
-            "content": {"msgtype": "m.text", "body": body, **(extra_content or {})},
+            "content": {
+                "msgtype": "m.text",
+                "body": body,
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                **(extra_content or {}),
+            },
         },
     )
     assert isinstance(event, nio.UnknownEvent)
@@ -3152,6 +3158,7 @@ class TestAdmittedWorkReachesItsCallback:
                 turn_has_live_claim=lambda _event_id: False,
             ),
             room_for_id=lambda _room_id: room(),
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
         )
 
     async def _deliver(
@@ -3428,6 +3435,37 @@ class TestScheduleTriggerDispatch:
 
         assert [message.event_id for message in handled] == [event.event_id]
         assert isinstance(handled[0], nio.RoomMessageFormatted)
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_ordinary_user_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An otherwise authorized human cannot manufacture automation work."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-human", sender=ALICE)
+
+        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_with_mismatched_marker_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The custom event type alone cannot promote a differently marked payload."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-marker",
+            extra_content={SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND},
+        )
+
+        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+
+        on_message.assert_not_awaited()
         assert not await alice.is_pending(event.event_id)
 
     async def test_schedule_trigger_deferred_callback_keeps_the_source_pending(

@@ -1335,8 +1335,12 @@ def _scheduled_task_response_text(
     response_text += f"**Will post:** {workflow.message}\n"
     if workflow.history_limit is not None:
         response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
-    response_text += f"**Mode:** {'Silent' if workflow.silent else 'Visible'}\n"
-    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+    mode = "Silent (hidden trigger; whitespace-only final omitted)" if workflow.silent else "Visible"
+    response_text += f"**Mode:** {mode}\n"
+    if new_thread and workflow.silent:
+        delivery = "Room-level roots for findings/failures"
+    else:
+        delivery = "New thread per fire" if new_thread else "Current room/thread scope"
     response_text += f"**Delivery:** {delivery}\n"
     return response_text + f"\n**Task ID:** `{task_id}`"
 

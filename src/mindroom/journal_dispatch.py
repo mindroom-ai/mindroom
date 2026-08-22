@@ -23,9 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE, SOURCE_KIND_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     TURN_BACKED_KINDS,
     AdmissionResult,
@@ -108,6 +109,7 @@ class JournalDispatcher:
     self_sender: str
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
     on_persist_failure: Callable[[], None] | None = None
     on_delivery_recovery_needed: Callable[[], None] = lambda: None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
@@ -618,6 +620,9 @@ def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFor
     if not isinstance(content, dict):
         msg = "Schedule trigger content is not an object"
         raise TypeError(msg)
+    if content.get(SOURCE_KIND_KEY) != SILENT_SCHEDULE_SOURCE_KIND:
+        msg = "Schedule trigger has the wrong source marker"
+        raise ValueError(msg)
     body = content.get("body")
     if not isinstance(body, str):
         msg = "Schedule trigger body is not a string"
@@ -648,6 +653,13 @@ async def _run_scheduled_trigger(
     event: nio.UnknownEvent,
 ) -> bool:
     """Run a valid schedule trigger through the existing message callback."""
+    if not dispatcher.schedule_trigger_sender_is_managed(event.sender):
+        logger.warning(
+            "schedule_trigger_invalid",
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        return True
     try:
         message = _scheduled_trigger_as_message(event)
     except (TypeError, ValueError, JournalCorruptionError):

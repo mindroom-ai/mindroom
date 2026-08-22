@@ -976,6 +976,11 @@ def _settle_completed_attempt(
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
+    elif ctx.allow_empty_response and not resolution.replayable_text.strip():
+        # Tool presentation and team fallback chrome are not semantic prose.
+        # The tool records remain part of the completed turn, but quiet
+        # delivery has no final assistant body to publish.
+        response_text = ""
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,

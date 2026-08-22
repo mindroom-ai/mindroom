@@ -19,7 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -315,6 +315,59 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
         send.assert_not_awaited()
+
+    @pytest.mark.parametrize("with_placeholder", [False, True])
+    async def test_silent_schedule_before_hook_failure_is_durably_visible(
+        self,
+        tmp_path: Path,
+        with_placeholder: bool,
+    ) -> None:
+        """A hook exception publishes one generic terminal error through the final outbox stage."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(
+            side_effect=RuntimeError("internal hook detail"),
+        )
+        send_text = AsyncMock(return_value="$failure")
+        edit_text = AsyncMock(return_value=True)
+        request = replace(
+            self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            existing_event_id="$placeholder" if with_placeholder else None,
+            existing_event_is_placeholder=with_placeholder,
+        )
+
+        with (
+            patch.object(DeliveryGateway, "send_text", new=send_text),
+            patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        ):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id == ("$placeholder" if with_placeholder else "$failure")
+        assert outcome.is_visible_response is True
+        assert outcome.final_visible_body == "Response failed. Please retry."
+        assert "internal hook detail" not in outcome.final_visible_body
+        gateway.deps.redact_message_event.assert_not_awaited()
+        durable_request = edit_text.await_args.args[-1] if with_placeholder else send_text.await_args.args[-1]
+        assert durable_request.delivery_turn_id == "$cause"
+        assert durable_request.retry_sync_recovery is True
+        assert durable_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        if with_placeholder:
+            send_text.assert_not_awaited()
+        else:
+            edit_text.assert_not_awaited()
+
+    async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(self, tmp_path: Path) -> None:
+        """The silent-source repair must not change ordinary interactive delivery."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=RuntimeError("hook failed"))
+        send_text = AsyncMock(return_value="$unexpected")
+
+        with patch.object(DeliveryGateway, "send_text", new=send_text):
+            outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id is None
+        send_text.assert_not_awaited()
 
     async def test_a_final_answer_is_enqueued_before_it_is_sent(
         self,

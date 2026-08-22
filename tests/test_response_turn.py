@@ -498,6 +498,76 @@ def test_blocking_completion_records_and_updates_collector() -> None:
     assert log.closed == 1
 
 
+@pytest.mark.parametrize(
+    ("presentation", "allow_empty_response", "expected_response"),
+    [
+        pytest.param("Tool: matrix alert sent", True, "", id="silent-agent"),
+        pytest.param("Team Response: no team prose", True, "", id="silent-team"),
+        pytest.param(
+            "Tool: matrix alert sent",
+            False,
+            "Tool: matrix alert sent",
+            id="ordinary-agent",
+        ),
+        pytest.param(
+            "Team Response: no team prose",
+            False,
+            "Team Response: no team prose",
+            id="ordinary-team",
+        ),
+    ],
+)
+def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
+    presentation: str,
+    allow_empty_response: bool,
+    expected_response: str,
+) -> None:
+    """Tool presentation is not semantic prose, while tool effects and records survive."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    collector: dict[str, Any] = {}
+    independent_alerts: list[str] = []
+    trace = _trace("matrix_alert")
+    tool = ToolExecution(
+        tool_call_id="call-alert",
+        tool_name="matrix_alert",
+        tool_args={"message": "check completed"},
+        result="sent",
+    )
+
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        independent_alerts.append("$alert")
+        run.run_metadata = {"tool_count": 1}
+        return CompletedAttempt(
+            response_text=presentation,
+            replayable_text="",
+            has_visible_content=False,
+            tool_executions=(tool,),
+            completed_tools=(trace,),
+            metadata_content={"ai_run": {"tools": 1}},
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_empty_response=allow_empty_response),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder), run_metadata_collector=collector),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == expected_response
+    assert independent_alerts == ["$alert"]
+    assert collector == {"ai_run": {"tools": 1}}
+    assert recorder.completed_calls == [
+        {
+            "run_metadata": {"tool_count": 1},
+            "assistant_text": "",
+            "completed_tools": [trace],
+        },
+    ]
+
+
 def test_blocking_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()

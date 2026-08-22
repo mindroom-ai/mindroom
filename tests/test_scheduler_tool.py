@@ -84,6 +84,15 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     function.process_entrypoint()
 
     assert set(function.parameters["required"]) == {"request", "new_thread"}
+    properties = function.parameters["properties"]
+    new_thread_description = properties["new_thread"]["description"].lower()
+    silent_description = properties["silent"]["description"].lower()
+    assert "silent" in new_thread_description
+    assert "room-level root" in new_thread_description
+    assert "hidden" in silent_description
+    assert "whitespace" in silent_description
+    assert "findings" in silent_description
+    assert "failures" in silent_description
 
 
 @pytest.mark.asyncio

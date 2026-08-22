@@ -66,6 +66,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _cached_room_display_name,
+    _DeliveryProgress,
     _merge_response_extra_content,
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
@@ -307,9 +308,15 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_ai = AsyncMock(return_value="Handled")
+        typing_events: list[str] = []
+
+        @asynccontextmanager
+        async def record_typing(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            typing_events.append("started")
+            yield
 
         with patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
+            typing_indicator=record_typing,
             ai_response=mock_ai,
         ):
             await bot._response_runner._process_and_respond(
@@ -331,6 +338,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert mock_ai.await_args.args[0].allow_empty_response is allows_empty_response
+        assert typing_events == ([] if allows_empty_response else ["started"])
+        assert (mock_ai.await_args.kwargs["compaction_lifecycle"] is None) is allows_empty_response
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -2177,8 +2186,14 @@ class TestAgentBot(AgentBotTestBase):
         expects_streaming: bool,
     ) -> None:
         """Silent scheduled turns override an enabled room without changing ordinary schedules."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str | None:
+            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
+            existing_event_id = cast("str | None", kwargs["existing_event_id"])
+            await response_function(existing_event_id)
+            return existing_event_id
+
         config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -2194,11 +2209,17 @@ class TestAgentBot(AgentBotTestBase):
         )
         blocking = AsyncMock(return_value=outcome)
         streaming = AsyncMock(return_value=outcome)
+        run_attempt = AsyncMock(side_effect=run_cancellable_response)
 
         with (
             patch.object(ResponseRunner, "_process_and_respond", new=blocking),
             patch.object(ResponseRunner, "_process_and_respond_streaming", new=streaming),
+            patch.object(ResponseRunner, "_run_cancellable_response", new=run_attempt),
             patch.object(ResponseRunner, "_memory_persistence", return_value=None),
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.send_text",
+                new=AsyncMock(return_value="$thinking"),
+            ) as send_text,
             patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True)),
         ):
             await bot._response_runner.generate_response(
@@ -2219,6 +2240,80 @@ class TestAgentBot(AgentBotTestBase):
 
         assert streaming.await_count == int(expects_streaming)
         assert blocking.await_count == int(not expects_streaming)
+        assert send_text.await_count == int(expects_streaming)
+        assert run_attempt.await_args.kwargs["existing_event_id"] == ("$thinking" if expects_streaming else None)
+        assert run_attempt.await_args.kwargs["show_stop_button"] is expects_streaming
+
+    @pytest.mark.asyncio
+    async def test_silent_schedule_agent_default_path_emits_only_final_finding(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Default agent progress features stay hidden until a real finding is final."""
+        typing_events: list[str] = []
+
+        @asynccontextmanager
+        async def record_typing(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            typing_events.append("started")
+            yield
+
+        config = self._config_for_storage(tmp_path)
+        assert config.defaults.enable_streaming is True
+        assert config.defaults.show_stop_button is True
+        assert config.defaults.show_tool_calls is True
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        redact_message_event = AsyncMock(return_value=True)
+        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
+        add_stop_button = AsyncMock(return_value=None)
+        bot.stop_manager.add_stop_button = add_stop_button
+        mock_ai_response = AsyncMock(return_value="Finding")
+
+        with (
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=True),
+                typing_indicator=record_typing,
+                ai_response=mock_ai_response,
+            ),
+            patch.object(ResponseRunner, "_memory_persistence", return_value=None),
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.send_text",
+                new=AsyncMock(return_value="$response"),
+            ) as send_text,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.edit_text",
+                new=AsyncMock(return_value="$response"),
+            ) as edit_text,
+        ):
+            response_event_id = await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Check for updates",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check for updates",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                    ),
+                    correlation_id="corr-silent-agent-defaults",
+                ),
+            )
+
+        assert response_event_id == "$response"
+        assert mock_ai_response.await_args.args[0].allow_empty_response is True
+        assert mock_ai_response.await_args.kwargs["compaction_lifecycle"] is None
+        assert typing_events == []
+        assert send_text.await_count == 1
+        assert send_text.await_args.args[-1].response_text == "Finding"
+        edit_text.assert_not_awaited()
+        redact_message_event.assert_not_awaited()
+        add_stop_button.assert_not_awaited()
+        bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_response_refreshes_thread_history_after_lock(
@@ -2841,6 +2936,69 @@ class TestAgentBot(AgentBotTestBase):
             resolution = await task
 
         assert _handled_response_event_id(resolution) == "$response"
+
+    @pytest.mark.asyncio
+    async def test_suppressed_no_response_settles_only_after_lifecycle_cleanup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Successful suppression settles its source after response cleanup completes."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        events: list[str] = []
+
+        async def record_no_response() -> None:
+            events.append("source_settled")
+
+        request = ResponseRequest(
+            prompt="Check for updates",
+            thread_history=[],
+            user_id="@alice:localhost",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                prompt="Check for updates",
+                user_id="@alice:localhost",
+                agent_name=bot.agent_name,
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            ),
+            on_no_response_handled=record_no_response,
+        )
+        progress = _DeliveryProgress()
+        suppressed = FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=None,
+            failure_reason="suppressed_by_hook",
+            suppressed=True,
+        )
+
+        async def generate(_message_id: str | None) -> None:
+            progress.settle(suppressed)
+
+        identity = bot._response_runner._response_identity(request, response_kind="ai")
+
+        async def finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
+            events.append("cleanup_complete")
+            return outcome
+
+        lifecycle = cast("Any", SimpleNamespace(identity=identity, finalize=finalize))
+        result = await bot._response_runner._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=generate,
+            user_id=request.user_id,
+            run_id="run-silent",
+            build_post_response_outcome=lambda _outcome: cast("Any", SimpleNamespace()),
+            post_response_deps=lambda: cast("Any", SimpleNamespace()),
+        )
+
+        assert result is None
+        assert events == ["cleanup_complete", "source_settled"]
 
     @pytest.mark.asyncio
     async def test_paused_approval_releases_conversation_for_the_next_turn(

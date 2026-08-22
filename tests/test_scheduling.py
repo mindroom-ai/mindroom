@@ -78,6 +78,29 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
     return reader
 
 
+def test_silent_new_thread_confirmation_describes_actual_visible_placement() -> None:
+    """The confirmation must not promise a thread beneath a hidden trigger."""
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check the queue",
+        description="queue check",
+        new_thread=True,
+        silent=True,
+    )
+
+    response = scheduling._scheduled_task_response_text(
+        workflow,
+        task_id="task1234",
+        new_thread=True,
+        config=Config(),
+    )
+
+    assert "**Mode:** Silent (hidden trigger; whitespace-only final omitted)" in response
+    assert "**Delivery:** Room-level roots for findings/failures" in response
+    assert "New thread per fire" not in response
+
+
 def _matrix_room(
     room_id: str,
     *,

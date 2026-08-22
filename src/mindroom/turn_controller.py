@@ -1870,6 +1870,10 @@ class TurnController:
             async def settle_redacted_sources() -> None:
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
 
+            async def record_no_response() -> None:
+                await self.deps.turn_store.record_turn(handled_turn)
+                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
+
             try:
                 response_request = ResponseRequest(
                     thread_history=dispatch.context.thread_history,
@@ -1895,6 +1899,7 @@ class TurnController:
                     on_source_turn_suppressed=settle_redacted_sources,
                     on_interrupted_response_recoverable=record_interrupted_turn,
                     on_deferred_outcome_handled=record_deferred_outcome,
+                    on_no_response_handled=record_no_response,
                     on_user_stop_handled=record_user_stop,
                     on_visible_response=record_visible_response,
                 )

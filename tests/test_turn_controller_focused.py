@@ -139,6 +139,7 @@ class _RecordingResponseRunner:
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
     suspend_source: bool = False
+    complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
@@ -195,6 +196,10 @@ class _RecordingResponseRunner:
         if request.prepare_source_turn is not None and await request.prepare_source_turn():
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
+            return None
+        if self.complete_without_response:
+            assert request.on_no_response_handled is not None
+            await request.on_no_response_handled()
             return None
         if self.visible_response_event_id is not None and request.on_visible_response is not None:
             await request.on_visible_response(self.visible_response_event_id)
@@ -706,6 +711,7 @@ def _obligation_runner(
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,
         ),
         room_for_id=lambda _room_id: room,
+        schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,
     )
 
 
@@ -1885,6 +1891,30 @@ def _silent_schedule_event(
     )
 
 
+def _silent_schedule_trigger_event(
+    config: Config,
+    *,
+    event_id: str = "$silent-schedule-trigger:localhost",
+) -> nio.UnknownEvent:
+    """Build the custom event admitted before message-shaped dispatch."""
+    event = nio.Event.parse_event(
+        {
+            "content": {
+                "body": "Poll the queue without posting the trigger",
+                constants.SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+            },
+            "event_id": event_id,
+            "sender": _entity_user_id(config, "general"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": constants.SILENT_SCHEDULE_EVENT_TYPE,
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
+
+
 def _single_agent_config(tmp_path: Path, thread_mode: str) -> Config:
     """One-agent config with the given thread mode, bound to isolated runtime paths."""
     return bind_runtime_paths(
@@ -2293,7 +2323,43 @@ async def test_room_level_silent_schedule_trigger_never_replies_to_hidden_source
     assert envelope.target.source_thread_id is None
     assert envelope.target.resolved_thread_id is None
     assert envelope.target.reply_to_event_id is None
+    assert envelope.target.is_room_mode is True
     assert envelope.target.session_id == _ROOM_ID
+
+
+@pytest.mark.asyncio
+async def test_eventless_silent_schedule_completion_is_terminal_before_recovery(tmp_path: Path) -> None:
+    """An admitted successful no-response turn cannot replay after cleanup."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    harness.runner.complete_without_response = True
+    room = _room_with_members(config, "general")
+    event = _silent_schedule_trigger_event(config)
+    obligation_runner = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    harness.controller.deps = replace(
+        harness.controller.deps,
+        visible_responses=VisibleResponseReconciler(
+            replace(
+                harness.controller.deps.visible_responses.deps,
+                settle_ignored_sources=obligation_runner.settle_intentionally_ignored_turn_sources,
+            ),
+        ),
+    )
+
+    await obligation_runner.admit_and_run(room, event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+
+    assert harness.turn_store.is_handled(event.event_id)
+    assert not await obligation_runner.store.is_pending(event.event_id)
+    await obligation_runner.drain_once()
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio

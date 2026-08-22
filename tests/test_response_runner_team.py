@@ -1134,40 +1134,43 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Silent scheduled team turns bypass an enabled stream and accept empty completion."""
+        typing_events: list[str] = []
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            await response_function(None)
-            return "$response"
+        @asynccontextmanager
+        async def record_typing(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            typing_events.append("started")
+            yield
 
         async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
+        assert config.defaults.show_tool_calls is True
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
+        bot._redact_message_event = AsyncMock(return_value=True)
+        replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
+        add_stop_button = AsyncMock(return_value=None)
+        bot.stop_manager.add_stop_button = add_stop_button
         mock_team_response = AsyncMock(return_value="Finding")
         mock_team_response_stream = MagicMock(side_effect=fake_team_response_stream)
 
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=_noop_typing_indicator,
+                typing_indicator=record_typing,
                 team_response_stream=mock_team_response_stream,
                 team_response=mock_team_response,
             ),
-            patch.object(
-                ResponseRunner,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
             patch(
-                "mindroom.delivery_gateway.send_message_outcome",
-                new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
-            ),
+                "mindroom.delivery_gateway.DeliveryGateway.send_text",
+                new=AsyncMock(return_value="$response"),
+            ) as send_text,
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.edit_text",
+                new=AsyncMock(return_value="$response"),
+            ) as edit_text,
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(
@@ -1202,6 +1205,14 @@ class TestAgentBot(AgentBotTestBase):
         mock_team_response.assert_awaited_once()
         mock_team_response_stream.assert_not_called()
         assert mock_team_response.await_args.kwargs["ctx"].allow_empty_response is True
+        assert mock_team_response.await_args.kwargs["compaction_lifecycle"] is None
+        assert typing_events == []
+        assert send_text.await_count == 1
+        assert send_text.await_args.args[-1].response_text == "Finding"
+        edit_text.assert_not_awaited()
+        bot._redact_message_event.assert_not_awaited()
+        add_stop_button.assert_not_awaited()
+        bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_keeps_streamed_visible_reply_when_before_response_suppresses(
