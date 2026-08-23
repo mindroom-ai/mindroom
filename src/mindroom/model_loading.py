@@ -402,10 +402,10 @@ def get_model_instance(
         default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         configured_provider=provider,
     )
+    install_claude_prompt_cache_hook(model)
+    install_claude_stream_retry_hook(model)
     install_provider_media_fallback(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
-    install_claude_prompt_cache_hook(model)
-    install_claude_stream_retry_hook(model)
     return model

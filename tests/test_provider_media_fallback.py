@@ -9,9 +9,11 @@ from unittest.mock import patch
 import pytest
 from agno.exceptions import ModelProviderError, ModelRateLimitError
 from agno.media import Audio, File, Image, Video
+from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 
+from mindroom import claude_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
@@ -78,7 +80,7 @@ def _media_message() -> Message:
     )
 
 
-def _load(model: _FakeModel, tmp_path: Path) -> _FakeModel:
+def _load[LoadedModel](model: LoadedModel, tmp_path: Path) -> LoadedModel:
     config = bind_runtime_paths(
         Config(
             models={
@@ -89,7 +91,7 @@ def _load(model: _FakeModel, tmp_path: Path) -> _FakeModel:
     )
     with patch("mindroom.model_loading._create_model_for_provider", return_value=cast("Model", model)):
         loaded = get_model_instance(config, runtime_paths_for(config))
-    return cast("_FakeModel", loaded)
+    return cast("LoadedModel", loaded)
 
 
 async def _consume_into(chunks: list[ModelResponse], stream: AsyncIterator[ModelResponse]) -> None:
@@ -145,6 +147,46 @@ async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) 
     assert "att_123" in str(model.streaming_calls[1][0].content)
     assert model.closed_streams == 2
     assert original.images
+
+
+@pytest.mark.asyncio
+async def test_loaded_claude_keeps_media_removed_during_transient_stream_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient retry nested inside fallback must reuse the media-free request."""
+    attempts: list[list[ModelResponse | Exception]] = [
+        [_provider_error()],
+        [_provider_error(503)],
+        [ModelResponse(content="recovered")],
+    ]
+    provider_calls: list[list[Message]] = []
+    model = Claude(id="claude-sonnet-5")
+
+    async def fake_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+        provider_calls.append(list(_messages_from_call(args, kwargs)))
+        for item in attempts[len(provider_calls) - 1]:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    vars(model)["ainvoke_stream"] = fake_ainvoke_stream
+    monkeypatch.setattr(claude_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
+    loaded = _load(model, tmp_path)
+
+    chunks = [
+        chunk
+        async for chunk in loaded.ainvoke_stream(
+            messages=[_media_message()],
+            assistant_message=Message(role="assistant"),
+        )
+    ]
+
+    assert [chunk.content for chunk in chunks] == ["recovered"]
+    assert len(provider_calls) == 3
+    assert provider_calls[0][0].images
+    assert provider_calls[1][0].images is None
+    assert provider_calls[2][0].images is None
 
 
 @pytest.mark.asyncio
