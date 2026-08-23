@@ -95,7 +95,8 @@ async def _ainvoke_with_fallback(
 ) -> ModelResponse:
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
-    known_unsupported = _known_unsupported_media_kinds(route)
+    present_kinds = _media_kinds(messages)
+    known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
         kwargs,
@@ -103,7 +104,7 @@ async def _ainvoke_with_fallback(
         known_unsupported,
         fallback_prompt,
     )
-    remaining_kinds = _media_kinds(messages) - known_unsupported
+    remaining_kinds = present_kinds - known_unsupported
     failure: Exception | None = None
     with _active_model(model):
         try:
@@ -148,7 +149,8 @@ async def _stream_with_fallback(
 ) -> AsyncGenerator[ModelResponse, None]:
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
-    known_unsupported = _known_unsupported_media_kinds(route)
+    present_kinds = _media_kinds(messages)
+    known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
         kwargs,
@@ -156,7 +158,7 @@ async def _stream_with_fallback(
         known_unsupported,
         fallback_prompt,
     )
-    remaining_kinds = _media_kinds(messages) - known_unsupported
+    remaining_kinds = present_kinds - known_unsupported
     stream: AsyncIterator[ModelResponse] | None = None
     failure: Exception | None = None
     produced = False

@@ -166,8 +166,8 @@ async def test_loaded_model_does_not_learn_from_a_mixed_media_failure(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_loaded_model_learns_only_the_media_kinds_present_in_the_failed_request(tmp_path: Path) -> None:
-    """Learning that audio is unsupported does not suppress an image sent later on the same route."""
+async def test_loaded_model_learns_unsupported_media_kinds_one_at_a_time(tmp_path: Path) -> None:
+    """Separate single-kind failures teach separate negative capabilities."""
     audio_only = Message(
         role="user",
         content='Listen to att_audio.\n[attachments: att_audio (audio, "clip.ogg")]',
@@ -178,20 +178,28 @@ async def test_loaded_model_learns_only_the_media_kinds_present_in_the_failed_re
             blocking_outcomes=[
                 _provider_error(),
                 ModelResponse(content="audio recovered"),
-                ModelResponse(content="image accepted"),
+                _provider_error(),
+                ModelResponse(content="image recovered"),
+                ModelResponse(content="both cached"),
             ],
         ),
         tmp_path,
     )
 
     await model.ainvoke(messages=[audio_only])
+    await model.ainvoke(messages=[_image_message()])
     await model.ainvoke(messages=[_media_message()])
 
-    learned_call = model.blocking_calls[2]
-    assert learned_call[0].audio is None
-    assert learned_call[0].images
-    assert learned_call[0].files
-    assert learned_call[0].videos
+    image_probe = model.blocking_calls[2]
+    assert len(image_probe) == 1
+    assert image_probe[0].images
+    image_retry = model.blocking_calls[3]
+    assert image_retry[0].images is None
+    cached_call = model.blocking_calls[4]
+    assert cached_call[0].audio is None
+    assert cached_call[0].images is None
+    assert cached_call[0].files
+    assert cached_call[0].videos
 
 
 @pytest.mark.asyncio
@@ -212,8 +220,8 @@ async def test_loaded_model_keeps_capability_learning_isolated_by_endpoint(tmp_p
         tmp_path,
     )
 
-    await first.ainvoke(messages=[_media_message()])
-    await second.ainvoke(messages=[_media_message()])
+    await first.ainvoke(messages=[_image_message()])
+    await second.ainvoke(messages=[_image_message()])
 
     assert first.blocking_calls[1][0].images is None
     assert second.blocking_calls[0][0].images
@@ -232,8 +240,8 @@ async def test_failed_media_free_retry_does_not_teach_the_route(tmp_path: Path) 
     )
 
     with pytest.raises(ModelProviderError):
-        await first.ainvoke(messages=[_media_message()])
-    await second.ainvoke(messages=[_media_message()])
+        await first.ainvoke(messages=[_image_message()])
+    await second.ainvoke(messages=[_image_message()])
 
     assert second.blocking_calls[0][0].images
 
@@ -250,9 +258,9 @@ async def test_model_media_capability_cache_can_be_reset(tmp_path: Path) -> None
         tmp_path,
     )
 
-    await first.ainvoke(messages=[_media_message()])
+    await first.ainvoke(messages=[_image_message()])
     reset_model_media_capability_cache()
-    await second.ainvoke(messages=[_media_message()])
+    await second.ainvoke(messages=[_image_message()])
 
     assert second.blocking_calls[0][0].images
 
