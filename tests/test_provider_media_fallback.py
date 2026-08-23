@@ -83,6 +83,14 @@ def _media_message() -> Message:
     )
 
 
+def _image_message() -> Message:
+    return Message(
+        role="user",
+        content='Please inspect att_image.\n[attachments: att_image (image, "diagram.png")]',
+        images=[Image(content=b"image")],
+    )
+
+
 def _load[LoadedModel](model: LoadedModel, tmp_path: Path) -> LoadedModel:
     config = bind_runtime_paths(
         Config(
@@ -129,8 +137,8 @@ async def test_loaded_model_retries_once_without_inline_media_and_preserves_atta
 
 
 @pytest.mark.asyncio
-async def test_loaded_model_omits_media_kinds_learned_unsupported_for_its_route(tmp_path: Path) -> None:
-    """A successful stripped retry prevents another probe for the same model route."""
+async def test_loaded_model_does_not_learn_from_a_mixed_media_failure(tmp_path: Path) -> None:
+    """A stripped retry cannot identify which of several media kinds failed."""
     model = _load(
         _FakeModel(
             blocking_outcomes=[
@@ -148,13 +156,13 @@ async def test_loaded_model_omits_media_kinds_learned_unsupported_for_its_route(
     assert first.content == "first recovered"
     assert second.content == "second recovered"
     assert len(model.blocking_calls) == 3
-    learned_call = model.blocking_calls[2]
-    assert learned_call[0].audio is None
-    assert learned_call[0].images is None
-    assert learned_call[0].files is None
-    assert learned_call[0].videos is None
-    assert "att_123" in str(learned_call[0].content)
-    assert learned_call[-1].temporary is True
+    reprobe_call = model.blocking_calls[2]
+    assert len(reprobe_call) == 1
+    assert reprobe_call[0].audio
+    assert reprobe_call[0].images
+    assert reprobe_call[0].files
+    assert reprobe_call[0].videos
+    assert "att_123" in str(reprobe_call[0].content)
 
 
 @pytest.mark.asyncio
@@ -252,7 +260,7 @@ async def test_model_media_capability_cache_can_be_reset(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) -> None:
     """A pre-output stream rejection retries once and closes both provider streams."""
-    original = _media_message()
+    original = _image_message()
     model = _load(
         _FakeModel(
             streaming_outcomes=[
@@ -265,14 +273,14 @@ async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) 
     )
 
     chunks = [chunk async for chunk in model.ainvoke_stream([original])]
-    cached_chunks = [chunk async for chunk in model.ainvoke_stream([_media_message()])]
+    cached_chunks = [chunk async for chunk in model.ainvoke_stream([_image_message()])]
 
     assert [chunk.content for chunk in chunks] == ["recovered"]
     assert [chunk.content for chunk in cached_chunks] == ["cached"]
     assert len(model.streaming_calls) == 3
     assert model.streaming_calls[1][0].images is None
     assert model.streaming_calls[2][0].images is None
-    assert "att_123" in str(model.streaming_calls[1][0].content)
+    assert "att_image" in str(model.streaming_calls[1][0].content)
     assert model.closed_streams == 3
     assert original.images
 
@@ -365,8 +373,8 @@ async def test_successful_retry_after_non_capability_failure_does_not_teach_rout
         tmp_path,
     )
 
-    await model.ainvoke(messages=[_media_message()])
-    await model.ainvoke(messages=[_media_message()])
+    await model.ainvoke(messages=[_image_message()])
+    await model.ainvoke(messages=[_image_message()])
 
     assert len(model.blocking_calls) == 3
     assert model.blocking_calls[1][0].images is None
@@ -387,8 +395,8 @@ async def test_untyped_failure_retries_once_and_teaches_after_success(tmp_path: 
         tmp_path,
     )
 
-    await model.ainvoke(messages=[_media_message()])
-    await model.ainvoke(messages=[_media_message()])
+    await model.ainvoke(messages=[_image_message()])
+    await model.ainvoke(messages=[_image_message()])
 
     assert len(model.blocking_calls) == 3
     assert model.blocking_calls[1][0].images is None

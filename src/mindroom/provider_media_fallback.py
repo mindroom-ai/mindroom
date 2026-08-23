@@ -122,7 +122,7 @@ async def _ainvoke_with_fallback(
             _log_retry(model, error)
             response = await original_ainvoke(*retry_args, **retry_kwargs)
     assert failure is not None
-    if _should_learn(failure):
+    if _should_learn(failure, remaining_kinds):
         _record_unsupported_media_kinds(route, remaining_kinds)
     return response
 
@@ -199,7 +199,7 @@ async def _stream_with_fallback(
             yield chunk
     finally:
         await _close_stream(model, retry_stream)
-    if _should_learn(failure):
+    if _should_learn(failure, remaining_kinds):
         _record_unsupported_media_kinds(route, remaining_kinds)
 
 
@@ -365,8 +365,10 @@ def _should_retry(error: Exception) -> bool:
     return not is_model_safeguard_refusal(error)
 
 
-def _should_learn(error: Exception) -> bool:
-    """Return whether stripped success proves the route rejected a media kind."""
+def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
+    """Return whether stripped success isolates one unsupported media kind."""
+    if len(media_kinds) != 1:
+        return False
     if isinstance(error, ContextWindowExceededError):
         return False
     if isinstance(error, ModelProviderError) and (
