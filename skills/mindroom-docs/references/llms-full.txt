@@ -15097,7 +15097,7 @@ Attachments sent with the current message (use tool calls to inspect or process 
 Current-turn attachments are offered to the model as inline media.
 Earlier attachments stay in chronological position through inline annotations, but their media bytes are not replayed to the provider:
 
-```
+```text
 @user:example.org: check this out
 [attachments: att_def456 (image, "house.jpg")]
 ```
