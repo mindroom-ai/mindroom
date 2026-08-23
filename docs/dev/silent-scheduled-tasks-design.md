@@ -42,7 +42,7 @@ The event journal gains a dedicated turn-backed scheduled-trigger kind.
 Live and recovered custom trigger events are actionable, while cold history remains context-only and cannot start old jobs.
 The custom trigger is not projected into visible conversation history.
 Journal dispatch validates the custom event content, converts it into an equivalent in-memory formatted text event with the same event identity and security metadata, and calls the existing message callback.
-Malformed custom triggers settle as intentionally ignored work with a diagnostic log instead of poisoning the recovery queue.
+Malformed custom triggers, including whitespace-only bodies, settle as intentionally ignored work with a diagnostic log instead of poisoning the recovery queue.
 The existing turn store settles the custom source only after the answer is durably owed or the turn deliberately produces no answer.
 
 ## Thread placement
@@ -60,6 +60,7 @@ Silent scheduled turns disable streaming so placeholders and incremental tool na
 The shared response driver accepts the first completed empty run for this source kind instead of retrying it or generating the empty-response notice.
 After before-response hooks run, final delivery suppresses a silent scheduled response when its entire trimmed text is empty or exactly `NO_REPLY`, regardless of internal tool trace metadata.
 The acknowledgment comparison is case-insensitive, but decorated tokens and responses that merely mention `NO_REPLY` are delivered normally.
+For teams, a leader acknowledgment is delivered with normal team formatting when any member contributed visible findings.
 Nonempty final text follows the normal durable delivery path, and tools that explicitly send Matrix messages remain unaffected.
 
 ## Failure behavior

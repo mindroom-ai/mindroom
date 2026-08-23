@@ -206,7 +206,7 @@ Assert malformed bodies settle intentionally without invoking `on_message`, whil
 
 - [ ] **Step 5: Implement validated conversion and binding**
 
-Add a scheduled-trigger binding that accepts only the exact custom event type, copies its source with `type="m.room.message"`, ensures `content.msgtype="m.text"` and a nonempty string body, parses a formatted event, restores security fields from the original event, and delegates to `callbacks.on_message`.
+Add a scheduled-trigger binding that accepts only the exact custom event type, copies its source with `type="m.room.message"`, ensures `content.msgtype="m.text"` and a non-whitespace string body, parses a formatted event, restores security fields from the original event, and delegates to `callbacks.on_message`.
 Catch only validation or journal-corruption errors at this binding, log event identity without body content, and return completion so a malformed row cannot poison recovery.
 
 - [ ] **Step 6: Write and implement target-placement tests**

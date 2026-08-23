@@ -3462,6 +3462,33 @@ class TestScheduleTriggerDispatch:
         assert isinstance(handled[0], nio.RoomMessageFormatted)
         assert not await alice.is_pending(event.event_id)
 
+    async def test_whitespace_schedule_trigger_replay_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovered whitespace-only trigger bodies are malformed, not actionable prompts."""
+        event = schedule_trigger_event(
+            "$schedule-whitespace-replay",
+            " \n\t",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )._admit(
+            room(),
+            event,
+            nio.TimelineEventProvenance.LIVE,
+        )
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
     async def test_schedule_trigger_from_ordinary_user_settles_without_message_dispatch(
         self,
         alice: PrincipalStore,

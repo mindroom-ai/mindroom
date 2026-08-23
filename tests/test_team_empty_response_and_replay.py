@@ -112,6 +112,33 @@ async def test_quiet_team_response_returns_no_reply_without_visible_team_chrome(
 
 
 @pytest.mark.asyncio
+async def test_quiet_team_response_preserves_member_finding_when_leader_returns_no_reply() -> None:
+    """A leader acknowledgment must not hide a finding contributed by a team member."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    team_run = _completed_team_run(SILENT_SCHEDULE_NO_REPLY_TOKEN)
+    team_run.member_responses = [RunOutput(agent_name="GeneralAgent", content="Queue depth is elevated.")]
+    mock_team.arun = AsyncMock(return_value=team_run)
+    recorder = TurnRecorder(user_message="Check for updates.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Check for updates.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=replace(make_turn_context(session_id="session-1"), allow_empty_response=True),
+        )
+
+    assert "Queue depth is elevated." in response
+    assert response != SILENT_SCHEDULE_NO_REPLY_TOKEN
+    assert recorder.assistant_text == response
+
+
+@pytest.mark.asyncio
 async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() -> None:
     """A second empty completed team run surfaces the shared fallback notice."""
     orchestrator, _config = _make_orchestrator()

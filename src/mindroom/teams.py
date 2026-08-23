@@ -917,6 +917,13 @@ def _format_contributions_recursive(  # noqa: C901
     return parts
 
 
+def _has_visible_team_member_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether terminal team formatting would include a member contribution."""
+    return isinstance(response, TeamRunOutput) and bool(
+        _format_contributions_recursive(response, indent=0, include_consensus=False),
+    )
+
+
 def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     """Get content from a response object.
 
@@ -3092,7 +3099,11 @@ async def team_response(  # noqa: C901, PLR0915
             raw_response_text = _get_response_content(response)
             response_text = (
                 raw_response_text.strip()
-                if ctx.allow_empty_response and is_silent_schedule_no_report_response(raw_response_text)
+                if (
+                    ctx.allow_empty_response
+                    and is_silent_schedule_no_report_response(raw_response_text)
+                    and not _has_visible_team_member_output(response)
+                )
                 else _format_terminal_team_response(response, team_display_names=team_members.display_names)
             )
         else:

@@ -628,7 +628,7 @@ def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFor
     if not isinstance(body, str):
         msg = "Schedule trigger body is not a string"
         raise TypeError(msg)
-    if not body:
+    if not body.strip():
         msg = "Schedule trigger body is not a nonempty string"
         raise ValueError(msg)
 
