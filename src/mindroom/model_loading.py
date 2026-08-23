@@ -14,6 +14,7 @@ from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
 from mindroom.prompt_cache_key import derive_session_prompt_cache_key
+from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -400,6 +401,10 @@ def get_model_instance(
         debug_config=config.debug,
         default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         configured_provider=provider,
+    )
+    install_provider_media_fallback(
+        model,
+        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
     install_claude_prompt_cache_hook(model)
     install_claude_stream_retry_hook(model)

@@ -564,6 +564,7 @@ depends_on = [
     "mindroom.kimi_model",
     "mindroom.openai_models",
     "mindroom.openai_tool_search",
+    "mindroom.provider_media_fallback",
     "mindroom.prompt_cache_key",
     "mindroom.vertex_claude_compat",
 ]
