@@ -148,8 +148,8 @@ Matrix sync callback
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `model_loading.py` | Model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `model_loading.py` | Model instantiation, provider-specific loader selection, and request wrapper installation |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
@@ -183,6 +183,7 @@ Matrix sync callback
 | `attachment_ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
 | `attachment_media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
+| `media_fallback.py` | One provider-boundary retry without inline media for rejected model requests |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |

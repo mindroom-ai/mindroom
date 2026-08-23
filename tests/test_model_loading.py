@@ -16,7 +16,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.model_loading import get_model_instance
-from mindroom.model_media_guard import install_model_media_guard
 from mindroom.openai_models import (
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
@@ -467,41 +466,17 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
         test_runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.model_loading.install_llm_request_logging") as install_logging:
+    with (
+        patch("mindroom.model_loading.install_llm_request_logging") as install_logging,
+        patch("mindroom.model_loading.install_model_media_fallback") as install_media_fallback,
+    ):
         model = get_model_instance(config, runtime_paths_for(config), "default")
 
     install_logging.assert_called_once()
     assert install_logging.call_args.args == (model,)
     assert install_logging.call_args.kwargs["configured_provider"] == "openai"
     assert install_logging.call_args.kwargs["debug_config"].log_llm_requests is False
-
-
-def test_openrouter_and_non_openrouter_receive_idempotent_media_guard(tmp_path: Path) -> None:
-    """Central model loading should guard every provider without replacing its concrete model type."""
-    config = bind_runtime_paths(
-        Config(
-            models={
-                "openrouter": ModelConfig(
-                    provider="openrouter",
-                    id="text-only-model",
-                    extra_kwargs={"api_key": "dummy-key"},
-                ),
-                "synthetic": ModelConfig(provider="synthetic", id="local-test-model"),
-            },
-        ),
-        test_runtime_paths(tmp_path),
+    install_media_fallback.assert_called_once_with(
+        model,
+        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
-
-    openrouter = get_model_instance(config, runtime_paths_for(config), "openrouter")
-    synthetic = get_model_instance(config, runtime_paths_for(config), "synthetic")
-
-    assert isinstance(openrouter, MindRoomOpenRouter)
-    assert isinstance(synthetic, SyntheticModel)
-    for model in (openrouter, synthetic):
-        guarded_ainvoke = model.ainvoke
-        guarded_ainvoke_stream = model.ainvoke_stream
-
-        install_model_media_guard(model)
-
-        assert model.ainvoke is guarded_ainvoke
-        assert model.ainvoke_stream is guarded_ainvoke_stream

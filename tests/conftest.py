@@ -112,10 +112,7 @@ from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
-from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
-from mindroom.prompt_templates import render_prompt_template
-from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -420,7 +417,6 @@ __all__ = [
     "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
-    "inline_media_fallback_note",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -551,11 +547,6 @@ async def prepare_history_for_run_for_test(
         static_prompt_tokens=static_prompt_tokens,
         available_history_budget=available_history_budget,
     )
-
-
-def inline_media_fallback_note(*kinds: str) -> str:
-    """Render the inline-media fallback note for the kinds a turn is entitled to name."""
-    return render_prompt_template(INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE, kinds=", ".join(sorted(kinds)))
 
 
 def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
@@ -2791,14 +2782,6 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
-
-
-@pytest.fixture(autouse=True)
-def _reset_model_media_capabilities() -> Generator[None, None, None]:
-    """Keep process-local learned media support isolated per test."""
-    reset_model_media_capability_cache()
-    yield
-    reset_model_media_capability_cache()
 
 
 _LEDGER_LOADING_TEST_MODULES = frozenset(

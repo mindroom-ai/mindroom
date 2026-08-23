@@ -13,37 +13,25 @@ from uuid import uuid4
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import (
-    ModelMediaRoute,
-    append_inline_media_fallback_prompt,
-    build_model_media_route,
-    filter_media_inputs_for_route,
-    strip_media_kinds_from_message,
-    unsupported_media_kinds_for_route,
-    unsupported_replayed_media_kinds_for_route,
-)
-from mindroom.media_inputs import MediaInputs, MediaKind
-from mindroom.run_output_status import is_empty_completed_run
+from mindroom.media_inputs import MediaInputs
 
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
-    from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
 
     from mindroom.history.runtime import ScopeSessionContext
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
-    "MediaAttempt",
     "ModelRunInput",
-    "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
     "copy_run_input",
@@ -51,13 +39,11 @@ __all__ = [
     "finalize_queued_notice_response_turn_async",
     "install_queued_message_notice_hook",
     "is_empty_completed_run",
-    "media_inputs_from_run_input",
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
     "register_queued_notice_storage",
     "scrub_queued_notice_session_context",
-    "strip_media_kinds_from_run_input",
 ]
 
 logger = get_logger(__name__)
@@ -88,191 +74,14 @@ def attach_media_to_run_input(
     run_input: ModelRunInput,
     media_inputs: MediaInputs,
 ) -> list[Message]:
-    """Attach media to the current user message.
-
-    An empty collection is written as ``None`` rather than ``()`` so that "this
-    message carries no media of that kind" has one representation on the wire,
-    the same one :func:`mindroom.media_fallback.strip_media_kinds_from_message`
-    leaves behind.
-    """
+    """Attach media to the current user message."""
     run_messages = copy_run_input(run_input)
     current_message = run_messages[-1]
-    current_message.audio = media_inputs.audio or None
-    current_message.images = media_inputs.images or None
-    current_message.files = media_inputs.files or None
-    current_message.videos = media_inputs.videos or None
+    current_message.audio = media_inputs.audio
+    current_message.images = media_inputs.images
+    current_message.files = media_inputs.files
+    current_message.videos = media_inputs.videos
     return run_messages
-
-
-def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
-    """Collect media attached to canonical run-input messages.
-
-    Agent and team paths inspect the collected kinds for media-capability
-    routing while preserving media on its canonical message.
-    """
-    if isinstance(run_input, str):
-        return MediaInputs()
-    audio: list[Audio] = []
-    images: list[Image] = []
-    files: list[File] = []
-    videos: list[Video] = []
-    for message in run_input:
-        audio.extend(message.audio or ())
-        images.extend(message.images or ())
-        files.extend(message.files or ())
-        videos.extend(message.videos or ())
-    return MediaInputs.from_optional(audio=audio, images=images, files=files, videos=videos)
-
-
-def strip_media_kinds_from_run_input(
-    run_input: ModelRunInput,
-    removed_kinds: frozenset[MediaKind],
-) -> list[Message]:
-    """Copy run input with the given media kinds cleared from every message."""
-    run_messages = copy_run_input(run_input)
-    for message in run_messages:
-        strip_media_kinds_from_message(message, removed_kinds)
-    return run_messages
-
-
-def append_inline_media_fallback_to_run_input(
-    run_input: ModelRunInput,
-    *,
-    fallback_prompt: str,
-    removed_kinds: frozenset[MediaKind],
-    note_kinds: frozenset[MediaKind],
-) -> list[Message]:
-    """Strip rejected media kinds from all run-input messages and append the fallback note.
-
-    ``note_kinds`` is what the note is allowed to claim, which is not always
-    what the strip removed: a kind can leave the replayed history while the
-    user's own upload of it stays on the wire.
-    """
-    run_messages = strip_media_kinds_from_run_input(run_input, removed_kinds)
-    current_message = run_messages[-1]
-    current_text = current_message.content if isinstance(current_message.content, str) else ""
-    current_message.content = append_inline_media_fallback_prompt(
-        current_text,
-        fallback_prompt=fallback_prompt,
-        kinds=note_kinds,
-    )
-    return run_messages
-
-
-@dataclass
-class MediaAttempt:
-    """Per-attempt media routing state shared by the agent and team runs.
-
-    Both paths keep the same two-sided provenance split, and it lives here so
-    neither can drift from it again. ``attempt_prompt`` carries thread-context
-    media — history MindRoom re-materialized into the run input — already
-    narrowed by both capability caches, while ``attempt_media_inputs`` carries
-    the current turn's fresh upload, narrowed by the run-input cache alone.
-    Keeping the two apart is what lets
-    :func:`mindroom.media_fallback.retry_media_inputs_after_failure` credit a
-    successful without-media retry only to the class of input that produced the
-    evidence, instead of walking a replayed-media conclusion into the cache that
-    gates fresh uploads.
-    """
-
-    context_media_kinds: frozenset[MediaKind]
-    media_route: ModelMediaRoute | None
-    removed_media_kinds: frozenset[MediaKind]
-    attempt_prompt: list[Message]
-    attempt_media_inputs: MediaInputs
-    attempt_run_id: str | None
-
-    @property
-    def remaining_context_media_kinds(self) -> frozenset[MediaKind]:
-        """Return the context media kinds still present after fallback removals."""
-        return self.context_media_kinds - self.removed_media_kinds
-
-    @classmethod
-    def initial(
-        cls,
-        run_input: ModelRunInput,
-        media_inputs: MediaInputs,
-        model: Model | None,
-        *,
-        fallback_prompt: str,
-        run_id: str | None,
-    ) -> MediaAttempt:
-        """Route media for the first attempt and build its prompt and inputs."""
-        context_media_kinds = media_inputs_from_run_input(run_input).kinds()
-        media_route = build_model_media_route(model) if media_inputs.has_any() or context_media_kinds else None
-        media_filter = filter_media_inputs_for_route(media_route, media_inputs)
-        # Context media is thread history MindRoom re-materialized into the run
-        # input, so both caches speak to it: what this layer learned about fresh
-        # input of that kind, and what the guard learned about replays. The guard
-        # never owns a message the caller put on the wire, so it cannot take this
-        # copy off itself — without the second read, a route that already knows it
-        # rejects the modality still ships it on the first call of every turn and
-        # pays a doomed provider call for the life of the process.
-        # This read only narrows, and only for context media: the user's own
-        # upload is still filtered by `filter_media_inputs_for_route` above,
-        # against the run-input cache alone.
-        removed_media_kinds = media_filter.removed_kinds | (
-            (unsupported_media_kinds_for_route(media_route) | unsupported_replayed_media_kinds_for_route(media_route))
-            & context_media_kinds
-        )
-        # The note tells the model its attachments were rejected for this turn,
-        # so it may only speak for kinds that are actually off the outgoing
-        # request. A kind the guard's cache contributed above is stripped from
-        # the replayed history while the user's fresh upload of that same kind
-        # still rides along, and announcing a rejection over a visible
-        # attachment would send the agent hunting for files it can already see.
-        # The note names the kinds it is entitled to for the same reason: this
-        # is a per-kind judgment, and a note that speaks for attachments in
-        # general cannot make it — strip a context image, leave a fresh audio,
-        # and unqualified prose is false about the audio.
-        note_kinds = removed_media_kinds - media_filter.media_inputs.kinds()
-        attempt_prompt = (
-            append_inline_media_fallback_to_run_input(
-                run_input,
-                fallback_prompt=fallback_prompt,
-                removed_kinds=removed_media_kinds,
-                note_kinds=note_kinds,
-            )
-            if note_kinds
-            else strip_media_kinds_from_run_input(run_input, removed_media_kinds)
-        )
-        return cls(
-            context_media_kinds=context_media_kinds,
-            media_route=media_route,
-            removed_media_kinds=removed_media_kinds,
-            attempt_prompt=attempt_prompt,
-            attempt_media_inputs=media_filter.media_inputs,
-            attempt_run_id=run_id,
-        )
-
-    def retry(
-        self,
-        run_input: ModelRunInput,
-        *,
-        fallback_prompt: str,
-        extra_removed_kinds: frozenset[MediaKind],
-        retry_media_inputs: MediaInputs,
-        run_id: str | None,
-    ) -> None:
-        """Apply one media-fallback retry: widen removed kinds and rebuild the attempt prompt.
-
-        The note is unconditional here, unlike the first attempt: a retry strips
-        every kind the failed call carried, so nothing it announces is still on
-        the wire and every removed kind is the note's to name.
-        """
-        self.removed_media_kinds = self.removed_media_kinds | extra_removed_kinds
-        self.attempt_prompt = append_inline_media_fallback_to_run_input(
-            run_input,
-            fallback_prompt=fallback_prompt,
-            removed_kinds=self.removed_media_kinds,
-            note_kinds=self.removed_media_kinds,
-        )
-        self.attempt_media_inputs = retry_media_inputs
-        self.attempt_run_id = next_retry_run_id(run_id)
-
-    def wire_run_input(self) -> list[Message]:
-        """Return the messages to send, with the surviving fresh upload on the current turn."""
-        return attach_media_to_run_input(self.attempt_prompt, self.attempt_media_inputs)
 
 
 class _SupportsQueuedMessageState(Protocol):
@@ -794,6 +603,16 @@ def scrub_queued_notice_session_context(
             session_id=scope_context.session.session_id,
             session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
         )
+
+
+def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
+    """Return whether one run completed with no tool calls and no visible content."""
+    if response.status is not RunStatus.completed or response.tools:
+        return False
+    content = response.content
+    if content is None:
+        return True
+    return isinstance(content, str) and not content.strip()
 
 
 def _remove_run_from_session(session: AgentSession | TeamSession, *, run_id: str) -> bool:

@@ -24,7 +24,7 @@ __all__ = [
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
-    "INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE",
+    "INLINE_MEDIA_FALLBACK_PROMPT",
     "INTERACTIVE_QUESTION_PROMPT",
     "INTERRUPTED_PARTIAL_REPLY_HEADER",
     "IN_PROGRESS_PARTIAL_REPLY_HEADER",
@@ -215,8 +215,8 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "next step. You cannot see the newer message's contents yet. If work remains, state that you "
     "intend to resume it on the next turn, subject to the newer message's instructions."
 )
-INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE = (
-    "The model rejected inline {kinds} attachments for this turn. "
+INLINE_MEDIA_FALLBACK_PROMPT = (
+    "The model rejected inline attachments for this turn. "
     "Use available attachment IDs and tools to inspect files instead."
 )
 
@@ -535,7 +535,6 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": frozenset(
             {"included_lines", "total_lines", "max_entrypoint_lines", "memory_path"},
         ),
-        "INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE": frozenset({"kinds"}),
         "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},

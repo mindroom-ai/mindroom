@@ -77,10 +77,6 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.media_fallback import (
-    MediaRetryDecision,
-    retry_media_inputs_after_failure,
-)
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
@@ -103,14 +99,6 @@ from mindroom.response_turn import (
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
-)
-from mindroom.run_output_status import (
-    carries_media_answer,
-    is_cancelled_run_output,
-    is_completed_run_output,
-    is_errored_run_output,
-    is_paused_run_output,
-    media_free_retry_succeeded,
 )
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -641,25 +629,6 @@ class _TeamStreamPresentation:
         return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
 
 
-def _team_stream_ran_a_tool(
-    tool_tracker: StreamingToolTracker,
-    completed_tool_executions: Sequence[ToolExecution],
-) -> bool:
-    """Return whether one team streaming attempt already put a tool on the wire.
-
-    One ledger, read by the media-retry gate and by the bar that banks a media
-    lesson, so the two cannot drift into disagreeing about whether a tool ran.
-    The tracker records a start only when it hands back a trace entry, while
-    every completion event appends its execution unconditionally — a completion
-    whose start was never announced is therefore absent from the tracker and
-    present in the executions. A gate reading only the tracker would re-run a
-    whole turn whose shell command or mail send has already happened, and a bar
-    reading only the executions would call an attempt empty that this driver
-    delivers as a real answer.
-    """
-    return bool(tool_tracker.pending_tools or tool_tracker.completed_tools or completed_tool_executions)
-
-
 def _blocking_team_member_scope(
     presentation: _TeamStreamPresentation,
     *,
@@ -819,6 +788,18 @@ def format_team_response(response: TeamRunOutput | RunOutput) -> list[str]:
     return _format_contributions_recursive(response, indent=0, include_consensus=True)
 
 
+def is_errored_run_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether a team or agent fallback run ended in an error state."""
+    status = response.status.value if isinstance(response.status, RunStatus) else response.status
+    return str(status).lower() == "error"
+
+
+def is_cancelled_run_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether a team or agent fallback run ended in a cancelled state."""
+    status = response.status.value if isinstance(response.status, RunStatus) else response.status
+    return str(status).lower() == "cancelled"
+
+
 def _is_bound_team_output(response: TeamRunOutput | RunOutput, *, team_id: str) -> bool:
     return isinstance(response, TeamRunOutput) and response.team_id in (None, "", team_id)
 
@@ -842,30 +823,6 @@ def _has_visible_team_output(response: TeamRunOutput | RunOutput) -> bool:
     return bool(format_team_response(response)) or bool(_get_response_content(response).strip())
 
 
-def _team_answered(response: object, tool_executions: Sequence[ToolExecution]) -> bool:
-    """Return whether one terminal team output came back with an answer of any kind.
-
-    The answer half every team bank bar hands to
-    :func:`media_free_retry_succeeded`, in one place so the two drivers cannot
-    drift. It has to be spelled here rather than left to the leaf because a team
-    answers through its members: the text lives in ``member_responses`` and the
-    tools are collected across them, which is what ``tool_executions`` and
-    :func:`_has_visible_team_output` already read for this driver's own empty-run
-    verdict.
-
-    Generated media is the third channel, and the one the empty-run verdict does
-    *not* share: an image the model produced proves the provider accepted the
-    request, so the lesson is real, while nothing in the delivery path renders
-    it, so the turn is still the empty run that earns the notice.
-
-    An outcome that is not a run output carries no answer to read, and the
-    caller's ``answered`` is evaluated before the shared bar's own type check.
-    """
-    if not isinstance(response, (TeamRunOutput, RunOutput)):
-        return False
-    return bool(tool_executions) or _has_visible_team_output(response) or carries_media_answer(response)
-
-
 def _format_terminal_team_response(
     response: TeamRunOutput | RunOutput,
     *,
@@ -886,18 +843,6 @@ def _register_team_notice_storage(
         storage_factory=scope_context.storage_factory if scope_context is not None else None,
         session_id=session_id,
         session_type=SessionType.TEAM,
-        entity_name=entity_name,
-    )
-
-
-def _scrub_team_retry_notice_state(
-    *,
-    scope_context: ScopeSessionContext | None,
-    entity_name: str,
-) -> None:
-    """Recover prior notices without finalizing the active team response."""
-    ai_runtime.scrub_queued_notice_session_context(
-        scope_context=scope_context,
         entity_name=entity_name,
     )
 
@@ -2845,7 +2790,7 @@ async def team_response(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
-        """Run one team attempt, including its media-fallback retries."""
+        """Run one team attempt."""
         attempt_members = await _ensure_attempt_team_members(
             holder,
             agent_names,
@@ -2902,6 +2847,8 @@ async def team_response(  # noqa: C901, PLR0915
         run.run_metadata = prepared_execution.run_metadata
         run_metadata = run.run_metadata
         turn_recorder.set_run_metadata(run_metadata)
+        if base_media_inputs.has_any():
+            run_input = ai_runtime.attach_media_to_run_input(run_input, base_media_inputs)
         logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
         logger.info(
             "team_prompt_preview",
@@ -2931,103 +2878,25 @@ async def team_response(  # noqa: C901, PLR0915
                     metadata=run_metadata,
                 )
 
-        response: object | None = None
-        inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE")
-        attempt = ai_runtime.MediaAttempt.initial(
-            run_input,
-            base_media_inputs,
-            team.model,
-            fallback_prompt=inline_media_fallback_prompt,
-            run_id=continuation_state.active_run_id,
-        )
-        attempt_run_id = attempt.attempt_run_id
+        attempt_run_id = continuation_state.active_run_id
         holder.attempt_run_id = attempt_run_id
         holder.attempt_started = True
-        pending_retry_decision: MediaRetryDecision | None = None
-        for retried_after_media_fallback in (False, True):
-            response = None
-            try:
-                response = await _run(attempt.wire_run_input(), attempt_run_id)
-            except Exception as e:
-                retry_decision = retry_media_inputs_after_failure(
-                    attempt.media_route,
-                    e,
-                    attempt.attempt_media_inputs,
-                    extra_present_kinds=attempt.remaining_context_media_kinds,
-                )
-                if not retried_after_media_fallback and retry_decision.should_retry:
-                    logger.warning(
-                        "Retrying team response after inline media validation error",
-                        agents=agent_list,
-                        error=str(e),
-                        removed_media_kinds=sorted(retry_decision.removed_kinds),
-                    )
-                    _scrub_team_retry_notice_state(
-                        scope_context=run.scope_context,
-                        entity_name=configured_team_name or team_name,
-                    )
-                    attempt.retry(
-                        run_input,
-                        fallback_prompt=inline_media_fallback_prompt,
-                        extra_removed_kinds=retry_decision.removed_kinds,
-                        retry_media_inputs=retry_decision.media_inputs,
-                        run_id=continuation_state.active_run_id,
-                    )
-                    attempt_run_id = attempt.attempt_run_id
-                    holder.attempt_run_id = attempt_run_id
-                    pending_retry_decision = retry_decision
-                    continue
+        try:
+            response = await _run(ai_runtime.copy_run_input(run_input), attempt_run_id)
+        except Exception as e:
+            logger.exception("team_response_failed", agents=agent_list)
+            error_text = get_user_friendly_error_message(e, team_name)
+            return ExcludedAttempt(RunStatus.error, error_text, run_id=attempt_run_id)
 
-                logger.exception("team_response_failed", agents=agent_list)
-                error_text = get_user_friendly_error_message(e, team_name)
-                return ExcludedAttempt(RunStatus.error, error_text, run_id=attempt_run_id)
-
-            if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
-                error_text = str(response.content or "Unknown team error")
-                retry_decision = retry_media_inputs_after_failure(
-                    attempt.media_route,
-                    error_text,
-                    attempt.attempt_media_inputs,
-                    extra_present_kinds=attempt.remaining_context_media_kinds,
-                )
-                if not retried_after_media_fallback and retry_decision.should_retry:
-                    logger.warning(
-                        "Retrying team response after inline media errored run output",
-                        agents=agent_list,
-                        error=error_text,
-                        removed_media_kinds=sorted(retry_decision.removed_kinds),
-                    )
-                    _register_team_notice_storage(
-                        scope_context=run.scope_context,
-                        session_id=ctx.session_id,
-                        entity_name=configured_team_name or team_name,
-                    )
-                    _scrub_team_retry_notice_state(
-                        scope_context=run.scope_context,
-                        entity_name=configured_team_name or team_name,
-                    )
-                    attempt.retry(
-                        run_input,
-                        fallback_prompt=inline_media_fallback_prompt,
-                        extra_removed_kinds=retry_decision.removed_kinds,
-                        retry_media_inputs=retry_decision.media_inputs,
-                        run_id=continuation_state.active_run_id,
-                    )
-                    attempt_run_id = attempt.attempt_run_id
-                    holder.attempt_run_id = attempt_run_id
-                    pending_retry_decision = retry_decision
-                    continue
-                logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
-
-            break
-
-        assert response is not None
+        if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
+            logger.warning(
+                "Team response returned errored run output",
+                agents=agent_list,
+                error=str(response.content or "Unknown team error"),
+            )
         run_tool_executions = (
             _collect_team_tool_executions(response) if isinstance(response, (TeamRunOutput, RunOutput)) else []
         )
-        # Read before the bank bar below, which needs this driver's own notion of
-        # an answer rather than a re-derivation from the leader's fields.
-        has_visible_output = isinstance(response, (TeamRunOutput, RunOutput)) and _has_visible_team_output(response)
         metadata_content: dict[str, Any] | None = None
         if run_metadata_collector is not None and isinstance(response, (TeamRunOutput, RunOutput)):
             metadata_content = _build_team_run_metadata_content(
@@ -3038,9 +2907,7 @@ async def team_response(  # noqa: C901, PLR0915
                 tool_count=len(run_tool_executions),
             )
         if isinstance(response, (TeamRunOutput, RunOutput)) and (
-            is_cancelled_run_output(response)
-            or is_errored_run_output(response)
-            or is_paused_run_output(response)
+            response.status in (RunStatus.cancelled, RunStatus.error, RunStatus.paused)
             or not _is_bound_team_output(
                 response,
                 team_id=run.scope_context.scope.scope_id if run.scope_context is not None else team.id or "",
@@ -3088,17 +2955,6 @@ async def team_response(  # noqa: C901, PLR0915
                 run_id=response.run_id or attempt_run_id,
                 metadata_content=metadata_content,
             )
-        # One shared bar with the agent blocking driver, so neither can drift
-        # into banking a lesson the other would refuse: only a run that came
-        # back `completed` *and answered* finished the experiment. A team
-        # answers through its members, so the answer half is this driver's own
-        # member-aware reading handed to the shared predicate instead of
-        # re-derived from the leader's own fields.
-        if pending_retry_decision is not None and media_free_retry_succeeded(
-            response,
-            answered=_team_answered(response, run_tool_executions),
-        ):
-            pending_retry_decision.record_retry_success()
         if ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
@@ -3120,10 +2976,11 @@ async def team_response(  # noqa: C901, PLR0915
                     content_preview=response.content[:200] if response.content else None,
                 )
             team_response_text = _team_response_text(response)
+            has_visible_output = _has_visible_team_output(response)
             response_session_id = response.session_id
             response_run_id = response.run_id
             response_output_tokens = response.metrics.output_tokens if response.metrics is not None else None
-            is_empty_run = is_completed_run_output(response) and not run_tool_executions and not has_visible_output
+            is_empty_run = response.status == RunStatus.completed and not run_tool_executions and not has_visible_output
         else:
             logger.warning(
                 "team_response_unexpected_type",
@@ -3427,15 +3284,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
         unseen_event_ids = run.unseen_event_ids
         turn_recorder.set_run_metadata(run_metadata)
         logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
-        inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE")
-        attempt = ai_runtime.MediaAttempt.initial(
-            run_input,
-            base_media_inputs,
-            team.model,
-            fallback_prompt=inline_media_fallback_prompt,
-            run_id=continuation_state.active_run_id,
-        )
-        attempt_run_id = attempt.attempt_run_id
+        if base_media_inputs.has_any():
+            run_input = ai_runtime.attach_media_to_run_input(run_input, base_media_inputs)
+        attempt_run_input = ai_runtime.copy_run_input(run_input)
+        attempt_run_id = continuation_state.active_run_id
         holder.attempt_run_id = attempt_run_id
 
         attempt_config_names = attempt_members.requested_agent_names
@@ -3509,479 +3361,351 @@ async def team_response_stream(  # noqa: C901, PLR0915
             )
 
         holder.attempt_started = True
-        pending_retry_decision: MediaRetryDecision | None = None
-        for retried_after_media_fallback in (False, True):
-            canonical_per_member = dict.fromkeys(attempt_member_ids, "")
-            canonical_consensus = ""
-            presentation = _TeamStreamPresentation.new(
-                attempt_config_names,
-                attempt_display_names,
-                show_tool_calls=show_tool_calls,
-            )
-            completed_tools = presentation.tool_tracker.completed_tools
-            pending_tools = presentation.tool_tracker.pending_tools
-            holder.tool_tracker = presentation.tool_tracker
-            completed_tool_executions: list[ToolExecution] = []
-            emitted_output = False
-            media_fallback_retry_requested = False
-            completed_run_event: TeamRunCompletedEvent | None = None
-            usage = _TeamStreamUsage()
+        canonical_per_member = dict.fromkeys(attempt_member_ids, "")
+        canonical_consensus = ""
+        presentation = _TeamStreamPresentation.new(
+            attempt_config_names,
+            attempt_display_names,
+            show_tool_calls=show_tool_calls,
+        )
+        completed_tools = presentation.tool_tracker.completed_tools
+        pending_tools = presentation.tool_tracker.pending_tools
+        holder.tool_tracker = presentation.tool_tracker
+        completed_tool_executions: list[ToolExecution] = []
+        emitted_output = False
+        completed_run_event: TeamRunCompletedEvent | None = None
+        usage = _TeamStreamUsage()
 
-            ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
+        ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
 
-            wire_run_input = attempt.wire_run_input()
-            raw_stream = await _team_response_stream_raw(
-                team=team,
-                team_members=attempt_members,
-                prompt=wire_run_input,
-                metadata=run_metadata,
-                session_id=ctx.session_id,
-                run_id=attempt_run_id,
-                user_id=user_id,
-            )
-            raw_stream = _capture_stream_interrupt(
-                stream_with_llm_request_log_context(
-                    cast("AsyncGenerator[Any, None]", raw_stream),
-                    request_context=_team_request_log_context(
-                        ctx,
-                        team_name=configured_team_name or team_label,
-                        prompt=continuation_state.active_prompt,
-                        run_input=wire_run_input,
-                        metadata=run_metadata,
-                    ),
+        raw_stream = await _team_response_stream_raw(
+            team=team,
+            team_members=attempt_members,
+            prompt=attempt_run_input,
+            metadata=run_metadata,
+            session_id=ctx.session_id,
+            run_id=attempt_run_id,
+            user_id=user_id,
+        )
+        raw_stream = _capture_stream_interrupt(
+            stream_with_llm_request_log_context(
+                cast("AsyncGenerator[Any, None]", raw_stream),
+                request_context=_team_request_log_context(
+                    ctx,
+                    team_name=configured_team_name or team_label,
+                    prompt=continuation_state.active_prompt,
+                    run_input=attempt_run_input,
+                    metadata=run_metadata,
                 ),
-            )
-            bound_team_id = run.scope_context.scope.scope_id if run.scope_context is not None else team.id or ""
-            async for event in raw_stream:
-                if isinstance(event, (TeamRunOutput, RunOutput)):
-                    if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
-                        logger.debug("Ignoring non-bound team run output", run_id=event.run_id)
-                        continue
-                    _register_team_notice_storage(
-                        scope_context=run.scope_context,
+            ),
+        )
+        bound_team_id = run.scope_context.scope.scope_id if run.scope_context is not None else team.id or ""
+        async for event in raw_stream:
+            if isinstance(event, (TeamRunOutput, RunOutput)):
+                if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
+                    logger.debug("Ignoring non-bound team run output", run_id=event.run_id)
+                    continue
+                _register_team_notice_storage(
+                    scope_context=run.scope_context,
+                    session_id=ctx.session_id,
+                    entity_name=configured_team_name or team_label,
+                )
+                event_tool_executions = _collect_team_tool_executions(event)
+                event_metadata_content: dict[str, Any] | None = None
+                if run_metadata_collector is not None:
+                    event_metadata_content = _build_team_run_metadata_content(
+                        config=config,
+                        prepared_execution=prepared_execution,
+                        response=event,
                         session_id=ctx.session_id,
-                        entity_name=configured_team_name or team_label,
+                        tool_count=len(event_tool_executions),
                     )
-                    event_tool_executions = _collect_team_tool_executions(event)
-                    # Read before the bank bar below, which needs this driver's
-                    # own notion of an answer rather than a re-derivation from
-                    # the leader's fields.
-                    event_has_visible = _has_visible_team_output(event)
-                    event_metadata_content: dict[str, Any] | None = None
-                    if run_metadata_collector is not None:
-                        event_metadata_content = _build_team_run_metadata_content(
-                            config=config,
-                            prepared_execution=prepared_execution,
-                            response=event,
-                            session_id=ctx.session_id,
-                            tool_count=len(event_tool_executions),
-                        )
 
-                    if is_cancelled_run_output(event):
-                        partial_text = _extract_interrupted_team_partial_text(event)
-                        completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
-                        yield AttemptResolved(
-                            ExcludedAttempt(
-                                reason=event.content,
-                                partial_text=partial_text,
-                                completed_tools=tuple(completed_tool_trace),
-                                interrupted_tools=tuple(interrupted_tool_trace),
-                                metadata_content=event_metadata_content,
-                            ),
-                        )
-                        return
-
-                    if is_errored_run_output(event):
-                        error_text = str(event.content or "Unknown team error")
-                        retry_decision = retry_media_inputs_after_failure(
-                            attempt.media_route,
-                            error_text,
-                            attempt.attempt_media_inputs,
-                            extra_present_kinds=attempt.remaining_context_media_kinds,
-                        )
-                        if (
-                            not retried_after_media_fallback
-                            and not emitted_output
-                            and not _team_stream_ran_a_tool(presentation.tool_tracker, completed_tool_executions)
-                            and retry_decision.should_retry
-                        ):
-                            logger.warning(
-                                "Retrying team streaming after inline media errored run output",
-                                agents=", ".join(agent_names),
-                                error=error_text,
-                                removed_media_kinds=sorted(retry_decision.removed_kinds),
-                            )
-                            _scrub_team_retry_notice_state(
-                                scope_context=run.scope_context,
-                                entity_name=configured_team_name or team_label,
-                            )
-                            attempt.retry(
-                                run_input,
-                                fallback_prompt=inline_media_fallback_prompt,
-                                extra_removed_kinds=retry_decision.removed_kinds,
-                                retry_media_inputs=retry_decision.media_inputs,
-                                run_id=continuation_state.active_run_id,
-                            )
-                            attempt_run_id = attempt.attempt_run_id
-                            holder.attempt_run_id = attempt_run_id
-                            pending_retry_decision = retry_decision
-                            media_fallback_retry_requested = True
-                            break
-                        if run_metadata_collector is not None and event_metadata_content is not None:
-                            run_metadata_collector.update(event_metadata_content)
-                        _record_interrupted_team_turn()
-                        yield get_user_friendly_error_message(Exception(error_text), team_label)
-                        yield AttemptResolved(HandledAttempt())
-                        return
-
-                    if is_paused_run_output(event):
-                        completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
-                        yield AttemptResolved(
-                            ExcludedAttempt(
-                                original_status=RunStatus.paused,
-                                response_text=_format_terminal_team_response(
-                                    event,
-                                    team_display_names=team_members.display_names,
-                                ),
-                                partial_text=_extract_interrupted_team_partial_text(event),
-                                completed_tools=tuple(completed_tool_trace),
-                                interrupted_tools=tuple(interrupted_tool_trace),
-                                session_id=event.session_id,
-                                run_id=event.run_id or attempt_run_id,
-                                metadata_content=event_metadata_content,
-                            ),
-                        )
-                        return
-
-                    # Same shared bar as the other drivers, with this driver's own
-                    # member-aware answer handed in: a team run whose only answer
-                    # is a member's text or tool call is one this driver delivers,
-                    # so it is one the experiment may bank. Generated media banks
-                    # too — the provider answered — while the empty-run verdict
-                    # below stays blind to it, because no delivery path renders it.
-                    #
-                    # A bare `RunOutput` is excluded a few lines below — this
-                    # driver's statement that it is not the team's answer — and
-                    # the blocking twin, whose bind check runs before its bank,
-                    # never banks from one. The lesson is written against the
-                    # leader's route and a first isolation lands in the
-                    # single-strike cache gating the user's fresh uploads, so
-                    # the bank stays unreachable for anything the driver throws
-                    # away.
-                    if (
-                        pending_retry_decision is not None
-                        and isinstance(event, TeamRunOutput)
-                        and media_free_retry_succeeded(
-                            event,
-                            answered=_team_answered(event, event_tool_executions),
-                        )
-                    ):
-                        pending_retry_decision.record_retry_success()
-                    if ctx.reply_to_event_id:
-                        _persist_bound_seen_event_ids(
-                            scope_context=run.scope_context,
-                            session_id=ctx.session_id,
-                            event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
-                        )
-                    response_text = _format_terminal_team_response(
-                        event,
-                        team_display_names=team_members.display_names,
-                    )
-                    if isinstance(event, RunOutput):
-                        yield AttemptResolved(
-                            ExcludedAttempt(
-                                original_status=RunStatus.completed,
-                                response_text=response_text,
-                                partial_text=response_text if event_has_visible else "",
-                                metadata_content=event_metadata_content,
-                            ),
-                        )
-                        return
-                    # The driver emits response_text only after settling the
-                    # attempt: a pre-settle yield would leak the fallback
-                    # placeholder before an empty-run retry, or stale
-                    # first-attempt text before a dynamic-tool continuation.
+                if is_cancelled_run_output(event):
+                    partial_text = _extract_interrupted_team_partial_text(event)
+                    completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
                     yield AttemptResolved(
-                        CompletedAttempt(
-                            response_text=response_text,
-                            replayable_text=response_text if event_has_visible else "",
-                            has_visible_content=event_has_visible,
-                            is_empty=(
-                                is_completed_run_output(event) and not event_tool_executions and not event_has_visible
-                            ),
-                            session_id=event.session_id,
-                            run_id=event.run_id,
-                            attempt_run_id=attempt_run_id,
-                            output_tokens=event.metrics.output_tokens if event.metrics is not None else None,
-                            tool_executions=tuple(event_tool_executions),
-                            completed_tools=tuple(_extract_completed_team_tool_trace(event)),
+                        ExcludedAttempt(
+                            reason=event.content,
+                            partial_text=partial_text,
+                            completed_tools=tuple(completed_tool_trace),
+                            interrupted_tools=tuple(interrupted_tool_trace),
                             metadata_content=event_metadata_content,
                         ),
                     )
                     return
 
-                if isinstance(event, TeamRunErrorEvent):
-                    if event.team_id and event.team_id != bound_team_id:
-                        continue
-                    error_text = event.content or "Unknown team error"
-                    retry_decision = retry_media_inputs_after_failure(
-                        attempt.media_route,
-                        error_text,
-                        attempt.attempt_media_inputs,
-                        extra_present_kinds=attempt.remaining_context_media_kinds,
-                    )
-                    if (
-                        not retried_after_media_fallback
-                        and not emitted_output
-                        and not _team_stream_ran_a_tool(presentation.tool_tracker, completed_tool_executions)
-                        and retry_decision.should_retry
-                    ):
-                        logger.warning(
-                            "Retrying team streaming after inline media team error",
-                            agents=", ".join(agent_names),
-                            error=error_text,
-                            removed_media_kinds=sorted(retry_decision.removed_kinds),
-                        )
-                        _scrub_team_retry_notice_state(
-                            scope_context=run.scope_context,
-                            entity_name=configured_team_name or team_label,
-                        )
-                        attempt.retry(
-                            run_input,
-                            fallback_prompt=inline_media_fallback_prompt,
-                            extra_removed_kinds=retry_decision.removed_kinds,
-                            retry_media_inputs=retry_decision.media_inputs,
-                            run_id=continuation_state.active_run_id,
-                        )
-                        attempt_run_id = attempt.attempt_run_id
-                        holder.attempt_run_id = attempt_run_id
-                        pending_retry_decision = retry_decision
-                        media_fallback_retry_requested = True
-                        break
-                    if run_metadata_collector is not None:
-                        run_metadata_collector.update(
-                            _build_streamed_team_run_metadata_content(
-                                config=config,
-                                prepared_execution=prepared_execution,
-                                completed_run_event=None,
-                                usage=usage,
-                                run_id=event.run_id or attempt_run_id,
-                                session_id=event.session_id or ctx.session_id,
-                                status=RunStatus.error,
-                                tool_count=len(completed_tool_executions),
-                            ),
-                        )
+                if is_errored_run_output(event):
+                    error_text = str(event.content or "Unknown team error")
+                    if run_metadata_collector is not None and event_metadata_content is not None:
+                        run_metadata_collector.update(event_metadata_content)
                     _record_interrupted_team_turn()
                     yield get_user_friendly_error_message(Exception(error_text), team_label)
                     yield AttemptResolved(HandledAttempt())
                     return
 
-                if isinstance(event, TeamRunCancelledEvent):
-                    if event.team_id and event.team_id != bound_team_id:
-                        continue
-                    cancelled_metadata_content: dict[str, Any] | None = None
-                    if run_metadata_collector is not None:
-                        cancelled_metadata_content = _build_streamed_team_run_metadata_content(
+                if event.status == RunStatus.paused:
+                    completed_tool_trace, interrupted_tool_trace = _extract_cancelled_team_tool_trace(event)
+                    yield AttemptResolved(
+                        ExcludedAttempt(
+                            original_status=RunStatus.paused,
+                            response_text=_format_terminal_team_response(
+                                event,
+                                team_display_names=team_members.display_names,
+                            ),
+                            partial_text=_extract_interrupted_team_partial_text(event),
+                            completed_tools=tuple(completed_tool_trace),
+                            interrupted_tools=tuple(interrupted_tool_trace),
+                            session_id=event.session_id,
+                            run_id=event.run_id or attempt_run_id,
+                            metadata_content=event_metadata_content,
+                        ),
+                    )
+                    return
+
+                if ctx.reply_to_event_id:
+                    _persist_bound_seen_event_ids(
+                        scope_context=run.scope_context,
+                        session_id=ctx.session_id,
+                        event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
+                    )
+                response_text = _format_terminal_team_response(
+                    event,
+                    team_display_names=team_members.display_names,
+                )
+                event_has_visible = _has_visible_team_output(event)
+                if isinstance(event, RunOutput):
+                    yield AttemptResolved(
+                        ExcludedAttempt(
+                            original_status=RunStatus.completed,
+                            response_text=response_text,
+                            partial_text=response_text if event_has_visible else "",
+                            metadata_content=event_metadata_content,
+                        ),
+                    )
+                    return
+                # The driver emits response_text only after settling the
+                # attempt: a pre-settle yield would leak the fallback
+                # placeholder before an empty-run retry, or stale
+                # first-attempt text before a dynamic-tool continuation.
+                yield AttemptResolved(
+                    CompletedAttempt(
+                        response_text=response_text,
+                        replayable_text=response_text if event_has_visible else "",
+                        has_visible_content=event_has_visible,
+                        is_empty=(
+                            event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
+                        ),
+                        session_id=event.session_id,
+                        run_id=event.run_id,
+                        attempt_run_id=attempt_run_id,
+                        output_tokens=event.metrics.output_tokens if event.metrics is not None else None,
+                        tool_executions=tuple(event_tool_executions),
+                        completed_tools=tuple(_extract_completed_team_tool_trace(event)),
+                        metadata_content=event_metadata_content,
+                    ),
+                )
+                return
+
+            if isinstance(event, TeamRunErrorEvent):
+                if event.team_id and event.team_id != bound_team_id:
+                    continue
+                error_text = event.content or "Unknown team error"
+                if run_metadata_collector is not None:
+                    run_metadata_collector.update(
+                        _build_streamed_team_run_metadata_content(
                             config=config,
                             prepared_execution=prepared_execution,
                             completed_run_event=None,
                             usage=usage,
                             run_id=event.run_id or attempt_run_id,
                             session_id=event.session_id or ctx.session_id,
-                            status=RunStatus.cancelled,
+                            status=RunStatus.error,
                             tool_count=len(completed_tool_executions),
-                        )
-                    yield AttemptResolved(
-                        ExcludedAttempt(
-                            reason=event.reason,
-                            partial_text=_current_canonical_partial_text(),
-                            completed_tools=tuple(completed_tools),
-                            interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
-                            metadata_content=cancelled_metadata_content,
                         ),
                     )
-                    return
+                _record_interrupted_team_turn()
+                yield get_user_friendly_error_message(Exception(error_text), team_label)
+                yield AttemptResolved(HandledAttempt())
+                return
 
-                if isinstance(event, TeamRunPausedEvent):
-                    if event.team_id and event.team_id != bound_team_id:
-                        continue
-                    paused_attempt = paused_attempt_from_event(
-                        event,
-                        fallback_session_id=ctx.session_id,
-                        fallback_run_id=attempt_run_id,
-                    )
-                    if paused_attempt is not None:
-                        paused_attempt = _continued_team_pause(presentation, paused_attempt)
-                        if paused_attempt.response_text:
-                            yield StructuredStreamChunk(
-                                content=paused_attempt.response_text,
-                                tool_trace=list(paused_attempt.tool_trace),
-                                presentation_state=paused_attempt.response_presentation_state,
-                            )
-                        yield AttemptResolved(
-                            replace(
-                                paused_attempt,
-                                runtime_model_name=prepared_execution.runtime_model_name,
-                                team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                            ),
-                        )
-                        return
-                    yield AttemptResolved(
-                        ExcludedAttempt(
-                            original_status=RunStatus.paused,
-                            response_text=str(event.content or ""),
-                            partial_text=_current_canonical_partial_text() or str(event.content or ""),
-                            completed_tools=tuple(completed_tools),
-                            interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
-                            session_id=event.session_id,
-                            run_id=event.run_id or attempt_run_id,
-                        ),
-                    )
-                    return
-
-                if isinstance(event, AgentRunContentEvent):
-                    member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
-                    content = str(event.content or "")
-                    canonical_per_member[member_id] += content
-                    presentation.append_member(member_id, content)
-                elif isinstance(event, AgentToolCallStartedEvent):
-                    member_name = event.agent_name
-                    member_id = presentation.resolve_member_id(event.agent_id, member_name)
-                    _emit_tool_timing(
-                        phase="agno_tool_call_started",
-                        tool_scope="member",
-                        agent_name=member_name,
-                        tool=event.tool,
-                    )
-                    presentation.start_member_tool(member_id, event.tool)
-                elif isinstance(event, AgentToolCallCompletedEvent):
-                    member_name = event.agent_name
-                    member_id = presentation.resolve_member_id(event.agent_id, member_name)
-                    _emit_tool_timing(
-                        phase="agno_tool_call_completed",
-                        tool_scope="member",
-                        agent_name=member_name,
-                        tool=event.tool,
-                    )
-                    if event.tool is not None:
-                        completed_tool_executions.append(event.tool)
-                    presentation.complete_member_tool(member_id, event.tool)
-                elif isinstance(event, TeamRunContentEvent):
-                    if event.content:
-                        content = str(event.content)
-                        canonical_consensus += content
-                        presentation.append_consensus(content)
-                    else:
-                        logger.debug("Empty team consensus event received")
-                elif isinstance(event, TeamToolCallStartedEvent):
-                    _emit_tool_timing(
-                        phase="agno_tool_call_started",
-                        tool_scope="team",
-                        agent_name=None,
-                        tool=event.tool,
-                    )
-                    presentation.start_tool("team", event.tool)
-                elif isinstance(event, TeamToolCallCompletedEvent):
-                    _emit_tool_timing(
-                        phase="agno_tool_call_completed",
-                        tool_scope="team",
-                        agent_name=None,
-                        tool=event.tool,
-                    )
-                    if event.tool is not None:
-                        completed_tool_executions.append(event.tool)
-                    presentation.complete_tool("team", event.tool)
-                elif isinstance(event, TeamRunCompletedEvent):
-                    # Real Agno team streams never yield a terminal run output;
-                    # this event is the stream's usage/identity source instead.
-                    if event.team_id in (None, "", bound_team_id):
-                        completed_run_event = event
-                        holder.attempt_run_id = event.run_id or attempt_run_id
+            if isinstance(event, TeamRunCancelledEvent):
+                if event.team_id and event.team_id != bound_team_id:
                     continue
-                elif isinstance(event, TeamModelRequestCompletedEvent):
-                    usage.track(event)
-                    continue
-                else:
-                    logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
-                    continue
-
-                _sync_live_turn_recorder()
-                rendered_body = presentation.render_body()
-                if rendered_body:
-                    emitted_output = True
-                    yield StructuredStreamChunk(
-                        content=rendered_body,
-                        tool_trace=presentation.tool_trace.copy(),
-                        presentation_state=presentation.to_state(),
+                cancelled_metadata_content: dict[str, Any] | None = None
+                if run_metadata_collector is not None:
+                    cancelled_metadata_content = _build_streamed_team_run_metadata_content(
+                        config=config,
+                        prepared_execution=prepared_execution,
+                        completed_run_event=None,
+                        usage=usage,
+                        run_id=event.run_id or attempt_run_id,
+                        session_id=event.session_id or ctx.session_id,
+                        status=RunStatus.cancelled,
+                        tool_count=len(completed_tool_executions),
                     )
-
-            if media_fallback_retry_requested:
-                continue
-            # The same bar the other three drivers apply, in the only terms a
-            # stream that never yields a run output has: an attempt that
-            # answered nothing is the empty run this driver discards below, so
-            # it proves nothing about the media either.
-            #
-            # What the attempt answered is read off the wire, not off the
-            # rendering. `emitted_output` says a body was pushed to the
-            # consumer, and with `show_tool_calls` on a bare tool spinner is
-            # such a body — so reading it here would let the same wire facts
-            # bank a lesson under one rendering setting and refuse it under the
-            # other. The facts below are the answer itself: the text the members
-            # and the coordinator streamed, a tool this attempt ran, and the
-            # media the model generated, which the completion event is the only
-            # place a stream carries.
-            #
-            # Media splits the two questions, exactly as it does on the blocking
-            # pair: it banks the lesson, because the provider answered, and it
-            # does not clear the empty-run verdict, because no delivery path
-            # renders it and a non-empty turn with no document is silence.
-            canonical_text = _current_canonical_partial_text()
-            stream_delivered_answer = bool(
-                canonical_text or _team_stream_ran_a_tool(presentation.tool_tracker, completed_tool_executions),
-            )
-            stream_produced_answer = stream_delivered_answer or (
-                completed_run_event is not None and carries_media_answer(completed_run_event)
-            )
-            if pending_retry_decision is not None and stream_produced_answer:
-                pending_retry_decision.record_retry_success()
-            if emitted_output and ctx.reply_to_event_id:
-                _persist_bound_seen_event_ids(
-                    scope_context=run.scope_context,
-                    session_id=ctx.session_id,
-                    event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
-                )
-            # Real Agno team streams end without a terminal run output, so this
-            # is the resolution point where the empty-run guard must fire.
-            end_metadata_content: dict[str, Any] | None = None
-            if run_metadata_collector is not None:
-                end_metadata_content = _build_streamed_team_run_metadata_content(
-                    config=config,
-                    prepared_execution=prepared_execution,
-                    completed_run_event=completed_run_event,
-                    usage=usage,
-                    run_id=(completed_run_event.run_id if completed_run_event is not None else None) or attempt_run_id,
-                    session_id=(completed_run_event.session_id if completed_run_event is not None else None)
-                    or ctx.session_id,
-                    status=RunStatus.completed,
-                    tool_count=len(completed_tool_executions),
-                )
-            yield AttemptResolved(
-                CompletedAttempt(
-                    replayable_text=(
-                        _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
+                yield AttemptResolved(
+                    ExcludedAttempt(
+                        reason=event.reason,
+                        partial_text=_current_canonical_partial_text(),
+                        completed_tools=tuple(completed_tools),
+                        interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
+                        metadata_content=cancelled_metadata_content,
                     ),
-                    has_visible_content=bool(canonical_text),
-                    is_empty=not stream_delivered_answer,
-                    run_id=attempt_run_id,
-                    attempt_run_id=attempt_run_id,
-                    output_tokens=usage.request_metric_totals.get("output_tokens"),
-                    tool_executions=tuple(completed_tool_executions),
-                    completed_tools=tuple(completed_tools),
-                    metadata_content=end_metadata_content,
-                ),
+                )
+                return
+
+            if isinstance(event, TeamRunPausedEvent):
+                if event.team_id and event.team_id != bound_team_id:
+                    continue
+                paused_attempt = paused_attempt_from_event(
+                    event,
+                    fallback_session_id=ctx.session_id,
+                    fallback_run_id=attempt_run_id,
+                )
+                if paused_attempt is not None:
+                    paused_attempt = _continued_team_pause(presentation, paused_attempt)
+                    if paused_attempt.response_text:
+                        yield StructuredStreamChunk(
+                            content=paused_attempt.response_text,
+                            tool_trace=list(paused_attempt.tool_trace),
+                            presentation_state=paused_attempt.response_presentation_state,
+                        )
+                    yield AttemptResolved(
+                        replace(
+                            paused_attempt,
+                            runtime_model_name=prepared_execution.runtime_model_name,
+                            team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                        ),
+                    )
+                    return
+                yield AttemptResolved(
+                    ExcludedAttempt(
+                        original_status=RunStatus.paused,
+                        response_text=str(event.content or ""),
+                        partial_text=_current_canonical_partial_text() or str(event.content or ""),
+                        completed_tools=tuple(completed_tools),
+                        interrupted_tools=tuple(pending.trace_entry for pending in pending_tools),
+                        session_id=event.session_id,
+                        run_id=event.run_id or attempt_run_id,
+                    ),
+                )
+                return
+
+            if isinstance(event, AgentRunContentEvent):
+                member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
+                content = str(event.content or "")
+                canonical_per_member[member_id] += content
+                presentation.append_member(member_id, content)
+            elif isinstance(event, AgentToolCallStartedEvent):
+                member_name = event.agent_name
+                member_id = presentation.resolve_member_id(event.agent_id, member_name)
+                _emit_tool_timing(
+                    phase="agno_tool_call_started",
+                    tool_scope="member",
+                    agent_name=member_name,
+                    tool=event.tool,
+                )
+                presentation.start_member_tool(member_id, event.tool)
+            elif isinstance(event, AgentToolCallCompletedEvent):
+                member_name = event.agent_name
+                member_id = presentation.resolve_member_id(event.agent_id, member_name)
+                _emit_tool_timing(
+                    phase="agno_tool_call_completed",
+                    tool_scope="member",
+                    agent_name=member_name,
+                    tool=event.tool,
+                )
+                if event.tool is not None:
+                    completed_tool_executions.append(event.tool)
+                presentation.complete_member_tool(member_id, event.tool)
+            elif isinstance(event, TeamRunContentEvent):
+                if event.content:
+                    content = str(event.content)
+                    canonical_consensus += content
+                    presentation.append_consensus(content)
+                else:
+                    logger.debug("Empty team consensus event received")
+            elif isinstance(event, TeamToolCallStartedEvent):
+                _emit_tool_timing(
+                    phase="agno_tool_call_started",
+                    tool_scope="team",
+                    agent_name=None,
+                    tool=event.tool,
+                )
+                presentation.start_tool("team", event.tool)
+            elif isinstance(event, TeamToolCallCompletedEvent):
+                _emit_tool_timing(
+                    phase="agno_tool_call_completed",
+                    tool_scope="team",
+                    agent_name=None,
+                    tool=event.tool,
+                )
+                if event.tool is not None:
+                    completed_tool_executions.append(event.tool)
+                presentation.complete_tool("team", event.tool)
+            elif isinstance(event, TeamRunCompletedEvent):
+                # Real Agno team streams never yield a terminal run output;
+                # this event is the stream's usage/identity source instead.
+                if event.team_id in (None, "", bound_team_id):
+                    completed_run_event = event
+                    holder.attempt_run_id = event.run_id or attempt_run_id
+                continue
+            elif isinstance(event, TeamModelRequestCompletedEvent):
+                usage.track(event)
+                continue
+            else:
+                logger.debug("ignoring_team_stream_event_type", event_type=type(event).__name__)
+                continue
+
+            _sync_live_turn_recorder()
+            rendered_body = presentation.render_body()
+            if rendered_body:
+                emitted_output = True
+                yield StructuredStreamChunk(
+                    content=rendered_body,
+                    tool_trace=presentation.tool_trace.copy(),
+                    presentation_state=presentation.to_state(),
+                )
+
+        if emitted_output and ctx.reply_to_event_id:
+            _persist_bound_seen_event_ids(
+                scope_context=run.scope_context,
+                session_id=ctx.session_id,
+                event_ids=[ctx.reply_to_event_id, *unseen_event_ids],
             )
-            return
+        canonical_text = _current_canonical_partial_text()
+        # Real Agno team streams end without a terminal run output, so this
+        # is the resolution point where the empty-run guard must fire.
+        end_metadata_content: dict[str, Any] | None = None
+        if run_metadata_collector is not None:
+            end_metadata_content = _build_streamed_team_run_metadata_content(
+                config=config,
+                prepared_execution=prepared_execution,
+                completed_run_event=completed_run_event,
+                usage=usage,
+                run_id=(completed_run_event.run_id if completed_run_event is not None else None) or attempt_run_id,
+                session_id=(completed_run_event.session_id if completed_run_event is not None else None)
+                or ctx.session_id,
+                status=RunStatus.completed,
+                tool_count=len(completed_tool_executions),
+            )
+        yield AttemptResolved(
+            CompletedAttempt(
+                replayable_text=(
+                    _format_team_header(team_members.display_names) + canonical_text if canonical_text else ""
+                ),
+                has_visible_content=bool(canonical_text),
+                is_empty=not emitted_output and not completed_tool_executions,
+                run_id=attempt_run_id,
+                attempt_run_id=attempt_run_id,
+                output_tokens=usage.request_metric_totals.get("output_tokens"),
+                tool_executions=tuple(completed_tool_executions),
+                completed_tools=tuple(completed_tools),
+                metadata_content=end_metadata_content,
+            ),
+        )
+        return
 
     async def _finalize_team_stream_attempt(scope_context: ScopeSessionContext | None) -> None:
         if not holder.attempt_started:
@@ -4056,6 +3780,8 @@ __all__ = [
     "continue_paused_team_run",
     "decide_team_formation",
     "format_team_response",
+    "is_cancelled_run_output",
+    "is_errored_run_output",
     "materialize_exact_team_members",
     "prepare_materialized_team_execution",
     "resolve_configured_team",

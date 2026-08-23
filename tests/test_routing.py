@@ -139,20 +139,12 @@ def _agent_description_config() -> Config:
     )
 
 
-def test_run_output_status_seam_exports_the_shared_status_helpers() -> None:
-    """The status predicates should live on one leaf seam both blocking drivers can import.
-
-    They used to hang off `mindroom.teams`, which forced the agent driver to
-    either import the team module or write its own comparison — and it wrote its
-    own, with a different answer.
-    """
-    status_module = importlib.import_module("mindroom.run_output_status")
+def test_teams_public_seam_exports_status_helpers() -> None:
+    """The declared teams seam should export the fallback status helpers it exposes elsewhere."""
     teams_module = importlib.import_module("mindroom.teams")
 
-    assert "is_cancelled_run_output" in status_module.__all__
-    assert "is_errored_run_output" in status_module.__all__
-    assert "media_free_retry_succeeded" in status_module.__all__
-    assert "is_cancelled_run_output" not in teams_module.__all__
+    assert "is_cancelled_run_output" in teams_module.__all__
+    assert "is_errored_run_output" in teams_module.__all__
 
 
 def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
@@ -167,7 +159,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "attach_media_to_run_input",
             "copy_run_input",
             "cached_agent_run",
-            "append_inline_media_fallback_to_run_input",
             "get_model_instance",
             "install_queued_message_notice_hook",
             "queued_message_signal_context",

@@ -684,15 +684,7 @@ def install_llm_request_logging(
     default_log_dir: Path,
     configured_provider: str | None = None,
 ) -> None:
-    """Wrap one model for usage telemetry and optional full request logging.
-
-    The wrappers are ``partial`` objects over the bound originals rather than
-    closures: Agno deep-copies models routinely (``Model.__deepcopy__``), and
-    ``deepcopy`` rebinds a partial's arguments through the memo while a closure
-    would keep sending the copy's calls to the instance it was installed on.
-    Hooks installed on top of this one (``model_media_guard``) capture whatever
-    ``ainvoke`` is here, so a closure would pin the whole chain to the source.
-    """
+    """Wrap one model for usage telemetry and optional full request logging."""
     model_dict = vars(model)
     if model_dict.get(_INSTALLED_ATTR) is True:
         return
