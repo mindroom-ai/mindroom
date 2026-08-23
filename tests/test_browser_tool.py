@@ -333,7 +333,7 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    parameters = tool.async_functions["browser"].parameters
+    parameters = tool.async_functions["browser_control"].parameters
     properties = parameters["properties"]
 
     action_schema = properties["action"]
@@ -351,12 +351,12 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
 def test_browser_schema_description_requires_registered_browser_function() -> None:
     """BrowserTools should fail fast if the browser entrypoint is missing."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
-    function = tool.async_functions.pop("browser")
+    function = tool.async_functions.pop("browser_control")
     try:
         with pytest.raises(RuntimeError, match="Browser function was not registered"):
             tool._describe_browser_schema()
     finally:
-        tool.async_functions["browser"] = function
+        tool.async_functions["browser_control"] = function
 
 
 def test_browser_docstring_lists_discovery_actions() -> None:

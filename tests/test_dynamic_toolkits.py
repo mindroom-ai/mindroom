@@ -1442,6 +1442,24 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrow
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
+def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) -> None:
+    """The deferred browser function must not collide with Codex's reserved browser namespace."""
+    raw = _base_config_data()
+    raw["models"]["codex"] = {"provider": "codex", "id": "gpt-5.6"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "codex"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{"browser": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    function_names = {
+        name for toolkit in agent.tools for name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
+    assert "browser_control" in function_names
+    assert "browser" not in function_names
+    assert vars(agent.model)[_OPENAI_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"browser_control"})
+
+
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:
     """Voice-style immutable schemas expose deferred tools without load_tool."""
     raw = _base_config_data()
