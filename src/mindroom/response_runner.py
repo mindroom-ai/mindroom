@@ -33,6 +33,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -348,8 +349,9 @@ def _with_silent_schedule_delivery(
         EnrichmentItem(
             key=enrichment_key,
             text=(
-                "Return no text when this scheduled check completes routinely without findings. "
-                "Report findings or failures normally."
+                f"Return exactly {SILENT_SCHEDULE_NO_REPLY_TOKEN} when this scheduled check completes "
+                "routinely without findings. Report findings or failures normally, and do not include "
+                f"{SILENT_SCHEDULE_NO_REPLY_TOKEN} with a report."
             ),
             persist=False,
         ),

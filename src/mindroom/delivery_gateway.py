@@ -1280,7 +1280,10 @@ class DeliveryGateway:
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
-        if draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND and not draft.response_text.strip():
+        if (
+            draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+            and constants.is_silent_schedule_no_report_response(draft.response_text)
+        ):
             draft.suppress = True
         if draft.suppress:
             self.deps.logger.info(

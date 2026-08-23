@@ -12,6 +12,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
@@ -91,6 +92,7 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     assert "room-level root" in new_thread_description
     assert "hidden" in silent_description
     assert "whitespace" in silent_description
+    assert SILENT_SCHEDULE_NO_REPLY_TOKEN.lower() in silent_description
     assert "findings" in silent_description
     assert "failures" in silent_description
     assert "infer" in silent_description

@@ -96,7 +96,7 @@ def test_silent_new_thread_confirmation_describes_actual_visible_placement() -> 
         config=Config(),
     )
 
-    assert "**Mode:** Silent (hidden trigger; whitespace-only final omitted)" in response
+    assert "**Mode:** Silent (hidden trigger; no-report final omitted)" in response
     assert "**Delivery:** Room-level roots for findings/failures" in response
     assert "New thread per fire" not in response
 

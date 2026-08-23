@@ -19,7 +19,12 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.constants import (
+    DURABLE_FINAL_OUTCOME_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+)
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -219,8 +224,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             extra_content=None,
         )
 
-    @pytest.mark.parametrize("text", ["", " \n\t"])
-    async def test_silent_schedule_whitespace_is_suppressed_after_hooks(
+    @pytest.mark.parametrize(
+        "text",
+        ["", " \n\t", SILENT_SCHEDULE_NO_REPLY_TOKEN, f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n"],
+    )
+    async def test_silent_schedule_no_report_response_is_suppressed_after_hooks(
         self,
         tmp_path: Path,
         text: str,
@@ -246,7 +254,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         ("text", "source_kind"),
         [
             ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
             ("", MESSAGE_SOURCE_KIND),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
         ],
     )
     async def test_silent_findings_and_ordinary_empty_responses_deliver_normally(
@@ -255,7 +266,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         text: str,
         source_kind: str,
     ) -> None:
-        """Automatic suppression is limited to whitespace from the silent source."""
+        """Automatic suppression never swallows findings or ordinary responses."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
@@ -269,8 +280,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.suppressed is False
         send.assert_awaited_once()
 
-    async def test_silent_schedule_hook_finding_delivers_after_empty_generation(self, tmp_path: Path) -> None:
-        """A before-response hook can turn an empty silent completion into a visible finding."""
+    @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
+    async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(
+        self,
+        tmp_path: Path,
+        generated_text: str,
+    ) -> None:
+        """A before-response hook can turn a silent completion into a visible finding."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         hooks = self._hooks()
@@ -285,12 +301,37 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await gateway.deliver_final(
-                self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+                self._final_request(generated_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
 
         assert outcome.terminal_status == "completed"
         assert outcome.event_id == "$sent"
         assert send.await_args.args[2]["body"] == "Finding from hook"
+
+    async def test_silent_schedule_hook_can_replace_a_finding_with_no_reply(self, tmp_path: Path) -> None:
+        """The no-report acknowledgment is interpreted after before-response hooks."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def replace_with_no_reply(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = SILENT_SCHEDULE_NO_REPLY_TOKEN
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_with_no_reply)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request("Finding", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outbox.rows == {}
+        send.assert_not_awaited()
 
     async def test_explicit_hook_suppression_wins_for_silent_schedule_finding(self, tmp_path: Path) -> None:
         """Explicit suppression remains authoritative even when a hook adds visible text."""
@@ -317,10 +358,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         send.assert_not_awaited()
 
     @pytest.mark.parametrize("with_placeholder", [False, True])
+    @pytest.mark.parametrize("response_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
     async def test_silent_schedule_before_hook_failure_is_durably_visible(
         self,
         tmp_path: Path,
         with_placeholder: bool,
+        response_text: str,
     ) -> None:
         """A hook exception publishes one generic terminal error through the final outbox stage."""
         gateway = _gateway(tmp_path, FakeOutbox())
@@ -330,7 +373,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         send_text = AsyncMock(return_value="$failure")
         edit_text = AsyncMock(return_value=True)
         request = replace(
-            self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            self._final_request(response_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             existing_event_id="$placeholder" if with_placeholder else None,
             existing_event_is_placeholder=with_placeholder,
         )

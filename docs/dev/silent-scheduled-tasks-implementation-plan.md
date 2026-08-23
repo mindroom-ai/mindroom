@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add durable scheduled runs that leave no visible trigger and suppress successful empty responses while preserving findings and failures.
+**Goal:** Add durable scheduled runs that leave no visible trigger and suppress successful no-report responses while preserving findings and failures.
 
 **Architecture:** Persist a `silent` schedule flag and transport silent fires as a custom Matrix timeline event that clients do not render.
 The event journal owns that custom event as turn-backed work, normalizes it into the existing text pipeline, and carries a distinct source kind into non-streaming empty-aware response delivery.
@@ -15,7 +15,7 @@ The event journal owns that custom event as turn-backed work, normalizes it into
 
 Normal schedules must retain their current visible `m.room.message` behavior.
 Previously persisted schedules must deserialize with `silent=False`.
-Only successful whitespace-only silent responses may be suppressed, while failures and explicit tool-posted messages remain visible.
+Only successful empty, whitespace-only, or exact `NO_REPLY` silent responses may be suppressed, while failures and explicit tool-posted messages remain visible.
 Silent `new_thread` findings become visible room-level roots because the hidden trigger cannot be a visible thread root.
 No new runtime dependency is allowed.
 Markdown documentation uses one sentence per line.
@@ -242,7 +242,7 @@ Run `git status --short`, scan the exact diff, stage only the seven Task 3 files
 - Consumes: `SILENT_SCHEDULE_SOURCE_KIND` from Task 2, preserved through Task 3 dispatch.
 - Produces: `ResponseTurnContext.allow_empty_response: bool = False`.
 - Produces: a non-persistent `EnrichmentItem` keyed `silent_schedule_delivery`.
-- Produces: automatic final suppression only when the source kind is silent scheduled and transformed response text is whitespace-only.
+- Produces: automatic final suppression only when the source kind is silent scheduled and transformed response text is empty, whitespace-only, or exactly `NO_REPLY`.
 
 - [ ] **Step 1: Write failing response-driver tests**
 
@@ -276,18 +276,18 @@ Assert silent scheduled requests add the system instruction, set `allow_empty_re
 
 - [ ] **Step 5: Implement quiet execution policy**
 
-Append an `EnrichmentItem` with `persist=False` that tells the entity to return no text for routine no-finding outcomes and to report findings or failures normally.
+Append an `EnrichmentItem` with `persist=False` that tells the entity to return exactly `NO_REPLY` for routine no-finding outcomes and to report findings or failures normally.
 Derive `allow_empty_response` from the immutable response envelope source kind.
 Resolve `use_streaming=False` before both agent and team streaming branches when that source kind is present.
 
 - [ ] **Step 6: Write failing final-delivery tests**
 
-Assert empty and whitespace-only silent responses return a suppressed cancelled outcome with no Matrix send, nonempty silent responses use normal durable delivery, and ordinary empty responses are not auto-suppressed.
+Assert empty, whitespace-only, and exact `NO_REPLY` silent responses return a suppressed cancelled outcome with no Matrix send, nonempty silent responses use normal durable delivery, and ordinary empty responses are not auto-suppressed.
 Assert a before-response hook that transforms empty text into a finding causes delivery, while explicit hook suppression still wins.
 
 - [ ] **Step 7: Implement final suppression after hook transformation**
 
-Run before-response hooks first, then set `draft.suppress=True` when the resulting text is whitespace-only and `draft.envelope.source_kind` is the silent scheduled source.
+Run before-response hooks first, then set `draft.suppress=True` when the resulting text is empty, whitespace-only, or exactly `NO_REPLY` and `draft.envelope.source_kind` is the silent scheduled source.
 Reuse the existing suppressed-delivery cleanup and source-settlement path.
 
 - [ ] **Step 8: Run Task 4 tests and confirm GREEN**

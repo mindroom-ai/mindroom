@@ -3,7 +3,7 @@
 ## Goal
 
 Add a per-schedule `silent` mode that runs an agent without posting the scheduled trigger as a visible Matrix message.
-Silent schedules should publish a final agent response only when the run produces non-whitespace output.
+Silent schedules should publish a final agent response only when the run has something to report.
 Scheduled execution failures and messages explicitly posted by tools must remain visible.
 
 ## Non-goals
@@ -54,23 +54,24 @@ Conversation target resolution treats a room-level silent trigger as room mode s
 ## Quiet response policy
 
 Silent scheduled turns use a distinct trusted automation source kind.
-The response payload adds a non-persistent system instruction telling the entity to return no text when the check has nothing to report and to report findings or failures normally.
+The response payload adds a non-persistent system instruction telling the entity to return exactly `NO_REPLY` when the check has nothing to report and to report findings or failures normally.
 Silent scheduled turns disable streaming so placeholders and incremental tool narration cannot become visible before the final result is known.
 The shared response driver accepts the first completed empty run for this source kind instead of retrying it or generating the empty-response notice.
-Final delivery suppresses a silent scheduled response when its text is empty or whitespace-only, regardless of internal tool trace metadata.
+After before-response hooks run, final delivery suppresses a silent scheduled response when its entire trimmed text is empty or exactly `NO_REPLY`, regardless of internal tool trace metadata.
+The acknowledgment comparison is case-insensitive, but decorated tokens and responses that merely mention `NO_REPLY` are delivered normally.
 Nonempty final text follows the normal durable delivery path, and tools that explicitly send Matrix messages remain unaffected.
 
 ## Failure behavior
 
 Failure to send or admit the custom trigger produces the existing visible scheduled-task failure notice.
-Model, tool, or response-generation failures continue through existing visible error handling because only successful whitespace-only final responses are suppressed.
+Model, tool, hook, or response-generation failures continue through existing visible error handling because no-report suppression applies only to successful final responses.
 One-time schedules are marked completed only after the custom trigger is accepted by Matrix, matching the current trigger-delivery boundary.
 
 ## Testing
 
 Scheduling tests cover persistence defaults, explicit create and edit overrides, list rendering, hook transformation, normal transport stability, and custom-event transport.
 Journal tests cover live admission, cold-history rejection, replay, malformed content, security metadata preservation, and turn-backed settlement.
-Turn and delivery tests cover non-streaming selection, system guidance, first-empty acceptance, whitespace suppression, nonempty findings, and visible failures.
+Turn and delivery tests cover non-streaming selection, system guidance, first-empty acceptance, exact no-report acknowledgment suppression, nonempty findings, and visible failures.
 Compatibility tests prove ordinary schedules and ordinary empty responses retain their current behavior.
 
 ## Security and privacy

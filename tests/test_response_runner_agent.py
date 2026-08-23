@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -226,7 +227,7 @@ class TestAgentBot(AgentBotTestBase):
         if delivery_items:
             instruction = delivery_items[0]
             assert instruction.persist is False
-            assert "no text" in instruction.text.lower()
+            assert SILENT_SCHEDULE_NO_REPLY_TOKEN in instruction.text
             assert "findings" in instruction.text.lower()
             assert "failures" in instruction.text.lower()
 
@@ -2245,12 +2246,21 @@ class TestAgentBot(AgentBotTestBase):
         assert run_attempt.await_args.kwargs["show_stop_button"] is expects_streaming
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("response_text", "expected_event_id"),
+        [
+            ("Finding", "$response"),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, None),
+        ],
+    )
     async def test_silent_schedule_agent_default_path_emits_only_final_finding(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        response_text: str,
+        expected_event_id: str | None,
     ) -> None:
-        """Default agent progress features stay hidden until a real finding is final."""
+        """Default agent progress stays hidden, including explicit no-report acknowledgments."""
         typing_events: list[str] = []
 
         @asynccontextmanager
@@ -2269,7 +2279,7 @@ class TestAgentBot(AgentBotTestBase):
         replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         add_stop_button = AsyncMock(return_value=None)
         bot.stop_manager.add_stop_button = add_stop_button
-        mock_ai_response = AsyncMock(return_value="Finding")
+        mock_ai_response = AsyncMock(return_value=response_text)
 
         with (
             patch_response_runner_module(
@@ -2304,12 +2314,13 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert response_event_id == "$response"
+        assert response_event_id == expected_event_id
         assert mock_ai_response.await_args.args[0].allow_empty_response is True
         assert mock_ai_response.await_args.kwargs["compaction_lifecycle"] is None
         assert typing_events == []
-        assert send_text.await_count == 1
-        assert send_text.await_args.args[-1].response_text == "Finding"
+        assert send_text.await_count == int(expected_event_id is not None)
+        if expected_event_id is not None:
+            assert send_text.await_args.args[-1].response_text == "Finding"
         edit_text.assert_not_awaited()
         redact_message_event.assert_not_awaited()
         add_stop_button.assert_not_awaited()

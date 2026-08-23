@@ -50,10 +50,10 @@ class SchedulerTools(Toolkit):
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
                 polling tasks), or leave unset for full history.
-            silent: Keep the trigger hidden and omit a final response when it is empty or
-                whitespace-only. Findings, failures, and independently sent tool
-                messages remain visible. Leave unset to infer the mode from the
-                scheduling request.
+            silent: Keep the trigger hidden and omit a final response when it is empty,
+                whitespace-only, or exactly `NO_REPLY`. Findings, failures, and
+                independently sent tool messages remain visible. Leave unset to infer
+                the mode from the scheduling request.
 
         Returns:
             The scheduling result message.
@@ -94,9 +94,9 @@ class SchedulerTools(Toolkit):
                 the task fires. Use 0 for no history. Leave unset to keep the task's
                 existing history limit. To restore full history, say so in request.
             silent: Whether to update quiet delivery. Silent tasks hide their trigger
-                and omit empty or whitespace-only finals while keeping findings,
-                failures, and independently sent tool messages visible. Leave unset
-                to preserve the existing mode.
+                and omit empty, whitespace-only, or exact `NO_REPLY` finals while
+                keeping findings, failures, and independently sent tool messages
+                visible. Leave unset to preserve the existing mode.
 
         Returns:
             The edit result message.
