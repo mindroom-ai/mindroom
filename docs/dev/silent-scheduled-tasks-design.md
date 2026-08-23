@@ -34,6 +34,7 @@ Silent schedules send a dedicated `io.mindroom.scheduled.trigger` timeline event
 Matrix clients ignore the custom event because it is not a room-message event, so the task body does not create a visible timeline entry.
 The Matrix client encrypts custom event types in encrypted rooms using the same room-send path used for messages.
 The `schedule:fired` hook still runs before transport and can transform `message_text` or cancel the entire fire through its existing `suppress` contract.
+A hook-transformed message that is empty or whitespace-only fails visibly before transport instead of being accepted as a delivered trigger.
 
 ## Durable journal dispatch
 

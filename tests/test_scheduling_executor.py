@@ -419,6 +419,36 @@ async def test_silent_hook_transform_is_sent_as_custom_event(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_empty_hook_transform_fails_before_silent_trigger_transport(tmp_path: Path) -> None:
+    """An empty hook rewrite must not be accepted as a successfully fired silent task."""
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def empty(ctx: ScheduleFiredContext) -> None:
+        ctx.message_text = " \n\t"
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [empty])]))
+
+    with patch(
+        "mindroom.scheduling_executor.send_matrix_message",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$failure")),
+    ) as mock_send:
+        outcome = await execute_scheduled_workflow(
+            AsyncMock(),
+            _workflow("Original schedule", new_thread=True, silent=True),
+            config,
+            runtime_paths_for(config),
+            _conversation_reader(),
+        )
+
+    assert outcome.delivered is False
+    assert outcome.failure_reason == "Scheduled workflow message is empty after hooks"
+    mock_send.assert_awaited_once()
+    assert "message_type" not in mock_send.await_args.kwargs
+    assert mock_send.await_args.args[2]["body"].startswith("❌ Scheduled task failed:")
+
+
+@pytest.mark.asyncio
 async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
     """Hook suppression yields an undelivered outcome without sending anything."""
 

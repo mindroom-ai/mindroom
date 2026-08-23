@@ -63,6 +63,13 @@ def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
     raise RuntimeError(msg)
 
 
+def _validate_scheduled_workflow_message(message_text: str) -> None:
+    """Reject an empty trigger body before Matrix accepts it as delivered."""
+    if not message_text.strip():
+        msg = "Scheduled workflow message is empty after hooks"
+        raise ValueError(msg)
+
+
 async def _build_workflow_message_content(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
@@ -212,6 +219,7 @@ async def execute_scheduled_workflow(
                     return ScheduledWorkflowOutcome(delivered=False, failure_reason="suppressed by hook")
                 message_text = context.message_text
 
+            _validate_scheduled_workflow_message(message_text)
             content = await _build_workflow_message_content(
                 workflow,
                 target,
