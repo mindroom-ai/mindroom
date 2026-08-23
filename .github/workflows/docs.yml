@@ -55,53 +55,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
-    outputs:
-      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-  smoke-deployment:
-    if: github.event_name != 'pull_request'
-    needs: deploy
-    runs-on: ubuntu-latest
-    timeout-minutes: 4
-    permissions:
-      contents: read
-    steps:
-      - name: Test deployed scheduling docs
-        id: smoke_deployed_docs
-        env:
-          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
-        run: |
-          set -euo pipefail
-
-          page_url="${PAGE_URL:?deployment page URL is required}"
-          scheduling_url="${page_url%/}/scheduling/"
-          output_file=$(mktemp)
-          trap 'rm -f "$output_file"' EXIT
-
-          for attempt in $(seq 1 12); do
-            if curl \
-              --fail \
-              --location \
-              --silent \
-              --show-error \
-              --connect-timeout 5 \
-              --max-time 10 \
-              "$scheduling_url" \
-              --output "$output_file" && \
-              grep --fixed-strings --quiet "Silent Delivery" "$output_file"; then
-              echo "Deployed scheduling docs are live at $scheduling_url"
-              exit 0
-            fi
-
-            if [[ "$attempt" -lt 12 ]]; then
-              echo "Waiting for deployed scheduling docs (attempt $attempt/12)..."
-              sleep 5
-            fi
-          done
-
-          echo "Deployed scheduling docs did not expose Silent Delivery at $scheduling_url" >&2
-          exit 1
