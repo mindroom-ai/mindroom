@@ -9978,7 +9978,7 @@
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [
-        "browser"
+        "browser_control"
       ],
       "helper_text": null,
       "icon": "FaChrome",
