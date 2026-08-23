@@ -112,6 +112,7 @@ from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
+from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
@@ -2782,6 +2783,14 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_media_capabilities() -> Generator[None, None, None]:
+    """Keep process-local learned media support isolated per test."""
+    reset_model_media_capability_cache()
+    yield
+    reset_model_media_capability_cache()
 
 
 _LEDGER_LOADING_TEST_MODULES = frozenset(

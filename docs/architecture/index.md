@@ -56,7 +56,7 @@ MindRoom's architecture consists of several key components working together.
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
+| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -93,7 +93,7 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Installs one provider-boundary retry without inline media when a model rejects media inputs |
+| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |

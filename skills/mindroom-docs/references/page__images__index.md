@@ -74,9 +74,12 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-The provider-boundary fallback retries once for a typed HTTP client error, except authentication, authorization, rate-limit, transient, and safeguard failures.
-Streaming requests retry only if the provider fails before returning the first chunk.
-MindRoom does not cache assumptions about a model's media support, so each request starts with the attachments the caller supplied.
+Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
+Provider safeguard refusals are returned as refusals and are not retried without media.
+When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+This learned capability state is process-local and resets on restart.
+Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
+Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
 
 ## Limitations
 

@@ -1,12 +1,13 @@
 """Shared response-turn drivers for the agent and team envelopes.
 
 One inbound response turn has the same lifecycle regardless of which entity
-answers it: open the scope session, run prepared attempts, decide whether the
-turn continues after a dynamic-tool call or a discarded empty run, record the
-outcome on the turn recorder, and persist an interrupted replay when the turn
-is cancelled without a recorder. This module owns that lifecycle exactly once;
-``mindroom.ai`` and ``mindroom.teams`` supply thin adapters carrying the
-entity-specific attempt bodies as injected callables.
+answers it: open the scope session, run prepared attempts (each attempt owns
+its own media-fallback retries), decide whether the turn continues after a
+dynamic-tool call or a discarded empty run, record the outcome on the turn
+recorder, and persist an interrupted replay when the turn is cancelled without
+a recorder. This module owns that lifecycle exactly once; ``mindroom.ai`` and
+``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
+bodies as injected callables.
 
 ``ResponseTurnContext`` is the per-turn identity carrier built once by the
 caller that owns the turn: the drivers consume its Matrix-identity fields,

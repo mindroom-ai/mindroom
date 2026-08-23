@@ -20,11 +20,13 @@ from agno.session.team import TeamSession
 
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_fallback import append_inline_media_fallback_prompt
+from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
 
     from mindroom.history.runtime import ScopeSessionContext
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
     "ModelRunInput",
+    "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
     "copy_run_input",
@@ -39,6 +42,7 @@ __all__ = [
     "finalize_queued_notice_response_turn_async",
     "install_queued_message_notice_hook",
     "is_empty_completed_run",
+    "media_inputs_from_run_input",
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
@@ -81,6 +85,49 @@ def attach_media_to_run_input(
     current_message.images = media_inputs.images
     current_message.files = media_inputs.files
     current_message.videos = media_inputs.videos
+    return run_messages
+
+
+def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
+    """Collect media attached to canonical run-input messages.
+
+    Agent and team paths inspect the collected kinds for media-capability
+    routing while preserving media on its canonical message.
+    """
+    if isinstance(run_input, str):
+        return MediaInputs()
+    audio: list[Audio] = []
+    images: list[Image] = []
+    files: list[File] = []
+    videos: list[Video] = []
+    for message in run_input:
+        audio.extend(message.audio or ())
+        images.extend(message.images or ())
+        files.extend(message.files or ())
+        videos.extend(message.videos or ())
+    return MediaInputs.from_optional(audio=audio, images=images, files=files, videos=videos)
+
+
+def append_inline_media_fallback_to_run_input(
+    run_input: ModelRunInput,
+    *,
+    fallback_prompt: str,
+    removed_kinds: frozenset[MediaKind],
+) -> list[Message]:
+    """Strip rejected media kinds from all run-input messages and append the fallback note."""
+    run_messages = copy_run_input(run_input)
+    for message in run_messages:
+        if "audio" in removed_kinds:
+            message.audio = None
+        if "image" in removed_kinds:
+            message.images = None
+        if "file" in removed_kinds:
+            message.files = None
+        if "video" in removed_kinds:
+            message.videos = None
+    current_message = run_messages[-1]
+    current_text = current_message.content if isinstance(current_message.content, str) else ""
+    current_message.content = append_inline_media_fallback_prompt(current_text, fallback_prompt=fallback_prompt)
     return run_messages
 
 

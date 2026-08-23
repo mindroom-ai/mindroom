@@ -466,17 +466,10 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
         test_runtime_paths(tmp_path),
     )
 
-    with (
-        patch("mindroom.model_loading.install_llm_request_logging") as install_logging,
-        patch("mindroom.model_loading.install_model_media_fallback") as install_media_fallback,
-    ):
+    with patch("mindroom.model_loading.install_llm_request_logging") as install_logging:
         model = get_model_instance(config, runtime_paths_for(config), "default")
 
     install_logging.assert_called_once()
     assert install_logging.call_args.args == (model,)
     assert install_logging.call_args.kwargs["configured_provider"] == "openai"
     assert install_logging.call_args.kwargs["debug_config"].log_llm_requests is False
-    install_media_fallback.assert_called_once_with(
-        model,
-        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
-    )

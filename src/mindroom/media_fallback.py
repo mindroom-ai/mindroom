@@ -1,239 +1,279 @@
-"""Retry one rejected provider request without inline media."""
+"""Shared inline-media fallback and model capability helpers."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from contextvars import ContextVar
-from functools import partial
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.exceptions import ModelProviderError, ModelRateLimitError
-from agno.models.message import Message
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, is_model_safeguard_refusal
-from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.context_bound_streams import close_async_stream
+from mindroom.error_handling import is_model_safeguard_refusal
+from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator
+    from collections.abc import Mapping
 
     from agno.models.base import Model
-    from agno.models.response import ModelResponse
 
-__all__ = ["install_model_media_fallback"]
+__all__ = [
+    "MediaRetryDecision",
+    "ModelMediaRoute",
+    "append_inline_media_fallback_prompt",
+    "build_model_media_route",
+    "filter_media_inputs_for_route",
+    "reset_model_media_capability_cache",
+    "retry_media_inputs_after_failure",
+    "unsupported_media_kinds_for_route",
+]
 
-logger = get_logger(__name__)
-
-_INSTALLED_ATTR = "_mindroom_model_media_fallback_installed"
-_FALLBACK_MARKER = "[Inline media unavailable for this model]"
-_CLIENT_ERROR_STATUS_CODES = range(400, 500)
-_CALLER_REJECTED_STATUS_CODES = frozenset({401, 403})
-_MAX_LOGGED_ERROR_CHARS = 500
-
-# A blocking adapter may implement ``ainvoke`` by consuming its own
-# ``ainvoke_stream`` method.
-# Binding the model during the outer call keeps that delegation from installing
-# a second retry owner around the same provider request.
-_ACTIVE_MODELS: ContextVar[frozenset[int]] = ContextVar(
-    "mindroom_active_media_fallback_models",
-    default=frozenset(),
-)
+_INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
+_PAYLOAD_TOO_LARGE_STATUS = 413
+_RATE_LIMIT_STATUS = 429
+_SERVER_ERROR_STATUS = 500
 
 
-def install_model_media_fallback(model: Model, *, fallback_prompt: str) -> None:
-    """Install one media-free retry around a model's asynchronous wire calls."""
-    model_dict = vars(model)
-    if model_dict.get(_INSTALLED_ATTR) is True:
-        return
+@dataclass(frozen=True, slots=True)
+class ModelMediaRoute:
+    """Concrete model route used for process-local media capability learning."""
 
-    model_dict["ainvoke"] = partial(_fallback_ainvoke, model, model.ainvoke, fallback_prompt)
-    model_dict["ainvoke_stream"] = partial(
-        _fallback_ainvoke_stream,
-        model,
-        model.ainvoke_stream,
-        fallback_prompt,
+    provider: str
+    model_id: str
+    base_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaFilterResult:
+    """Media inputs after route capability filtering."""
+
+    media_inputs: MediaInputs
+    removed_kinds: frozenset[MediaKind]
+
+
+@dataclass(frozen=True, slots=True)
+class MediaRetryDecision:
+    """Retry policy after one provider media failure.
+
+    ``teach_route_on_success`` carries the route whose capability cache should
+    learn ``removed_kinds`` once the without-media retry actually succeeds; the
+    attempt loop reports that via :meth:`record_retry_success`.
+    """
+
+    should_retry: bool
+    media_inputs: MediaInputs
+    removed_kinds: frozenset[MediaKind]
+    teach_route_on_success: ModelMediaRoute | None = None
+
+    def record_retry_success(self) -> None:
+        """Teach the route cache from the successful without-media experiment."""
+        if self.teach_route_on_success is None or not self.removed_kinds:
+            return
+        _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(self.teach_route_on_success, set()).update(self.removed_kinds)
+
+
+# Intentional process-lifetime pessimism: learned negative capability state is cleared by restart.
+_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[MediaKind]] = {}
+
+
+def build_model_media_route(model: Model | None) -> ModelMediaRoute | None:
+    """Return a process-cache key for one effective model route."""
+    if model is None:
+        return None
+
+    provider = _route_text(model.provider) or model.__class__.__name__
+    model_id = _route_text(model.id) or model.__class__.__name__
+    return ModelMediaRoute(
+        provider=provider.lower(),
+        model_id=model_id,
+        base_url=_route_endpoint(model),
     )
-    model_dict[_INSTALLED_ATTR] = True
 
 
-def _fallback_ainvoke(
-    model: Model,
-    original_ainvoke: Callable[..., Coroutine[object, object, ModelResponse]],
+def unsupported_media_kinds_for_route(route: ModelMediaRoute | None) -> frozenset[MediaKind]:
+    """Return media kinds this route has been learned to reject."""
+    if route is None:
+        return frozenset()
+    return frozenset(_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.get(route, set()))
+
+
+def filter_media_inputs_for_route(
+    route: ModelMediaRoute | None,
+    media_inputs: MediaInputs,
+) -> _MediaFilterResult:
+    """Omit learned-unsupported media kinds before a model request."""
+    removed_kinds = unsupported_media_kinds_for_route(route) & media_inputs.kinds()
+    if not removed_kinds:
+        return _MediaFilterResult(media_inputs=media_inputs, removed_kinds=frozenset())
+    return _MediaFilterResult(
+        media_inputs=_without_media_kinds(media_inputs, removed_kinds),
+        removed_kinds=removed_kinds,
+    )
+
+
+def retry_media_inputs_after_failure(
+    route: ModelMediaRoute | None,
+    error: Exception | str,
+    media_inputs: MediaInputs,
+    *,
+    extra_present_kinds: frozenset[MediaKind] = frozenset(),
+) -> MediaRetryDecision:
+    """Decide how one media-bearing request should retry after a failure.
+
+    Every failure of a media-bearing request retries once without media —
+    no error wording decides whether to retry, so unknown provider prose
+    (and streamed run errors that lost their HTTP status) degrade
+    gracefully instead of leaking a raw provider error to the user. The
+    route capability cache learns the dropped kinds once the retry actually
+    succeeds (via :meth:`MediaRetryDecision.record_retry_success`), except
+    when the error names a payload-size or context-overflow cause, where
+    dropping media can succeed for the wrong reason. A kind can only be
+    learned when it was actually present in ``media_inputs`` or
+    ``extra_present_kinds`` (media pinned to thread-history messages in the
+    run input).
+    """
+    if is_model_safeguard_refusal(error):
+        return _no_media_retry_decision(media_inputs)
+    present_kinds = media_inputs.kinds() | extra_present_kinds
+    if not present_kinds:
+        return _no_media_retry_decision(media_inputs)
+
+    teaching_blocked = _capability_teaching_blocked(error, str(error).lower())
+    return MediaRetryDecision(
+        should_retry=True,
+        media_inputs=_without_media_kinds(media_inputs, present_kinds),
+        removed_kinds=present_kinds,
+        teach_route_on_success=None if teaching_blocked else route,
+    )
+
+
+def reset_model_media_capability_cache() -> None:
+    """Clear process-local learned model media capabilities."""
+    _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.clear()
+
+
+def append_inline_media_fallback_prompt(
+    full_prompt: str,
+    *,
     fallback_prompt: str,
-    *args: object,
-    **kwargs: object,
-) -> Coroutine[object, object, ModelResponse]:
-    if id(model) in _ACTIVE_MODELS.get():
-        return original_ainvoke(*args, **kwargs)
-    return _ainvoke_with_media_fallback(model, original_ainvoke, fallback_prompt, args, kwargs)
+) -> str:
+    """Append one-time guidance when inline media had to be dropped."""
+    if _INLINE_MEDIA_FALLBACK_MARKER in full_prompt:
+        return full_prompt
+
+    return f"{full_prompt.rstrip()}\n\n{_INLINE_MEDIA_FALLBACK_MARKER}\n{fallback_prompt}"
 
 
-async def _ainvoke_with_media_fallback(
-    model: Model,
-    original_ainvoke: Callable[..., Coroutine[object, object, ModelResponse]],
-    fallback_prompt: str,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-) -> ModelResponse:
-    messages = _request_messages(args, kwargs)
-    with _active_model(model):
-        try:
-            return await original_ainvoke(*args, **kwargs)
-        except Exception as error:
-            if messages is None or not _has_inline_media(messages) or not _is_retryable_media_failure(error):
-                raise
-            retry_args, retry_kwargs = _media_free_call(args, kwargs, messages, fallback_prompt)
-            _log_retry(model, error)
-            return await original_ainvoke(*retry_args, **retry_kwargs)
+def _no_media_retry_decision(media_inputs: MediaInputs) -> MediaRetryDecision:
+    return MediaRetryDecision(
+        should_retry=False,
+        media_inputs=media_inputs,
+        removed_kinds=frozenset(),
+    )
 
 
-def _fallback_ainvoke_stream(
-    model: Model,
-    original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
-    fallback_prompt: str,
-    *args: object,
-    **kwargs: object,
-) -> AsyncIterator[ModelResponse]:
-    if id(model) in _ACTIVE_MODELS.get():
-        return original_ainvoke_stream(*args, **kwargs)
-    return _stream_with_media_fallback(model, original_ainvoke_stream, fallback_prompt, args, kwargs)
+def _capability_teaching_blocked(error: Exception | str, lowered_error_text: str) -> bool:
+    """Report when a retry success would not prove the media kinds unsupported.
+
+    Payload-size and context-overflow rejections shrink below the limit once
+    media is dropped, and transient failures (5xx outages, 429 rate limits)
+    can pass on the retry because the blip passed — in both cases a
+    successful retry says nothing about media capability. Status codes come
+    from the exception object, never from provider error prose; streamed run
+    errors arrive as bare text without a status and stay eligible to teach.
+    """
+    if isinstance(error, ContextWindowExceededError):
+        return True
+    if isinstance(error, ModelProviderError) and (
+        error.status_code in (_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS)
+        or error.status_code >= _SERVER_ERROR_STATUS
+    ):
+        return True
+    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
+        return True
+    return any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
 
 
-async def _stream_with_media_fallback(
-    model: Model,
-    original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
-    fallback_prompt: str,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-) -> AsyncGenerator[ModelResponse, None]:
-    messages = _request_messages(args, kwargs)
-    with _active_model(model):
-        stream = original_ainvoke_stream(*args, **kwargs)
-    produced = False
-    failure: Exception | None = None
-    try:
-        while True:
-            try:
-                chunk = await _next_with_active_model(model, stream)
-            except StopAsyncIteration:
-                return
-            except Exception as error:
-                if (
-                    produced
-                    or messages is None
-                    or not _has_inline_media(messages)
-                    or not _is_retryable_media_failure(error)
-                ):
-                    raise
-                failure = error
-                break
-            produced = True
-            yield chunk
-    finally:
-        await _close_quietly(model, stream)
-
-    assert failure is not None
-    retry_args, retry_kwargs = _media_free_call(args, kwargs, messages, fallback_prompt)
-    _log_retry(model, failure)
-    with _active_model(model):
-        retry_stream = original_ainvoke_stream(*retry_args, **retry_kwargs)
-    try:
-        while True:
-            try:
-                chunk = await _next_with_active_model(model, retry_stream)
-            except StopAsyncIteration:
-                return
-            yield chunk
-    finally:
-        await _close_quietly(model, retry_stream)
+def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind]) -> MediaInputs:
+    return MediaInputs(
+        audio=() if "audio" in kinds else media_inputs.audio,
+        images=() if "image" in kinds else media_inputs.images,
+        files=() if "file" in kinds else media_inputs.files,
+        videos=() if "video" in kinds else media_inputs.videos,
+    )
 
 
-def _request_messages(args: tuple[object, ...], kwargs: dict[str, object]) -> list[Message] | None:
-    candidate = kwargs.get("messages") if "messages" in kwargs else (args[0] if args else None)
-    if isinstance(candidate, list) and all(isinstance(message, Message) for message in candidate):
-        return cast("list[Message]", candidate)
+# The effective endpoint is dispatched on which endpoint attribute the model
+# exposes, not on its class, so this module never imports provider model
+# classes (and through them provider SDKs) just to route media errors (#1436).
+# Azure models keep the endpoint in azure_endpoint, Ollama in host, most
+# OpenAI-compatible providers in base_url, and Claude/Gemini only carry
+# client_params.
+@runtime_checkable
+class _HasAzureEndpoint(Protocol):
+    azure_endpoint: str | None
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasHost(Protocol):
+    host: str | None
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasBaseUrl(Protocol):
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasClientParams(Protocol):
+    client_params: Mapping[str, object] | None
+
+
+def _route_endpoint(model: Model) -> str | None:
+    if isinstance(model, _HasAzureEndpoint):
+        return _route_endpoint_text(
+            model.azure_endpoint,
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, _HasHost):
+        return _route_endpoint_text(
+            model.host,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, _HasBaseUrl):
+        return _route_endpoint_text(
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, _HasClientParams):
+        return _client_params_endpoint(model.client_params)
     return None
 
 
-def _has_inline_media(messages: list[Message]) -> bool:
-    return any(message.audio or message.images or message.files or message.videos for message in messages)
+def _client_params_endpoint(client_params: Mapping[str, object] | None) -> str | None:
+    if client_params is None:
+        return None
+    for field_name in ("base_url", "host", "azure_endpoint"):
+        candidate = client_params.get(field_name)
+        endpoint = _route_text(candidate) if isinstance(candidate, str) else None
+        if endpoint:
+            return endpoint.rstrip("/")
+    return None
 
 
-def _media_free_call(
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-    messages: list[Message],
-    fallback_prompt: str,
-) -> tuple[tuple[object, ...], dict[str, object]]:
-    retry_messages = [_without_inline_media(message) for message in messages]
-    retry_messages.append(
-        Message(
-            role="user",
-            content=_fallback_note(fallback_prompt),
-            temporary=True,
-        ),
-    )
-    if "messages" in kwargs:
-        return args, {**kwargs, "messages": retry_messages}
-    return (retry_messages, *args[1:]), kwargs
+def _route_endpoint_text(*values: str | None) -> str | None:
+    for value in values:
+        endpoint = _route_text(value)
+        if endpoint:
+            return endpoint.rstrip("/")
+    return None
 
 
-def _without_inline_media(message: Message) -> Message:
-    copy = message.model_copy()
-    copy.audio = None
-    copy.images = None
-    copy.files = None
-    copy.videos = None
-    return copy
-
-
-def _fallback_note(fallback_prompt: str) -> str:
-    if _FALLBACK_MARKER in fallback_prompt:
-        return fallback_prompt
-    return f"{_FALLBACK_MARKER}\n{fallback_prompt}"
-
-
-def _is_retryable_media_failure(error: Exception) -> bool:
-    if not isinstance(error, ModelProviderError) or isinstance(error, ModelRateLimitError):
-        return False
-    if is_model_safeguard_refusal(error):
-        return False
-    if error.status_code in TRANSIENT_PROVIDER_STATUS_CODES or error.status_code in _CALLER_REJECTED_STATUS_CODES:
-        return False
-    return error.status_code in _CLIENT_ERROR_STATUS_CODES
-
-
-@contextmanager
-def _active_model(model: Model) -> Iterator[None]:
-    token = _ACTIVE_MODELS.set(_ACTIVE_MODELS.get() | {id(model)})
-    try:
-        yield
-    finally:
-        _ACTIVE_MODELS.reset(token)
-
-
-async def _next_with_active_model(model: Model, stream: AsyncIterator[ModelResponse]) -> ModelResponse:
-    with _active_model(model):
-        return await anext(stream)
-
-
-async def _close_quietly(model: Model, stream: AsyncIterator[ModelResponse]) -> None:
-    try:
-        with _active_model(model):
-            await close_async_stream(stream)
-    except Exception as error:
-        logger.debug(
-            "Failed to close provider stream",
-            error=redact_sensitive_text(str(error), max_length=_MAX_LOGGED_ERROR_CHARS),
-        )
-
-
-def _log_retry(model: Model, error: Exception) -> None:
-    logger.warning(
-        "Retrying model request without inline media",
-        provider=model.provider,
-        model_id=model.id,
-        status_code=error.status_code if isinstance(error, ModelProviderError) else None,
-        error=redact_sensitive_text(str(error), max_length=_MAX_LOGGED_ERROR_CHARS),
-    )
+def _route_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None

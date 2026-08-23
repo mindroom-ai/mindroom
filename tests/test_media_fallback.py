@@ -1,312 +1,238 @@
-"""Tests for the provider-boundary inline-media fallback."""
+"""Tests for learned model media capability fallback policy."""
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from unittest.mock import MagicMock
 
 import pytest
-from agno.exceptions import ModelProviderError, ModelRateLimitError
-from agno.media import Audio, File, Image, Video
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.media import Audio, Image
 from agno.models.message import Message
-from agno.models.response import ModelResponse
+from agno.models.openai import OpenAIChat
 
-from mindroom.config.models import DebugConfig
+from mindroom import ai_runtime
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
-from mindroom.llm_request_logging import install_llm_request_logging
-from mindroom.media_fallback import install_model_media_fallback
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from pathlib import Path
-
-    from agno.models.base import Model
-
-
-_FALLBACK_PROMPT = "Use available attachment IDs and tools to inspect files instead."
+from mindroom.media_fallback import (
+    ModelMediaRoute,
+    build_model_media_route,
+    filter_media_inputs_for_route,
+    reset_model_media_capability_cache,
+    retry_media_inputs_after_failure,
+    unsupported_media_kinds_for_route,
+)
+from mindroom.media_inputs import MediaInputs
 
 
-@dataclass
-class _FakeModel:
-    id: str = "text-only"
-    provider: str = "test"
-    blocking_outcomes: list[ModelResponse | Exception] = field(default_factory=list)
-    streaming_outcomes: list[list[ModelResponse | Exception] | Exception] = field(default_factory=list)
-    blocking_calls: list[list[Message]] = field(default_factory=list)
-    streaming_calls: list[list[Message]] = field(default_factory=list)
-    closed_streams: int = 0
+def test_unknown_model_route_sends_all_media() -> None:
+    """Unknown route should optimistically keep every supplied media kind."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
 
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        self.blocking_calls.append(list(_messages_from_call(args, kwargs)))
-        outcome = self.blocking_outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
+    filtered = filter_media_inputs_for_route(_route(), media)
 
-    async def ainvoke_stream(self, *args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        self.streaming_calls.append(list(_messages_from_call(args, kwargs)))
-        outcome = self.streaming_outcomes.pop(0)
-        try:
-            if isinstance(outcome, Exception):
-                raise outcome
-            for item in outcome:
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        finally:
-            self.closed_streams += 1
+    assert filtered.media_inputs == media
+    assert filtered.removed_kinds == frozenset()
 
 
-@dataclass
-class _StreamDelegatesToBlockingModel(_FakeModel):
-    async def ainvoke_stream(self, *args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        self.streaming_calls.append(list(_messages_from_call(args, kwargs)))
-        try:
-            yield await self.ainvoke(*args, **kwargs)
-        finally:
-            self.closed_streams += 1
+def test_model_route_includes_provider_model_and_base_url() -> None:
+    """Route construction should key learned support by concrete model endpoint."""
+    model = OpenAIChat(id="qwen-local", base_url="http://localhost:9292/v1/")
 
-
-def _messages_from_call(args: tuple[object, ...], kwargs: dict[str, object]) -> list[Message]:
-    candidate = kwargs.get("messages") if "messages" in kwargs else args[0]
-    assert isinstance(candidate, list)
-    assert all(isinstance(message, Message) for message in candidate)
-    return cast("list[Message]", candidate)
-
-
-def _provider_error(status_code: int = 400, message: str = "inline media is unsupported") -> ModelProviderError:
-    return ModelProviderError(message=message, status_code=status_code)
-
-
-def _media_message() -> Message:
-    return Message(
-        role="user",
-        content='Please inspect this.\n[attachments: att_123 (image, "diagram.png")]',
-        audio=[Audio(content=b"audio", mime_type="audio/ogg")],
-        images=[Image(content=b"image")],
-        files=[File(content=b"file")],
-        videos=[Video(content=b"video")],
+    assert build_model_media_route(model) == ModelMediaRoute(
+        provider="openai",
+        model_id="qwen-local",
+        base_url="http://localhost:9292/v1",
     )
 
 
-def _install(model: _FakeModel) -> None:
-    install_model_media_fallback(cast("Model", model), fallback_prompt=_FALLBACK_PROMPT)
-
-
-async def _consume_into(chunks: list[ModelResponse], stream: AsyncIterator[ModelResponse]) -> None:
-    async for chunk in stream:
-        chunks.append(chunk)  # noqa: PERF401 - Preserve chunks yielded before a failure.
-
-
-@pytest.mark.asyncio
-async def test_blocking_retries_once_without_inline_media_and_preserves_attachment_id() -> None:
-    """A provider rejection gets one media-free retry with attachment text intact."""
-    original = _media_message()
-    model = _FakeModel(blocking_outcomes=[_provider_error(), ModelResponse(content="recovered")])
-    _install(model)
-
-    response = await model.ainvoke(messages=[original])
-
-    assert response.content == "recovered"
-    assert len(model.blocking_calls) == 2
-    assert model.blocking_calls[0] == [original]
-    retry_messages = model.blocking_calls[1]
-    assert "att_123" in str(retry_messages[0].content)
-    assert retry_messages[0].audio is None
-    assert retry_messages[0].images is None
-    assert retry_messages[0].files is None
-    assert retry_messages[0].videos is None
-    assert retry_messages[-1].temporary is True
-    assert "[Inline media unavailable for this model]" in str(retry_messages[-1].content)
-    assert _FALLBACK_PROMPT in str(retry_messages[-1].content)
-    assert original.audio
-    assert original.images
-    assert original.files
-    assert original.videos
-
-
-@pytest.mark.asyncio
-async def test_blocking_retry_does_not_mutate_the_callers_list_or_messages() -> None:
-    """Building the retry request leaves caller-owned messages unchanged."""
-    original = _media_message()
-    messages = [Message(role="system", content="system"), original]
-    original_snapshot = [message.model_copy(deep=True) for message in messages]
-    model = _FakeModel(blocking_outcomes=[_provider_error(), ModelResponse(content="ok")])
-    _install(model)
-
-    await model.ainvoke(messages=messages)
-
-    assert messages == original_snapshot
-    assert messages[0] is not model.blocking_calls[1][0]
-    assert messages[1] is not model.blocking_calls[1][1]
-    assert len(messages) == 2
-
-
-@pytest.mark.asyncio
-async def test_blocking_supports_positional_messages() -> None:
-    """The wrapper handles the model API's positional messages argument."""
-    model = _FakeModel(blocking_outcomes=[_provider_error(), ModelResponse(content="ok")])
-    _install(model)
-
-    response = await model.ainvoke([_media_message()])
-
-    assert response.content == "ok"
-    assert len(model.blocking_calls) == 2
-    assert model.blocking_calls[1][0].images is None
-
-
-@pytest.mark.asyncio
-async def test_blocking_propagates_the_retry_failure_after_two_calls() -> None:
-    """A failed media-free attempt escapes without a third call."""
-    retry_error = _provider_error(message="still rejected")
-    model = _FakeModel(blocking_outcomes=[_provider_error(), retry_error])
-    _install(model)
-
-    with pytest.raises(ModelProviderError) as raised:
-        await model.ainvoke(messages=[_media_message()])
-
-    assert raised.value is retry_error
-    assert len(model.blocking_calls) == 2
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [
-        _provider_error(401, "bad key"),
-        _provider_error(403, "forbidden"),
-        _provider_error(408, "timeout"),
-        _provider_error(429, "rate limited"),
-        _provider_error(500, "server error"),
-        ModelRateLimitError(message="rate limited", status_code=429),
-        ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
-        RuntimeError("application bug"),
+        # Z.ai code 1214 as it reaches the streamed run-error path: bare message,
+        # no exception object, no status code, no "Error code: 400" marker.
+        "messages[30].content[0].type type error",
+        "Error code: 400 - messages.content.type is invalid, allowed values: ['text']",
+        "audio input is not supported - hint: you may need to provide the mmproj",
+        "Rate limit exceeded",
+        "Error code: 400 - invalid api key provided",
+        ModelProviderError(message="Some brand new provider wording about content", status_code=400),
     ],
 )
-async def test_blocking_does_not_retry_ineligible_failures(error: Exception) -> None:
-    """Failures unrelated to supported client rejections remain untouched."""
-    model = _FakeModel(blocking_outcomes=[error])
-    _install(model)
+def test_any_failure_retries_without_media_and_teaches_on_success(error: Exception | str) -> None:
+    """No error wording decides the retry: every failure drops all media once.
 
-    with pytest.raises(type(error)) as raised:
-        await model.ainvoke(messages=[_media_message()])
+    The route capability cache learns the dropped kinds only when the retry
+    actually succeeds, which never happens for failures unrelated to media
+    (auth, rate limits, outages) because their retry fails identically.
+    """
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
 
-    assert raised.value is error
-    assert len(model.blocking_calls) == 1
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert decision.media_inputs == MediaInputs()
+    assert decision.teach_route_on_success == route
+    # Nothing is taught until the without-media retry actually succeeds.
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset({"audio", "image", "file", "video"})
+    filtered = filter_media_inputs_for_route(route, media)
+    assert filtered.removed_kinds == frozenset({"audio", "image", "file", "video"})
+    assert filtered.media_inputs == MediaInputs()
+    reset_model_media_capability_cache()
 
 
-@pytest.mark.asyncio
-async def test_blocking_does_not_retry_when_the_request_has_no_media() -> None:
-    """A text-only request never enters media fallback."""
-    error = _provider_error()
-    model = _FakeModel(blocking_outcomes=[error])
-    _install(model)
+def test_no_media_present_never_retries() -> None:
+    """Media-shaped errors without any media sent are not retried."""
+    decision = retry_media_inputs_after_failure(_route(), "audio input is not supported", MediaInputs())
 
-    with pytest.raises(ModelProviderError):
-        await model.ainvoke(messages=[Message(role="user", content="text only")])
-
-    assert len(model.blocking_calls) == 1
+    assert decision.should_retry is False
+    assert decision.removed_kinds == frozenset()
 
 
-@pytest.mark.asyncio
-async def test_streaming_retries_when_the_first_stream_fails_before_a_chunk() -> None:
-    """A stream may restart media-free before any output escapes."""
-    model = _FakeModel(
-        streaming_outcomes=[
-            _provider_error(),
-            [ModelResponse(content="recovered"), ModelResponse(content=" response")],
-        ],
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+        MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    ],
+)
+def test_safeguard_refusal_never_retries_without_media(error: Exception | str) -> None:
+    """A deterministic refusal must not enter the generic media fallback loop."""
+    media = _media_inputs()
+
+    decision = retry_media_inputs_after_failure(_route(), error, media)
+
+    assert decision.should_retry is False
+    assert decision.media_inputs == media
+    assert decision.removed_kinds == frozenset()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ContextWindowExceededError(message="prompt is too long: 250000 tokens > 200000 maximum"),
+        "Error code: 400 - maximum context length is 128000 tokens",
+        ModelProviderError(message="Request Entity Too Large", status_code=413),
+        # Transient failures can pass on the retry because the blip passed, so
+        # a lucky retry success must not disable media for the route.
+        ModelProviderError(message="upstream connect error", status_code=502),
+        ModelProviderError(message="model overloaded", status_code=503),
+        ModelProviderError(message="Too Many Requests", status_code=429),
+    ],
+)
+def test_size_context_and_transient_failures_retry_but_never_teach(error: Exception | str) -> None:
+    """Oversized requests and transient failures must not teach capability on retry success."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(route, error, media)
+
+    assert decision.should_retry is True
+    assert decision.teach_route_on_success is None
+
+    decision.record_retry_success()
+
+    assert unsupported_media_kinds_for_route(route) == frozenset()
+
+
+def test_different_base_url_does_not_inherit_negative_cache() -> None:
+    """Effective route should include endpoint, not just provider/model."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    first_route = _route(base_url="http://localhost:9292/v1")
+    second_route = _route(base_url="http://localhost:9293/v1")
+
+    retry_media_inputs_after_failure(first_route, "audio input is not supported", media).record_retry_success()
+
+    filtered = filter_media_inputs_for_route(second_route, media)
+    assert filtered.removed_kinds == frozenset()
+    assert filtered.media_inputs == media
+    reset_model_media_capability_cache()
+
+
+def test_context_media_kinds_enable_retry_without_current_turn_media() -> None:
+    """Media pinned to history messages should still trigger the retry and teach on success."""
+    reset_model_media_capability_cache()
+    route = _route()
+
+    decision = retry_media_inputs_after_failure(
+        route,
+        "image input is not supported",
+        MediaInputs(),
+        extra_present_kinds=frozenset({"image"}),
     )
-    _install(model)
 
-    chunks = [chunk async for chunk in model.ainvoke_stream(messages=[_media_message()])]
+    assert decision.should_retry is True
+    assert decision.removed_kinds == frozenset({"image"})
 
-    assert [chunk.content for chunk in chunks] == ["recovered", " response"]
-    assert len(model.streaming_calls) == 2
-    assert model.streaming_calls[1][0].images is None
-    assert model.closed_streams == 2
+    decision.record_retry_success()
 
-
-@pytest.mark.asyncio
-async def test_streaming_does_not_retry_after_any_chunk_escaped() -> None:
-    """A visible partial stream is never replayed from the beginning."""
-    error = _provider_error()
-    model = _FakeModel(streaming_outcomes=[[ModelResponse(content="prefix"), error]])
-    _install(model)
-    chunks: list[ModelResponse] = []
-
-    with pytest.raises(ModelProviderError) as raised:
-        await _consume_into(chunks, model.ainvoke_stream(messages=[_media_message()]))
-
-    assert raised.value is error
-    assert [chunk.content for chunk in chunks] == ["prefix"]
-    assert len(model.streaming_calls) == 1
-    assert model.closed_streams == 1
+    assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+    reset_model_media_capability_cache()
 
 
-@pytest.mark.asyncio
-async def test_streaming_propagates_the_retry_failure() -> None:
-    """A failed media-free stream escapes after exactly two streams."""
-    retry_error = _provider_error(message="still rejected")
-    model = _FakeModel(streaming_outcomes=[_provider_error(), retry_error])
-    _install(model)
-
-    with pytest.raises(ModelProviderError) as raised:
-        _ = [chunk async for chunk in model.ainvoke_stream(messages=[_media_message()])]
-
-    assert raised.value is retry_error
-    assert len(model.streaming_calls) == 2
-    assert model.closed_streams == 2
+def test_unsupported_media_kinds_for_route_defaults_empty() -> None:
+    """Unknown and None routes report no learned-unsupported kinds."""
+    reset_model_media_capability_cache()
+    assert unsupported_media_kinds_for_route(None) == frozenset()
+    assert unsupported_media_kinds_for_route(_route()) == frozenset()
 
 
-@pytest.mark.asyncio
-async def test_streaming_nested_model_call_has_only_one_retry_owner() -> None:
-    """Nested adapter methods share one retry owner for the provider request."""
-    initial_error = _provider_error(message="initial rejection")
-    retry_error = _provider_error(message="retry rejection")
-    unexpected_error = _provider_error(message="unexpected third attempt")
-    model = _StreamDelegatesToBlockingModel(
-        blocking_outcomes=[initial_error, retry_error, unexpected_error],
+def test_cache_can_be_reset() -> None:
+    """Tests need explicit access to clear process-local learned state."""
+    reset_model_media_capability_cache()
+    media = _media_inputs()
+    route = _route()
+
+    retry_media_inputs_after_failure(route, "image input is not supported", media).record_retry_success()
+    assert filter_media_inputs_for_route(route, media).media_inputs == MediaInputs()
+
+    reset_model_media_capability_cache()
+
+    assert filter_media_inputs_for_route(route, media).media_inputs == media
+
+
+def _route(base_url: str = "http://localhost:9292/v1") -> ModelMediaRoute:
+    return ModelMediaRoute(provider="openai", model_id="qwen-local", base_url=base_url)
+
+
+def _media_inputs() -> MediaInputs:
+    return MediaInputs(
+        audio=(MagicMock(name="audio"),),
+        images=(MagicMock(name="image"),),
+        files=(MagicMock(name="file"),),
+        videos=(MagicMock(name="video"),),
     )
-    _install(model)
-
-    with pytest.raises(ModelProviderError) as raised:
-        _ = [chunk async for chunk in model.ainvoke_stream(messages=[_media_message()])]
-
-    assert raised.value is retry_error
-    assert len(model.blocking_calls) == 2
-    assert model.closed_streams == 2
 
 
-@pytest.mark.asyncio
-async def test_installation_is_idempotent() -> None:
-    """Installing the wrapper twice does not stack fallback attempts."""
-    model = _FakeModel(blocking_outcomes=[_provider_error(), ModelResponse(content="ok")])
-    _install(model)
-    _install(model)
+def test_run_input_media_helpers_cover_pinned_history_media() -> None:
+    """Run-input helpers report, collect, and strip media pinned to history messages."""
+    image = Image(content=b"\x89PNG\r\n\x1a\npayload")
+    audio = Audio(content=b"audio-bytes", mime_type="audio/ogg")
+    history = Message(role="user", content="earlier", images=[image], audio=[audio])
+    current = Message(role="user", content="now")
+    run_input = [history, current]
 
-    await model.ainvoke(messages=[_media_message()])
+    collected = ai_runtime.media_inputs_from_run_input(run_input)
+    assert collected.kinds() == frozenset({"image", "audio"})
+    assert ai_runtime.media_inputs_from_run_input("plain prompt").kinds() == frozenset()
+    assert list(collected.images) == [image]
+    assert list(collected.audio) == [audio]
 
-    assert len(model.blocking_calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_deep_copied_model_retries_on_the_copy(tmp_path: Path) -> None:
-    """Stacked wrappers remain bound to a copied model instance."""
-    original = _FakeModel()
-    install_llm_request_logging(
-        cast("Model", original),
-        agent_name="test",
-        debug_config=DebugConfig(),
-        default_log_dir=tmp_path,
+    stripped = ai_runtime.append_inline_media_fallback_to_run_input(
+        run_input,
+        fallback_prompt="Use attachment tools instead.",
+        removed_kinds=frozenset({"image"}),
     )
-    _install(original)
-    copied = deepcopy(original)
-    copied.blocking_outcomes = [_provider_error(), ModelResponse(content="copy")]
-
-    response = await copied.ainvoke(messages=[_media_message()])
-
-    assert response.content == "copy"
-    assert len(copied.blocking_calls) == 2
-    assert original.blocking_calls == []
+    assert stripped[0].images is None
+    assert [item.content for item in (stripped[0].audio or [])] == [audio.content]
+    assert "[Inline media unavailable for this model]" in str(stripped[-1].content)
+    # The original run input stays untouched for later retries.
+    assert history.images == [image]

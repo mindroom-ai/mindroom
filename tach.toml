@@ -338,6 +338,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
+    "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.memory",
     "mindroom.metadata_merge",
@@ -520,6 +521,7 @@ path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.history_run_visibility",
     "mindroom.logging_config",
+    "mindroom.media_fallback",
     "mindroom.media_inputs",
 ]
 visibility = [
@@ -554,7 +556,6 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
-    "mindroom.media_fallback",
     "mindroom.tool_system.dependencies",
     "mindroom.azure_openai_model",
     "mindroom.claude_prompt_cache",
@@ -1889,6 +1890,7 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.state",
+    "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
     "mindroom.model_loading",
