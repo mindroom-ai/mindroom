@@ -359,12 +359,16 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.failure_reason == "suppressed_by_hook"
         send.assert_not_awaited()
 
-    @pytest.mark.parametrize("with_placeholder", [False, True])
+    @pytest.mark.parametrize(
+        ("with_placeholder", "edit_succeeds"),
+        [(False, True), (True, True), (True, False)],
+    )
     @pytest.mark.parametrize("response_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
     async def test_silent_schedule_before_hook_failure_is_durably_visible(
         self,
         tmp_path: Path,
         with_placeholder: bool,
+        edit_succeeds: bool,
         response_text: str,
     ) -> None:
         """A hook exception publishes one generic terminal error through the final outbox stage."""
@@ -373,7 +377,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             side_effect=RuntimeError("internal hook detail"),
         )
         send_text = AsyncMock(return_value="$failure")
-        edit_text = AsyncMock(return_value=True)
+        edit_text = AsyncMock(return_value=edit_succeeds)
         request = replace(
             self._final_request(response_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             existing_event_id="$placeholder" if with_placeholder else None,
@@ -389,8 +393,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "error"
         assert outcome.event_id == ("$placeholder" if with_placeholder else "$failure")
         assert outcome.is_visible_response is True
-        assert outcome.final_visible_body == "Response failed. Please retry."
-        assert "internal hook detail" not in outcome.final_visible_body
+        if not with_placeholder or edit_succeeds:
+            assert outcome.final_visible_body == "Response failed. Please retry."
+            assert "internal hook detail" not in outcome.final_visible_body
+        else:
+            assert outcome.failure_reason == "delivery_failed"
         gateway.deps.redact_message_event.assert_not_awaited()
         durable_request = edit_text.await_args.args[-1] if with_placeholder else send_text.await_args.args[-1]
         assert durable_request.delivery_turn_id == "$cause"

@@ -678,7 +678,8 @@ class DeliveryGateway:
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
-                event_id=None,
+                event_id=request.existing_event_id,
+                is_visible_response=True,
                 failure_reason="delivery_failed",
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=failure_extra_content,
