@@ -2617,7 +2617,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=tuple(system_enrichment_items),
-            allow_empty_response=request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+            allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
@@ -3300,14 +3300,11 @@ class ResponseRunner:
         assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
-        use_streaming = (
-            request.response_envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
-            and await should_use_streaming(
-                self._client(),
-                request.room_id,
-                requester_user_id=requester_user_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
-            )
+        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
+            self._client(),
+            request.room_id,
+            requester_user_id=requester_user_id,
+            enable_streaming=self.deps.runtime.enable_streaming,
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
@@ -3399,7 +3396,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=request.system_enrichment_items,
-            allow_empty_response=request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+            allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
@@ -4412,14 +4409,11 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        use_streaming = (
-            request.response_envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND
-            and await should_use_streaming(
-                self._client(),
-                request.room_id,
-                requester_user_id=request.user_id,
-                enable_streaming=self.deps.runtime.enable_streaming,
-            )
+        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
+            self._client(),
+            request.room_id,
+            requester_user_id=request.user_id,
+            enable_streaming=self.deps.runtime.enable_streaming,
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         generation: _ResponseGenerationOutcome | None = None

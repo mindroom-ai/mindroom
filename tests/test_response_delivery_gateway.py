@@ -247,6 +247,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
         assert outcome.event_id is None
+        assert outcome.failure_reason == "silent_no_report"
         assert outbox.rows == {}
         send.assert_not_awaited()
 
@@ -355,6 +356,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
+        assert outcome.failure_reason == "suppressed_by_hook"
         send.assert_not_awaited()
 
     @pytest.mark.parametrize("with_placeholder", [False, True])

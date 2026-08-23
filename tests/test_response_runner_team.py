@@ -1128,7 +1128,7 @@ class TestAgentBot(AgentBotTestBase):
         assert send_kwargs["adopt_existing_placeholder"] is True
 
     @pytest.mark.asyncio
-    async def test_silent_schedule_team_response_is_blocking_and_allows_empty(
+    async def test_silent_schedule_team_response_is_blocking_and_allows_no_report(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1204,7 +1204,7 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_team_response.assert_awaited_once()
         mock_team_response_stream.assert_not_called()
-        assert mock_team_response.await_args.kwargs["ctx"].allow_empty_response is True
+        assert mock_team_response.await_args.kwargs["ctx"].allow_no_report_response is True
         assert mock_team_response.await_args.kwargs["compaction_lifecycle"] is None
         assert typing_events == []
         assert send_text.await_count == 1

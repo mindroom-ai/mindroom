@@ -3100,7 +3100,7 @@ async def team_response(  # noqa: C901, PLR0915
             response_text = (
                 raw_response_text.strip()
                 if (
-                    ctx.allow_empty_response
+                    ctx.allow_no_report_response
                     and is_silent_schedule_no_report_response(raw_response_text)
                     and not _has_visible_team_member_output(response)
                 )

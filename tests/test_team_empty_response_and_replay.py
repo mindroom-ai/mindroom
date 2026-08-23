@@ -104,7 +104,7 @@ async def test_quiet_team_response_returns_no_reply_without_visible_team_chrome(
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=replace(make_turn_context(session_id="session-1"), allow_empty_response=True),
+            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
         )
 
     assert response == SILENT_SCHEDULE_NO_REPLY_TOKEN
@@ -130,7 +130,7 @@ async def test_quiet_team_response_preserves_member_finding_when_leader_returns_
             turn_recorder=recorder,
             orchestrator=orchestrator,
             execution_identity=None,
-            ctx=replace(make_turn_context(session_id="session-1"), allow_empty_response=True),
+            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
         )
 
     assert "Queue depth is elevated." in response

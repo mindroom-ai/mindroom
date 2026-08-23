@@ -499,7 +499,7 @@ def test_blocking_completion_records_and_updates_collector() -> None:
 
 
 @pytest.mark.parametrize(
-    ("presentation", "allow_empty_response", "expected_response"),
+    ("presentation", "allow_no_report_response", "expected_response"),
     [
         pytest.param("Tool: matrix alert sent", True, "", id="silent-agent"),
         pytest.param("Team Response: no team prose", True, "", id="silent-team"),
@@ -519,7 +519,7 @@ def test_blocking_completion_records_and_updates_collector() -> None:
 )
 def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     presentation: str,
-    allow_empty_response: bool,
+    allow_no_report_response: bool,
     expected_response: str,
 ) -> None:
     """Tool presentation is not semantic prose, while tool effects and records survive."""
@@ -549,7 +549,7 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
 
     result = asyncio.run(
         run_blocking_response_turn(
-            _ctx(allow_empty_response=allow_empty_response),
+            _ctx(allow_no_report_response=allow_no_report_response),
             _blocking_adapter(log, _attempt),
             TurnSinks(turn_recorder=cast("Any", recorder), run_metadata_collector=collector),
             continuation=_continuation(),
@@ -853,7 +853,7 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
     ]
 
 
-def test_blocking_allowed_empty_run_completes_without_retry_or_notice() -> None:
+def test_blocking_no_report_empty_run_completes_without_retry_or_notice() -> None:
     """An allowed empty completion is a successful first-attempt outcome."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
@@ -866,7 +866,7 @@ def test_blocking_allowed_empty_run_completes_without_retry_or_notice() -> None:
 
     result = asyncio.run(
         run_blocking_response_turn(
-            _ctx(allow_empty_response=True),
+            _ctx(allow_no_report_response=True),
             _blocking_adapter(log, _attempt),
             TurnSinks(turn_recorder=cast("Any", recorder)),
             continuation=_continuation(),
@@ -1267,7 +1267,7 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
     assert recorder.completed_calls[-1]["assistant_text"] == ""
 
 
-def test_streaming_allowed_empty_run_completes_without_retry_or_notice() -> None:
+def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> None:
     """An allowed streamed empty completion records success without yielding a notice."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
@@ -1284,7 +1284,7 @@ def test_streaming_allowed_empty_run_completes_without_retry_or_notice() -> None
     chunks = asyncio.run(
         _collect(
             stream_response_turn(
-                _ctx(allow_empty_response=True),
+                _ctx(allow_no_report_response=True),
                 _streaming_adapter(log, _attempt),
                 TurnSinks(turn_recorder=cast("Any", recorder)),
                 continuation=_continuation(),

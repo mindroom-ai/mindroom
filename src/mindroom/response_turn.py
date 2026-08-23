@@ -276,7 +276,7 @@ class ResponseTurnContext:
     active_event_ids: frozenset[str] = frozenset()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    allow_empty_response: bool = False
+    allow_no_report_response: bool = False
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -908,7 +908,7 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
-    if resolution.is_empty and ctx.allow_empty_response:
+    if resolution.is_empty and ctx.allow_no_report_response:
         return _CompletionSettle(
             keep_going=False,
             continuation=continuation,
@@ -976,7 +976,7 @@ def _settle_completed_attempt(
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
-    elif ctx.allow_empty_response and not resolution.replayable_text.strip():
+    elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.

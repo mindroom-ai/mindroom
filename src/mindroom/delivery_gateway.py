@@ -1280,17 +1280,19 @@ class DeliveryGateway:
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
-        if (
+        suppression_reason = "suppressed_by_hook" if draft.suppress else None
+        if suppression_reason is None and (
             draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
             and constants.is_silent_schedule_no_report_response(draft.response_text)
         ):
-            draft.suppress = True
-        if draft.suppress:
+            suppression_reason = "silent_no_report"
+        if suppression_reason is not None:
             self.deps.logger.info(
-                "Response suppressed by hook",
+                "Response suppressed",
                 response_kind=request.identity.response_kind,
                 source_event_id=request.identity.response_envelope.source_event_id,
                 correlation_id=request.identity.correlation_id,
+                suppression_reason=suppression_reason,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
@@ -1298,7 +1300,7 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     identity=request.identity,
                     redaction_reason="Suppressed placeholder response",
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -1313,7 +1315,7 @@ class DeliveryGateway:
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
                     event_id=None,
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                     suppressed=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -1323,7 +1325,7 @@ class DeliveryGateway:
                     terminal_status="cancelled",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                     suppressed=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -1331,7 +1333,7 @@ class DeliveryGateway:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=None,
-                failure_reason="suppressed_by_hook",
+                failure_reason=suppression_reason,
                 suppressed=True,
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,

@@ -289,18 +289,18 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("source_kind", "allows_empty_response"),
+        ("source_kind", "allows_no_report_response"),
         [
             (SILENT_SCHEDULE_SOURCE_KIND, True),
             (SCHEDULED_SOURCE_KIND, False),
         ],
     )
-    async def test_agent_turn_context_allows_empty_only_for_silent_schedules(
+    async def test_agent_turn_context_allows_no_report_only_for_silent_schedules(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         source_kind: str,
-        allows_empty_response: bool,
+        allows_no_report_response: bool,
     ) -> None:
         """The immutable response source alone controls first-empty acceptance."""
         config = self._config_for_storage(tmp_path)
@@ -338,9 +338,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert mock_ai.await_args.args[0].allow_empty_response is allows_empty_response
-        assert typing_events == ([] if allows_empty_response else ["started"])
-        assert (mock_ai.await_args.kwargs["compaction_lifecycle"] is None) is allows_empty_response
+        assert mock_ai.await_args.args[0].allow_no_report_response is allows_no_report_response
+        assert typing_events == ([] if allows_no_report_response else ["started"])
+        assert (mock_ai.await_args.kwargs["compaction_lifecycle"] is None) is allows_no_report_response
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
@@ -2315,7 +2315,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert response_event_id == expected_event_id
-        assert mock_ai_response.await_args.args[0].allow_empty_response is True
+        assert mock_ai_response.await_args.args[0].allow_no_report_response is True
         assert mock_ai_response.await_args.kwargs["compaction_lifecycle"] is None
         assert typing_events == []
         assert send_text.await_count == int(expected_event_id is not None)
