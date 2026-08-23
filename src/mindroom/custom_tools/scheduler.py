@@ -33,7 +33,7 @@ class SchedulerTools(Toolkit):
         request: str,
         new_thread: bool,
         history_limit: int | None = None,
-        silent: bool = False,
+        silent: bool | None = None,
     ) -> str:
         """Schedule a task using natural language.
 
@@ -52,7 +52,8 @@ class SchedulerTools(Toolkit):
                 polling tasks), or leave unset for full history.
             silent: Keep the trigger hidden and omit a final response when it is empty or
                 whitespace-only. Findings, failures, and independently sent tool
-                messages remain visible.
+                messages remain visible. Leave unset to infer the mode from the
+                scheduling request.
 
         Returns:
             The scheduling result message.

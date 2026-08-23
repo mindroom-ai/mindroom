@@ -1341,7 +1341,11 @@ class TestScheduleTriggerAdmission:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         """Removing the custom predicate must drop a trigger instead of starting a turn."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
+        ingress = JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
         event = schedule_trigger_event(f"$schedule-{provenance.value}")
 
         await ingress._admit(room(), event, provenance)
@@ -1350,6 +1354,22 @@ class TestScheduleTriggerAdmission:
         assert stored is not None
         assert stored.kind.value == "schedule_trigger"
         assert await alice.is_pending(event.event_id)
+
+    async def test_unmanaged_schedule_trigger_is_not_admitted(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An invisible custom event from a room user must not become durable work."""
+        ingress = JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        event = schedule_trigger_event("$schedule-unmanaged", sender=ALICE)
+
+        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+
+        assert await alice.load_event(event.event_id) is None
 
     async def test_schedule_trigger_from_cold_history_settles_without_a_callback(
         self,
@@ -1360,6 +1380,7 @@ class TestScheduleTriggerAdmission:
         ingress = JournalIngress(
             store=alice,
             self_sender=BOT,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
             on_event_admitted=lambda _room, event: admitted_for_callback.append(event.event_id),
         )
         event = schedule_trigger_event("$schedule-history")
@@ -3417,7 +3438,11 @@ class TestScheduleTriggerDispatch:
             "$schedule-replay",
             extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
         )
-        await JournalIngress(store=alice, self_sender=BOT)._admit(
+        await JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )._admit(
             room(),
             event,
             nio.TimelineEventProvenance.LIVE,

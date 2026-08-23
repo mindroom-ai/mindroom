@@ -336,6 +336,9 @@ class JournalIngress:
     # recognized as transport. Deliberately not the journal principal, which
     # prefixes the agent name and would therefore never match a sender.
     self_sender: str
+    # Custom schedule triggers are invisible transport, so only a managed
+    # automation sender may introduce one into the durable journal.
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
     on_admitted: Callable[[], None] = lambda: None
     # Room-membership events are only MindRoom's to act on once the router is
     # ready for them, which the timeline callback cannot decide for itself.
@@ -361,6 +364,8 @@ class JournalIngress:
     def _admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
         kind = _event_kind(event)
+        if kind is EventKind.SCHEDULE_TRIGGER and not self.schedule_trigger_sender_is_managed(event.sender):
+            return None
         if (
             kind is None
             and isinstance(event, nio.RoomMemberEvent)

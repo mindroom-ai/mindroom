@@ -144,6 +144,7 @@ class JournalDispatcher:
         self._ingress = JournalIngress(
             store=self.store,
             self_sender=self.self_sender,
+            schedule_trigger_sender_is_managed=self.schedule_trigger_sender_is_managed,
             on_admitted=self._worker.wake,
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,

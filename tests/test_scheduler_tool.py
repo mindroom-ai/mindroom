@@ -93,6 +93,7 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     assert "whitespace" in silent_description
     assert "findings" in silent_description
     assert "failures" in silent_description
+    assert "infer" in silent_description
 
 
 @pytest.mark.asyncio
@@ -142,7 +143,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "full_text": "tomorrow at 3pm check deployment",
         "new_thread": False,
         "history_limit": None,
-        "silent": False,
+        "silent": None,
     }
     assert second_call == {
         "runtime": expected_runtime,
@@ -162,7 +163,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "full_text": "every 25 minutes poll the queue",
         "new_thread": False,
         "history_limit": 0,
-        "silent": False,
+        "silent": None,
     }
 
 
