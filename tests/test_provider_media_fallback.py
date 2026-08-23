@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.model_loading import get_model_instance
+from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 class _FakeModel:
     id: str = "text-only"
     provider: str = "test"
+    base_url: str | None = None
+    client_params: dict[str, object] | None = None
     blocking_outcomes: list[ModelResponse | Exception] = field(default_factory=list)
     streaming_outcomes: list[list[ModelResponse | Exception] | Exception] = field(default_factory=list)
     blocking_calls: list[list[Message]] = field(default_factory=list)
@@ -126,6 +129,127 @@ async def test_loaded_model_retries_once_without_inline_media_and_preserves_atta
 
 
 @pytest.mark.asyncio
+async def test_loaded_model_omits_media_kinds_learned_unsupported_for_its_route(tmp_path: Path) -> None:
+    """A successful stripped retry prevents another probe for the same model route."""
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                _provider_error(),
+                ModelResponse(content="first recovered"),
+                ModelResponse(content="second recovered"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    first = await model.ainvoke(messages=[_media_message()])
+    second = await model.ainvoke(messages=[_media_message()])
+
+    assert first.content == "first recovered"
+    assert second.content == "second recovered"
+    assert len(model.blocking_calls) == 3
+    learned_call = model.blocking_calls[2]
+    assert learned_call[0].audio is None
+    assert learned_call[0].images is None
+    assert learned_call[0].files is None
+    assert learned_call[0].videos is None
+    assert "att_123" in str(learned_call[0].content)
+    assert learned_call[-1].temporary is True
+
+
+@pytest.mark.asyncio
+async def test_loaded_model_learns_only_the_media_kinds_present_in_the_failed_request(tmp_path: Path) -> None:
+    """Learning that audio is unsupported does not suppress an image sent later on the same route."""
+    audio_only = Message(
+        role="user",
+        content='Listen to att_audio.\n[attachments: att_audio (audio, "clip.ogg")]',
+        audio=[Audio(content=b"audio", mime_type="audio/ogg")],
+    )
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                _provider_error(),
+                ModelResponse(content="audio recovered"),
+                ModelResponse(content="image accepted"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    await model.ainvoke(messages=[audio_only])
+    await model.ainvoke(messages=[_media_message()])
+
+    learned_call = model.blocking_calls[2]
+    assert learned_call[0].audio is None
+    assert learned_call[0].images
+    assert learned_call[0].files
+    assert learned_call[0].videos
+
+
+@pytest.mark.asyncio
+async def test_loaded_model_keeps_capability_learning_isolated_by_endpoint(tmp_path: Path) -> None:
+    """The same provider and model ID at another endpoint gets its own first probe."""
+    first = _load(
+        _FakeModel(
+            base_url="http://localhost:9292/v1/",
+            blocking_outcomes=[_provider_error(), ModelResponse(content="recovered")],
+        ),
+        tmp_path,
+    )
+    second = _load(
+        _FakeModel(
+            base_url="http://localhost:9293/v1",
+            blocking_outcomes=[ModelResponse(content="accepted")],
+        ),
+        tmp_path,
+    )
+
+    await first.ainvoke(messages=[_media_message()])
+    await second.ainvoke(messages=[_media_message()])
+
+    assert first.blocking_calls[1][0].images is None
+    assert second.blocking_calls[0][0].images
+
+
+@pytest.mark.asyncio
+async def test_failed_media_free_retry_does_not_teach_the_route(tmp_path: Path) -> None:
+    """A negative capability is remembered only after the stripped request succeeds."""
+    first = _load(
+        _FakeModel(blocking_outcomes=[_provider_error(), _provider_error()]),
+        tmp_path,
+    )
+    second = _load(
+        _FakeModel(blocking_outcomes=[ModelResponse(content="accepted")]),
+        tmp_path,
+    )
+
+    with pytest.raises(ModelProviderError):
+        await first.ainvoke(messages=[_media_message()])
+    await second.ainvoke(messages=[_media_message()])
+
+    assert second.blocking_calls[0][0].images
+
+
+@pytest.mark.asyncio
+async def test_model_media_capability_cache_can_be_reset(tmp_path: Path) -> None:
+    """Resetting the process cache makes the same route probe inline media again."""
+    first = _load(
+        _FakeModel(blocking_outcomes=[_provider_error(), ModelResponse(content="recovered")]),
+        tmp_path,
+    )
+    second = _load(
+        _FakeModel(blocking_outcomes=[ModelResponse(content="accepted")]),
+        tmp_path,
+    )
+
+    await first.ainvoke(messages=[_media_message()])
+    reset_model_media_capability_cache()
+    await second.ainvoke(messages=[_media_message()])
+
+    assert second.blocking_calls[0][0].images
+
+
+@pytest.mark.asyncio
 async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) -> None:
     """A pre-output stream rejection retries once and closes both provider streams."""
     original = _media_message()
@@ -134,18 +258,22 @@ async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) 
             streaming_outcomes=[
                 _provider_error(),
                 [ModelResponse(content="recovered")],
+                [ModelResponse(content="cached")],
             ],
         ),
         tmp_path,
     )
 
     chunks = [chunk async for chunk in model.ainvoke_stream([original])]
+    cached_chunks = [chunk async for chunk in model.ainvoke_stream([_media_message()])]
 
     assert [chunk.content for chunk in chunks] == ["recovered"]
-    assert len(model.streaming_calls) == 2
+    assert [chunk.content for chunk in cached_chunks] == ["cached"]
+    assert len(model.streaming_calls) == 3
     assert model.streaming_calls[1][0].images is None
+    assert model.streaming_calls[2][0].images is None
     assert "att_123" in str(model.streaming_calls[1][0].content)
-    assert model.closed_streams == 2
+    assert model.closed_streams == 3
     assert original.images
 
 
@@ -216,25 +344,67 @@ async def test_loaded_model_does_not_replay_a_stream_after_output(tmp_path: Path
 @pytest.mark.parametrize(
     "error",
     [
-        ModelProviderError(message="unauthorized", status_code=401),
-        ModelProviderError(message="forbidden", status_code=403),
         ModelRateLimitError(message="rate limited", status_code=429),
+        ModelProviderError(message="payload too large", status_code=413),
         ModelProviderError(message="server unavailable", status_code=503),
-        ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status_code=400),
-        RuntimeError("not reported by a provider"),
     ],
 )
-async def test_loaded_model_leaves_non_media_provider_failures_to_existing_policy(
+async def test_successful_retry_after_non_capability_failure_does_not_teach_route(
     tmp_path: Path,
     error: Exception,
 ) -> None:
-    """Authentication, transient, safeguard, and untyped failures keep their existing owners."""
+    """Size and transient failures retry once but cannot prove media is unsupported."""
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                error,
+                ModelResponse(content="recovered"),
+                ModelResponse(content="next"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    await model.ainvoke(messages=[_media_message()])
+    await model.ainvoke(messages=[_media_message()])
+
+    assert len(model.blocking_calls) == 3
+    assert model.blocking_calls[1][0].images is None
+    assert model.blocking_calls[2][0].images
+
+
+@pytest.mark.asyncio
+async def test_untyped_failure_retries_once_and_teaches_after_success(tmp_path: Path) -> None:
+    """Fallback does not depend on provider-specific error wording or exception type."""
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                RuntimeError("unknown provider failure"),
+                ModelResponse(content="recovered"),
+                ModelResponse(content="next"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    await model.ainvoke(messages=[_media_message()])
+    await model.ainvoke(messages=[_media_message()])
+
+    assert len(model.blocking_calls) == 3
+    assert model.blocking_calls[1][0].images is None
+    assert model.blocking_calls[2][0].images is None
+
+
+@pytest.mark.asyncio
+async def test_safeguard_refusal_is_not_retried_without_media(tmp_path: Path) -> None:
+    """A deterministic safeguard refusal must remain a refusal."""
+    error = ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE, status_code=400)
     model = _load(
         _FakeModel(blocking_outcomes=[error, ModelResponse(content="must not run")]),
         tmp_path,
     )
 
-    with pytest.raises(type(error)):
+    with pytest.raises(ModelSafeguardRefusalError):
         await model.ainvoke(messages=[_media_message()])
 
     assert len(model.blocking_calls) == 1

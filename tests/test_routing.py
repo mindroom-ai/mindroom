@@ -159,7 +159,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "attach_media_to_run_input",
             "copy_run_input",
             "cached_agent_run",
-            "append_inline_media_fallback_to_run_input",
             "get_model_instance",
             "install_queued_message_notice_hook",
             "queued_message_signal_context",

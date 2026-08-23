@@ -16827,7 +16827,7 @@ MindRoom's architecture consists of several key components working together.
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -16864,7 +16864,7 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
@@ -17289,7 +17289,8 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
 - **`src/mindroom/agent_policy.py`** — Resolves canonical execution policies and private-team eligibility derived from authored agent config.
 - **`src/mindroom/model_loading.py`** — Owns `get_model_instance()` and provider-specific model loader selection.
-- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying, queued-notice hooks, and inline-media fallback helpers used during execution.
+- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying and queued-notice hooks used during execution.
+- **`src/mindroom/provider_media_fallback.py`** — Owns provider-boundary inline-media retry and process-local capability learning per model route.
 - **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
