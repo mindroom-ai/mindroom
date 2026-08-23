@@ -138,6 +138,8 @@ It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, 
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
+Pass `silent=True` to hide the scheduled trigger and omit successful final responses that are empty or contain only `NO_REPLY`.
+Findings, failures, and messages explicitly sent by tools remain visible for silent schedules.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
 The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
@@ -159,8 +161,9 @@ agents:
 schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
 schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
+schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
 cancel_schedule("a1b2c3d4")
 ```
 
@@ -169,7 +172,10 @@ cancel_schedule("a1b2c3d4")
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
 - Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
+- Editing preserves the current silent-delivery mode unless the natural-language request or `silent` argument changes it.
 - Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
+- A silent schedule with `new_thread=True` posts any finding or failure as a room-level root because its hidden trigger cannot serve as a visible thread root.
+- Silent delivery controls room presentation only; the task body still travels through Matrix and remains subject to homeserver retention and MindRoom's durable recovery journal.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
 - Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 

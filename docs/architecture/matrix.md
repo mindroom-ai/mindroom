@@ -95,6 +95,9 @@ Classic Sync classifies initial timelines and `/messages` recovery as history, w
 This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
 `matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
+Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
+Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
+Journal dispatch validates and normalizes a live or recovered trigger into the existing formatted-message turn path, while an intentional no-report result records the turn and settles the trigger without a visible response.
 Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
 Every derived conversation row, pending turn, and delivery outbox entry is tied to that membership epoch.
 A departure advances the epoch, removes old projected history, retires unsent old-membership delivery work, and prevents an in-flight response admitted before departure from being sent after rejoin.
