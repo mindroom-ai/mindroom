@@ -65,10 +65,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import (
     MediaRetryDecision,
     ModelMediaRoute,
-    build_model_media_route,
-    filter_media_inputs_for_route,
     retry_media_inputs_after_failure,
-    unsupported_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
@@ -93,6 +90,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.run_output_status import carries_media_answer, is_errored_run_output, media_free_retry_succeeded
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
@@ -107,7 +105,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.base import Model
     from agno.models.response import ToolExecution
     from agno.tools.function import Function
 
@@ -227,77 +224,6 @@ class _PreparedAgentRun:
         return ai_runtime.copy_run_input(self.messages)
 
 
-@dataclass
-class _MediaAttempt:
-    """Per-attempt media routing state shared by the blocking and streaming agent runs."""
-
-    context_media_kinds: frozenset[MediaKind]
-    media_route: ModelMediaRoute | None
-    removed_media_kinds: frozenset[MediaKind]
-    attempt_prompt: list[Message]
-    attempt_media_inputs: MediaInputs
-    attempt_run_id: str | None
-
-    @property
-    def remaining_context_media_kinds(self) -> frozenset[MediaKind]:
-        """Return the context media kinds still present after fallback removals."""
-        return self.context_media_kinds - self.removed_media_kinds
-
-    @classmethod
-    def initial(
-        cls,
-        run_input: list[Message],
-        media_inputs: MediaInputs,
-        model: Model | None,
-        *,
-        fallback_prompt: str,
-        run_id: str | None,
-    ) -> _MediaAttempt:
-        """Route media for the first attempt and build its prompt and inputs."""
-        context_media_kinds = ai_runtime.media_inputs_from_run_input(run_input).kinds()
-        media_route = build_model_media_route(model) if media_inputs.has_any() or context_media_kinds else None
-        media_filter = filter_media_inputs_for_route(media_route, media_inputs)
-        removed_media_kinds = media_filter.removed_kinds | (
-            unsupported_media_kinds_for_route(media_route) & context_media_kinds
-        )
-        attempt_prompt = (
-            ai_runtime.append_inline_media_fallback_to_run_input(
-                run_input,
-                fallback_prompt=fallback_prompt,
-                removed_kinds=removed_media_kinds,
-            )
-            if removed_media_kinds
-            else ai_runtime.copy_run_input(run_input)
-        )
-        return cls(
-            context_media_kinds=context_media_kinds,
-            media_route=media_route,
-            removed_media_kinds=removed_media_kinds,
-            attempt_prompt=attempt_prompt,
-            attempt_media_inputs=media_filter.media_inputs,
-            attempt_run_id=run_id,
-        )
-
-    def retry(
-        self,
-        run_input: list[Message],
-        *,
-        fallback_prompt: str,
-        extra_removed_kinds: frozenset[MediaKind],
-        retry_media_inputs: MediaInputs,
-        run_id: str | None,
-    ) -> None:
-        """Apply one media-fallback retry: widen removed kinds and rebuild the attempt prompt."""
-        self.removed_media_kinds = self.removed_media_kinds | extra_removed_kinds
-        self.attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
-            run_input,
-            fallback_prompt=fallback_prompt,
-            removed_kinds=self.removed_media_kinds,
-        )
-        self.attempt_media_inputs = retry_media_inputs
-        self.attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-
-
 def _build_timing_scope(
     *,
     reply_to_event_id: str | None,
@@ -358,7 +284,7 @@ class _AgentTurnHolder:
     """Live per-turn agent state shared between attempt closures and adapter callbacks."""
 
     agent: Agent | None = None
-    attempt: _MediaAttempt | None = None
+    attempt: ai_runtime.MediaAttempt | None = None
     state: _StreamingAttemptState | None = None  # streaming turns only
     attempt_started: bool = False  # streaming turns only
 
@@ -497,7 +423,7 @@ class _NonStreamingAttemptResult:
     """Result of running one non-streaming agent attempt sequence."""
 
     response: RunOutput | None
-    attempt: _MediaAttempt
+    attempt: ai_runtime.MediaAttempt
     user_error: Exception | None = None
 
 
@@ -673,8 +599,16 @@ def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEn
 
 
 def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
-    """Return whether one streaming attempt already observed agent-visible work."""
-    return bool(state.assistant_text or state.observed_tool_calls)
+    """Return whether one streaming attempt already observed agent-visible work.
+
+    A tool counts from either end of its life, the same way the answer bar
+    counts one. The start tracker drops a completion whose start it never saw —
+    it logs that and skips the visible marker — so ``observed_tool_calls`` stays
+    at zero for it while ``completed_tool_executions`` holds the execution that
+    really ran. Reading only the starts would let this gate re-run a whole turn
+    whose shell command, file write or mail send has already happened.
+    """
+    return bool(state.assistant_text or state.observed_tool_calls or state.completed_tool_executions)
 
 
 def _is_run_cancelled_boilerplate(content: str) -> bool:
@@ -855,9 +789,52 @@ def _track_model_request_metrics(
         state.first_token_latency = float(event.time_to_first_token)
 
 
-def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
+def _stream_produced_answer(state: _StreamingAttemptState) -> bool:
+    """Return whether this streamed attempt came back with a real answer.
+
+    A streaming driver never holds a terminal run output to put through
+    :func:`media_free_retry_succeeded`, so this is the same bar spelled in the
+    facts a stream does leave behind: visible text, or a tool call. A stream
+    that ended having emitted neither answered nothing, whatever status the
+    run-metadata card ends up carrying.
+
+    A tool call counts from either end of its life. The start tracker drops a
+    completion whose start it never saw — it logs that and skips the marker —
+    while ``completed_tool_executions`` takes every completion the stream
+    carried, which is why the driver's own ``is_empty`` reads that list. Reading
+    only the starts here would let this bar call a turn empty that the same
+    driver hands on as a non-empty attempt carrying that tool execution, and the
+    route would re-send the media it just proved unnecessary on every later turn.
+
+    Media is the third channel an answer arrives on. A stream never carries a
+    run output, but its completion event carries the same generated images,
+    videos, audio and files the blocking bar reads, so a run whose whole answer
+    is an image the model produced clears this bar too — and only this bar. What
+    the driver can deliver is :func:`_stream_delivered_answer`, which is blind to
+    media on purpose.
+    """
+    if _stream_delivered_answer(state):
+        return True
+    return state.completed_run_event is not None and carries_media_answer(state.completed_run_event)
+
+
+def _stream_delivered_answer(state: _StreamingAttemptState) -> bool:
+    """Return whether this streamed attempt left the user something to read.
+
+    The media-blind half of :func:`_stream_produced_answer`, and the same split
+    :func:`is_empty_completed_run` makes against ``media_free_retry_succeeded``
+    on the blocking side. Nothing downstream renders the generated images,
+    videos, audio or files a completion event carries, so an attempt whose whole
+    answer is media leaves this driver with an empty document: it is the empty
+    run the driver discards, and the turn ends on the empty-response notice
+    rather than in silence.
+    """
     visible_text = state.full_response.strip() or (state.canonical_final_body_candidate or "").strip()
-    return state.completed_run_event is not None and not visible_text and state.observed_tool_calls == 0
+    return bool(visible_text or state.observed_tool_calls > 0 or state.completed_tool_executions)
+
+
+def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
+    return state.completed_run_event is not None and not _stream_delivered_answer(state)
 
 
 def _metrics_comparison_payload(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -955,7 +932,7 @@ async def _run_cached_agent_attempt(
 async def _run_non_streaming_agent_attempts(
     *,
     run_context: _AgentRunContext,
-    attempt: _MediaAttempt,
+    attempt: ai_runtime.MediaAttempt,
     run_id: str | None,
     run_id_callback: Callable[[str], None] | None,
     scope_context: ScopeSessionContext | None,
@@ -1018,7 +995,7 @@ async def _run_non_streaming_agent_attempts(
                 logger.exception("Error generating AI response", agent=run_context.agent_name)
                 return _NonStreamingAttemptResult(response=None, attempt=attempt, user_error=e)
 
-            if response.status == RunStatus.error:
+            if is_errored_run_output(response):
                 error_text = str(response.content or "Unknown agent error")
                 retry_decision = retry_media_inputs_after_failure(
                     attempt.media_route,
@@ -1052,7 +1029,14 @@ async def _run_non_streaming_agent_attempts(
             break
 
         assert response is not None
-        if pending_retry_decision is not None and response.status not in (RunStatus.error, RunStatus.cancelled):
+        # One shared bar with every other driver (see
+        # `media_free_retry_succeeded`): only a run that came back `completed`
+        # *and answered* proves the media is what the provider objected to. A
+        # `completed` run carrying no content and no tool call is the empty run
+        # this driver discards and retries below, so it banks nothing either.
+        # No `answered=` here: on the agent path the leaf's reading of this
+        # output is the driver's own definition of empty.
+        if pending_retry_decision is not None and media_free_retry_succeeded(response):
             pending_retry_decision.record_retry_success()
         return _NonStreamingAttemptResult(response=response, attempt=attempt)
     finally:
@@ -1380,7 +1364,7 @@ async def _prepare_agent_run_context(
         prepared_run=prepared_run,
         run_input=prepared_run.run_input,
         metadata=metadata,
-        inline_media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
+        inline_media_fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE"),
     )
 
 
@@ -1567,7 +1551,7 @@ async def ai_response(  # noqa: C901
         run.unseen_event_ids = prepared_run.unseen_event_ids
         run.run_metadata = run_context.metadata
 
-        attempt = _MediaAttempt.initial(
+        attempt = ai_runtime.MediaAttempt.initial(
             run_context.run_input,
             media_inputs,
             prepared_run.agent.model,
@@ -1828,7 +1812,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
 async def _stream_agent_attempt_chunks(
     *,
     run_context: _AgentRunContext,
-    attempt: _MediaAttempt,
+    attempt: ai_runtime.MediaAttempt,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
     run_id_callback: Callable[[str], None] | None,
@@ -1851,10 +1835,7 @@ async def _stream_agent_attempt_chunks(
             metadata=run_context.metadata,
         )
         with bind_llm_request_log_context(**request_context):
-            prepared_input = ai_runtime.attach_media_to_run_input(
-                attempt.attempt_prompt,
-                attempt.attempt_media_inputs,
-            )
+            prepared_input = attempt.wire_run_input()
             stream_generator = agent.arun(
                 prepared_input,
                 session_id=run_context.session_id,
@@ -2056,7 +2037,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
         run.run_metadata = run_context.metadata
 
-        attempt = _MediaAttempt.initial(
+        attempt = ai_runtime.MediaAttempt.initial(
             run_context.run_input,
             media_inputs,
             prepared_run.agent.model,
@@ -2212,7 +2193,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 )
                 return
 
-            if pending_retry_decision is not None:
+            # Same bar as the blocking driver, read off the stream instead of a
+            # run output: an attempt that emitted no text, called no tool and
+            # generated no media answered nothing, so it proves nothing about
+            # the media either. Generated media parts the two questions here:
+            # the provider answered, so the lesson is real, while the card below
+            # and the empty-run verdict read the media-blind half because no
+            # delivery path renders what the model generated.
+            if pending_retry_decision is not None and _stream_produced_answer(state):
                 pending_retry_decision.record_retry_success()
             break
 
@@ -2257,7 +2245,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             CompletedAttempt(
                 replayable_text=state.assistant_text or state.canonical_final_body_candidate or "",
                 has_visible_content=bool(state.assistant_text or state.canonical_final_body_candidate),
-                is_empty=_stream_completed_without_visible_output(state) and not state.completed_tool_executions,
+                is_empty=_stream_completed_without_visible_output(state),
                 session_id=state.completed_run_event.session_id if state.completed_run_event is not None else None,
                 run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                 attempt_run_id=attempt.attempt_run_id,

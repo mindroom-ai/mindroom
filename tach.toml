@@ -344,6 +344,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
+    "mindroom.run_output_status",
     "mindroom.timing",
     "mindroom.tool_system.events",
     "mindroom.user_turn_time",
@@ -523,6 +524,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
+    "mindroom.run_output_status",
 ]
 visibility = [
     "mindroom.ai",
@@ -556,6 +558,7 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
+    "mindroom.model_media_guard",
     "mindroom.tool_system.dependencies",
     "mindroom.azure_openai_model",
     "mindroom.claude_prompt_cache",
@@ -579,6 +582,17 @@ visibility = [
     "mindroom.topic_generator",
     "mindroom.voice_handler",
 ]
+
+[[modules]]
+path = "mindroom.model_media_guard"
+depends_on = [
+    "mindroom.error_handling",
+    "mindroom.logging_config",
+    "mindroom.media_fallback",
+    "mindroom.redaction",
+    "mindroom.tool_system.context_bound_streams",
+]
+visibility = ["mindroom.model_loading"]
 
 [[modules]]
 path = "mindroom.metadata_merge"
@@ -980,6 +994,7 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.routing",
+    "mindroom.run_output_status",
     "mindroom.teams",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1868,6 +1883,12 @@ depends_on = [
     "mindroom.model_loading",
 ]
 
+# Terminal run-output status predicates: a leaf both blocking drivers read so
+# their media-lesson guards cannot drift apart.
+[[modules]]
+path = "mindroom.run_output_status"
+depends_on = []
+
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
@@ -1895,6 +1916,7 @@ depends_on = [
     "mindroom.metadata_merge",
     "mindroom.model_loading",
     "mindroom.response_turn",
+    "mindroom.run_output_status",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
 ]
@@ -3359,6 +3381,7 @@ path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
     "mindroom.llm_request_logging",
+    "mindroom.model_media_guard",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -4111,8 +4134,6 @@ expose = [
     "build_materialized_team_instance",
     "continue_paused_team_run",
     "format_team_response",
-    "is_cancelled_run_output",
-    "is_errored_run_output",
     "resolve_team_turn_models",
     "select_model_for_team",
     "team_response",

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -665,6 +666,16 @@ def _stream_with_llm_request_logging(
     return _stream()
 
 
+@dataclass(frozen=True, slots=True)
+class _LogSettings:
+    """Everything one installed model logs under, fixed at install time."""
+
+    agent_name: str
+    debug_config: DebugConfig
+    default_log_dir: Path
+    configured_provider: str | None
+
+
 def install_llm_request_logging(
     model: Model,
     *,
@@ -673,44 +684,69 @@ def install_llm_request_logging(
     default_log_dir: Path,
     configured_provider: str | None = None,
 ) -> None:
-    """Wrap one model for usage telemetry and optional full request logging."""
+    """Wrap one model for usage telemetry and optional full request logging.
+
+    The wrappers are ``partial`` objects over the bound originals rather than
+    closures: Agno deep-copies models routinely (``Model.__deepcopy__``), and
+    ``deepcopy`` rebinds a partial's arguments through the memo while a closure
+    would keep sending the copy's calls to the instance it was installed on.
+    Hooks installed on top of this one (``model_media_guard``) capture whatever
+    ``ainvoke`` is here, so a closure would pin the whole chain to the source.
+    """
     model_dict = vars(model)
     if model_dict.get(_INSTALLED_ATTR) is True:
         return
 
-    original_ainvoke = model.ainvoke
-    original_ainvoke_stream = model.ainvoke_stream
-
-    def _logged_ainvoke(*args: object, **kwargs: object) -> Coroutine[object, object, ModelResponse]:
-        if id(model) in _ACTIVE_MODEL_CALLS.get():
-            return original_ainvoke(*args, **kwargs)
-        return _invoke_with_llm_request_logging(
-            model=model,
-            original_ainvoke=original_ainvoke,
-            args=args,
-            kwargs=kwargs,
-            agent_name=agent_name,
-            debug_config=debug_config,
-            default_log_dir=default_log_dir,
-            configured_provider=configured_provider,
-            request_context=_snapshot_request_log_context(),
-        )
-
-    def _logged_ainvoke_stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        if id(model) in _ACTIVE_MODEL_CALLS.get():
-            return original_ainvoke_stream(*args, **kwargs)
-        return _stream_with_llm_request_logging(
-            model=model,
-            original_ainvoke_stream=original_ainvoke_stream,
-            args=args,
-            kwargs=kwargs,
-            agent_name=agent_name,
-            debug_config=debug_config,
-            default_log_dir=default_log_dir,
-            configured_provider=configured_provider,
-            request_context=_snapshot_request_log_context(),
-        )
-
-    model_dict["ainvoke"] = _logged_ainvoke
-    model_dict["ainvoke_stream"] = _logged_ainvoke_stream
+    settings = _LogSettings(
+        agent_name=agent_name,
+        debug_config=debug_config,
+        default_log_dir=default_log_dir,
+        configured_provider=configured_provider,
+    )
+    model_dict["ainvoke"] = partial(_logged_ainvoke, model, model.ainvoke, settings)
+    model_dict["ainvoke_stream"] = partial(_logged_ainvoke_stream, model, model.ainvoke_stream, settings)
     model_dict[_INSTALLED_ATTR] = True
+
+
+def _logged_ainvoke(
+    model: Model,
+    original_ainvoke: Callable[..., Coroutine[object, object, ModelResponse]],
+    settings: _LogSettings,
+    *args: object,
+    **kwargs: object,
+) -> Coroutine[object, object, ModelResponse]:
+    if id(model) in _ACTIVE_MODEL_CALLS.get():
+        return original_ainvoke(*args, **kwargs)
+    return _invoke_with_llm_request_logging(
+        model=model,
+        original_ainvoke=original_ainvoke,
+        args=args,
+        kwargs=kwargs,
+        agent_name=settings.agent_name,
+        debug_config=settings.debug_config,
+        default_log_dir=settings.default_log_dir,
+        configured_provider=settings.configured_provider,
+        request_context=_snapshot_request_log_context(),
+    )
+
+
+def _logged_ainvoke_stream(
+    model: Model,
+    original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
+    settings: _LogSettings,
+    *args: object,
+    **kwargs: object,
+) -> AsyncIterator[ModelResponse]:
+    if id(model) in _ACTIVE_MODEL_CALLS.get():
+        return original_ainvoke_stream(*args, **kwargs)
+    return _stream_with_llm_request_logging(
+        model=model,
+        original_ainvoke_stream=original_ainvoke_stream,
+        args=args,
+        kwargs=kwargs,
+        agent_name=settings.agent_name,
+        debug_config=settings.debug_config,
+        default_log_dir=settings.default_log_dir,
+        configured_provider=settings.configured_provider,
+        request_context=_snapshot_request_log_context(),
+    )

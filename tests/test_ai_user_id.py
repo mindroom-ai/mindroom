@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from contextvars import Context
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
-from agno.media import File
+from agno.exceptions import ModelProviderError
+from agno.media import Audio, File, Image
 from agno.models.message import Message
 from agno.models.metrics import Metrics
 from agno.models.openai import OpenAIChat
@@ -38,6 +41,7 @@ from mindroom.ai import (
     _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
+    _PreparedAgentRun,
     _run_error_event_text,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
@@ -46,6 +50,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _serialize_metrics, build_ai_run_metadata_content
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -69,13 +74,20 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.media_fallback import (
     append_inline_media_fallback_prompt,
+    build_model_media_route,
+    filter_media_inputs_for_route,
+    record_replayed_media_isolation,
     reset_model_media_capability_cache,
     retry_media_inputs_after_failure,
+    suspected_replayed_media_kinds_for_route,
+    unsupported_media_kinds_for_route,
+    unsupported_replayed_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
-from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.model_loading import get_model_instance
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
     prepare_memory_and_model_context,
@@ -111,6 +123,7 @@ from tests.bot_helpers import (
     _stream_outcome,
 )
 from tests.conftest import (
+    inline_media_fallback_note,
     make_turn_context,
     make_visible_message,
 )
@@ -123,6 +136,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
     from mindroom.final_delivery import StreamTransportOutcome
+    from mindroom.media_fallback import ModelMediaRoute
 
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
@@ -296,6 +310,43 @@ def test_compose_current_turn_prompt_keeps_model_only_tail_without_timestamp() -
     )
 
     assert prompt == "Available attachment IDs: att_report."
+
+
+def _context_only_agent(model_id: str) -> MagicMock:
+    """Return an agent mock whose real model gives the media caches a stable route key."""
+    agent = MagicMock()
+    agent.model = OpenAIChat(id=model_id, api_key="dummy-key")
+    agent.name = "GeneralAgent"
+    agent.add_history_to_context = False
+    return agent
+
+
+def _context_only_prepared_run(agent: object, prompt: str) -> _PreparedAgentRun:
+    """Return a prepared run whose only media is a thread-context image the caller owns.
+
+    The wire guard never owns a message the caller put on the wire, so this is
+    the shape that leaves the run-input layer as the only one able to take the
+    image off — and therefore the only one whose retry can be credited for it.
+    """
+    return replace(
+        _prepared_prompt_result(agent, prompt=prompt),
+        messages=(
+            Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+            Message(role="user", content=prompt),
+        ),
+    )
+
+
+def _assert_context_only_credit(route: ModelMediaRoute | None) -> None:
+    """Assert a context-only retry taught the replayed gate and left fresh uploads alone."""
+    # One isolation of replayed media, which is what a context-only experiment
+    # proves: the two-strike gate still owes a second one before it is a lesson.
+    assert suspected_replayed_media_kinds_for_route(route) == frozenset({"image"})
+    assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+    # And nothing at all in the cache that gates the user's next upload.
+    assert unsupported_media_kinds_for_route(route) == frozenset()
+    fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+    assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
 
 
 class TestUserIdPassthrough:
@@ -1720,12 +1771,11 @@ class TestUserIdPassthrough:
         first_agent = build_agent()
         second_agent = build_agent()
 
-        first_success = MagicMock()
-        first_success.content = "Recovered response"
-        first_success.tools = None
-        second_success = MagicMock()
-        second_success.content = "Cached response"
-        second_success.tools = None
+        # Real run outputs with the status set: banking is gated on `completed`
+        # alone, and `RunOutput` defaults to `running` — the status of a run
+        # nothing ever settled, which no success fixture may lean on.
+        first_success = RunOutput(content="Recovered response", status=RunStatus.completed)
+        second_success = RunOutput(content="Cached response", status=RunStatus.completed)
         first_agent.arun = AsyncMock(
             side_effect=[
                 Exception("audio input is not supported - hint: you may need to provide the mmproj"),
@@ -1779,6 +1829,128 @@ class TestUserIdPassthrough:
         assert not cached_prompt[-1].audio
         assert not cached_prompt[-1].images
         reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("retry_status", "retry_content"),
+        [
+            (RunStatus.error, "Still no answer"),
+            (RunStatus.cancelled, "Still no answer"),
+            (RunStatus.paused, "Still no answer"),
+            (RunStatus.running, "Still no answer"),
+            (RunStatus.pending, "Still no answer"),
+            ("error", "Still no answer"),
+            ("cancelled", "Still no answer"),
+            ("paused", "Still no answer"),
+            ("running", "Still no answer"),
+            (RunStatus.completed, ""),
+            (RunStatus.completed, None),
+            (RunStatus.completed, "   "),
+        ],
+    )
+    async def test_ai_response_banks_nothing_when_the_media_free_retry_did_not_finish(
+        self,
+        tmp_path: Path,
+        retry_status: RunStatus | str,
+        retry_content: str | None,
+    ) -> None:
+        """The twin of the test above, one outcome at a time: an unfinished retry proved nothing.
+
+        A media lesson lasts the life of the process, so it may only be banked
+        by a retry that came back ``completed`` *with an answer*. An error is
+        the experiment coming back negative, a cancellation and a pause stopped
+        before it had an answer, and ``running``/``pending`` are what a run
+        output says when nothing ever settled it — ``running`` being the
+        dataclass default, so a denylist of the unhappy statuses would bank on
+        the emptiest shape there is. ``RunStatus`` is a ``str`` enum with
+        uppercase values, so a serialized status still matches by identity; the
+        lowercase spellings here are the defense-in-depth half of the one shared
+        predicate. The ``completed``-with-nothing rows are the shape this same
+        driver discards and retries as an empty run: it finished, but it
+        answered nothing, so it says nothing about the media either.
+        """
+        reset_model_media_capability_cache()
+        agent = MagicMock()
+        agent.model = OpenAIChat(id="qwen-local", base_url="http://localhost:9292/v1")
+        agent.name = "GeneralAgent"
+        agent.add_history_to_context = False
+        agent.arun = AsyncMock(
+            side_effect=[
+                Exception("audio input is not supported - hint: you may need to provide the mmproj"),
+                # A `completed` run with no answer is discarded and retried once
+                # by the empty-run guard, so the driver asks for one more output.
+                RunOutput(content=retry_content, status=retry_status),
+                RunOutput(content=retry_content, status=retry_status),
+            ],
+        )
+        route = build_model_media_route(agent.model)
+
+        try:
+            with (
+                patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+                suppress(asyncio.CancelledError),
+            ):
+                mock_prepare.return_value = _prepared_prompt_result(agent)
+                await ai_response(
+                    make_turn_context("general", session_id="session-unfinished-retry"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+
+            assert agent.arun.await_count >= 2
+            assert unsupported_media_kinds_for_route(route) == frozenset()
+            assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_ai_response_banks_a_lesson_from_a_retry_that_answered_only_in_media(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A generated image is the provider saying yes, and it is still nothing to deliver.
+
+        The row above proves an empty ``completed`` retry banks nothing. This is
+        the row next to it: the same empty ``content``, with the image the model
+        produced sitting on the run output. The provider took the media-free
+        request, so the lesson is real and the doomed image never goes back on
+        the wire — and because nothing here renders a generated image, the turn
+        is the empty run that earns the notice instead of ending in silence.
+        """
+        reset_model_media_capability_cache()
+        agent = MagicMock()
+        agent.model = OpenAIChat(id="blocking-media-answer", api_key="dummy-key")
+        agent.name = "GeneralAgent"
+        agent.add_history_to_context = False
+        agent.arun = AsyncMock(
+            side_effect=[
+                Exception("Error code: 404 - No endpoints found that support image input"),
+                RunOutput(content=None, status=RunStatus.completed, images=[Image(content=b"generated")]),
+                RunOutput(content=None, status=RunStatus.completed, images=[Image(content=b"generated")]),
+            ],
+        )
+        route = build_model_media_route(agent.model)
+
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _prepared_prompt_result(agent)
+                response = await ai_response(
+                    make_turn_context("general", session_id="session-blocking-media-answer"),
+                    prompt="draw it again",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(images=[Image(content=b"fresh")]),
+                )
+
+            assert response == EMPTY_RESPONSE_NOTICE
+            # The doomed call, the retry that answered in media, and the one the
+            # empty-run guard spends on it.
+            assert agent.arun.await_count == 3
+            assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+        finally:
+            reset_model_media_capability_cache()
 
     @pytest.mark.asyncio
     async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
@@ -1845,7 +2017,8 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(
             prepared_prompt,
-            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE,
+            kinds=frozenset({"file"}),
         )
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         expected_metadata = {
@@ -2028,6 +2201,1047 @@ class TestUserIdPassthrough:
         assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Recovered stream" for chunk in chunks)
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_recovers_from_image_in_persisted_history_after_model_switch(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A text-only current turn should survive an image replayed by Agno after a model switch."""
+        reset_model_media_capability_cache()
+        session_db = tmp_path / "persisted-history-media.db"
+        session_id = "session-with-image"
+        requester_id = "@user:localhost"
+        image = Image(content=b"\x89PNG\r\n\x1a\npersisted")
+
+        vision_model = OpenAIChat(id="vision-model", api_key="dummy-key")
+
+        async def vision_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield ModelResponse(content="I saw the photo")
+
+        vars(vision_model)["ainvoke_stream"] = vision_stream
+        vision_agent = AgnoAgent(
+            id="general",
+            model=vision_model,
+            db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            add_history_to_context=True,
+        )
+        first_turn = cast(
+            "AsyncIterator[object]",
+            vision_agent.arun(
+                "earlier photo",
+                images=[image],
+                session_id=session_id,
+                user_id=requester_id,
+                stream=True,
+                stream_events=True,
+            ),
+        )
+        async for _event in first_turn:
+            pass
+
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images for message in messages):
+                # The captured OpenRouter rejection from the original report.
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Recovered after model switch")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        text_agent = AgnoAgent(
+            id="general",
+            model=loaded_text_model,
+            db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            add_history_to_context=True,
+            num_history_runs=3,
+        )
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(text_agent, prompt="current text only")
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id=session_id, requester_id=requester_id),
+                    prompt="current text only",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                )
+            ]
+
+        assert len(wire_calls) == 2
+        assert any(message.from_history and message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        # The disclosure rides the replayed message that lost its attachment,
+        # leaving the current turn's own text exactly as the user wrote it.
+        assert any(message.from_history and "Attachment omitted" in str(message.content) for message in wire_calls[1])
+        assert any(
+            not message.from_history and str(message.content) == "current text only" for message in wire_calls[1]
+        )
+        assert any(
+            isinstance(chunk, RunContentEvent) and chunk.content == "Recovered after model switch" for chunk in chunks
+        )
+        persisted_session = await text_agent.aget_session(session_id=session_id, user_id=requester_id)
+        assert persisted_session is not None
+        assert any(message.images for message in persisted_session.get_messages())
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_does_not_credit_itself_with_the_wire_guards_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When the wire guard is what rescued the turn, the run-input cache must learn nothing."""
+        reset_model_media_capability_cache()
+        session_db = tmp_path / "two-owners-one-turn.db"
+        session_id = "session-with-image"
+        requester_id = "@user:localhost"
+        replayed_image = Image(content=b"\x89PNG\r\n\x1a\npersisted")
+
+        vision_model = OpenAIChat(id="vision-model", api_key="dummy-key")
+
+        async def vision_stream(*_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield ModelResponse(content="I saw the photo")
+
+        vars(vision_model)["ainvoke_stream"] = vision_stream
+        vision_agent = AgnoAgent(
+            id="general",
+            model=vision_model,
+            db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            add_history_to_context=True,
+        )
+        first_turn = cast(
+            "AsyncIterator[object]",
+            vision_agent.arun(
+                "earlier photo",
+                images=[replayed_image],
+                session_id=session_id,
+                user_id=requester_id,
+                stream=True,
+                stream_events=True,
+            ),
+        )
+        async for _event in first_turn:
+            pass
+
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Recovered after both layers tried")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        text_agent = AgnoAgent(
+            id="general",
+            model=loaded_text_model,
+            db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+            add_history_to_context=True,
+            num_history_runs=3,
+        )
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(text_agent, prompt="look at this too")
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id=session_id, requester_id=requester_id),
+                    prompt="look at this too",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    media=MediaInputs(images=[Image(content=b"\x89PNG\r\n\x1a\nfresh")]),
+                )
+            ]
+
+        # Call 1 carries both owners' media, so the guard stands down and ai.py strips
+        # its own upload. Calls 2 and 3 belong to the guard: the replayed image alone,
+        # then the request without it.
+        assert len(wire_calls) == 3
+        assert any(not message.from_history and message.images for message in wire_calls[0])
+        assert any(message.from_history and message.images for message in wire_calls[1])
+        assert not any(message.images for message in wire_calls[1] if not message.from_history)
+        assert not any(message.images for message in wire_calls[2])
+        assert any(
+            isinstance(chunk, RunContentEvent) and chunk.content == "Recovered after both layers tried"
+            for chunk in chunks
+        )
+        route = build_model_media_route(loaded_text_model)
+        # The turn recovered, but the run input was never the problem.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        # The guard's own evidence is a suspicion until a second turn corroborates it.
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_stops_paying_for_context_media_the_guard_already_learned(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A learned modality must stop costing a doomed call when it arrives as thread context.
+
+        Thread context is the one place the two layers meet without either one
+        being able to finish the job alone: the guard learned the kind but never
+        owns a message the caller put on the wire, and the layer above can strip
+        it but may not bank the lesson. If the pre-strip reads only its own
+        cache, every turn of that conversation ships the media, fails, and
+        retries — a fixed extra provider call for the life of the process.
+        """
+        reset_model_media_capability_cache()
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Answered without the photo")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        route = build_model_media_route(loaded_text_model)
+        # Filled the way the guard fills it: one isolation, then the one that confirms it.
+        record_replayed_media_isolation(route, "image")
+        record_replayed_media_isolation(route, "image")
+
+        agent = AgnoAgent(id="general", model=loaded_text_model)
+        # Shaped like execution_preparation builds thread context: a live user
+        # message carrying the attachment, so it is the caller's, not the guard's.
+        prepared_run = replace(
+            _prepared_prompt_result(agent, prompt="what is in it?"),
+            messages=(
+                Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                Message(role="user", content="what is in it?"),
+            ),
+        )
+
+        turn_calls: list[int] = []
+        for turn in range(2):
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = prepared_run
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id=f"session-{turn}", requester_id="@user:localhost"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=config,
+                    )
+                ]
+            assert any(
+                isinstance(chunk, RunContentEvent) and chunk.content == "Answered without the photo" for chunk in chunks
+            )
+            turn_calls.append(len(wire_calls) - sum(turn_calls))
+
+        # One call per turn, from the first turn on: the guard's lesson is read
+        # before the call, so the doomed experiment is never repeated.
+        assert turn_calls == [1, 1]
+        assert not any(message.images for call in wire_calls for message in call)
+        assert any("Inline media unavailable for this model" in str(call[-1].content) for call in wire_calls)
+        # Nothing was credited for it, so a fresh upload of that kind still goes
+        # out: the crossover the run-input cache guards stays closed.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_keeps_the_note_off_a_surviving_upload_of_a_learned_kind(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The pre-strip may not announce a rejection over an attachment still on the wire.
+
+        The note and the strip used to be the same decision, and they stopped
+        being one when the pre-strip started reading the guard's cache: that read
+        takes the replayed copy off the request by design and leaves the user's
+        own upload of the same kind exactly where it was. Announcing "the model
+        rejected inline attachments for this turn" over a visible image sends the
+        agent off to hunt for attachment IDs it does not need.
+        """
+        reset_model_media_capability_cache()
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Answered without either photo")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        route = build_model_media_route(loaded_text_model)
+        record_replayed_media_isolation(route, "image")
+        record_replayed_media_isolation(route, "image")
+
+        agent = AgnoAgent(id="general", model=loaded_text_model)
+        prepared_run = replace(
+            _prepared_prompt_result(agent, prompt="and what about this one?"),
+            messages=(
+                Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                Message(role="user", content="and what about this one?"),
+            ),
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = prepared_run
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session-note", requester_id="@user:localhost"),
+                    prompt="and what about this one?",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    media=MediaInputs(images=[Image(content=b"fresh")]),
+                )
+            ]
+
+        assert len(wire_calls) == 2
+        context_messages = [
+            message for message in wire_calls[0] if str(message.content).startswith("thread context photo")
+        ]
+        # The guard's lesson still takes the replayed copy off the request...
+        assert context_messages
+        assert not any(message.images for message in context_messages)
+        # ...while the upload this turn is about rides along untouched, so the
+        # note would be describing something that did not happen.
+        assert wire_calls[0][-1].images
+        assert not any(inline_media_fallback_note("image") in str(message.content) for message in wire_calls[0])
+        # The retry does strip everything, and there the note is the truth.
+        assert not any(message.images for message in wire_calls[1])
+        assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+        assert any(
+            isinstance(chunk, RunContentEvent) and chunk.content == "Answered without either photo" for chunk in chunks
+        )
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_pays_two_turns_before_a_context_only_kind_is_learned(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An unprimed route must converge on context media without ever crediting fresh uploads.
+
+        This is the state every route really starts in: the guard's cache is
+        empty, so the pre-strip has nothing to read and the conversation's first
+        call ships the replayed image and fails. The layer above is the only one
+        that can take it off, so its recovery is one isolation of replayed media
+        — the same class of evidence the guard's own ladder produces, and priced
+        the same way. Two turns buy the lesson and the third stops paying for
+        it. Banking it in the fresh-upload cache instead would converge one turn
+        sooner and strip the user's next real upload for the life of the
+        process, which is the trade this test pins.
+        """
+        reset_model_media_capability_cache()
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Answered without the photo")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        route = build_model_media_route(loaded_text_model)
+        agent = AgnoAgent(id="general", model=loaded_text_model)
+        prepared_run = _context_only_prepared_run(agent, "what is in it?")
+
+        turn_calls: list[int] = []
+        for turn in range(4):
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = prepared_run
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id=f"session-{turn}", requester_id="@user:localhost"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=config,
+                    )
+                ]
+            assert any(
+                isinstance(chunk, RunContentEvent) and chunk.content == "Answered without the photo" for chunk in chunks
+            )
+            turn_calls.append(len(wire_calls) - sum(turn_calls))
+
+        # Two doomed calls, then the second isolation confirms the kind and the
+        # pre-strip takes over: one call per turn from there on.
+        assert turn_calls == [2, 2, 1, 1]
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        # The fresh-upload cache never hears about any of it.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_pays_a_third_turn_when_the_removal_confounded_two_kinds(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A turn whose one removal took a fresh kind and a replayed kind converges a turn later.
+
+        Every turn here uploads a voice note into a thread that already carries
+        an image, so the retry's single removal takes both and proves neither
+        kind on its own. The audio is credited nowhere at all: the single-strike
+        cache may not hear about a confounded removal, and the two-strike gate
+        is not its cache either, because nothing ever replayed it. Only the
+        image walks the replayed ladder, and only once its two strikes let the
+        pre-strip take it off does a turn isolate the upload and the fresh cache
+        learn the kind it is allowed to learn. This is the measured price of
+        crediting a confounded removal to neither cache: one more doomed call
+        than the context-only ladder pays.
+        """
+        reset_model_media_capability_cache()
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images or message.audio for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Answered from text alone")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        route = build_model_media_route(loaded_text_model)
+        agent = AgnoAgent(id="general", model=loaded_text_model)
+        prepared_run = _context_only_prepared_run(agent, "and the voice note?")
+
+        turn_calls: list[int] = []
+        for turn in range(5):
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = prepared_run
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id=f"session-confounded-{turn}"),
+                        prompt="and the voice note?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=config,
+                        media=MediaInputs(audio=[Audio(content=b"fresh-voice", format="wav")]),
+                    )
+                ]
+            assert any(
+                isinstance(chunk, RunContentEvent) and chunk.content == "Answered from text alone" for chunk in chunks
+            )
+            turn_calls.append(len(wire_calls) - sum(turn_calls))
+
+        # Three doomed calls against the context-only ladder's two: turns one and
+        # two buy the replayed gate's lesson about the image, turn three ships
+        # the upload alone and pays for isolating it, turn four is clean.
+        assert turn_calls == [2, 2, 2, 1, 1]
+        # Only the replayed kind ever walked the replayed ladder. The audio
+        # arrived as a fresh upload on every one of those turns and was never
+        # replayed, so it is absent from that cache and from its suspicions...
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        # ...and it reached the single-strike cache only on the turn its own
+        # removal stood alone.
+        assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_note_names_every_kind_a_retry_took_from_an_unlearned_route(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """On an unprimed route the first attempt owes no note, and the retry's note names both kinds.
+
+        The twin of the primed note test: with neither cache holding anything
+        there is nothing to pre-strip, so the first attempt carries the context
+        image and the fresh voice note and says nothing about either. The retry
+        has to strip both to have a chance, and there the note is entitled to
+        name both — and because one removal took both, the voice note is
+        credited to neither cache.
+        """
+        reset_model_media_capability_cache()
+        wire_calls: list[list[Message]] = []
+        text_model = OpenAIChat(id="text-only-model", api_key="dummy-key")
+
+        async def text_only_stream(*_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+            messages = cast("list[Message]", kwargs["messages"])
+            wire_calls.append([message.model_copy(deep=True) for message in messages])
+            if any(message.images or message.audio for message in messages):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            yield ModelResponse(content="Answered from text alone")
+
+        vars(text_model)["ainvoke_stream"] = text_only_stream
+        config = bind_runtime_paths(_config(), _runtime_paths(tmp_path))
+        with (
+            patch("mindroom.model_loading._create_model_for_provider", return_value=text_model),
+            patch("mindroom.model_loading.install_llm_request_logging"),
+        ):
+            loaded_text_model = get_model_instance(config, _runtime_paths(tmp_path), "default")
+
+        route = build_model_media_route(loaded_text_model)
+        agent = AgnoAgent(id="general", model=loaded_text_model)
+        prepared_run = _context_only_prepared_run(agent, "and the voice note?")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = prepared_run
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    make_turn_context("general", session_id="session-unprimed-note"),
+                    prompt="and the voice note?",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=config,
+                    media=MediaInputs(audio=[Audio(content=b"fresh-voice", format="wav")]),
+                )
+            ]
+
+        assert len(wire_calls) == 2
+        # Nothing was removed from the first attempt, so it announces nothing.
+        assert any(message.images for message in wire_calls[0])
+        assert wire_calls[0][-1].audio
+        assert not any("Inline media unavailable for this model" in str(message.content) for message in wire_calls[0])
+        # The retry took both, and names both.
+        assert not any(message.images or message.audio for message in wire_calls[1])
+        assert inline_media_fallback_note("audio", "image") in str(wire_calls[1][-1].content)
+        assert any(
+            isinstance(chunk, RunContentEvent) and chunk.content == "Answered from text alone" for chunk in chunks
+        )
+        # One removal, two kinds, so the turn isolated neither. The replayed
+        # image takes its first strike at the two-strike gate; the fresh voice
+        # note is credited nowhere, so it is absent from the cache that gates
+        # the user's next upload and from the replayed gate's suspicions alike.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(audio=[Audio(content=b"next-voice", format="wav")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_ai_response_context_only_retry_after_an_exception_credits_the_replayed_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The blocking agent path must retry a context-only turn and bank it as a replay lesson.
+
+        A turn whose only media is thread context carries nothing in the run
+        input's own media, so the retry exists at all only because the driver
+        reports the context kinds it is about to strip.
+        """
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent("blocking-context-only")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def _arun(run_input: list[Message], **_kwargs: object) -> RunOutput:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            if any(message.images for message in run_input):
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            return RunOutput(content="Answered without the photo", status=RunStatus.completed)
+
+        mock_agent.arun = AsyncMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _context_only_prepared_run(mock_agent, "what is in it?")
+                response = await ai_response(
+                    make_turn_context("general", session_id="session-blocking-context"),
+                    prompt="what is in it?",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+
+            assert "Answered without the photo" in response
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+            _assert_context_only_credit(route)
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_ai_response_context_only_retry_after_an_errored_run_output_credits_the_replayed_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An errored run output is the same evidence as a raised error, and must retry the same way."""
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent("blocking-errored-output")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def _arun(run_input: list[Message], **_kwargs: object) -> RunOutput:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            if any(message.images for message in run_input):
+                return RunOutput(
+                    content="Error code: 404 - No endpoints found that support image input",
+                    status=RunStatus.error,
+                )
+            return RunOutput(content="Answered without the photo", status=RunStatus.completed)
+
+        mock_agent.arun = AsyncMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _context_only_prepared_run(mock_agent, "what is in it?")
+                response = await ai_response(
+                    make_turn_context("general", session_id="session-blocking-errored"),
+                    prompt="what is in it?",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+
+            assert "Answered without the photo" in response
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            _assert_context_only_credit(route)
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_context_only_retry_after_a_run_error_event_credits_the_replayed_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A streamed run error over context-only media must retry and bank the lesson as a replay."""
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent("stream-run-error")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Answered without the photo")
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            return failing_stream() if any(message.images for message in run_input) else successful_stream()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _context_only_prepared_run(mock_agent, "what is in it?")
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id="session-stream-run-error"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                    )
+                ]
+
+            assert any(
+                isinstance(chunk, RunContentEvent) and chunk.content == "Answered without the photo" for chunk in chunks
+            )
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+            _assert_context_only_credit(route)
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_context_only_retry_after_a_setup_failure_credits_the_replayed_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stream that dies before it starts must retry a context-only turn the same way."""
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent("stream-setup-failure")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def successful_stream() -> AsyncIterator[object]:
+            yield RunContentEvent(content="Answered without the photo")
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            if any(message.images for message in run_input):
+                # Raised by the call that builds the stream, before any event.
+                raise ModelProviderError(
+                    message="Error code: 404 - No endpoints found that support image input",
+                    status_code=404,
+                )
+            return successful_stream()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _context_only_prepared_run(mock_agent, "what is in it?")
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id="session-stream-setup"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                    )
+                ]
+
+            assert any(
+                isinstance(chunk, RunContentEvent) and chunk.content == "Answered without the photo" for chunk in chunks
+            )
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            _assert_context_only_credit(route)
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("removed_provenance", ["fresh_upload", "thread_context"])
+    async def test_stream_agent_response_that_answered_nothing_teaches_neither_cache(
+        self,
+        tmp_path: Path,
+        removed_provenance: str,
+    ) -> None:
+        """A media-free retry that emitted nothing proved nothing, whatever it removed.
+
+        A streaming driver never holds a terminal run output to judge, so the
+        bar is spelled in the facts a stream leaves behind, and this is the case
+        that bar exists for: the retry ran and came back with no text, no tool
+        call, and no run output at all. The run-metadata card calls that very
+        outcome an error, so it cannot also be the success that banks a
+        process-lifetime media lesson. Both provenances are driven because each
+        one credits a different cache, and neither may be credited here.
+        """
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent(f"stream-silent-retry-{removed_provenance}")
+        route = build_model_media_route(mock_agent.model)
+        context_media = removed_provenance == "thread_context"
+        wire_calls: list[list[Message]] = []
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+        async def silent_stream() -> AsyncIterator[object]:
+            """The retry that answered nothing: no content chunk, no tool call, no run output."""
+            if False:
+                yield RunContentEvent(content="")
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            return failing_stream() if any(message.images for message in run_input) else silent_stream()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        prepared_run = (
+            _context_only_prepared_run(mock_agent, "what is in it?")
+            if context_media
+            else _prepared_prompt_result(mock_agent, prompt="what is in it?")
+        )
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = prepared_run
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id=f"session-silent-{removed_provenance}"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        media=MediaInputs() if context_media else MediaInputs(images=[Image(content=b"fresh")]),
+                    )
+                ]
+
+            # The retry ran, over a payload this layer stripped the image from,
+            # and it emitted nothing for the caches to learn from.
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            assert not any(isinstance(chunk, RunContentEvent) for chunk in chunks)
+            assert unsupported_media_kinds_for_route(route) == frozenset()
+            assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+            assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+            fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+            assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_banks_from_a_retry_whose_only_answer_was_a_tool_completion(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A completion whose start was never announced is still an answer this driver delivers.
+
+        The start tracker drops a completion it has no pending start for — it
+        says so in the log and skips the visible marker — so the started-call
+        counter stays at zero while the completed-execution list does not. The
+        driver reads the list: it hands the turn on as a real answer carrying
+        that tool execution, and no empty-run retry is spent on it. The bank bar
+        has to read the same fact, or the experiment that just proved the media
+        was the problem is thrown away and the route ships the image again on
+        every turn for the life of the process.
+        """
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent("stream-untracked-tool-completion")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+        async def untracked_completion_stream() -> AsyncIterator[object]:
+            """The retry's whole output: one completion the stream never announced a start for."""
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "pwd"},
+                    result="/app",
+                ),
+            )
+            yield RunCompletedEvent(run_id="run-untracked", session_id="session-untracked-completion")
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            if any(message.images for message in run_input):
+                return failing_stream()
+            return untracked_completion_stream()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt="what is in it?")
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id="session-untracked-completion"),
+                        prompt="what is in it?",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        media=MediaInputs(images=[Image(content=b"fresh")]),
+                    )
+                ]
+
+            # The doomed call and its media-free retry, and no third one: an
+            # empty attempt would have borrowed the one-shot empty-run retry.
+            assert len(wire_calls) == 2
+            assert any(message.images for message in wire_calls[0])
+            assert not any(message.images for message in wire_calls[1])
+            # The driver delivered the completion as this turn's answer...
+            assert not any(isinstance(chunk, RunContentEvent) for chunk in chunks)
+            assert [
+                chunk.tool.tool_name for chunk in chunks if isinstance(chunk, ToolCallCompletedEvent) and chunk.tool
+            ] == ["run_shell_command"]
+            # ...so the bar that banks the lesson must call it an answer too.
+            assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "completion_kwargs",
+        [
+            pytest.param({"images": [Image(content=b"generated")]}, id="generated-image"),
+            pytest.param({"response_audio": Audio(content=b"spoken")}, id="spoken-answer"),
+        ],
+    )
+    async def test_stream_agent_response_banks_from_a_retry_that_answered_only_in_media(
+        self,
+        tmp_path: Path,
+        completion_kwargs: dict[str, object],
+    ) -> None:
+        """A model answers in media as readily as in words, and that is the experiment coming back.
+
+        Gemini appends the image it generated and never touches ``content``, and
+        an OpenAI spoken answer arrives on ``response_audio``. A stream never
+        holds a run output, but its completion event carries those same
+        channels, so a bank bar reading text and tool calls alone refuses the
+        lesson this route just earned and re-sends the doomed image on every
+        later turn for the life of the process.
+
+        Delivering is the other question, and it has the other answer: no path
+        in this codebase renders generated media, so the turn is still the empty
+        run the driver retries once and finishes with the notice. Banked and
+        undeliverable at once is the whole point of the split.
+        """
+        reset_model_media_capability_cache()
+        row_id = "image" if "images" in completion_kwargs else "audio"
+        mock_agent = _context_only_agent(f"stream-media-answer-{row_id}")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def failing_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+        async def media_answer_stream() -> AsyncIterator[object]:
+            """The retry's whole output: generated media and not one character of text."""
+            yield RunCompletedEvent(
+                run_id=f"run-media-{row_id}",
+                session_id=f"session-media-answer-{row_id}",
+                content=None,
+                **completion_kwargs,  # type: ignore[arg-type]
+            )
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            if any(message.images for message in run_input):
+                return failing_stream()
+            return media_answer_stream()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt="draw it again")
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id=f"session-media-answer-{row_id}"),
+                        prompt="draw it again",
+                        runtime_paths=_runtime_paths(tmp_path),
+                        config=_config(),
+                        media=MediaInputs(images=[Image(content=b"fresh")]),
+                    )
+                ]
+
+            # The doomed call, its media-free retry, and the one the empty-run
+            # guard spends on an answer this codebase cannot show. The image is
+            # never on the wire again: the lesson banked on the retry.
+            assert [any(message.images for message in call) for call in wire_calls] == [True, False, False]
+            contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
+            assert contents == [EMPTY_RESPONSE_NOTICE]
+            assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["run_error_event", "stream_exception"])
+    async def test_stream_agent_response_refuses_a_media_retry_after_a_tool_already_ran(
+        self,
+        tmp_path: Path,
+        failure: str,
+    ) -> None:
+        """A retry may not re-run a turn whose tool already executed.
+
+        The retry gate exists to keep a second attempt from duplicating work the
+        first one already did, and a tool execution is the half of that work
+        that leaves the process. The start tracker drops a completion whose
+        start it never saw, so the started-call counter stays at zero while the
+        completed-execution list holds the shell command that really ran.
+        Reading only the counter re-runs the whole turn — and the command runs
+        twice.
+
+        Both rows fail through a different one of the gate's callers: the run
+        error event the stream carries, and an exception raised mid-stream.
+        """
+        reset_model_media_capability_cache()
+        mock_agent = _context_only_agent(f"stream-tool-ran-{failure}")
+        route = build_model_media_route(mock_agent.model)
+        wire_calls: list[list[Message]] = []
+
+        async def tool_ran_then_failed() -> AsyncIterator[object]:
+            """One tool execution the stream never announced a start for, then a media failure."""
+            yield ToolCallCompletedEvent(
+                tool=ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name="run_shell_command",
+                    tool_args={"cmd": "rm -rf build"},
+                    result="removed",
+                ),
+            )
+            error_text = "Error code: 404 - No endpoints found that support image input"
+            if failure == "stream_exception":
+                raise ValueError(error_text)
+            yield RunErrorEvent(content=error_text)
+
+        def _arun(run_input: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+            wire_calls.append([message.model_copy(deep=True) for message in run_input])
+            return tool_ran_then_failed()
+
+        mock_agent.arun = MagicMock(side_effect=_arun)
+        try:
+            with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+                mock_prepare.return_value = _prepared_prompt_result(mock_agent, prompt="what is in it?")
+                async for _chunk in stream_agent_response(
+                    make_turn_context("general", session_id=f"session-tool-ran-{failure}"),
+                    prompt="what is in it?",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    media=MediaInputs(images=[Image(content=b"fresh")]),
+                ):
+                    pass
+
+            # The whole point: exactly one provider call. A second one would
+            # have re-run the shell command the first attempt already executed.
+            assert len(wire_calls) == 1
+            assert any(message.images for message in wire_calls[0])
+            assert unsupported_media_kinds_for_route(route) == frozenset()
+            assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+            assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+        finally:
+            reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_surfaces_stringified_safeguard_refusal_without_media_retry(
         self,
         tmp_path: Path,
@@ -2137,7 +3351,8 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(
             prepared_prompt,
-            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE,
+            kinds=frozenset({"file"}),
         )
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         expected_metadata = {
@@ -2400,34 +3615,48 @@ class TestUserIdPassthrough:
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""
         initial_prompt = "Inspect this attachment."
-        assert "[Inline media unavailable for this model]" not in INLINE_MEDIA_FALLBACK_PROMPT
+        assert "[Inline media unavailable for this model]" not in INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE
 
         first = append_inline_media_fallback_prompt(
             initial_prompt,
-            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE,
+            kinds=frozenset({"image"}),
         )
         second = append_inline_media_fallback_prompt(
             first,
-            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE,
+            kinds=frozenset({"image"}),
         )
         assert first == second
         assert "[Inline media unavailable for this model]" in first
+        assert "inline image attachments" in first
 
+        # Several kinds are named in a stable order, and a user override that
+        # does not care which kinds left still renders.
+        assert "inline audio, image attachments" in append_inline_media_fallback_prompt(
+            initial_prompt,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT_TEMPLATE,
+            kinds=frozenset({"image", "audio"}),
+        )
         custom = append_inline_media_fallback_prompt(
             initial_prompt,
             fallback_prompt="Custom retry guidance.",
+            kinds=frozenset({"file"}),
         )
         assert "Custom retry guidance." in custom
 
         custom_user_copy = append_inline_media_fallback_prompt(
             initial_prompt,
-            fallback_prompt="Use attachment tools instead.",
+            fallback_prompt="Use attachment tools instead of the {kinds} you cannot see.",
+            kinds=frozenset({"video"}),
         )
         repeated_custom_user_copy = append_inline_media_fallback_prompt(
             custom_user_copy,
-            fallback_prompt="Use attachment tools instead.",
+            fallback_prompt="Use attachment tools instead of the {kinds} you cannot see.",
+            kinds=frozenset({"video"}),
         )
         assert "[Inline media unavailable for this model]" in custom_user_copy
+        assert "Use attachment tools instead of the video you cannot see." in custom_user_copy
         assert custom_user_copy == repeated_custom_user_copy
 
     @pytest.mark.asyncio

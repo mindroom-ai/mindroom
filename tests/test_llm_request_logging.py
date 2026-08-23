@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -231,6 +232,27 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
     assert entries[1]["correlation_id"] == "$reply:example.com"
     assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deep_copied_model_logs_as_itself(tmp_path: Path) -> None:
+    """Agno deep-copies models for memory, learning, and culture work; the copy must be the model that runs."""
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    copied = deepcopy(model)
+    copied.id = "copied-model"
+
+    result = await copied.ainvoke(messages=[Message(role="user", content="hello")], assistant_message=None, tools=[])
+
+    assert result.content == "ok"
+    # A closure over the source instance would have sent the copy's call to the
+    # source, and every hook installed on top of this one inherits that binding.
+    assert [entry["model_id"] for entry in _read_log_entries(tmp_path)] == ["copied-model"]
 
 
 @pytest.mark.asyncio

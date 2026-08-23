@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import tempfile
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -15,6 +15,8 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
+from agno.exceptions import ModelProviderError
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
@@ -38,6 +40,7 @@ from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
 from mindroom.ai_runtime import (
+    EMPTY_RESPONSE_NOTICE,
     finalize_queued_notice_response_turn_async,
     install_queued_message_notice_hook,
     queued_message_signal_context,
@@ -65,8 +68,13 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_fallback import (
     build_model_media_route,
+    filter_media_inputs_for_route,
+    note_wire_media_recovery,
+    record_replayed_media_isolation,
     reset_model_media_capability_cache,
+    suspected_replayed_media_kinds_for_route,
     unsupported_media_kinds_for_route,
+    unsupported_replayed_media_kinds_for_route,
 )
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
@@ -85,6 +93,7 @@ from mindroom.teams import (
     _materialize_team_members,
     _PreparedMaterializedTeamExecution,
     _team_response_stream_raw,
+    _team_stream_ran_a_tool,
     _TeamStreamPresentation,
     build_materialized_team_instance,
     continue_paused_team_run,
@@ -94,9 +103,11 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import StreamingToolTracker
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     bind_runtime_paths,
+    inline_media_fallback_note,
     make_turn_context,
     make_visible_message,
     runtime_paths_for,
@@ -106,6 +117,8 @@ from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from mindroom.media_fallback import ModelMediaRoute
 
 
 _TEST_MODEL = "openai:gpt-5.4"
@@ -1187,10 +1200,12 @@ async def test_team_response_media_retry_keeps_route_filtered_kinds_removed() ->
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
             patch("mindroom.teams._create_team_instance", return_value=mock_team),
         ):
+            # `completed` explicitly: banking is gated on that status alone, and
+            # `TeamRunOutput` defaults to `running`, which no success may claim.
             mock_team.arun = AsyncMock(
                 side_effect=[
                     Exception("Error code: 400 - audio unsupported"),
-                    TeamRunOutput(content="Learned audio fallback"),
+                    TeamRunOutput(content="Learned audio fallback", status=RunStatus.completed),
                 ],
             )
             await team_response(
@@ -1207,7 +1222,7 @@ async def test_team_response_media_retry_keeps_route_filtered_kinds_removed() ->
             mock_team.arun = AsyncMock(
                 side_effect=[
                     Exception("Error code: 400 - image unsupported"),
-                    TeamRunOutput(content="Recovered team response"),
+                    TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
                 ],
             )
             response = await team_response(
@@ -1228,6 +1243,280 @@ async def test_team_response_media_retry_keeps_route_filtered_kinds_removed() ->
         assert first_attempt[-1].images == [image_input]
         assert retry_attempt[-1].audio is None
         assert retry_attempt[-1].images is None
+    finally:
+        reset_model_media_capability_cache()
+
+
+_MEDIA_ROUTE_ERROR = ModelProviderError(
+    message="Error code: 404 - No endpoints found that support image input",
+    status_code=404,
+)
+
+
+def _team_orchestrator(config: Config) -> MagicMock:
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+    return orchestrator
+
+
+def _assert_context_only_credit(route: ModelMediaRoute | None) -> None:
+    """Assert a context-only retry taught the replayed gate and left fresh uploads alone."""
+    # One isolation of replayed media, which is all a context-only experiment
+    # proves: the two-strike gate still owes a second one before it is a lesson.
+    assert suspected_replayed_media_kinds_for_route(route) == frozenset({"image"})
+    assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+    # And nothing at all in the cache that gates the user's next upload.
+    assert unsupported_media_kinds_for_route(route) == frozenset()
+    fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+    assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_team_response_does_not_credit_the_fresh_upload_cache_with_a_lesson_the_guard_already_learned() -> None:
+    """The team path must keep the guard's replayed-media lesson out of the fresh-upload cache.
+
+    Thread context is media MindRoom re-materialized into the run input, so the
+    guard can learn from it while the layer above is the only one able to remove
+    it. When the team's own retry is what recovers such a turn, crediting the
+    run-input cache would walk a conclusion about a replay into the cache that
+    gates the user's next upload — the crossover the agent path already closes.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def _arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.images for message in prompt):
+            # What the wire guard does on this doomed call: isolate the replayed
+            # image and, with one isolation already behind it, bank the lesson.
+            record_replayed_media_isolation(route, "image")
+            record_replayed_media_isolation(route, "image")
+            raise _MEDIA_ROUTE_ERROR
+        return TeamRunOutput(content="Recovered team response")
+
+    mock_team.arun = AsyncMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+            )
+
+        assert "Recovered team response" in response
+        # The context image is present only because the team declared it as
+        # context rather than as its own run input; without that the retry never
+        # fires at all and the turn dies on the first error.
+        assert len(wire_calls) == 2
+        assert any(message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+        # The guard owns its own lesson...
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        # ...and the team's success may not be credited for it, so the user's
+        # next upload of that kind still goes out.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_response_stops_paying_for_context_media_the_guard_already_learned() -> None:
+    """A learned modality must stop costing the team a doomed call every turn."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    record_replayed_media_isolation(route, "image")
+    record_replayed_media_isolation(route, "image")
+    wire_calls: list[list[Message]] = []
+
+    async def _arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.images for message in prompt):
+            raise _MEDIA_ROUTE_ERROR
+        return TeamRunOutput(content="Answered without the photo", status=RunStatus.completed)
+
+    mock_team.arun = AsyncMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+            )
+
+        assert "Answered without the photo" in response
+        assert len(wire_calls) == 1
+        assert not any(message.images for message in wire_calls[0])
+        assert inline_media_fallback_note("image") in str(wire_calls[0][-1].content)
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_response_pays_two_turns_before_a_context_only_kind_is_learned() -> None:
+    """An unprimed team route must converge on context media without crediting fresh uploads.
+
+    The twin of the primed test above, in the state every route actually starts
+    in. Nothing is banked yet, so the first call of the conversation ships the
+    replayed image and fails, and the team's own retry is the only thing that
+    can remove it. That recovery is one isolation of replayed media and is
+    priced like one: two turns buy the lesson, the third stops paying for it,
+    and the cache that gates the user's next upload is never touched.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def _arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.images for message in prompt):
+            raise _MEDIA_ROUTE_ERROR
+        return TeamRunOutput(content="Answered without the photo", status=RunStatus.completed)
+
+    mock_team.arun = AsyncMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        turn_calls: list[int] = []
+        for _turn in range(4):
+            with (
+                patch("mindroom.teams.create_agent", return_value=fake_agent),
+                patch(
+                    "mindroom.teams.resolve_agent_knowledge_access",
+                    return_value=_KnowledgeResolution(knowledge=None),
+                ),
+                patch("mindroom.teams._create_team_instance", return_value=mock_team),
+                patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+            ):
+                mock_prepare.return_value = _prepared_team_execution_context(
+                    final_prompt="What is in it?",
+                    context_messages=(
+                        Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                    ),
+                )
+                response = await team_response(
+                    agent_names=["general"],
+                    mode=TeamMode.COORDINATE,
+                    message="What is in it?",
+                    turn_recorder=_team_turn_recorder("What is in it?"),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                )
+            assert "Answered without the photo" in response
+            turn_calls.append(len(wire_calls) - sum(turn_calls))
+
+        assert turn_calls == [2, 2, 1, 1]
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_response_context_only_retry_after_an_errored_run_output_credits_the_replayed_gate() -> None:
+    """An errored team run output over context-only media must retry and bank a replay lesson.
+
+    A turn whose only media is thread context carries nothing in the team's own
+    media inputs, so the retry exists at all only because the driver reports the
+    context kinds it is about to strip.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def _arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.images for message in prompt):
+            return TeamRunOutput(
+                content="Error code: 404 - No endpoints found that support image input",
+                status=RunStatus.error,
+            )
+        return TeamRunOutput(content="Recovered team response", status=RunStatus.completed)
+
+    mock_team.arun = AsyncMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+            )
+
+        assert "Recovered team response" in response
+        assert len(wire_calls) == 2
+        assert any(message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+        _assert_context_only_credit(route)
     finally:
         reset_model_media_capability_cache()
 
@@ -1329,7 +1618,7 @@ async def test_team_generic_invalid_request_retry_teaches_route_after_success() 
     mock_team.arun = AsyncMock(
         side_effect=[
             Exception("Error code: 400 - completely new provider wording"),
-            TeamRunOutput(content="Recovered team response"),
+            TeamRunOutput(content="Recovered team response", status=RunStatus.completed),
         ],
     )
 
@@ -1354,6 +1643,285 @@ async def test_team_generic_invalid_request_retry_teaches_route_after_success() 
     assert mock_team.arun.await_count == 2
     route = build_model_media_route(mock_team.model)
     assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+    reset_model_media_capability_cache()
+
+
+_MEMBER_ONLY_ANSWERS = [
+    pytest.param({"content": "The member answered"}, id="member-text"),
+    pytest.param(
+        {
+            "content": None,
+            "tools": [ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="/")],
+        },
+        id="member-tool-call",
+    ),
+]
+
+
+def _member_answered_team_output(member_answer: dict[str, object]) -> TeamRunOutput:
+    """The shape a coordinate team returns when the leader synthesized nothing itself.
+
+    ``content`` and ``tools`` are the leader's own fields and both are empty; the
+    answer this driver renders and delivers lives entirely in the member.
+    """
+    return TeamRunOutput(
+        content=None,
+        tools=[],
+        status=RunStatus.completed,
+        member_responses=[
+            RunOutput(agent_name="GeneralAgent", status=RunStatus.completed, **member_answer),  # type: ignore[arg-type]
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member_answer", _MEMBER_ONLY_ANSWERS)
+async def test_team_response_banks_a_lesson_from_a_retry_only_a_member_answered(
+    member_answer: dict[str, object],
+) -> None:
+    """A team answers through its members, so a member-only answer is a success this may bank.
+
+    The bank bar reads one answeredness fact; if that fact is re-derived from the
+    leader's own ``content`` and ``tools`` it calls this run empty — while the
+    very same driver renders it, delivers it, and does not retry it. The lesson
+    would then never bank and every turn of the conversation would pay the same
+    doomed provider call forever, so the second turn here is what proves the
+    route converges.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    prompts: list[list[Message]] = []
+    rejection = Exception("Error code: 400 - completely new provider wording")
+
+    async def arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        prompts.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.audio for message in prompt):
+            raise rejection
+        return _member_answered_team_output(member_answer)
+
+    mock_team.arun = AsyncMock(side_effect=arun)
+    route = build_model_media_route(mock_team.model)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        for _turn in range(2):
+            with (
+                patch("mindroom.teams.create_agent", return_value=fake_agent),
+                patch(
+                    "mindroom.teams.resolve_agent_knowledge_access",
+                    return_value=_KnowledgeResolution(knowledge=None),
+                ),
+                patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            ):
+                await team_response(
+                    agent_names=["general"],
+                    mode=TeamMode.COORDINATE,
+                    message="Analyze this.",
+                    turn_recorder=_team_turn_recorder("Analyze this."),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                )
+
+        assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+        # Two calls on the doomed turn, one on the turn that already knows.
+        assert [any(message.audio for message in prompt) for prompt in prompts] == [True, False, False]
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retry_status", "retry_content"),
+    [
+        (RunStatus.error, "Still no answer"),
+        (RunStatus.cancelled, "Still no answer"),
+        (RunStatus.paused, "Still no answer"),
+        (RunStatus.running, "Still no answer"),
+        (RunStatus.pending, "Still no answer"),
+        ("error", "Still no answer"),
+        ("cancelled", "Still no answer"),
+        ("paused", "Still no answer"),
+        ("running", "Still no answer"),
+        (RunStatus.completed, ""),
+        (RunStatus.completed, None),
+        (RunStatus.completed, "   "),
+    ],
+)
+async def test_team_response_banks_nothing_when_the_media_free_retry_did_not_finish(
+    retry_status: RunStatus | str,
+    retry_content: str | None,
+) -> None:
+    """The twin of the test above, one outcome at a time: an unfinished retry proved nothing.
+
+    A media lesson lasts the life of the process, so it may only be banked by a
+    retry that came back ``completed`` *with an answer*. An error is the
+    experiment coming back negative, a cancellation and a pause stopped before
+    it had an answer, and ``running``/``pending`` are what a run output says
+    when nothing ever settled it — ``running`` being the dataclass default, so a
+    denylist of the unhappy statuses would bank on the emptiest shape there is.
+    ``RunStatus`` is a ``str`` enum with uppercase values, so a serialized
+    status still matches by identity; the lowercase spellings here are the
+    defense-in-depth half of the one shared predicate. The ``completed``-with-
+    nothing rows are the shape this same driver discards and retries as an empty
+    run: it finished, but it answered nothing, so it says nothing about the
+    media either.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(
+        side_effect=[
+            Exception("Error code: 400 - completely new provider wording"),
+            # A `completed` run with no answer is discarded and retried once by
+            # the empty-run guard, so the driver asks for one more output.
+            TeamRunOutput(content=retry_content, status=retry_status),
+            TeamRunOutput(content=retry_content, status=retry_status),
+        ],
+    )
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            suppress(asyncio.CancelledError),
+        ):
+            await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                turn_recorder=_team_turn_recorder("Analyze this."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+
+        assert mock_team.arun.await_count >= 2
+        route = build_model_media_route(mock_team.model)
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_response_banks_a_lesson_from_a_retry_that_answered_only_in_media() -> None:
+    """The answer this driver hands the shared bar has to count the media channel too.
+
+    The bar takes this driver's own answer verdict, because a team answers
+    through its members — and a verdict spelled from member text and tools alone
+    silently drops the channel the leaf reads for everyone else. A retry that
+    came back with nothing but a generated image is the provider accepting the
+    media-free request, which is the whole experiment, so the doomed audio must
+    never go on the wire again.
+
+    Delivering is the other question: nothing renders that image, so this turn
+    is still the empty run the guard retries once and finishes with the notice.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    prompts: list[list[Message]] = []
+
+    async def arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        prompts.append([message.model_copy(deep=True) for message in prompt])
+        if any(message.audio for message in prompt):
+            raise ModelProviderError(message="Error code: 400 - audio input is not supported", status_code=400)
+        return TeamRunOutput(content=None, status=RunStatus.completed, images=[Image(content=b"generated")])
+
+    mock_team.arun = AsyncMock(side_effect=arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        ):
+            response = await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="Draw it again.",
+                turn_recorder=_team_turn_recorder("Draw it again."),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+
+        assert response == EMPTY_RESPONSE_NOTICE
+        # The doomed call, the retry that answered in media, and the one the
+        # empty-run guard spends on an answer nothing here can render.
+        assert [any(message.audio for message in prompt) for prompt in prompts] == [True, False, False]
+        assert unsupported_media_kinds_for_route(route) == frozenset({"audio"})
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_retry_the_wire_guard_rescued_teaches_the_run_input_cache_nothing() -> None:
+    """A recovery the wire guard caused must not be credited to the team's own run-input retry."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    mock_team = _make_test_team()
+    rejection = Exception("Error code: 400 - completely new provider wording")
+    attempts: list[int] = []
+
+    async def arun(*_args: object, **_kwargs: object) -> TeamRunOutput:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise rejection
+        # The second call only succeeds because the wire guard dropped a replayed
+        # attachment of its own; the team's run-input strip did not cause this.
+        note_wire_media_recovery()
+        return TeamRunOutput(content="Recovered team response")
+
+    mock_team.arun = AsyncMock(side_effect=arun)
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    with (
+        patch("mindroom.teams.create_agent", return_value=fake_agent),
+        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            turn_recorder=_team_turn_recorder("Analyze this."),
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=make_turn_context(session_id=None),
+            media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+        )
+
+    assert "Recovered team response" in response
+    assert mock_team.arun.await_count == 2
+    route = build_model_media_route(mock_team.model)
+    assert unsupported_media_kinds_for_route(route) == frozenset()
     reset_model_media_capability_cache()
 
 
@@ -1397,6 +1965,72 @@ async def test_team_generic_invalid_request_retry_failure_does_not_teach() -> No
     assert "Recovered" not in response
     route = build_model_media_route(mock_team.model)
     assert unsupported_media_kinds_for_route(route) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_team_blocking_retry_that_errors_again_teaches_neither_cache() -> None:
+    """A media retry that also comes back errored has disproved its own hypothesis.
+
+    The retry is an experiment: drop the media and see whether the call starts
+    working. When attempt two errors as well, the answer is that media was not
+    what broke it — a provider outage, a failing tool, an erroring member agent.
+    Banking that as "this route rejects the modality" convicts the user's
+    attachments on the strength of an experiment that came back negative.
+
+    An errored run output normally leaves this driver as an excluded attempt
+    long before the record site, but a status that arrives as a raw string
+    rather than a ``RunStatus`` misses that enum comparison and falls straight
+    through to it.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def _arun(prompt: list[Message], **_kwargs: object) -> TeamRunOutput:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return TeamRunOutput(content="Error code: 400 - completely new provider wording", status="error")
+
+    mock_team.arun = AsyncMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            await team_response(
+                agent_names=["general"],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+            )
+
+        # The retry ran and stripped both provenance classes, so both caches
+        # were candidates: the fresh audio for the run-input cache and the
+        # replayed image for the two-strike gate.
+        assert len(wire_calls) == 2
+        assert wire_calls[0][-1].audio is not None
+        assert wire_calls[1][-1].audio is None
+        # Neither hears a word, because the experiment failed.
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
 
 
 @pytest.mark.asyncio
@@ -5299,6 +5933,860 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
 
     rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert "Recovered stream" in rendered_output
+
+
+@pytest.mark.asyncio
+async def test_team_stream_does_not_credit_the_fresh_upload_cache_with_a_lesson_the_guard_already_learned() -> None:
+    """Team streaming must keep the guard's replayed-media lesson out of the fresh-upload cache."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        record_replayed_media_isolation(route, "image")
+        record_replayed_media_isolation(route, "image")
+        yield TeamRunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+    async def successful_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered stream")
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else successful_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    mode=TeamMode.COORDINATE,
+                    message="What is in it?",
+                    turn_recorder=_team_turn_recorder("What is in it?"),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                )
+            ]
+
+        rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+        assert "Recovered stream" in rendered_output
+        assert len(wire_calls) == 2
+        assert any(message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_context_only_retry_after_an_errored_run_output_credits_the_replayed_gate() -> None:
+    """A streamed errored team output over context-only media must retry and bank a replay lesson."""
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(
+            content="Error code: 404 - No endpoints found that support image input",
+            status=RunStatus.error,
+        )
+
+    async def successful_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered stream")
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else successful_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    mode=TeamMode.COORDINATE,
+                    message="What is in it?",
+                    turn_recorder=_team_turn_recorder("What is in it?"),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                )
+            ]
+
+        rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+        assert "Recovered stream" in rendered_output
+        assert len(wire_calls) == 2
+        assert any(message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        assert inline_media_fallback_note("image") in str(wire_calls[1][-1].content)
+        _assert_context_only_credit(route)
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_terminal_run_output_credits_the_replayed_gate_and_converges() -> None:
+    """A streamed retry resolved by a terminal run output banks its lesson in the gate too.
+
+    Real Agno team streams end without a terminal run output, and that
+    end-of-stream resolution is what the context-only test above drives. A
+    stream that does yield a completed ``TeamRunOutput`` resolves on a different
+    branch of the same driver, and that branch owns the same credit decision:
+    the replayed image goes to the two-strike gate, the cache that gates fresh
+    uploads is never touched, and the route converges on the third turn.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(
+            content="Error code: 404 - No endpoints found that support image input",
+            status=RunStatus.error,
+        )
+
+    async def successful_stream() -> AsyncIterator[object]:
+        yield TeamRunContentEvent(content="Recovered stream")
+        # The branch under test: this stream resolves on a terminal run output
+        # rather than by running dry.
+        yield TeamRunOutput(content="Recovered stream", status=RunStatus.completed)
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else successful_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        turn_calls: list[int] = []
+        for turn in range(3):
+            with (
+                patch("mindroom.teams.create_agent", return_value=fake_agent),
+                patch(
+                    "mindroom.teams.resolve_agent_knowledge_access",
+                    return_value=_KnowledgeResolution(knowledge=None),
+                ),
+                patch("mindroom.teams._create_team_instance", return_value=mock_team),
+                patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+            ):
+                mock_prepare.return_value = _prepared_team_execution_context(
+                    final_prompt="What is in it?",
+                    context_messages=(
+                        Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                    ),
+                )
+                chunks = [
+                    chunk
+                    async for chunk in team_response_stream(
+                        agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                        mode=TeamMode.COORDINATE,
+                        message="What is in it?",
+                        turn_recorder=_team_turn_recorder("What is in it?"),
+                        orchestrator=orchestrator,
+                        execution_identity=None,
+                        ctx=make_turn_context(session_id=None),
+                    )
+                ]
+
+            rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+            assert "Recovered stream" in rendered_output
+            turn_calls.append(len(wire_calls) - sum(turn_calls))
+            if turn == 0:
+                # One isolation only: this branch may not shortcut the gate.
+                _assert_context_only_credit(route)
+
+        # Two turns buy the lesson, the third stops paying the doomed call.
+        assert turn_calls == [2, 2, 1]
+        assert not any(message.images for message in wire_calls[-1])
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset({"image"})
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member_answer", _MEMBER_ONLY_ANSWERS)
+async def test_team_stream_banks_a_lesson_from_a_terminal_output_only_a_member_answered(
+    member_answer: dict[str, object],
+) -> None:
+    """The streamed twin: a terminal team output whose only answer is a member's still banks.
+
+    This driver resolves that output on the same branch it uses for any terminal
+    run output, and that branch owns the bank decision. Reading answeredness off
+    the leader's own ``content`` and ``tools`` calls a member-answered run empty,
+    so the lesson never banks and the doomed call is paid every turn — which the
+    second turn here is what rules out.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+    async def member_answered_stream() -> AsyncIterator[object]:
+        yield _member_answered_team_output(member_answer)
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else member_answered_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        for _turn in range(2):
+            with (
+                patch("mindroom.teams.create_agent", return_value=fake_agent),
+                patch(
+                    "mindroom.teams.resolve_agent_knowledge_access",
+                    return_value=_KnowledgeResolution(knowledge=None),
+                ),
+                patch("mindroom.teams._create_team_instance", return_value=mock_team),
+                patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+            ):
+                mock_prepare.return_value = _prepared_team_execution_context(final_prompt="What is in it?")
+                async for _chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    mode=TeamMode.COORDINATE,
+                    message="What is in it?",
+                    turn_recorder=_team_turn_recorder("What is in it?"),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                    media=MediaInputs(images=[Image(content=b"fresh")]),
+                ):
+                    pass
+
+        assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+        # Two calls on the doomed turn, one on the turn that already knows.
+        assert [any(message.images for message in call) for call in wire_calls] == [True, False, False]
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_banks_nothing_from_a_bare_run_output_it_refuses_to_deliver() -> None:
+    """A run output this driver excludes may not teach the cache gating the user's next upload.
+
+    A bare ``RunOutput`` on a team stream is not the team's answer: the driver
+    hands it back as an ``ExcludedAttempt``, and the blocking twin — whose bind
+    check runs before its bank — never banks from one either. The lesson would
+    be written against the leader's route, and a first isolation lands in the
+    single-strike cache that gates fresh uploads for the life of the process, so
+    the weakest evidence there is would be spent on the strictest cache.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+    async def bare_run_output_stream() -> AsyncIterator[object]:
+        """The retry's whole output: a completed agent run output, not the team's."""
+        yield RunOutput(
+            run_id="run-bare",
+            content="Recovered team response",
+            status=RunStatus.completed,
+        )
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else bare_run_output_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="What is in it?")
+            async for _chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(images=[Image(content=b"fresh")]),
+            ):
+                pass
+
+        # The doomed call and the media-free retry both ran, and the retry came
+        # back with something the driver then threw away.
+        assert [any(message.images for message in call) for call in wire_calls] == [True, False]
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removed_provenance", ["fresh_upload", "thread_context"])
+async def test_team_stream_that_answered_nothing_teaches_neither_cache(removed_provenance: str) -> None:
+    """A media-free retry that emitted nothing proved nothing, whatever it removed.
+
+    Real Agno team streams end without a terminal run output, so this driver
+    judges the retry by what the stream emitted. This is the case that bar
+    exists for: the retry ran and came back with no body and no tool execution,
+    which is the empty run the driver discards a moment later — it cannot also
+    be the success that banks a process-lifetime media lesson. Both provenances
+    are driven because each one credits a different cache, and neither may be
+    credited here.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    context_media = removed_provenance == "thread_context"
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content="Error code: 404 - No endpoints found that support image input")
+
+    async def silent_stream() -> AsyncIterator[object]:
+        """The retry that answered nothing: no content event, no tool execution, no run output."""
+        if False:
+            yield TeamRunContentEvent(content="")
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else silent_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    (Message(role="user", content="thread context photo", images=[Image(content=b"context")]),)
+                    if context_media
+                    else ()
+                ),
+            )
+            async for _chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs() if context_media else MediaInputs(images=[Image(content=b"fresh")]),
+            ):
+                pass
+
+        # The retry ran, over a payload this layer stripped the image from, and
+        # it emitted nothing for the caches to learn from. An answer-free
+        # attempt is also the empty run the shared driver runs once more, so the
+        # media-free retry happens on every pass and never counts as evidence.
+        assert len(wire_calls) >= 2
+        assert all(any(message.images for message in call) for call in wire_calls[::2])
+        assert all(not any(message.images for message in call) for call in wire_calls[1::2])
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+        fresh_upload = MediaInputs(images=[Image(content=b"fresh")])
+        assert filter_media_inputs_for_route(route, fresh_upload).removed_kinds == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+_UNTRACKED_TEAM_TOOL = ToolExecution(
+    tool_call_id="call-untracked",
+    tool_name="run_shell_command",
+    tool_args={"cmd": "rm -rf build"},
+    result="removed",
+)
+_MEDIA_ERROR_TEXT = "Error code: 404 - No endpoints found that support image input"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_event",
+    [
+        pytest.param(
+            TeamRunOutput(content=_MEDIA_ERROR_TEXT, status=RunStatus.error),
+            id="errored-run-output",
+        ),
+        pytest.param(TeamRunErrorEvent(content=_MEDIA_ERROR_TEXT), id="team-error-event"),
+    ],
+)
+async def test_team_stream_refuses_a_media_retry_after_a_tool_already_ran(terminal_event: object) -> None:
+    """A retry may not re-run a turn whose tool already executed, at either gate.
+
+    Both media-retry gates on this driver see the same attempt. The tool tracker
+    records a start only when it hands back a trace entry, while every
+    completion event appends its execution unconditionally, so a completion the
+    stream never announced a start for is invisible to the tracker. A gate
+    reading only the tracker calls this attempt untouched and re-runs the whole
+    turn — and the shell command in it runs a second time.
+
+    The two rows are the two terminal shapes that reach a gate: a terminal
+    ``TeamRunOutput`` carrying an error status, and a ``TeamRunErrorEvent``.
+    Fixing one and not the other is the same bug at the surviving site.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def tool_ran_then_failed() -> AsyncIterator[object]:
+        """One tool execution the stream never announced a start for, then a media failure."""
+        yield TeamToolCallCompletedEvent(tool=_UNTRACKED_TEAM_TOOL)
+        yield terminal_event
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return tool_ran_then_failed()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+            suppress(asyncio.CancelledError),
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="What is in it?")
+            async for _chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(images=[Image(content=b"fresh")]),
+            ):
+                pass
+
+        # The whole point: exactly one provider call. A second one would have
+        # re-run the shell command the first attempt already executed.
+        assert len(wire_calls) == 1
+        assert any(message.images for message in wire_calls[0])
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+def _team_tool_ledgers(shape: str) -> tuple[StreamingToolTracker, tuple[ToolExecution, ...]]:
+    """Build the two tool ledgers one team streaming attempt would be holding."""
+    tracker = StreamingToolTracker()
+    if shape == "nothing-ran":
+        return tracker, ()
+    if shape == "start-without-completion":
+        tracker.start(_UNTRACKED_TEAM_TOOL, scope_key="team", tool_index=1)
+        return tracker, ()
+    if shape == "start-then-completion":
+        tracker.start(_UNTRACKED_TEAM_TOOL, scope_key="team", tool_index=1)
+        tracker.complete(_UNTRACKED_TEAM_TOOL, scope_key="team")
+        return tracker, (_UNTRACKED_TEAM_TOOL,)
+    if shape == "completion-without-start":
+        return tracker, (_UNTRACKED_TEAM_TOOL,)
+    msg = f"Unknown team tool ledger shape {shape!r}"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    ("shape", "tracker_holds_it", "executions_hold_it"),
+    [
+        ("nothing-ran", False, False),
+        ("start-without-completion", True, False),
+        ("start-then-completion", True, True),
+        ("completion-without-start", False, True),
+    ],
+)
+def test_team_stream_ran_a_tool_reads_every_ledger_a_tool_can_land_in(
+    shape: str,
+    tracker_holds_it: bool,
+    executions_hold_it: bool,
+) -> None:
+    """The shared predicate answers for the union of both ledgers, not either one.
+
+    Two media-retry gates and the bar that banks a media lesson all ask this one
+    question, and the cost of a wrong ``False`` is a whole turn re-run: the shell
+    command, file write or mail send the first attempt already put on the wire
+    happens a second time. So the question has to be asked of every ledger a tool
+    can land in — the tracker, which holds a start whose completion never
+    arrived, and the executions, which hold what the completion events carried.
+
+    This is a unit test rather than another driver test on purpose. Today the two
+    ledgers cannot disagree in the ``completion-without-start`` direction: both
+    append sites in the streaming driver record the execution and hand the same
+    tool to a tracker that appends every completion it is given, matched start or
+    not. That makes dropping the executions term from this predicate an
+    unobservable change at the call sites, and no test driving the driver can
+    catch it. The contract is still the one the callers depend on, so it is
+    pinned here, where a regression is observable — and the day the tracker stops
+    recording an unmatched completion, this assertion is already holding the line
+    the gates need.
+    """
+    tracker, executions = _team_tool_ledgers(shape)
+    # Establish the ledgers before judging them: a row that quietly built the
+    # wrong shape would assert nothing at all about the predicate under test.
+    assert bool(tracker.pending_tools or tracker.completed_tools) is tracker_holds_it
+    assert bool(executions) is executions_hold_it
+
+    assert _team_stream_ran_a_tool(tracker, executions) is (tracker_holds_it or executions_hold_it)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retry_status", "retry_content"),
+    [
+        (RunStatus.error, "Still no answer"),
+        (RunStatus.cancelled, "Still no answer"),
+        (RunStatus.paused, "Still no answer"),
+        (RunStatus.running, "Still no answer"),
+        (RunStatus.pending, "Still no answer"),
+        ("error", "Still no answer"),
+        ("cancelled", "Still no answer"),
+        (RunStatus.completed, ""),
+        (RunStatus.completed, None),
+        (RunStatus.completed, "   "),
+    ],
+)
+async def test_team_stream_banks_nothing_from_a_terminal_output_that_answered_nothing(
+    retry_status: RunStatus | str,
+    retry_content: str | None,
+) -> None:
+    """The streaming twin of the blocking negative table, on the terminal-output branch.
+
+    A team stream that does yield a terminal ``TeamRunOutput`` resolves on its
+    own branch, with its own bank bar, and that bar is the one the other
+    drivers' negative tables never reach: the end-of-stream fallback bar answers
+    for a stream that runs dry instead. So this table drives the same outcomes
+    at the branch that owns them — an error, a cancellation, a pause, the two
+    never-settled statuses, a lowercase spelling of each unhappy one, and a
+    ``completed`` run whose content is blank in every way it can be with no tool
+    execution behind it. None of them finished the experiment, so none may write
+    a cache that lasts the life of the process.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content=_MEDIA_ERROR_TEXT)
+
+    async def unanswered_terminal_stream() -> AsyncIterator[object]:
+        """The retry's whole output: one terminal team output that answered nothing."""
+        yield TeamRunOutput(run_id="run-unanswered", content=retry_content, status=retry_status)
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else unanswered_terminal_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+            suppress(asyncio.CancelledError),
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="What is in it?")
+            async for _chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(images=[Image(content=b"fresh")]),
+            ):
+                pass
+
+        # The doomed call and its media-free retry both ran, and the retry came
+        # back with nothing that finished the experiment.
+        assert len(wire_calls) >= 2
+        assert any(message.images for message in wire_calls[0])
+        assert not any(message.images for message in wire_calls[1])
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_team_stream_banks_the_same_lesson_whether_or_not_tool_calls_are_rendered(
+    show_tool_calls: bool,
+) -> None:
+    """Whether the media caused the failure is a wire fact, not a rendering setting.
+
+    The bar used to read ``emitted_output``, which says a body was pushed to the
+    consumer. With tool calls rendered, a bare spinner is such a body; with them
+    hidden, the identical wire facts push nothing. The same experiment would
+    then bank a process-lifetime lesson under one room's setting and refuse it
+    under another's, and the route would converge for one and re-walk the ladder
+    forever for the other.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content=_MEDIA_ERROR_TEXT)
+
+    async def tool_only_stream() -> AsyncIterator[object]:
+        """The retry's whole output: one tool this attempt put on the wire, and no text."""
+        yield TeamToolCallStartedEvent(tool=_UNTRACKED_TEAM_TOOL)
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else tool_only_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="What is in it?")
+            async for _chunk in team_response_stream(
+                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                mode=TeamMode.COORDINATE,
+                message="What is in it?",
+                turn_recorder=_team_turn_recorder("What is in it?"),
+                orchestrator=orchestrator,
+                execution_identity=None,
+                ctx=make_turn_context(session_id=None),
+                media=MediaInputs(images=[Image(content=b"fresh")]),
+                show_tool_calls=show_tool_calls,
+            ):
+                pass
+
+        assert [any(message.images for message in call) for call in wire_calls] == [True, False]
+        assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completion_event", "run_output"])
+async def test_team_stream_banks_a_lesson_from_a_retry_that_answered_only_in_media(terminal: str) -> None:
+    """A stream carries the model's generated media on whichever terminal it ends with.
+
+    Both are real endings of this driver: agno's team streams normally stop at a
+    completion event, and a terminal run output arriving on the stream is the
+    other branch — each with its own bank bar. A retry whose whole answer is an
+    image the model produced is the provider accepting the media-free request on
+    either of them, so the doomed image never goes back on the wire.
+
+    And on neither is it something to show: no delivery path renders generated
+    media, so the attempt is still the empty run the guard retries once before
+    the turn finishes on the notice.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    wire_calls: list[list[Message]] = []
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunErrorEvent(content=_MEDIA_ERROR_TEXT)
+
+    async def media_answer_stream() -> AsyncIterator[object]:
+        """The retry's whole output: one generated image and not one character of text."""
+        if terminal == "completion_event":
+            yield TeamRunCompletedEvent(
+                run_id="run-media-answer",
+                session_id="session-media-answer",
+                content=None,
+                images=[Image(content=b"generated")],
+            )
+        else:
+            yield TeamRunOutput(content=None, status=RunStatus.completed, images=[Image(content=b"generated")])
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        wire_calls.append([message.model_copy(deep=True) for message in prompt])
+        return failing_stream() if any(message.images for message in prompt) else media_answer_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Draw it again.")
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    mode=TeamMode.COORDINATE,
+                    message="Draw it again.",
+                    turn_recorder=_team_turn_recorder("Draw it again."),
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                    media=MediaInputs(images=[Image(content=b"fresh")]),
+                )
+            ]
+
+        # The doomed attempt, the retry that answered in media, and the one the
+        # empty-run guard spends on an answer nothing here can render.
+        assert [any(message.images for message in call) for call in wire_calls] == [True, False, False]
+        rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+        assert EMPTY_RESPONSE_NOTICE in rendered_output
+        assert unsupported_media_kinds_for_route(route) == frozenset({"image"})
+    finally:
+        reset_model_media_capability_cache()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_treats_a_paused_run_output_as_a_pause_in_any_spelling() -> None:
+    """A terminal run output that says it paused is a pause however its status is spelled.
+
+    This driver used to judge the pause by enum identity, which any spelling
+    other than ``RunStatus``' own uppercase value fails — and the very next
+    check is the one that banks a media lesson for the life of the process, so
+    a pause read as a finish is read one line away from a cache write. Reading
+    it through the same predicate the banking sites use is what keeps every
+    spelling on one branch. A pause teaches nothing either way: the retry
+    never finished.
+    """
+    reset_model_media_capability_cache()
+    config = _build_test_config()
+    orchestrator = _team_orchestrator(config)
+    mock_team = _make_test_team()
+    route = build_model_media_route(mock_team.model)
+    recorder = _team_turn_recorder("What is in it?")
+
+    async def failing_stream() -> AsyncIterator[object]:
+        yield TeamRunOutput(
+            content="Error code: 404 - No endpoints found that support image input",
+            status=RunStatus.error,
+        )
+
+    async def paused_stream() -> AsyncIterator[object]:
+        # A lowercase spelling, which enum identity misses and the predicate does not.
+        yield TeamRunOutput(content="Waiting on approval", status="paused")
+
+    def _arun(prompt: list[Message], **_kwargs: object) -> AsyncIterator[object]:
+        return failing_stream() if any(message.images for message in prompt) else paused_stream()
+
+    mock_team.arun = MagicMock(side_effect=_arun)
+    fake_agent = _make_test_agent("GeneralAgent")
+    try:
+        with (
+            patch("mindroom.teams.create_agent", return_value=fake_agent),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams._create_team_instance", return_value=mock_team),
+            patch("mindroom.teams.prepare_bound_team_run_context", new_callable=AsyncMock) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="What is in it?",
+                context_messages=(
+                    Message(role="user", content="thread context photo", images=[Image(content=b"context")]),
+                ),
+            )
+            chunks = [
+                chunk
+                async for chunk in team_response_stream(
+                    agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
+                    mode=TeamMode.COORDINATE,
+                    message="What is in it?",
+                    turn_recorder=recorder,
+                    orchestrator=orchestrator,
+                    execution_identity=None,
+                    ctx=make_turn_context(session_id=None),
+                )
+            ]
+
+        assert mock_team.arun.call_count == 2
+        assert recorder.outcome == "interrupted"
+        assert recorder.original_status is RunStatus.paused
+        rendered_output = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
+        assert "Waiting on approval" in rendered_output
+        # Nothing finished, so no cache may hold anything about the image.
+        assert suspected_replayed_media_kinds_for_route(route) == frozenset()
+        assert unsupported_replayed_media_kinds_for_route(route) == frozenset()
+        assert unsupported_media_kinds_for_route(route) == frozenset()
+    finally:
+        reset_model_media_capability_cache()
 
 
 @pytest.mark.asyncio

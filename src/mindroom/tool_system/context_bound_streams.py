@@ -10,12 +10,21 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
 
+__all__ = ["AsyncClosableIterator", "close_async_stream", "context_bound_async_stream"]
+
+
 @runtime_checkable
-class _AsyncClosableIterator(Protocol):
+class AsyncClosableIterator(Protocol):
     """Minimal async-iterator surface that can be closed explicitly."""
 
     async def aclose(self) -> None:
         """Close the async iterator and release any underlying resources."""
+
+
+async def close_async_stream(stream: object) -> None:
+    """Finalize an async iterator that supports explicit closing."""
+    if isinstance(stream, (AsyncGeneratorABC, AsyncClosableIterator)):
+        await stream.aclose()
 
 
 def context_bound_async_stream[ChunkT](
@@ -38,7 +47,7 @@ def context_bound_async_stream[ChunkT](
                     return
                 yield chunk
         finally:
-            if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
+            if isinstance(stream, (AsyncGeneratorABC, AsyncClosableIterator)):
                 with context_factory():
                     await stream.aclose()
 

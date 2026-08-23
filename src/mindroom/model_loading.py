@@ -13,6 +13,7 @@ from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.model_media_guard import install_model_media_guard
 from mindroom.prompt_cache_key import derive_session_prompt_cache_key
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
@@ -401,6 +402,7 @@ def get_model_instance(
         default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         configured_provider=provider,
     )
+    install_model_media_guard(model)
     install_claude_prompt_cache_hook(model)
     install_claude_stream_retry_hook(model)
     return model
