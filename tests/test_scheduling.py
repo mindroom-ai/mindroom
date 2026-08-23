@@ -1913,8 +1913,8 @@ async def test_edit_scheduled_task_preserves_new_thread_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_state_power(tmp_path: Path) -> None:
-    """Editing should use the same privileged schedule-state persistence fallback as creation."""
+async def test_edit_scheduled_task_persists_via_admin_and_preserves_omitted_silent_mode(tmp_path: Path) -> None:
+    """Editing preserves omitted fields while using privileged state persistence."""
     client = AsyncMock()
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
@@ -1938,6 +1938,7 @@ async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_st
         created_by="@alice:server",
         thread_id="$thread",
         room_id="!test:server",
+        silent=True,
     )
     client.room_get_state_event = AsyncMock(
         return_value=nio.RoomGetStateEventResponse(
@@ -1983,6 +1984,7 @@ async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_st
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
     assert [task.task_id for task in tasks] == ["taskedit"]
     assert tasks[0].workflow.message == "updated message"
+    assert tasks[0].workflow.silent is True
 
 
 @pytest.mark.asyncio

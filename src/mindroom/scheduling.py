@@ -1433,6 +1433,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
             error_msg += f"\n\n💡 {workflow_result.suggestion}"
         return (None, error_msg)
 
+    if existing_task is not None and silent is None and "silent" not in workflow_result.model_fields_set:
+        workflow_result.silent = existing_task.workflow.silent
+
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
         workflow_result.message,
