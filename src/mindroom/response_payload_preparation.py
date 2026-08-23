@@ -125,7 +125,7 @@ class ResponsePayloadPreparer:
             attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
             response_envelope=prepared_payload.envelope,
             transient_enrichment_items=prepared_payload.transient_enrichment_items,
-            system_enrichment_items=tuple(system_enrichment_items),
+            system_enrichment_items=(*system_enrichment_items, *request.system_enrichment_items),
             requires_model_history_refresh=False,
             payload_preparation=None,
         )

@@ -23,8 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE, SOURCE_KIND_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     TURN_BACKED_KINDS,
     AdmissionResult,
@@ -107,6 +109,7 @@ class JournalDispatcher:
     self_sender: str
     callbacks: JournalCallbacks
     room_for_id: Callable[[str], nio.MatrixRoom]
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
     on_persist_failure: Callable[[], None] | None = None
     on_delivery_recovery_needed: Callable[[], None] = lambda: None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
@@ -141,6 +144,7 @@ class JournalDispatcher:
         self._ingress = JournalIngress(
             store=self.store,
             self_sender=self.self_sender,
+            schedule_trigger_sender_is_managed=self.schedule_trigger_sender_is_managed,
             on_admitted=self._worker.wake,
             room_lifecycle_enabled=self.room_lifecycle_admission_enabled,
             on_event_admitted=self._remember_live_event,
@@ -608,9 +612,71 @@ def _completing(
     return run
 
 
+def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
+    """Validate and normalize one silent schedule trigger as a text message."""
+    if event.type != SILENT_SCHEDULE_EVENT_TYPE:
+        msg = "Schedule trigger has the wrong event type"
+        raise ValueError(msg)
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        msg = "Schedule trigger content is not an object"
+        raise TypeError(msg)
+    if content.get(SOURCE_KIND_KEY) != SILENT_SCHEDULE_SOURCE_KIND:
+        msg = "Schedule trigger has the wrong source marker"
+        raise ValueError(msg)
+    body = content.get("body")
+    if not isinstance(body, str):
+        msg = "Schedule trigger body is not a string"
+        raise TypeError(msg)
+    if not body.strip():
+        msg = "Schedule trigger body is not a nonempty string"
+        raise ValueError(msg)
+
+    source = {
+        **event.source,
+        "type": "m.room.message",
+        "content": {**content, "msgtype": "m.text"},
+    }
+    message = nio.Event.parse_event(source)
+    if not isinstance(message, nio.RoomMessageFormatted) or message.event_id != event.event_id:
+        msg = f"Schedule trigger {event.event_id!r} did not normalize as itself"
+        raise JournalCorruptionError(msg)
+    message.decrypted = event.decrypted
+    message.verified = event.verified
+    message.sender_key = event.sender_key
+    message.session_id = event.session_id
+    return message
+
+
+async def _run_scheduled_trigger(
+    dispatcher: JournalDispatcher,
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+) -> bool:
+    """Run a valid schedule trigger through the existing message callback."""
+    if not dispatcher.schedule_trigger_sender_is_managed(event.sender):
+        logger.warning(
+            "schedule_trigger_invalid",
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        return True
+    try:
+        message = _scheduled_trigger_as_message(event)
+    except (TypeError, ValueError, JournalCorruptionError):
+        logger.exception(
+            "schedule_trigger_invalid",
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        return True
+    return _turn_settles(await dispatcher.callbacks.on_message(room, message))
+
+
 _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
     EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
+    EventKind.SCHEDULE_TRIGGER: _Binding(nio.UnknownEvent, _run_scheduled_trigger),
     EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),

@@ -190,6 +190,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.journal_ingress"
 depends_on = [
+    "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.media",
@@ -221,6 +222,7 @@ visibility = ["mindroom.journal_dispatch"]
 [[modules]]
 path = "mindroom.journal_dispatch"
 depends_on = [
+    "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
     "mindroom.event_journal",

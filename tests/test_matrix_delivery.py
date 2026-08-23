@@ -55,6 +55,19 @@ async def test_send_message_result_ignores_unverified_devices() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_message_result_forwards_explicit_event_type_and_defaults_to_message() -> None:
+    """The delivery boundary preserves a requested event type while visible callers keep their default."""
+    client = _mock_client()
+    content = {"body": "scheduled trigger", "msgtype": "m.text"}
+
+    await send_message_result(client, "!room:localhost", content, message_type="io.mindroom.scheduled.trigger")
+    await send_message_result(client, "!room:localhost", content)
+
+    assert client.room_send.await_args_list[0].kwargs["message_type"] == "io.mindroom.scheduled.trigger"
+    assert client.room_send.await_args_list[1].kwargs["message_type"] == "m.room.message"
+
+
+@pytest.mark.asyncio
 async def test_send_message_result_ignores_unverified_devices_in_encrypted_room() -> None:
     """Encrypted-room sends must not be blocked by nio's device-trust checks."""
     client = _mock_client(encrypted=True)

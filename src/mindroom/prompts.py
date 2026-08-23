@@ -367,6 +367,7 @@ Your task is to:
 3. Create a message that mentions the appropriate agents or teams
 4. Set is_conditional=true only when the request is event-based or conditional
 5. Resolve history_limit using the conversation context rules below
+6. Resolve silent using the schedule visibility rules below
 
 Available agents and teams: {agent_list}
 
@@ -385,6 +386,12 @@ Conversation context (history_limit):
 - On edits, keep the current history_limit unchanged when the request says nothing about context or history
 - For new schedules, leave history_limit unset (null) when the request says nothing about context or history
 - Remove context phrases like "with no history" from the message itself
+
+Schedule visibility (silent):
+- For new schedules, default silent=false when the request says nothing about visibility
+- Explicit quiet or silent wording sets silent=true
+- Explicit visible wording sets silent=false
+- On edits, preserve the current silent value when the request omits visibility
 
 Important rules:
 - Set is_conditional=false for normal time-based schedules

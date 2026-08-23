@@ -43,7 +43,11 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.authorization import get_available_responders_in_room
-from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    ROUTER_AGENT_NAME,
+    is_silent_schedule_no_report_response,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -911,6 +915,13 @@ def _format_contributions_recursive(  # noqa: C901
             parts.append(_format_member_contribution(agent_name, content, indent))
 
     return parts
+
+
+def _has_visible_team_member_output(response: TeamRunOutput | RunOutput) -> bool:
+    """Return whether terminal team formatting would include a member contribution."""
+    return isinstance(response, TeamRunOutput) and bool(
+        _format_contributions_recursive(response, indent=0, include_consensus=False),
+    )
 
 
 def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
@@ -3084,14 +3095,19 @@ async def team_response(  # noqa: C901, PLR0915
         if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=agent_list, response=team_response_text)
 
-        response_text = (
-            _format_terminal_team_response(
-                response,
-                team_display_names=team_members.display_names,
+        if isinstance(response, (TeamRunOutput, RunOutput)):
+            raw_response_text = _get_response_content(response)
+            response_text = (
+                raw_response_text.strip()
+                if (
+                    ctx.allow_no_report_response
+                    and is_silent_schedule_no_report_response(raw_response_text)
+                    and not _has_visible_team_member_output(response)
+                )
+                else _format_terminal_team_response(response, team_display_names=team_members.display_names)
             )
-            if isinstance(response, (TeamRunOutput, RunOutput))
-            else _format_team_header(team_members.display_names) + team_response_text
-        )
+        else:
+            response_text = _format_team_header(team_members.display_names) + team_response_text
         return CompletedAttempt(
             response_text=response_text,
             # Match the streaming path: the "No team response generated."

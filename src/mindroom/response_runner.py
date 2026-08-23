@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -32,12 +33,14 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -332,6 +335,29 @@ def _with_matrix_message_target(
     return (*filtered_items, target_item)
 
 
+def _with_silent_schedule_delivery(
+    items: Sequence[EnrichmentItem],
+    envelope: MessageEnvelope,
+) -> tuple[EnrichmentItem, ...]:
+    """Append nonpersistent quiet-delivery guidance only for silent schedules."""
+    enrichment_key = "silent_schedule_delivery"
+    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
+        return tuple(items)
+    filtered_items = tuple(item for item in items if item.key != enrichment_key)
+    return (
+        *filtered_items,
+        EnrichmentItem(
+            key=enrichment_key,
+            text=(
+                f"Return exactly {SILENT_SCHEDULE_NO_REPLY_TOKEN} when this scheduled check completes "
+                "routinely without findings. Report findings or failures normally, and do not include "
+                f"{SILENT_SCHEDULE_NO_REPLY_TOKEN} with a report."
+            ),
+            persist=False,
+        ),
+    )
+
+
 def _timestamp_thread_history_user_turns(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -419,6 +445,7 @@ class ResponseRequest:
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
+    on_no_response_handled: Callable[[], Awaitable[None]] | None = None
     on_user_stop_handled: Callable[[str, int], Awaitable[None]] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
@@ -438,6 +465,24 @@ class ResponseRequest:
     def thread_id(self) -> str | None:
         """Return the canonical resolved response thread root."""
         return self.response_envelope.target.resolved_thread_id
+
+
+def _is_silent_schedule_response(request: ResponseRequest) -> bool:
+    """Return whether one response must avoid provisional Matrix activity."""
+    return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+
+
+@asynccontextmanager
+async def _response_typing_indicator(
+    client: nio.AsyncClient,
+    request: ResponseRequest,
+) -> AsyncIterator[None]:
+    """Expose typing only for response kinds whose progress may be visible."""
+    if _is_silent_schedule_response(request):
+        yield
+        return
+    async with typing_indicator(client, request.room_id):
+        yield
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -2044,7 +2089,9 @@ class ResponseRunner:
                         locked_operation=locked_operation,
                     ),
                     signal_queued_message=(
-                        signal_queued_message and request.sync_restart_retry_source_event_id is None
+                        signal_queued_message
+                        and request.sync_restart_retry_source_event_id is None
+                        and not _is_silent_schedule_response(request)
                     ),
                 )
             except asyncio.CancelledError as error:
@@ -2372,8 +2419,10 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         request: ResponseRequest,
-    ) -> MatrixCompactionLifecycle:
+    ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
+        if _is_silent_schedule_response(request):
+            return None
         reply_to_event_id = (
             request.existing_event_id
             if request.existing_event_id is not None and request.existing_event_is_placeholder
@@ -2491,6 +2540,13 @@ class ResponseRunner:
             )
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
+            request = replace(
+                request,
+                system_enrichment_items=_with_silent_schedule_delivery(
+                    request.system_enrichment_items,
+                    request.response_envelope,
+                ),
+            )
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
@@ -2561,6 +2617,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=tuple(system_enrichment_items),
+            allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
@@ -2901,7 +2958,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _run_and_settle_locked_response(  # noqa: C901, PLR0912
+    async def _run_and_settle_locked_response(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2933,6 +2990,7 @@ class ResponseRunner:
                 user_id=user_id,
                 run_id=run_id,
                 on_cancelled=progress.note_task_cancelled,
+                show_stop_button=not _is_silent_schedule_response(request),
             )
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:
@@ -3012,6 +3070,12 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
+        if (
+            final_outcome.suppressed
+            and final_outcome.final_visible_event_id is None
+            and request.on_no_response_handled is not None
+        ):
+            await request.on_no_response_handled()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
@@ -3183,7 +3247,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            placeholder_message="🤝 Team Response: Thinking...",
+            placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
             early_placeholder_state=placeholder_state,
             reply_entity_names=tuple(agent_names),
         )
@@ -3236,7 +3300,7 @@ class ResponseRunner:
         assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
-        use_streaming = await should_use_streaming(
+        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
             self._client(),
             request.room_id,
             requester_user_id=requester_user_id,
@@ -3332,6 +3396,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=request.system_enrichment_items,
+            allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
         team_turn_recorder = self._build_turn_recorder(
@@ -3380,7 +3445,7 @@ class ResponseRunner:
             if use_streaming and (
                 delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
             ):
-                async with typing_indicator(self._client(), request.room_id):
+                async with _response_typing_indicator(self._client(), request):
                     event_id: str | None = None
 
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
@@ -3477,7 +3542,7 @@ class ResponseRunner:
             else:
                 try:
                     try:
-                        async with typing_indicator(self._client(), request.room_id):
+                        async with _response_typing_indicator(self._client(), request):
 
                             async def build_response_text() -> str:
                                 return await team_response(
@@ -3679,6 +3744,7 @@ class ResponseRunner:
         user_id: str | None = None,
         run_id: str | None = None,
         on_cancelled: Callable[[str], None] | None = None,
+        show_stop_button: bool = True,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -3686,7 +3752,7 @@ class ResponseRunner:
                 client=self._client(),
                 stop_manager=self.deps.stop_manager,
                 logger=self.deps.logger,
-                show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
+                show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
                 config=self.deps.runtime.config,
             ),
         ).run(
@@ -3808,7 +3874,7 @@ class ResponseRunner:
             )
 
         try:
-            async with typing_indicator(self._client(), request.room_id):
+            async with _response_typing_indicator(self._client(), request):
                 response_text = await self._run_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
                     operation=build_response_text,
@@ -3900,7 +3966,7 @@ class ResponseRunner:
         )
 
         try:
-            async with typing_indicator(self._client(), request.room_id):
+            async with _response_typing_indicator(self._client(), request):
                 wrapped_response_stream = self._stream_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
                     stream_factory=lambda: response_stream,
@@ -4303,7 +4369,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
-            placeholder_message="Thinking...",
+            placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
         if prepared_request is None:
@@ -4343,7 +4409,7 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        use_streaming = await should_use_streaming(
+        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
             self._client(),
             request.room_id,
             requester_user_id=request.user_id,

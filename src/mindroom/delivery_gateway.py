@@ -15,6 +15,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
     MatrixDeliveryView,
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
 _PLACEHOLDER_DELIVERY_FAILURE_TEXT = "Response delivery failed. Please retry."
+_BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
 _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
     {
         "delivery_failed",
@@ -640,6 +642,80 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    async def _deliver_before_response_hook_failure(
+        self,
+        request: FinalDeliveryRequest,
+        *,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Durably publish a generic error for a silent turn whose hook failed."""
+        failure_extra_content = dict(request.extra_content or {})
+        failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
+        turn_id = request.identity.response_envelope.source_event_id
+        if request.existing_event_id is not None and request.existing_event_is_placeholder:
+            edited = await self.edit_text(
+                EditTextRequest(
+                    target=request.target,
+                    event_id=request.existing_event_id,
+                    new_text=_BEFORE_RESPONSE_HOOK_FAILURE_TEXT,
+                    tool_trace=request.tool_trace,
+                    extra_content=failure_extra_content,
+                    retry_sync_recovery=True,
+                    delivery_turn_id=turn_id,
+                    defer_source_handoff=request.defer_source_handoff,
+                ),
+            )
+            if edited:
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    final_visible_body=_BEFORE_RESPONSE_HOOK_FAILURE_TEXT,
+                    delivery_kind="edited",
+                    failure_reason=failure_reason,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=failure_extra_content,
+                )
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=request.existing_event_id,
+                is_visible_response=True,
+                failure_reason="delivery_failed",
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=failure_extra_content,
+            )
+
+        event_id = await self.send_text(
+            SendTextRequest(
+                target=request.target,
+                response_text=_BEFORE_RESPONSE_HOOK_FAILURE_TEXT,
+                skip_mentions=request.skip_mentions,
+                tool_trace=request.tool_trace,
+                extra_content=failure_extra_content,
+                retry_sync_recovery=True,
+                delivery_turn_id=turn_id,
+                defer_source_handoff=request.defer_source_handoff,
+            ),
+        )
+        if event_id is None:
+            return FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id=None,
+                failure_reason="delivery_failed",
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=failure_extra_content,
+            )
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=event_id,
+            is_visible_response=True,
+            final_visible_body=_BEFORE_RESPONSE_HOOK_FAILURE_TEXT,
+            delivery_kind="sent",
+            failure_reason=failure_reason,
+            tool_trace=tuple(request.tool_trace or ()),
+            extra_content=failure_extra_content,
+        )
+
     async def _acknowledged_delivery(
         self,
         turn_id: str,
@@ -1158,6 +1234,19 @@ class DeliveryGateway:
             raise
         except Exception as error:
             failure_reason = str(error)
+            if request.identity.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND and (
+                request.existing_event_id is None or request.existing_event_is_placeholder
+            ):
+                self.deps.logger.exception(
+                    "before_response_hook_failed",
+                    response_kind=request.identity.response_kind,
+                    source_event_id=request.identity.response_envelope.source_event_id,
+                    correlation_id=request.identity.correlation_id,
+                )
+                return await self._deliver_before_response_hook_failure(
+                    request,
+                    failure_reason=failure_reason or "before_response_hook_failed",
+                )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
@@ -1192,12 +1281,19 @@ class DeliveryGateway:
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
-        if draft.suppress:
+        suppression_reason = "suppressed_by_hook" if draft.suppress else None
+        if suppression_reason is None and (
+            draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+            and constants.is_silent_schedule_no_report_response(draft.response_text)
+        ):
+            suppression_reason = "silent_no_report"
+        if suppression_reason is not None:
             self.deps.logger.info(
-                "Response suppressed by hook",
+                "Response suppressed",
                 response_kind=request.identity.response_kind,
                 source_event_id=request.identity.response_envelope.source_event_id,
                 correlation_id=request.identity.correlation_id,
+                suppression_reason=suppression_reason,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
@@ -1205,7 +1301,7 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     identity=request.identity,
                     redaction_reason="Suppressed placeholder response",
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(
@@ -1220,7 +1316,7 @@ class DeliveryGateway:
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
                     event_id=None,
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                     suppressed=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -1230,7 +1326,7 @@ class DeliveryGateway:
                     terminal_status="cancelled",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    failure_reason="suppressed_by_hook",
+                    failure_reason=suppression_reason,
                     suppressed=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
@@ -1238,7 +1334,7 @@ class DeliveryGateway:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=None,
-                failure_reason="suppressed_by_hook",
+                failure_reason=suppression_reason,
                 suppressed=True,
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,

@@ -51,7 +51,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
     ApprovalCall,
@@ -1954,6 +1954,32 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
     assert exc_info.value.placeholder_event_id == "$placeholder"
     assert exc_info.value.__cause__ is proximate_error
     assert exc_info.value.__cause__.__cause__ is underlying_error
+
+
+@pytest.mark.asyncio
+async def test_silent_schedule_does_not_signal_queued_human_activity(tmp_path: Path) -> None:
+    """A silent source must serialize without producing a queued-input notice."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    base_request = _plain_request(_target())
+    request = replace(
+        base_request,
+        response_envelope=request_envelope(
+            target=base_request.response_envelope.target,
+            prompt=base_request.prompt,
+            user_id=base_request.user_id,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+        ),
+    )
+    run_locked_response = AsyncMock(return_value=None)
+
+    with patch.object(runner._lifecycle_coordinator, "run_locked_response", new=run_locked_response):
+        await runner._run_locked_response_lifecycle(
+            request,
+            response_kind="agent",
+            locked_operation=AsyncMock(return_value=None),
+        )
+
+    assert run_locked_response.await_args.kwargs["signal_queued_message"] is False
 
 
 @pytest.mark.asyncio

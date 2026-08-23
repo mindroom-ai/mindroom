@@ -1048,6 +1048,8 @@ SOURCE_KIND_KEY = "com.mindroom.source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
+SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
@@ -1091,6 +1093,12 @@ STREAM_STATUS_ERROR = "error"
 # by the provisioning service.
 OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+
+
+def is_silent_schedule_no_report_response(response_text: str) -> bool:
+    """Return whether one silent-schedule final text explicitly reports nothing."""
+    normalized = response_text.strip()
+    return not normalized or normalized.casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
 
 
 # Canonical mapping from provider name to the environment variable it requires.

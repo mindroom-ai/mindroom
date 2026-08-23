@@ -19,7 +19,12 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
+from mindroom.constants import (
+    DURABLE_FINAL_OUTCOME_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+)
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -30,6 +35,7 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
@@ -85,11 +91,18 @@ def _failed_delivery() -> MatrixDeliveryFailure:
     return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test delivery failure")
 
 
-def _identity(source_event_id: str = "$cause") -> ResponseIdentity:
+def _identity(
+    source_event_id: str = "$cause",
+    *,
+    source_kind: str = MESSAGE_SOURCE_KIND,
+) -> ResponseIdentity:
     """Return the identity of one visible response, caused by one event."""
     return ResponseIdentity(
         response_kind="agent",
-        response_envelope=SimpleNamespace(source_event_id=source_event_id),  # type: ignore[arg-type]
+        response_envelope=SimpleNamespace(  # type: ignore[arg-type]
+            source_event_id=source_event_id,
+            source_kind=source_kind,
+        ),
         correlation_id="c1",
     )
 
@@ -195,17 +208,218 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
     @staticmethod
-    def _final_request(text: str) -> FinalDeliveryRequest:
+    def _final_request(
+        text: str,
+        *,
+        source_kind: str = MESSAGE_SOURCE_KIND,
+    ) -> FinalDeliveryRequest:
         """Return one final delivery for the turn caused by `$cause`."""
         target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
         return FinalDeliveryRequest(
             target=target,
             existing_event_id=None,
             response_text=text,
-            identity=_identity(),
+            identity=_identity(source_kind=source_kind),
             tool_trace=None,
             extra_content=None,
         )
+
+    @pytest.mark.parametrize(
+        "text",
+        ["", " \n\t", SILENT_SCHEDULE_NO_REPLY_TOKEN, f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n"],
+    )
+    async def test_silent_schedule_no_report_response_is_suppressed_after_hooks(
+        self,
+        tmp_path: Path,
+        text: str,
+    ) -> None:
+        """Silent whitespace settles as suppressed without creating a Matrix event."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outcome.failure_reason == "silent_no_report"
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("text", "source_kind"),
+        [
+            ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
+            ("", MESSAGE_SOURCE_KIND),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
+        ],
+    )
+    async def test_silent_findings_and_ordinary_empty_responses_deliver_normally(
+        self,
+        tmp_path: Path,
+        text: str,
+        source_kind: str,
+    ) -> None:
+        """Automatic suppression never swallows findings or ordinary responses."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(self._final_request(text, source_kind=source_kind))
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$sent"
+        assert outcome.suppressed is False
+        send.assert_awaited_once()
+
+    @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
+    async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(
+        self,
+        tmp_path: Path,
+        generated_text: str,
+    ) -> None:
+        """A before-response hook can turn a silent completion into a visible finding."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def add_finding(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = "Finding from hook"
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_finding)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request(generated_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$sent"
+        assert send.await_args.args[2]["body"] == "Finding from hook"
+
+    async def test_silent_schedule_hook_can_replace_a_finding_with_no_reply(self, tmp_path: Path) -> None:
+        """The no-report acknowledgment is interpreted after before-response hooks."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def replace_with_no_reply(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = SILENT_SCHEDULE_NO_REPLY_TOKEN
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_with_no_reply)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request("Finding", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    async def test_explicit_hook_suppression_wins_for_silent_schedule_finding(self, tmp_path: Path) -> None:
+        """Explicit suppression remains authoritative even when a hook adds visible text."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def add_suppressed_finding(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = "Finding from hook"
+            draft.suppress = True
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_suppressed_finding)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.failure_reason == "suppressed_by_hook"
+        send.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("with_placeholder", "edit_succeeds"),
+        [(False, True), (True, True), (True, False)],
+    )
+    @pytest.mark.parametrize("response_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
+    async def test_silent_schedule_before_hook_failure_is_durably_visible(
+        self,
+        tmp_path: Path,
+        with_placeholder: bool,
+        edit_succeeds: bool,
+        response_text: str,
+    ) -> None:
+        """A hook exception publishes one generic terminal error through the final outbox stage."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(
+            side_effect=RuntimeError("internal hook detail"),
+        )
+        send_text = AsyncMock(return_value="$failure")
+        edit_text = AsyncMock(return_value=edit_succeeds)
+        request = replace(
+            self._final_request(response_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            existing_event_id="$placeholder" if with_placeholder else None,
+            existing_event_is_placeholder=with_placeholder,
+        )
+
+        with (
+            patch.object(DeliveryGateway, "send_text", new=send_text),
+            patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        ):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id == ("$placeholder" if with_placeholder else "$failure")
+        assert outcome.is_visible_response is True
+        if not with_placeholder or edit_succeeds:
+            assert outcome.final_visible_body == "Response failed. Please retry."
+            assert "internal hook detail" not in outcome.final_visible_body
+        else:
+            assert outcome.failure_reason == "delivery_failed"
+        gateway.deps.redact_message_event.assert_not_awaited()
+        durable_request = edit_text.await_args.args[-1] if with_placeholder else send_text.await_args.args[-1]
+        assert durable_request.delivery_turn_id == "$cause"
+        assert durable_request.retry_sync_recovery is True
+        assert durable_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        if with_placeholder:
+            send_text.assert_not_awaited()
+        else:
+            edit_text.assert_not_awaited()
+
+    async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(self, tmp_path: Path) -> None:
+        """The silent-source repair must not change ordinary interactive delivery."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=RuntimeError("hook failed"))
+        send_text = AsyncMock(return_value="$unexpected")
+
+        with patch.object(DeliveryGateway, "send_text", new=send_text):
+            outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id is None
+        send_text.assert_not_awaited()
 
     async def test_a_final_answer_is_enqueued_before_it_is_sent(
         self,

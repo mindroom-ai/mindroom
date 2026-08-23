@@ -418,6 +418,7 @@ async def send_message_outcome(
     room_id: str,
     content: dict[str, Any],
     *,
+    message_type: str = "m.room.message",
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
@@ -435,7 +436,6 @@ async def send_message_outcome(
             "encrypted delivery rejected by local trust policy",
         )
 
-    message_type = "m.room.message"
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_start",
@@ -535,6 +535,7 @@ async def send_message_result(
     room_id: str,
     content: dict[str, Any],
     *,
+    message_type: str = "m.room.message",
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
@@ -544,6 +545,7 @@ async def send_message_result(
         client,
         room_id,
         content,
+        message_type=message_type,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,

@@ -715,6 +715,11 @@ class AgentBot:
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
             ),
             room_for_id=self._room_for_journal_event,
+            # Resolved late because ingress validation is built below this
+            # dispatcher; callbacks cannot run until bot initialization ends.
+            schedule_trigger_sender_is_managed=(
+                lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
+            ),
             on_persist_failure=self._record_dispatch_persist_failure,
             on_delivery_recovery_needed=self._schedule_delivery_recovery,
             room_lifecycle_admission_enabled=lambda: (

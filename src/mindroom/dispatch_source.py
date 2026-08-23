@@ -26,6 +26,7 @@ EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 INTERACTIVE_SELECTION_SOURCE_KIND = "interactive_selection"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
+SILENT_SCHEDULE_SOURCE_KIND = "silent_scheduled"
 AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
 )
@@ -41,6 +42,7 @@ _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_DISPATCH_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
     },
 )
 _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -49,6 +51,7 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
     },
 )
 _COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
@@ -63,6 +66,7 @@ _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_SOURCE_KIND,
         EXTERNAL_TRIGGER_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         VOICE_SOURCE_KIND,
     },
