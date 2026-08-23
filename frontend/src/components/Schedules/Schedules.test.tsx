@@ -70,9 +70,7 @@ describe("Schedules", () => {
     render(<Schedules />);
 
     fireEvent.click(await screen.findByText("Quiet inbox check"));
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Silent delivery" }),
-    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Silent delivery" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(3));
