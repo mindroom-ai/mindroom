@@ -281,6 +281,11 @@ def test_get_command_help() -> None:
     assert "in 5 minutes" in schedule_help
     assert "Requires an explicit recurring polling cadence" in schedule_help
     assert "Automatically converts to smart polling" not in schedule_help
+    assert "silently" in schedule_help
+    assert "quietly" in schedule_help
+    assert "hide their trigger" in schedule_help
+    assert "NO_REPLY" in schedule_help
+    assert "visible by default" in schedule_help
 
     list_schedules_help = get_command_help("list_schedules")
     assert "List Schedules Command" in list_schedules_help
@@ -292,6 +297,9 @@ def test_get_command_help() -> None:
     edit_help = get_command_help("edit_schedule")
     assert "Edit Schedule Command" in edit_help
     assert "edit_schedule" in edit_help
+    assert "make this schedule silent" in edit_help
+    assert "make this schedule visible" in edit_help
+    assert "silent-delivery mode" in edit_help
 
     reload_help = get_command_help("reload-plugins")
     assert "Reload Plugins Command" in reload_help
