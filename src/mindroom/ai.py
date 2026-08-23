@@ -1374,7 +1374,7 @@ async def ai_response(  # noqa: C901
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
-        """Run one agent attempt, including its media-fallback retries."""
+        """Run one prepared agent attempt."""
         try:
             run_context = await _prepare_agent_run_context(
                 ctx,

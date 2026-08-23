@@ -1,4 +1,4 @@
-"""Tests for team response behavior."""
+"""Team response behavior and shared test fixtures."""
 
 from __future__ import annotations
 

@@ -40,7 +40,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_team_media_fallback import _make_test_agent, _make_test_team
+from tests.test_team_response import _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

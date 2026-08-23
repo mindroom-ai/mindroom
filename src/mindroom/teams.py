@@ -2790,7 +2790,7 @@ async def team_response(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
-        """Run one team attempt, including its media-fallback retries."""
+        """Run one prepared team attempt."""
         attempt_members = await _ensure_attempt_team_members(
             holder,
             agent_names,
@@ -3361,15 +3361,6 @@ async def team_response_stream(  # noqa: C901, PLR0915
             )
 
         holder.attempt_started = True
-        canonical_per_member = dict.fromkeys(attempt_member_ids, "")
-        canonical_consensus = ""
-        presentation = _TeamStreamPresentation.new(
-            attempt_config_names,
-            attempt_display_names,
-            show_tool_calls=show_tool_calls,
-        )
-        completed_tools = presentation.tool_tracker.completed_tools
-        pending_tools = presentation.tool_tracker.pending_tools
         holder.tool_tracker = presentation.tool_tracker
         completed_tool_executions: list[ToolExecution] = []
         emitted_output = False

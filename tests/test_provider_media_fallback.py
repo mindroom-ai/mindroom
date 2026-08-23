@@ -10,6 +10,7 @@ import pytest
 from agno.exceptions import ModelProviderError, ModelRateLimitError
 from agno.media import Audio, File, Image, Video
 from agno.models.anthropic import Claude
+from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 
@@ -22,14 +23,12 @@ from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
-
-    from agno.models.base import Model
 
 
 @dataclass
-class _FakeModel:
+class _FakeModel(Model):
     id: str = "text-only"
     provider: str = "test"
     base_url: str | None = None
@@ -39,6 +38,9 @@ class _FakeModel:
     blocking_calls: list[list[Message]] = field(default_factory=list)
     streaming_calls: list[list[Message]] = field(default_factory=list)
     closed_streams: int = 0
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        raise NotImplementedError
 
     async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
         self.blocking_calls.append(list(_messages_from_call(args, kwargs)))
@@ -59,6 +61,17 @@ class _FakeModel:
                 yield item
         finally:
             self.closed_streams += 1
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        raise NotImplementedError
+
+    def _parse_provider_response(self, response: object, **kwargs: object) -> ModelResponse:
+        del response, kwargs
+        raise NotImplementedError
+
+    def _parse_provider_response_delta(self, response: object) -> ModelResponse:
+        del response
+        raise NotImplementedError
 
 
 def _messages_from_call(args: tuple[object, ...], kwargs: dict[str, object]) -> list[Message]:
@@ -134,6 +147,31 @@ async def test_loaded_model_retries_once_without_inline_media_and_preserves_atta
     assert retry_messages[-1].temporary is True
     assert "Inline media unavailable for this model" in str(retry_messages[-1].content)
     assert original == original_snapshot
+
+
+@pytest.mark.asyncio
+async def test_outer_blocking_retry_never_reattaches_rejected_media(tmp_path: Path) -> None:
+    """A transient retry after fallback must keep using the media-free request."""
+    model = _load(
+        _FakeModel(
+            retries=1,
+            delay_between_retries=0,
+            blocking_outcomes=[
+                _provider_error(),
+                _provider_error(503),
+                ModelResponse(content="recovered"),
+                ModelResponse(content="cached"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    response = await model._ainvoke_with_retry(messages=[_image_message()])
+    cached = await model.ainvoke(messages=[_image_message()])
+
+    assert response.content == "recovered"
+    assert cached.content == "cached"
+    assert [bool(call[0].images) for call in model.blocking_calls] == [True, False, False, False]
 
 
 @pytest.mark.asyncio
@@ -294,6 +332,31 @@ async def test_loaded_model_retries_a_stream_only_before_output(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_outer_streaming_retry_never_reattaches_rejected_media(tmp_path: Path) -> None:
+    """A transient stream retry after fallback must keep using the media-free request."""
+    model = _load(
+        _FakeModel(
+            retries=1,
+            delay_between_retries=0,
+            streaming_outcomes=[
+                _provider_error(),
+                _provider_error(503),
+                [ModelResponse(content="recovered")],
+                [ModelResponse(content="cached")],
+            ],
+        ),
+        tmp_path,
+    )
+
+    chunks = [chunk async for chunk in model._ainvoke_stream_with_retry(messages=[_image_message()])]
+    cached_chunks = [chunk async for chunk in model.ainvoke_stream(messages=[_image_message()])]
+
+    assert [chunk.content for chunk in chunks] == ["recovered"]
+    assert [chunk.content for chunk in cached_chunks] == ["cached"]
+    assert [bool(call[0].images) for call in model.streaming_calls] == [True, False, False, False]
+
+
+@pytest.mark.asyncio
 async def test_loaded_claude_keeps_media_removed_during_transient_stream_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -350,6 +413,31 @@ async def test_loaded_model_does_not_replay_a_stream_after_output(tmp_path: Path
     chunks: list[ModelResponse] = []
     with pytest.raises(ModelProviderError):
         await _consume_into(chunks, model.ainvoke_stream(messages=[_media_message()]))
+
+    assert [chunk.content for chunk in chunks] == ["prefix"]
+    assert len(model.streaming_calls) == 1
+    assert model.closed_streams == 1
+
+
+@pytest.mark.asyncio
+async def test_outer_streaming_retry_does_not_replay_after_output(tmp_path: Path) -> None:
+    """Agno's outer retry loop must not replay a stream after output escapes."""
+    error = _provider_error(503)
+    model = _load(
+        _FakeModel(
+            retries=1,
+            delay_between_retries=0,
+            streaming_outcomes=[
+                [ModelResponse(content="prefix"), error],
+                [ModelResponse(content="must not run")],
+            ],
+        ),
+        tmp_path,
+    )
+
+    chunks: list[ModelResponse] = []
+    with pytest.raises(ModelProviderError):
+        await _consume_into(chunks, model._ainvoke_stream_with_retry(messages=[_media_message()]))
 
     assert [chunk.content for chunk in chunks] == ["prefix"]
     assert len(model.streaming_calls) == 1

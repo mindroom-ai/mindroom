@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from agno.models.message import Message
 
 from mindroom import ai_runtime
-from mindroom.attachment_media import attachment_records_to_media
 from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
@@ -281,17 +280,7 @@ def _context_message_from_visible_message(
         )
     else:
         content = render_msg_tag(sender=speaker_label or "", body=body, event_id=event_id)
-    if not attachment_records:
-        return Message(role="user", content=content)
-    audio, images, files, videos = attachment_records_to_media(list(attachment_records))
-    return Message(
-        role="user",
-        content=content,
-        audio=audio or None,
-        images=images or None,
-        files=files or None,
-        videos=videos or None,
-    )
+    return Message(role="user", content=content)
 
 
 def _context_messages_from_visible_messages(

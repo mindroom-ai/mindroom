@@ -49,6 +49,22 @@ class _ModelMediaRoute:
     base_url: str | None = None
 
 
+@dataclass(slots=True)
+class _MediaFallbackRequestState:
+    """Media removed for the remainder of one provider retry cycle."""
+
+    removed_kinds: frozenset[MediaKind] = frozenset()
+    failure: Exception | None = None
+    failed_kinds: frozenset[MediaKind] = frozenset()
+    stream_output_produced: bool = False
+
+
+_REQUEST_STATES: ContextVar[dict[int, _MediaFallbackRequestState] | None] = ContextVar(
+    "mindroom_provider_media_fallback_request_states",
+    default=None,
+)
+
+
 # Learned negative capabilities intentionally live only for this process lifetime.
 _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[_ModelMediaRoute, set[MediaKind]] = {}
 
@@ -64,6 +80,21 @@ def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> No
     if model_dict.get(_INSTALLED_ATTR) is True:
         return
 
+    model_dict["_ainvoke_with_retry"] = partial(
+        _ainvoke_in_request_scope,
+        model,
+        model._ainvoke_with_retry,
+    )
+    model_dict["_ainvoke_stream_with_retry"] = partial(
+        _ainvoke_stream_in_request_scope,
+        model,
+        model._ainvoke_stream_with_retry,
+    )
+    model_dict["_is_retryable_error"] = partial(
+        _is_retryable_provider_error,
+        model,
+        model._is_retryable_error,
+    )
     model_dict["ainvoke"] = partial(_fallback_ainvoke, model, model.ainvoke, fallback_prompt)
     model_dict["ainvoke_stream"] = partial(
         _fallback_ainvoke_stream,
@@ -72,6 +103,36 @@ def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> No
         fallback_prompt,
     )
     model_dict[_INSTALLED_ATTR] = True
+
+
+async def _ainvoke_in_request_scope(
+    model: Model,
+    original_ainvoke_with_retry: Callable[..., Coroutine[object, object, ModelResponse]],
+    *args: object,
+    **kwargs: object,
+) -> ModelResponse:
+    with _media_fallback_request(model):
+        return await original_ainvoke_with_retry(*args, **kwargs)
+
+
+async def _ainvoke_stream_in_request_scope(
+    model: Model,
+    original_ainvoke_stream_with_retry: Callable[..., AsyncIterator[ModelResponse]],
+    *args: object,
+    **kwargs: object,
+) -> AsyncGenerator[ModelResponse, None]:
+    with _media_fallback_request(model):
+        async for response in original_ainvoke_stream_with_retry(*args, **kwargs):
+            yield response
+
+
+def _is_retryable_provider_error(
+    model: Model,
+    original_is_retryable_error: Callable[[ModelProviderError], bool],
+    error: ModelProviderError,
+) -> bool:
+    state = _request_state(model)
+    return not (state is not None and state.stream_output_produced) and original_is_retryable_error(error)
 
 
 def _fallback_ainvoke(
@@ -96,35 +157,34 @@ async def _ainvoke_with_fallback(
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
+    request_state = _request_state(model) or _MediaFallbackRequestState()
     known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
+    removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
         kwargs,
         messages,
-        known_unsupported,
+        removed_kinds,
         fallback_prompt,
     )
-    remaining_kinds = present_kinds - known_unsupported
-    failure: Exception | None = None
+    remaining_kinds = present_kinds - removed_kinds
     with _active_model(model):
         try:
-            return await original_ainvoke(*initial_args, **initial_kwargs)
+            response = await original_ainvoke(*initial_args, **initial_kwargs)
         except Exception as error:
             if not remaining_kinds or not _should_retry(error):
                 raise
-            failure = error
+            _remember_request_fallback(request_state, error, remaining_kinds)
             retry_args, retry_kwargs = _call_without_media_kinds(
                 args,
                 kwargs,
                 messages,
-                known_unsupported | remaining_kinds,
+                known_unsupported | request_state.removed_kinds,
                 fallback_prompt,
             )
             _log_retry(model, error)
             response = await original_ainvoke(*retry_args, **retry_kwargs)
-    assert failure is not None
-    if _should_learn(failure, remaining_kinds):
-        _record_unsupported_media_kinds(route, remaining_kinds)
+    _learn_from_request_fallback(route, request_state)
     return response
 
 
@@ -150,15 +210,17 @@ async def _stream_with_fallback(
     messages = _request_messages(args, kwargs)
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
+    request_state = _request_state(model) or _MediaFallbackRequestState()
     known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
+    removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
         kwargs,
         messages,
-        known_unsupported,
+        removed_kinds,
         fallback_prompt,
     )
-    remaining_kinds = present_kinds - known_unsupported
+    remaining_kinds = present_kinds - removed_kinds
     stream: AsyncIterator[ModelResponse] | None = None
     failure: Exception | None = None
     produced = False
@@ -169,6 +231,7 @@ async def _stream_with_fallback(
             try:
                 chunk = await _next_with_active_model(model, stream)
             except StopAsyncIteration:
+                _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
                 if produced or not remaining_kinds or not _should_retry(error):
@@ -176,17 +239,19 @@ async def _stream_with_fallback(
                 failure = error
                 break
             produced = True
+            request_state.stream_output_produced = True
             yield chunk
     finally:
         if stream is not None:
             await _close_stream(model, stream)
 
     assert failure is not None
+    _remember_request_fallback(request_state, failure, remaining_kinds)
     retry_args, retry_kwargs = _call_without_media_kinds(
         args,
         kwargs,
         messages,
-        known_unsupported | remaining_kinds,
+        known_unsupported | request_state.removed_kinds,
         fallback_prompt,
     )
     _log_retry(model, failure)
@@ -198,11 +263,11 @@ async def _stream_with_fallback(
                 chunk = await _next_with_active_model(model, retry_stream)
             except StopAsyncIteration:
                 break
+            request_state.stream_output_produced = True
             yield chunk
     finally:
         await _close_stream(model, retry_stream)
-    if _should_learn(failure, remaining_kinds):
-        _record_unsupported_media_kinds(route, remaining_kinds)
+    _learn_from_request_fallback(route, request_state)
 
 
 def _request_messages(args: tuple[object, ...], kwargs: dict[str, object]) -> list[Message] | None:
@@ -272,6 +337,28 @@ def _record_unsupported_media_kinds(
     removed_kinds: frozenset[MediaKind],
 ) -> None:
     _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(route, set()).update(removed_kinds)
+
+
+def _request_state(model: Model) -> _MediaFallbackRequestState | None:
+    states = _REQUEST_STATES.get()
+    return states.get(id(model)) if states is not None else None
+
+
+def _remember_request_fallback(
+    state: _MediaFallbackRequestState,
+    failure: Exception,
+    failed_kinds: frozenset[MediaKind],
+) -> None:
+    state.removed_kinds |= failed_kinds
+    state.failure = failure
+    state.failed_kinds = failed_kinds
+
+
+def _learn_from_request_fallback(route: _ModelMediaRoute, state: _MediaFallbackRequestState) -> None:
+    if state.failure is not None and _should_learn(state.failure, state.failed_kinds):
+        _record_unsupported_media_kinds(route, state.failed_kinds)
+    state.failure = None
+    state.failed_kinds = frozenset()
 
 
 def reset_model_media_capability_cache() -> None:
@@ -392,6 +479,19 @@ def _active_model(model: Model) -> Iterator[None]:
         yield
     finally:
         _ACTIVE_MODELS.reset(token)
+
+
+@contextmanager
+def _media_fallback_request(model: Model) -> Iterator[None]:
+    states = _REQUEST_STATES.get() or {}
+    if id(model) in states:
+        yield
+        return
+    token = _REQUEST_STATES.set({**states, id(model): _MediaFallbackRequestState()})
+    try:
+        yield
+    finally:
+        _REQUEST_STATES.reset(token)
 
 
 async def _next_with_active_model(model: Model, stream: AsyncIterator[ModelResponse]) -> ModelResponse:
