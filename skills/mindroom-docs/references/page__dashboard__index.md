@@ -134,8 +134,8 @@ Configure shared culture rules that apply across agents:
 
 View and manage scheduled tasks across rooms:
 
-- **List all schedules** with room, status, schedule type, and next run time
-- **Edit schedule timing** and description
+- **List all schedules** with room, status, schedule type, delivery mode, and next run time
+- **Edit schedule timing**, description, and visible or silent delivery
 - **Cancel schedules** by task ID
 
 ### Skills
@@ -261,8 +261,8 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks (filterable by room) |
-| PUT | `/api/schedules/{task_id}` | Edit a scheduled task |
+| GET | `/api/schedules` | List scheduled tasks, including each task's `silent` delivery flag (filterable by room) |
+| PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including the optional `silent` delivery flag |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
 ### Workers

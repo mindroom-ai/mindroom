@@ -700,6 +700,8 @@ ToolAfterCallContext(
 
 For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
 This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
+Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
+Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
 
 ## Testing
 

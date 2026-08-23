@@ -65,6 +65,28 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
+## Silent Delivery
+
+Schedules are visible by default.
+Add `silently` or `quietly` to a natural-language request when the trigger and routine no-report result should stay out of the room timeline.
+
+```
+!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
+!schedule Daily at 9am, silently check whether the backup failed and report failures
+```
+
+A silent schedule does not post its trigger as a visible room message.
+MindRoom sends no final message when a successful run returns only whitespace or the standalone marker `NO_REPLY`, matched case-insensitively after trimming.
+Findings, failures, and messages explicitly sent by tools remain visible.
+Silent runs also omit typing indicators, progress placeholders, stop controls, streaming updates, and tool-only final presentation.
+
+Schedule confirmations and `!list_schedules` label each task as `Silent` or `Visible`.
+An edit preserves the current mode when visibility is omitted.
+Say `make this schedule silent` or `make this schedule visible` to change the mode through `!edit_schedule`.
+
+Silent delivery controls room presentation, not storage or transport.
+The task body still travels through Matrix as a custom timeline event and remains subject to homeserver retention, encrypted transport where enabled, and MindRoom's local durable recovery journal.
+
 ## Agent and Team Mentions
 
 Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
