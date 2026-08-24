@@ -84,6 +84,7 @@ from mindroom.streaming import (
     classify_cancel_source,
     interactive_response_for_visible_body,
     send_streaming_response,
+    strip_visible_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -1282,11 +1283,12 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         suppression_reason = "suppressed_by_hook" if draft.suppress else None
-        if suppression_reason is None and (
-            draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
-            and constants.is_silent_schedule_no_report_response(draft.response_text)
-        ):
-            suppression_reason = "silent_no_report"
+        if suppression_reason is None and draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND:
+            no_report_text = draft.response_text
+            if draft.tool_trace:
+                no_report_text = strip_visible_tool_markers(no_report_text)
+            if constants.is_silent_schedule_no_report_response(no_report_text):
+                suppression_reason = "silent_no_report"
         if suppression_reason is not None:
             self.deps.logger.info(
                 "Response suppressed",

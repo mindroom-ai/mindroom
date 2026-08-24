@@ -48,6 +48,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
+from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     FakeOutbox,
     bind_runtime_paths,
@@ -243,6 +244,37 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             outcome = await gateway.deliver_final(
                 self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outcome.failure_reason == "silent_no_report"
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    async def test_silent_schedule_tool_trace_no_reply_is_suppressed(self, tmp_path: Path) -> None:
+        """Display-only tool markers must not turn a silent no-report result into a visible response."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
+        request = replace(
+            self._final_request(
+                f"🔧 `run_shell_command` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}",
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            ),
+            tool_trace=[
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="run_shell_command",
+                    args_preview="cmd=true",
+                    result_preview="done",
+                ),
+            ],
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(request)
 
         assert outcome.terminal_status == "cancelled"
         assert outcome.suppressed is True
