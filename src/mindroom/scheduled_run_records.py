@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -99,13 +100,6 @@ def _atomic_write_receipt(path: Path, receipt: _ScheduledRunReceipt) -> None:
     )
 
 
-def _agent_names(config: Config, entity_name: str) -> tuple[str, ...]:
-    team = config.teams.get(entity_name)
-    if team is not None:
-        return tuple(dict.fromkeys(team.agents))
-    return (entity_name,)
-
-
 def _workspace_for_agent(
     agent_name: str,
     *,
@@ -140,26 +134,30 @@ def _workspace_for_agent(
     return agent_workspace_root_path(runtime_paths.storage_root, agent_name)
 
 
-def _is_utc_timestamp(value: object) -> bool:
+def _parse_utc_timestamp(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.endswith("Z"):
-        return False
+        return None
     try:
         parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
     except ValueError:
-        return False
+        return None
     canonical = parsed.isoformat().replace("+00:00", "Z")
-    return parsed.tzinfo is not None and parsed.utcoffset() == UTC.utcoffset(parsed) and value == canonical
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed) or value != canonical:
+        return None
+    return parsed
 
 
-def _receipt_state_is_valid(payload: dict[object, object]) -> bool:
+def _receipt_state_is_valid(payload: dict[object, object], *, started_at: datetime) -> bool:
     if payload["status"] == "started":
         return all(payload[field] is None for field in ("result", "response_text", "completed_at"))
+    completed_at = _parse_utc_timestamp(payload["completed_at"])
     return (
         payload["status"] == "completed"
         and isinstance(payload["result"], str)
         and payload["result"] in _COMPLETED_RESULTS
         and isinstance(payload["response_text"], str)
-        and _is_utc_timestamp(payload["completed_at"])
+        and completed_at is not None
+        and completed_at >= started_at
     )
 
 
@@ -188,11 +186,17 @@ def _existing_receipt_state(path: Path, expected: _ScheduledRunReceipt) -> _Exis
         expected.thread_id,
         expected.prompt,
     )
+    started_at = _parse_utc_timestamp(payload["started_at"])
+    replacement_completed_at = _parse_utc_timestamp(expected.completed_at)
     if (
         type(payload["schema_version"]) is not int
         or identity != expected_identity
-        or not _is_utc_timestamp(payload["started_at"])
-        or not _receipt_state_is_valid(payload)
+        or started_at is None
+        or (
+            expected.status == "completed"
+            and (replacement_completed_at is None or started_at > replacement_completed_at)
+        )
+        or not _receipt_state_is_valid(payload, started_at=started_at)
     ):
         return None
     return _ExistingReceiptState(status=payload["status"], started_at=payload["started_at"])
@@ -201,12 +205,13 @@ def _existing_receipt_state(path: Path, expected: _ScheduledRunReceipt) -> _Exis
 def _write_started_receipts(
     *,
     entity_name: str,
+    agent_names: tuple[str, ...],
     envelope: MessageEnvelope,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
     started_at = _utc_timestamp()
-    for agent_name in _agent_names(config, entity_name):
+    for agent_name in agent_names:
         workspace = _workspace_for_agent(
             agent_name,
             entity_name=entity_name,
@@ -239,6 +244,7 @@ def _write_started_receipts(
 def _write_completed_receipts(
     *,
     entity_name: str,
+    agent_names: tuple[str, ...],
     envelope: MessageEnvelope,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -246,7 +252,7 @@ def _write_completed_receipts(
     response_text: str,
 ) -> None:
     completed_at = _utc_timestamp()
-    for agent_name in _agent_names(config, entity_name):
+    for agent_name in agent_names:
         workspace = _workspace_for_agent(
             agent_name,
             entity_name=entity_name,
@@ -277,6 +283,7 @@ def _write_completed_receipts(
 async def record_silent_schedule_result_if_needed(
     *,
     entity_name: str,
+    agent_names: tuple[str, ...],
     envelope: MessageEnvelope,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -291,20 +298,24 @@ async def record_silent_schedule_result_if_needed(
         result = "no_report"
     elif suppression_reason is not None:
         result = "suppressed"
-    await asyncio.to_thread(
-        _write_completed_receipts,
-        entity_name=entity_name,
-        envelope=envelope,
-        config=config,
-        runtime_paths=runtime_paths,
-        result=result,
-        response_text=response_text,
+    await run_blocking_until_complete(
+        partial(
+            _write_completed_receipts,
+            entity_name=entity_name,
+            agent_names=agent_names,
+            envelope=envelope,
+            config=config,
+            runtime_paths=runtime_paths,
+            result=result,
+            response_text=response_text,
+        ),
     )
 
 
 async def record_silent_schedule_started_if_needed(
     *,
     entity_name: str,
+    agent_names: tuple[str, ...],
     envelope: MessageEnvelope,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -312,10 +323,13 @@ async def record_silent_schedule_started_if_needed(
     """Create an idempotent start receipt only for a silent schedule."""
     if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
         return
-    await asyncio.to_thread(
-        _write_started_receipts,
-        entity_name=entity_name,
-        envelope=envelope,
-        config=config,
-        runtime_paths=runtime_paths,
+    await run_blocking_until_complete(
+        partial(
+            _write_started_receipts,
+            entity_name=entity_name,
+            agent_names=agent_names,
+            envelope=envelope,
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
     )

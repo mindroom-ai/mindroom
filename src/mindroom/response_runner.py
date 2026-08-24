@@ -432,6 +432,7 @@ class ResponseRequest:
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
+    participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
@@ -1437,6 +1438,7 @@ class ResponseRunner:
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
             correlation_id=continuation.correlation_id,
+            participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
 
     def _approval_post_response_outcome(
@@ -2579,6 +2581,7 @@ class ResponseRunner:
             response_kind=response_kind,
             response_envelope=request.response_envelope,
             correlation_id=self._correlation_id_for_request(request),
+            participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
 
     def _agent_turn_context(
@@ -2773,6 +2776,7 @@ class ResponseRunner:
             return None
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
+            agent_names=request.participating_agent_names or (self.deps.agent_name,),
             envelope=request.response_envelope,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
@@ -3269,6 +3273,7 @@ class ResponseRunner:
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
         ]
+        request = replace(request, participating_agent_names=tuple(agent_names))
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
@@ -4398,6 +4403,7 @@ class ResponseRunner:
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        request = replace(request, participating_agent_names=(self.deps.agent_name,))
         history_scope = self.deps.state_writer.history_scope()
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,

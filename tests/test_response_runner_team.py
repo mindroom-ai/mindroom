@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1213,6 +1214,69 @@ class TestAgentBot(AgentBotTestBase):
         bot._redact_message_event.assert_not_awaited()
         add_stop_button.assert_not_awaited()
         bot.client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_silent_schedule_ad_hoc_team_writes_receipt_to_each_member(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A dynamic team's resolved participants must each receive the run receipt."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock()
+        matrix_ids = entity_ids(config, runtime_paths)
+
+        async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> str:
+            for agent_name in ("calculator", "general"):
+                receipt_directory = (
+                    runtime_paths.storage_root / "agents" / agent_name / "workspace" / ".mindroom" / "scheduled_runs"
+                )
+                [receipt_path] = list(receipt_directory.glob("*.json"))
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                assert receipt["status"] == "started"
+            return "Finding"
+
+        with (
+            patch_response_runner_module(
+                team_response=AsyncMock(side_effect=team_response_with_started_receipt_check),
+            ),
+            patch(
+                "mindroom.delivery_gateway.DeliveryGateway.send_text",
+                new=AsyncMock(return_value="$response"),
+            ),
+        ):
+            await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    prompt="Check for updates",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$ad-hoc-silent-run",
+                        prompt="Check for updates",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                    ),
+                    correlation_id="corr-ad-hoc-silent-team",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        for agent_name in ("calculator", "general"):
+            receipt_directory = (
+                runtime_paths.storage_root / "agents" / agent_name / "workspace" / ".mindroom" / "scheduled_runs"
+            )
+            receipts = list(receipt_directory.glob("*.json"))
+            assert len(receipts) == 1
+            receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+            assert receipt["entity_name"] == bot.agent_name
+            assert receipt["agent_name"] == agent_name
+            assert receipt["status"] == "completed"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_keeps_streamed_visible_reply_when_before_response_suppresses(
