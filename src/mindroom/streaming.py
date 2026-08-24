@@ -45,11 +45,12 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     complete_pending_tool_block,
     is_visible_tool_marker_line,
+    tool_markers_match_trace,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     import nio
 
@@ -87,6 +88,7 @@ __all__ = [
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
+    "strip_matching_visible_tool_markers",
     "strip_visible_tool_markers",
 ]
 
@@ -176,6 +178,13 @@ def strip_visible_tool_markers(text: str) -> str:
 
         filtered_lines.extend(spacer_lines)
     return "\n".join(filtered_lines).rstrip()
+
+
+def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
+    """Strip display-only markers only when they exactly represent the structured trace."""
+    if not tool_markers_match_trace(text, tool_trace):
+        return text
+    return strip_visible_tool_markers(text)
 
 
 class StreamingDeliveryError(Exception):
