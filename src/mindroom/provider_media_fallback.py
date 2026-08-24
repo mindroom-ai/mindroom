@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Never, Protocol, cast, runtime_checkable
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, RetryableModelProviderError
 from agno.models.message import Message
@@ -200,6 +200,21 @@ def _fallback_ainvoke_stream(
     return _stream_with_fallback(model, original_ainvoke_stream, fallback_prompt, args, kwargs)
 
 
+def _raise_terminal_stream_error(
+    model: Model,
+    error: Exception,
+    *,
+    output_produced: bool,
+) -> Never:
+    if output_produced and isinstance(error, RetryableModelProviderError):
+        raise ModelProviderError(
+            message=f"Cannot retry with guidance after stream output was produced. Error: {error.original_error}",
+            model_name=model.name,
+            model_id=model.id,
+        ) from error
+    raise error
+
+
 async def _stream_with_fallback(
     model: Model,
     original_ainvoke_stream: Callable[..., AsyncIterator[ModelResponse]],
@@ -235,7 +250,7 @@ async def _stream_with_fallback(
                 return
             except Exception as error:
                 if produced or not remaining_kinds or not _should_retry(error):
-                    raise
+                    _raise_terminal_stream_error(model, error, output_produced=produced)
                 failure = error
                 break
             produced = True

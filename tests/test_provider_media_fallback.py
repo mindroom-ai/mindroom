@@ -474,9 +474,21 @@ async def test_loaded_model_does_not_replay_a_stream_after_output(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_outer_streaming_retry_does_not_replay_after_output(tmp_path: Path) -> None:
-    """Agno's outer retry loop must not replay a stream after output escapes."""
-    error = _provider_error(503)
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_provider_error(503), id="provider-error"),
+        pytest.param(
+            RetryableModelProviderError(
+                original_error="malformed function call",
+                retry_guidance_message="Retry with a valid function call.",
+            ),
+            id="guidance-error",
+        ),
+    ],
+)
+async def test_outer_streaming_retry_does_not_replay_after_output(tmp_path: Path, error: Exception) -> None:
+    """Agno's outer retry paths must not replay a stream after output escapes."""
     model = _load(
         _FakeModel(
             retries=1,
