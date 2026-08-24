@@ -46,6 +46,14 @@ class _ScheduledRunReceipt:
     completed_at: str | None
 
 
+@dataclass(frozen=True)
+class _ExistingReceiptState:
+    """Validated lifecycle state reused when rewriting one receipt."""
+
+    status: Literal["started", "completed"]
+    started_at: str
+
+
 _RECEIPT_FIELDS = frozenset(
     {
         "schema_version",
@@ -155,7 +163,7 @@ def _receipt_state_is_valid(payload: dict[object, object]) -> bool:
     )
 
 
-def _existing_started_at(path: Path, expected: _ScheduledRunReceipt) -> str | None:
+def _existing_receipt_state(path: Path, expected: _ScheduledRunReceipt) -> _ExistingReceiptState | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -187,7 +195,7 @@ def _existing_started_at(path: Path, expected: _ScheduledRunReceipt) -> str | No
         or not _receipt_state_is_valid(payload)
     ):
         return None
-    return payload["started_at"]
+    return _ExistingReceiptState(status=payload["status"], started_at=payload["started_at"])
 
 
 def _write_started_receipts(
@@ -221,8 +229,10 @@ def _write_started_receipts(
             started_at=started_at,
             completed_at=None,
         )
-        if _existing_started_at(path, receipt) is not None:
-            continue
+        if existing := _existing_receipt_state(path, receipt):
+            receipt = replace(receipt, started_at=existing.started_at)
+            if existing.status == "started":
+                continue
         _atomic_write_receipt(path, receipt)
 
 
@@ -259,8 +269,8 @@ def _write_completed_receipts(
             started_at=completed_at,
             completed_at=completed_at,
         )
-        if started_at := _existing_started_at(path, receipt):
-            receipt = replace(receipt, started_at=started_at)
+        if existing := _existing_receipt_state(path, receipt):
+            receipt = replace(receipt, started_at=existing.started_at)
         _atomic_write_receipt(path, receipt)
 
 

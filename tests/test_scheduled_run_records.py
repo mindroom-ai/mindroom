@@ -121,3 +121,52 @@ async def test_private_agent_silent_run_uses_requester_scoped_workspace(tmp_path
     assert receipt["result"] == "no_report"
     assert receipt["status"] == "completed"
     assert not (runtime_paths.storage_root / "agents" / "private" / "workspace" / ".mindroom").exists()
+
+
+async def test_replayed_completed_silent_run_reenters_started_state(tmp_path: Path) -> None:
+    """A replay must not leave the previous completion visible while its new attempt is running."""
+    config = _config(agents={"watcher": AgentConfig(display_name="Watcher")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    envelope = request_envelope(
+        room_id="!room:localhost",
+        reply_to_event_id="$replayed-run",
+        prompt="Check for changes",
+        agent_name="watcher",
+        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+    )
+
+    await record_silent_schedule_started_if_needed(
+        entity_name="watcher",
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await record_silent_schedule_result_if_needed(
+        entity_name="watcher",
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+        suppression_reason=None,
+        response_text="A change was found",
+    )
+    [receipt_path] = list(
+        (runtime_paths.storage_root / "agents" / "watcher" / "workspace" / ".mindroom" / "scheduled_runs").glob(
+            "*.json",
+        ),
+    )
+    completed_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert completed_receipt["status"] == "completed"
+
+    await record_silent_schedule_started_if_needed(
+        entity_name="watcher",
+        envelope=envelope,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    replayed_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert replayed_receipt["status"] == "started"
+    assert replayed_receipt["result"] is None
+    assert replayed_receipt["response_text"] is None
+    assert replayed_receipt["completed_at"] is None
+    assert replayed_receipt["started_at"] == completed_receipt["started_at"]
