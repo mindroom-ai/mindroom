@@ -4506,6 +4506,49 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     )
 
 
+def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker worker routing should receive the committed tool-validation snapshot."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    runtime_context = make_test_tool_runtime_context(
+        agent_name="code",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] is None
+
+
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

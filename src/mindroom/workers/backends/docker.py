@@ -1206,6 +1206,7 @@ class DockerWorkerBackend:
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
+            "tool_validation_snapshot": self._tool_validation_snapshot,
             "workers_root": str(self._workers_root),
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,

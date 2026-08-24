@@ -2970,6 +2970,47 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_run_call["user"] == "2000:2000"
 
 
+def test_docker_backend_recreates_container_when_validation_snapshot_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A surviving worker must restart when its authoritative validation state changes."""
+    first_snapshot = {"shell": {"name": "shell", "config_fields": []}}
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot=first_snapshot,
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_snapshot = {
+        **first_snapshot,
+        "file": {"name": "file", "config_fields": []},
+    }
+    updated_backend = DockerWorkerBackend(
+        config=backend.config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        tool_validation_snapshot=second_snapshot,
+    )
+    monkeypatch.setattr(
+        updated_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{updated_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    second_container = fake_client.containers.by_name[first_handle.worker_id]
+    assert second_container is not first_container
+    assert first_container.removed == 1
+    manifest_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / ".runtime" / "startup_manifest.json"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["tool_validation_snapshot"] == second_snapshot
+
+
 def test_docker_backend_recreates_container_when_name_prefix_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
