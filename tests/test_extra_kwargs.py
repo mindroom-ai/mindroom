@@ -716,8 +716,15 @@ def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
 
 
+@pytest.mark.parametrize(
+    "codex_provider_data",
+    [{"response_id": "response-1"}, {"signature": ""}],
+    ids=["missing-signature", "empty-signature"],
+)
 @pytest.mark.asyncio
-async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay() -> None:
+async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay(
+    codex_provider_data: dict[str, str],
+) -> None:
     """Codex reasoning without an Anthropic signature must not become a thinking block."""
     model = MindroomVertexAIClaude(
         id="claude-opus-5",
@@ -728,7 +735,7 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
         role="assistant",
         content="Codex answer",
         reasoning_content="Unsigned Codex reasoning",
-        provider_data={"response_id": "response-1"},
+        provider_data=codex_provider_data,
         tool_calls=[
             {
                 "id": "call-1",
@@ -768,10 +775,10 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
     assert fitted_codex_message.reasoning_content is None
     assert fitted_codex_message.content == "Codex answer"
     assert fitted_codex_message.tool_calls == codex_message.tool_calls
-    assert fitted_codex_message.provider_data == {"response_id": "response-1"}
+    assert fitted_codex_message.provider_data == codex_provider_data
     assert fitted_messages[3] is claude_message
     assert codex_message.reasoning_content == "Unsigned Codex reasoning"
-    assert codex_message.provider_data == {"response_id": "response-1"}
+    assert codex_message.provider_data == codex_provider_data
 
 
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:

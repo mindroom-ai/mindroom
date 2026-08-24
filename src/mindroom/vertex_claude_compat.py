@@ -47,7 +47,8 @@ def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Messag
     for index, message in enumerate(messages):
         if message.reasoning_content is None or message.provider_data is None:
             continue
-        if isinstance(message.provider_data.get("signature"), str):
+        signature = message.provider_data.get("signature")
+        if isinstance(signature, str) and signature:
             continue
         if sanitized_messages is None:
             sanitized_messages = list(messages)
