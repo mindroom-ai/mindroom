@@ -23,6 +23,7 @@ from mindroom.constants import (
     runtime_env_values,
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
+    sandbox_startup_manifest_path,
     serialize_runtime_paths,
     write_startup_manifest,
 )
@@ -1028,6 +1029,7 @@ class DockerWorkerBackend:
     def _write_startup_manifest(self, paths: LocalWorkerStatePaths, *, worker_key: str) -> None:
         """Persist primary validation state before starting one Docker worker."""
         if self._tool_validation_snapshot is None:
+            sandbox_startup_manifest_path(paths.root).unlink(missing_ok=True)
             return
         dedicated_root = Path(self.config.storage_mount_path)
         write_startup_manifest(
