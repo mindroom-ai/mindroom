@@ -44,8 +44,8 @@ __all__ = [
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
     "reset_primary_worker_manager",
+    "serialized_dedicated_worker_validation_snapshot",
     "serialized_kubernetes_worker_config_snapshot",
-    "serialized_kubernetes_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
 ]
 
@@ -103,7 +103,7 @@ class _ConfiguredPrimaryWorkerManagerInputs:
     proxy_url: str | None
     proxy_token: str | None
     storage_root: Path
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
 
@@ -149,7 +149,7 @@ def clear_worker_validation_snapshot_cache() -> None:
     clear_resolved_tool_state_cache()
 
 
-def serialized_kubernetes_worker_validation_snapshot(
+def serialized_dedicated_worker_validation_snapshot(
     runtime_paths: RuntimePaths,
     *,
     runtime_config: Config | None = None,
@@ -283,7 +283,7 @@ def _lease_configured_primary_worker_manager(
         proxy_url=inputs.proxy_url,
         proxy_token=inputs.proxy_token,
         storage_root=inputs.storage_root,
-        kubernetes_tool_validation_snapshot=inputs.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=inputs.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
         worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
@@ -302,7 +302,7 @@ def configured_primary_worker_manager_identity(
         proxy_url=inputs.proxy_url,
         proxy_token=inputs.proxy_token,
         storage_root=inputs.storage_root,
-        kubernetes_tool_validation_snapshot=inputs.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=inputs.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
         worker_grantable_credentials=inputs.worker_grantable_credentials,
     )
@@ -326,34 +326,35 @@ def _configured_primary_worker_manager_inputs(
     backend_name = primary_worker_backend_name(runtime_paths)
     if runtime_config is None and backend_name == "kubernetes":
         return None
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None
     kubernetes_config_snapshot: dict[str, object] | None = None
     worker_grantable_credentials: frozenset[str] | None = None
     if runtime_config is not None:
         worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-        if backend_name == "kubernetes":
-            kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+        if backend_name in _DEDICATED_WORKER_BACKENDS:
+            dedicated_worker_validation_snapshot = serialized_dedicated_worker_validation_snapshot(
                 runtime_paths,
                 runtime_config=runtime_config,
             )
+        if backend_name == "kubernetes":
             kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
     return _ConfiguredPrimaryWorkerManagerInputs(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
 
 
 def _require_kubernetes_tool_validation_snapshot(
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None,
 ) -> dict[str, dict[str, object]]:
-    if kubernetes_tool_validation_snapshot is None:
+    if dedicated_worker_validation_snapshot is None:
         msg = "Kubernetes worker backend requires an explicit tool validation snapshot."
         raise WorkerBackendError(msg)
-    return kubernetes_tool_validation_snapshot
+    return dedicated_worker_validation_snapshot
 
 
 def _require_kubernetes_config_snapshot(
@@ -391,7 +392,7 @@ def _primary_worker_backend_config_signature(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
@@ -400,13 +401,20 @@ def _primary_worker_backend_config_signature(
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "docker":
-        return docker_backend_config_signature(
+        backend_signature = docker_backend_config_signature(
             runtime_paths,
             auth_token=proxy_token,
             storage_path=resolved_storage_root,
             worker_grantable_credentials=_resolve_worker_grantable_credentials(
                 worker_grantable_credentials,
             ),
+        )
+        if dedicated_worker_validation_snapshot is None:
+            return backend_signature
+        return (
+            *backend_signature,
+            "__tool_validation_snapshot__",
+            json.dumps(dedicated_worker_validation_snapshot, separators=(",", ":"), sort_keys=True),
         )
     if backend_name == "kubernetes":
         backend_signature = kubernetes_backend_config_signature(
@@ -420,7 +428,7 @@ def _primary_worker_backend_config_signature(
         return (
             *backend_signature,
             json.dumps(
-                _require_kubernetes_tool_validation_snapshot(kubernetes_tool_validation_snapshot),
+                _require_kubernetes_tool_validation_snapshot(dedicated_worker_validation_snapshot),
                 separators=(",", ":"),
                 sort_keys=True,
             ),
@@ -462,7 +470,7 @@ def _build_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> WorkerBackend:
@@ -480,6 +488,7 @@ def _build_primary_worker_manager(
                 runtime_paths,
                 auth_token=proxy_token,
                 storage_path=resolved_storage_root,
+                tool_validation_snapshot=dedicated_worker_validation_snapshot,
                 worker_grantable_credentials=_resolve_worker_grantable_credentials(
                     worker_grantable_credentials,
                 ),
@@ -494,7 +503,7 @@ def _build_primary_worker_manager(
             auth_token=proxy_token,
             storage_root=resolved_storage_root,
             tool_validation_snapshot=_require_kubernetes_tool_validation_snapshot(
-                kubernetes_tool_validation_snapshot,
+                dedicated_worker_validation_snapshot,
             ),
             config_snapshot=_require_kubernetes_config_snapshot(kubernetes_config_snapshot),
             worker_grantable_credentials=_resolve_worker_grantable_credentials(
@@ -639,7 +648,7 @@ def _resolve_primary_worker_manager_entry(
     proxy_token: str | None,
     storage_root: Path | None,
     acquire_lease: bool,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> tuple[_WorkerManagerEntry, list[WorkerBackend]]:
@@ -649,7 +658,7 @@ def _resolve_primary_worker_manager_entry(
         proxy_url=proxy_url,
         proxy_token=proxy_token,
         storage_root=storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
@@ -672,7 +681,7 @@ def _resolve_primary_worker_manager_entry(
             proxy_url=proxy_url,
             proxy_token=proxy_token,
             storage_root=storage_root,
-            kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+            dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
             kubernetes_config_snapshot=kubernetes_config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
@@ -716,7 +725,7 @@ def get_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None = None,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> WorkerBackend:
@@ -727,7 +736,7 @@ def get_primary_worker_manager(
         proxy_token=proxy_token,
         storage_root=storage_root,
         acquire_lease=False,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
@@ -746,7 +755,7 @@ def lease_primary_worker_manager(
     proxy_url: str | None,
     proxy_token: str | None,
     storage_root: Path | None = None,
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
 ) -> PrimaryWorkerManagerLease:
@@ -757,7 +766,7 @@ def lease_primary_worker_manager(
         proxy_token=proxy_token,
         storage_root=storage_root,
         acquire_lease=True,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )

@@ -2517,7 +2517,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_url: str | None,
         proxy_token: str | None,
         storage_root: Path | None = None,
-        kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
         kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
@@ -2525,7 +2525,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
-        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["dedicated_worker_validation_snapshot"] = dedicated_worker_validation_snapshot
         captured["kubernetes_config_snapshot"] = kubernetes_config_snapshot
         captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
@@ -2550,7 +2550,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
-    assert captured["kubernetes_tool_validation_snapshot"] is None
+    assert captured["dedicated_worker_validation_snapshot"] is None
     assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
@@ -3419,9 +3419,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             built_storage_paths.append(storage_path)
@@ -3570,9 +3571,10 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3656,9 +3658,10 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3728,9 +3731,10 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3813,9 +3817,10 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3916,9 +3921,10 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = runtime_paths, storage_path, worker_grantable_credentials
+            _ = runtime_paths, storage_path, tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             build_started.set()
             assert allow_build.wait(timeout=5.0)
@@ -3993,9 +3999,10 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -4089,9 +4096,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
@@ -4162,9 +4170,10 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
@@ -4291,7 +4300,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=first_snapshot,
+        dedicated_worker_validation_snapshot=first_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4299,7 +4308,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     third_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4307,7 +4316,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=second_config_snapshot,
     )
 
@@ -4356,7 +4365,7 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
             storage_root=tmp_path,
-            kubernetes_tool_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
+            dedicated_worker_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
         )
 
 
@@ -4435,7 +4444,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
@@ -4444,7 +4453,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
 
@@ -4491,10 +4500,53 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     with tool_runtime_context(runtime_context):
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["kubernetes_config_snapshot"] == (
         workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
     )
+
+
+def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker worker routing should receive the committed tool-validation snapshot."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    runtime_context = make_test_tool_runtime_context(
+        agent_name="code",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] is None
 
 
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
@@ -4521,7 +4573,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         return {"fake": ToolValidationInfo(name="fake")}
 
     def fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
-        captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
+        captured_snapshots.append(kwargs["dedicated_worker_validation_snapshot"])
         return object()
 
     runtime_context = make_test_tool_runtime_context(
@@ -4652,7 +4704,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     assert result == "proxied"
     assert captured_kwargs["storage_root"] == request_storage_path
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})
 
 
