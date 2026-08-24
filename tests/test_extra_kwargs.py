@@ -716,6 +716,64 @@ def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     assert model._has_beta_features(tools=[_strict_tool_definition()]) is False
 
 
+@pytest.mark.asyncio
+async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_provider_replay() -> None:
+    """Codex reasoning without an Anthropic signature must not become a thinking block."""
+    model = MindroomVertexAIClaude(
+        id="claude-opus-5",
+        project_id="demo-project",
+        region="global",
+    )
+    codex_message = Message(
+        role="assistant",
+        content="Codex answer",
+        reasoning_content="Unsigned Codex reasoning",
+        provider_data={"response_id": "response-1"},
+        tool_calls=[
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "demo_tool", "arguments": "{}"},
+            },
+        ],
+        from_history=True,
+    )
+    claude_message = Message(
+        role="assistant",
+        content="Claude answer",
+        reasoning_content="Signed Claude reasoning",
+        provider_data={"signature": "signature-1"},
+        from_history=True,
+    )
+    messages = [
+        Message(role="user", content="First question", from_history=True),
+        codex_message,
+        Message(role="user", content="Second question", from_history=True),
+        claude_message,
+        Message(role="user", content="Current question"),
+    ]
+
+    fitted_messages = await model._fit_request_messages(
+        messages,
+        tools=None,
+        response_format=None,
+        compress_tool_results=False,
+    )
+    chat_messages, _system_prompt = format_messages(fitted_messages)
+
+    assert [block.type for block in chat_messages[1]["content"]] == ["text", "tool_use"]
+    assert [block.type for block in chat_messages[3]["content"]] == ["thinking", "text"]
+    fitted_codex_message = fitted_messages[1]
+    assert fitted_codex_message is not codex_message
+    assert fitted_codex_message.reasoning_content is None
+    assert fitted_codex_message.content == "Codex answer"
+    assert fitted_codex_message.tool_calls == codex_message.tool_calls
+    assert fitted_codex_message.provider_data == {"response_id": "response-1"}
+    assert fitted_messages[3] is claude_message
+    assert codex_message.reasoning_content == "Unsigned Codex reasoning"
+    assert codex_message.provider_data == {"response_id": "response-1"}
+
+
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
     return VertexAIClaude(
         id="claude-sonnet-4-6",
