@@ -331,11 +331,12 @@ def _configured_primary_worker_manager_inputs(
     worker_grantable_credentials: frozenset[str] | None = None
     if runtime_config is not None:
         worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-        if backend_name == "kubernetes":
+        if backend_name in _DEDICATED_WORKER_BACKENDS:
             kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
                 runtime_paths,
                 runtime_config=runtime_config,
             )
+        if backend_name == "kubernetes":
             kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
     return _ConfiguredPrimaryWorkerManagerInputs(
         proxy_url=proxy_config.proxy_url,
@@ -400,13 +401,20 @@ def _primary_worker_backend_config_signature(
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "docker":
-        return docker_backend_config_signature(
+        backend_signature = docker_backend_config_signature(
             runtime_paths,
             auth_token=proxy_token,
             storage_path=resolved_storage_root,
             worker_grantable_credentials=_resolve_worker_grantable_credentials(
                 worker_grantable_credentials,
             ),
+        )
+        if kubernetes_tool_validation_snapshot is None:
+            return backend_signature
+        return (
+            *backend_signature,
+            "__tool_validation_snapshot__",
+            json.dumps(kubernetes_tool_validation_snapshot, separators=(",", ":"), sort_keys=True),
         )
     if backend_name == "kubernetes":
         backend_signature = kubernetes_backend_config_signature(
@@ -480,6 +488,7 @@ def _build_primary_worker_manager(
                 runtime_paths,
                 auth_token=proxy_token,
                 storage_path=resolved_storage_root,
+                tool_validation_snapshot=kubernetes_tool_validation_snapshot,
                 worker_grantable_credentials=_resolve_worker_grantable_credentials(
                     worker_grantable_credentials,
                 ),

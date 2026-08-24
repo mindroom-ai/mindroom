@@ -3419,9 +3419,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             built_storage_paths.append(storage_path)
@@ -3570,9 +3571,10 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3656,9 +3658,10 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3728,9 +3731,10 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3813,9 +3817,10 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3916,9 +3921,10 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = runtime_paths, storage_path, worker_grantable_credentials
+            _ = runtime_paths, storage_path, tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             build_started.set()
             assert allow_build.wait(timeout=5.0)
@@ -3993,9 +3999,10 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -4089,9 +4096,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
@@ -4162,9 +4170,10 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))

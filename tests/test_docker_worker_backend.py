@@ -626,6 +626,7 @@ def _backend(
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
     host_config_path: Path | None = None,
+    tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -676,6 +677,7 @@ def _backend(
         auth_token=_TEST_AUTH_TOKEN,
         storage_path=tmp_path if storage_path is None else storage_path,
         runtime_paths=runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
     )
     monkeypatch.setattr(
         backend,
@@ -1323,6 +1325,29 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+def test_docker_backend_writes_authoritative_worker_validation_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker workers should inherit primary validation state instead of rebuilding it per call."""
+    validation_snapshot = {"shell": {"name": "shell", "config_fields": []}}
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        tool_validation_snapshot=validation_snapshot,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    manifest = json.loads((worker_root / ".runtime" / "startup_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tool_validation_snapshot"] == validation_snapshot
+    assert manifest["runtime_paths"]["storage_root"] == "/app/worker"
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert env["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == "/app/worker/.runtime/startup_manifest.json"
 
 
 def test_docker_script_worker_profile_mirrors_no_global_credentials(

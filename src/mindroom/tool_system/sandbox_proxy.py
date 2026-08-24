@@ -422,11 +422,12 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
     )
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
     kubernetes_config_snapshot: dict[str, object] | None = None
-    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
+    if context is not None and primary_worker_backend_name(runtime_paths) in {"docker", "kubernetes"}:
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
             runtime_paths,
             runtime_config=context.config,
         )
+    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(context.config)
     return _PrimaryWorkerManagerContext(
         storage_root=storage_root,

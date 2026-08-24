@@ -24,10 +24,15 @@ from mindroom.constants import (
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
     serialize_runtime_paths,
+    write_startup_manifest,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.redaction import redact_sensitive_text
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SHARED_CREDENTIALS_PATH_ENV,
+)
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
 from mindroom.workers.backend import WorkerBackendError
@@ -324,6 +329,7 @@ class DockerWorkerBackend:
         auth_token: str | None,
         storage_path: Path | None = None,
         runtime_paths: RuntimePaths | None = None,
+        tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
         worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ) -> None:
         if auth_token is None:
@@ -352,6 +358,7 @@ class DockerWorkerBackend:
         if config.host_config_path is not None:
             base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
         self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
+        self._tool_validation_snapshot = tool_validation_snapshot
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -376,6 +383,7 @@ class DockerWorkerBackend:
         *,
         auth_token: str | None,
         storage_path: Path | None = None,
+        tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
         worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ) -> DockerWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
@@ -384,6 +392,7 @@ class DockerWorkerBackend:
             auth_token=auth_token,
             storage_path=storage_path,
             runtime_paths=runtime_paths,
+            tool_validation_snapshot=tool_validation_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
 
@@ -836,6 +845,7 @@ class DockerWorkerBackend:
             container = None
 
         if container is None:
+            self._write_startup_manifest(paths, worker_key=metadata.worker_key)
             volumes = self._container_volumes(
                 paths,
                 worker_key=metadata.worker_key,
@@ -1008,8 +1018,24 @@ class DockerWorkerBackend:
         }
         if self.config.host_config_path is not None:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
+        if self._tool_validation_snapshot is not None:
+            env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
+                Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
+            )
         env.update(self.config.extra_env)
         return env
+
+    def _write_startup_manifest(self, paths: LocalWorkerStatePaths, *, worker_key: str) -> None:
+        """Persist primary validation state before starting one Docker worker."""
+        if self._tool_validation_snapshot is None:
+            return
+        dedicated_root = Path(self.config.storage_mount_path)
+        write_startup_manifest(
+            paths.root,
+            self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
+            tool_validation_snapshot=self._tool_validation_snapshot,
+            public_runtime=True,
+        )
 
     def _container_env_matches(
         self,
