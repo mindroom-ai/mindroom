@@ -2517,7 +2517,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_url: str | None,
         proxy_token: str | None,
         storage_root: Path | None = None,
-        kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
         kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
@@ -2525,7 +2525,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
-        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["dedicated_worker_validation_snapshot"] = dedicated_worker_validation_snapshot
         captured["kubernetes_config_snapshot"] = kubernetes_config_snapshot
         captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
@@ -2550,7 +2550,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
-    assert captured["kubernetes_tool_validation_snapshot"] is None
+    assert captured["dedicated_worker_validation_snapshot"] is None
     assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
@@ -4300,7 +4300,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=first_snapshot,
+        dedicated_worker_validation_snapshot=first_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4308,7 +4308,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     third_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4316,7 +4316,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=second_config_snapshot,
     )
 
@@ -4365,7 +4365,7 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
             storage_root=tmp_path,
-            kubernetes_tool_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
+            dedicated_worker_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
         )
 
 
@@ -4444,7 +4444,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
@@ -4453,7 +4453,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
 
@@ -4500,7 +4500,7 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     with tool_runtime_context(runtime_context):
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["kubernetes_config_snapshot"] == (
         workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
     )
@@ -4545,7 +4545,7 @@ def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_c
     with tool_runtime_context(runtime_context):
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["kubernetes_config_snapshot"] is None
 
 
@@ -4573,7 +4573,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         return {"fake": ToolValidationInfo(name="fake")}
 
     def fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
-        captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
+        captured_snapshots.append(kwargs["dedicated_worker_validation_snapshot"])
         return object()
 
     runtime_context = make_test_tool_runtime_context(
@@ -4704,7 +4704,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     assert result == "proxied"
     assert captured_kwargs["storage_root"] == request_storage_path
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})
 
 

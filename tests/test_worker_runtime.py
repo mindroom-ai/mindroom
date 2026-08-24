@@ -64,7 +64,7 @@ def test_duplicate_worker_manager_build_is_immediately_disposable() -> None:
         workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = previous_building
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver_result(
+def test_serialized_dedicated_worker_validation_snapshot_reuses_cached_resolver_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -82,11 +82,11 @@ def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver
         fake_resolver,
     )
 
-    first_snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    first_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
-    second_snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    second_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
@@ -95,7 +95,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver
     assert first_snapshot == second_snapshot
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_tolerates_plugin_load_errors(
+def test_serialized_dedicated_worker_validation_snapshot_tolerates_plugin_load_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -113,7 +113,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_tolerates_plugin_load_
         fake_resolver,
     )
 
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
@@ -121,7 +121,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_tolerates_plugin_load_
     assert tolerate_values == [True]
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_loads_config_tolerantly(
+def test_serialized_dedicated_worker_validation_snapshot_loads_config_tolerantly(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -153,12 +153,12 @@ def test_serialized_kubernetes_worker_validation_snapshot_loads_config_tolerantl
         fake_resolver,
     )
 
-    snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+    snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(runtime_paths)
 
     assert set(snapshot) == {"fake", "scheduler"}
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
+def test_serialized_dedicated_worker_validation_snapshot_clear_recomputes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -177,12 +177,12 @@ def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
         fake_resolver,
     )
 
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
     workers_runtime_module.clear_worker_validation_snapshot_cache()
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
@@ -190,7 +190,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
     assert calls == 2
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_returns_independent_copies(
+def test_serialized_dedicated_worker_validation_snapshot_returns_independent_copies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -209,12 +209,12 @@ def test_serialized_kubernetes_worker_validation_snapshot_returns_independent_co
         fake_resolver,
     )
 
-    first_snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    first_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
     first_snapshot["fake"]["config_fields"].append({"name": "mutated"})
-    second_snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    second_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
@@ -223,7 +223,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_returns_independent_co
     assert second_snapshot["fake"]["config_fields"] == []
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_mcp_config(
+def test_serialized_dedicated_worker_validation_snapshot_cache_key_includes_mcp_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -257,15 +257,15 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_mcp
         fake_resolver,
     )
 
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=first_config,
     )
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=first_config,
     )
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=second_config,
     )
@@ -273,7 +273,7 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_mcp
     assert calls == 2
 
 
-def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_plugin_entries(
+def test_serialized_dedicated_worker_validation_snapshot_cache_key_includes_plugin_entries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -293,15 +293,15 @@ def test_serialized_kubernetes_worker_validation_snapshot_cache_key_includes_plu
         fake_resolver,
     )
 
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=first_config,
     )
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=first_config,
     )
-    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=second_config,
     )
@@ -354,7 +354,7 @@ def test_configured_docker_worker_manager_receives_validation_snapshot(
     monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
     monkeypatch.setattr(
         workers_runtime_module,
-        "serialized_kubernetes_worker_validation_snapshot",
+        "serialized_dedicated_worker_validation_snapshot",
         MagicMock(return_value=validation_snapshot),
     )
     lease_manager = MagicMock(return_value=MagicMock())
@@ -365,7 +365,7 @@ def test_configured_docker_worker_manager_receives_validation_snapshot(
         runtime_config=runtime_config,
     )
 
-    assert lease_manager.call_args.kwargs["kubernetes_tool_validation_snapshot"] == validation_snapshot
+    assert lease_manager.call_args.kwargs["dedicated_worker_validation_snapshot"] == validation_snapshot
 
 
 def test_docker_worker_manager_build_passes_validation_snapshot(
@@ -385,7 +385,7 @@ def test_docker_worker_manager_build_passes_validation_snapshot(
         proxy_url=None,
         proxy_token="worker-token",  # noqa: S106
         storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=validation_snapshot,
+        dedicated_worker_validation_snapshot=validation_snapshot,
     )
 
     assert resolved is expected
@@ -417,7 +417,7 @@ def test_docker_worker_manager_identity_tracks_validation_snapshot(
         proxy_url=None,
         proxy_token="worker-token",  # noqa: S106
         storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=validation_snapshot,
+        dedicated_worker_validation_snapshot=validation_snapshot,
     )
 
     assert with_snapshot != without_snapshot
