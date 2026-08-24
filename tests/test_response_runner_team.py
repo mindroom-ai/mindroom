@@ -106,7 +106,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        original_begin_locked_turn = coordinator._begin_locked_turn
+        original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
         matrix_ids = entity_ids(config, runtime_paths)
         mock_team_response = AsyncMock(return_value="Team reply")
 
@@ -117,10 +117,10 @@ class TestAgentBot(AgentBotTestBase):
                 model_name="default",
                 set_by="@admin:localhost",
             )
-            return await original_begin_locked_turn(*args, **kwargs)  # type: ignore[arg-type]
+            return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
 
         with (
-            patch.object(coordinator, "_begin_locked_turn", new=change_room_default_during_preparation),
+            patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),

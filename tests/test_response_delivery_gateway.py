@@ -55,6 +55,7 @@ from tests.conftest import (
     ignore_delivered_projection,
     ignore_final_delivery_handoff,
     make_outbox_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -100,8 +101,11 @@ def _identity(
     """Return the identity of one visible response, caused by one event."""
     return ResponseIdentity(
         response_kind="agent",
-        response_envelope=SimpleNamespace(  # type: ignore[arg-type]
-            source_event_id=source_event_id,
+        response_envelope=request_envelope(
+            room_id=_ROOM_ID,
+            reply_to_event_id=source_event_id,
+            prompt="Test response request",
+            agent_name="agent",
             source_kind=source_kind,
         ),
         correlation_id="c1",
@@ -251,6 +255,149 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.failure_reason == "silent_no_report"
         assert outbox.rows == {}
         send.assert_not_awaited()
+
+    async def test_silent_schedule_writes_machine_readable_run_receipt(self, tmp_path: Path) -> None:
+        """Removing the workspace receipt must make an evidence-free silent completion fail this test."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        request = replace(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            identity=ResponseIdentity(
+                response_kind="agent",
+                response_envelope=request_envelope(
+                    room_id=_ROOM_ID,
+                    reply_to_event_id="$cause",
+                    prompt="Check the inbox",
+                    agent_name="agent",
+                    source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                ),
+                correlation_id="c1",
+            ),
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt_path = (
+            tmp_path
+            / "mindroom_data"
+            / "agents"
+            / "agent"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "d70fd85d0319a4c275c5df743feff6424bb8b85982e28a97e317285e7c441830.json"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt == {
+            "agent_name": "agent",
+            "completed_at": receipt["completed_at"],
+            "entity_name": "agent",
+            "prompt": "Check the inbox",
+            "result": "no_report",
+            "response_text": SILENT_SCHEDULE_NO_REPLY_TOKEN,
+            "room_id": _ROOM_ID,
+            "schema_version": 1,
+            "source_event_id": "$cause",
+            "started_at": receipt["started_at"],
+            "status": "completed",
+            "thread_id": None,
+        }
+        assert receipt["completed_at"].endswith("Z")
+        assert receipt["started_at"].endswith("Z")
+
+    async def test_silent_schedule_receipt_uses_original_envelope_after_hooks(self, tmp_path: Path) -> None:
+        """A hook may transform presentation fields but cannot redirect durable run identity."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        hook_service = self._hooks()
+
+        async def replace_envelope(**kwargs: object) -> object:
+            draft = await hook_service._apply_before_response(**kwargs)  # type: ignore[arg-type]
+            draft.envelope = replace(draft.envelope, source_event_id="$hook-replaced")
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_envelope)
+
+        outcome = await gateway.deliver_final(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+        )
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt_directory = (
+            tmp_path / "mindroom_data" / "agents" / "agent" / "workspace" / ".mindroom" / "scheduled_runs"
+        )
+        receipts = list(receipt_directory.glob("*.json"))
+        assert len(receipts) == 1
+        assert json.loads(receipts[0].read_text(encoding="utf-8"))["source_event_id"] == "$cause"
+
+    @pytest.mark.parametrize(
+        "invalid_update",
+        [None, {"result": []}, {"schema_version": True}],
+    )
+    async def test_silent_schedule_completion_repairs_malformed_receipt(
+        self,
+        tmp_path: Path,
+        invalid_update: dict[str, object] | None,
+    ) -> None:
+        """A damaged start receipt cannot prevent the final machine-readable record."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        receipt_path = (
+            tmp_path
+            / "mindroom_data"
+            / "agents"
+            / "agent"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "d70fd85d0319a4c275c5df743feff6424bb8b85982e28a97e317285e7c441830.json"
+        )
+        receipt_path.parent.mkdir(parents=True)
+        invalid_receipt: dict[str, object] = {
+            "agent_name": "agent",
+            "completed_at": "2026-08-24T12:01:00Z",
+            "entity_name": "agent",
+            "prompt": "Test response request",
+            "result": "reported",
+            "response_text": "stale",
+            "room_id": _ROOM_ID,
+            "schema_version": 1,
+            "source_event_id": "$cause",
+            "started_at": "2026-08-24T12:00:00Z",
+            "status": "completed",
+            "thread_id": None,
+        }
+        if invalid_update is None:
+            receipt_path.write_text("not json", encoding="utf-8")
+        else:
+            invalid_receipt.update(invalid_update)
+            receipt_path.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+
+        outcome = await gateway.deliver_final(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+        )
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["source_event_id"] == "$cause"
+        assert receipt["status"] == "completed"
+
+    async def test_silent_schedule_receipt_rejects_symlinked_metadata_directory(self, tmp_path: Path) -> None:
+        """Agent-controlled workspace symlinks cannot redirect a host receipt write."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        workspace = tmp_path / "mindroom_data" / "agents" / "agent" / "workspace"
+        outside = tmp_path / "outside"
+        workspace.mkdir(parents=True)
+        outside.mkdir()
+        (workspace / ".mindroom").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="workspace root"):
+            await gateway.deliver_final(
+                self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert list(outside.iterdir()) == []
 
     async def test_silent_schedule_tool_trace_no_reply_is_suppressed(self, tmp_path: Path) -> None:
         """Display-only tool markers must not turn a silent no-report result into a visible response."""
