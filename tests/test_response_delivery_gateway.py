@@ -283,6 +283,33 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outbox.rows == {}
         send.assert_not_awaited()
 
+    async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(self, tmp_path: Path) -> None:
+        """Marker-shaped findings must not be stripped when they do not match the trace."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        text = f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}"
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+        request = replace(
+            self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            tool_trace=[
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="run_shell_command",
+                    args_preview="cmd=true",
+                    result_preview="done",
+                ),
+            ],
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.suppressed is False
+        assert outcome.event_id == "$sent"
+        send.assert_awaited_once()
+
     @pytest.mark.parametrize(
         ("text", "source_kind"),
         [
