@@ -511,6 +511,37 @@ async def test_outer_streaming_retry_does_not_replay_after_output(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_media_free_stream_does_not_replay_after_output_on_guidance_error(tmp_path: Path) -> None:
+    """A guidance failure after fallback output must terminate the stream."""
+    model = _load(
+        _FakeModel(
+            retries=1,
+            delay_between_retries=0,
+            streaming_outcomes=[
+                _provider_error(),
+                [
+                    ModelResponse(content="fallback prefix"),
+                    RetryableModelProviderError(
+                        original_error="malformed function call",
+                        retry_guidance_message="Retry with a valid function call.",
+                    ),
+                ],
+                [ModelResponse(content="must not run")],
+            ],
+        ),
+        tmp_path,
+    )
+
+    chunks: list[ModelResponse] = []
+    with pytest.raises(ModelProviderError):
+        await _consume_into(chunks, model._ainvoke_stream_with_retry(messages=[_image_message()]))
+
+    assert [chunk.content for chunk in chunks] == ["fallback prefix"]
+    assert [bool(call[0].images) for call in model.streaming_calls] == [True, False]
+    assert model.closed_streams == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [

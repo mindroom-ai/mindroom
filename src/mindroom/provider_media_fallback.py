@@ -238,23 +238,20 @@ async def _stream_with_fallback(
     remaining_kinds = present_kinds - removed_kinds
     stream: AsyncIterator[ModelResponse] | None = None
     failure: Exception | None = None
-    produced = False
     try:
         with _active_model(model):
             stream = original_ainvoke_stream(*initial_args, **initial_kwargs)
         while True:
             try:
-                chunk = await _next_with_active_model(model, stream)
+                chunk = await _next_stream_response(model, stream, request_state)
             except StopAsyncIteration:
                 _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
-                if produced or not remaining_kinds or not _should_retry(error):
-                    _raise_terminal_stream_error(model, error, output_produced=produced)
+                if request_state.stream_output_produced or not remaining_kinds or not _should_retry(error):
+                    raise
                 failure = error
                 break
-            produced = True
-            request_state.stream_output_produced = True
             yield chunk
     finally:
         if stream is not None:
@@ -275,10 +272,9 @@ async def _stream_with_fallback(
     try:
         while True:
             try:
-                chunk = await _next_with_active_model(model, retry_stream)
+                chunk = await _next_stream_response(model, retry_stream, request_state)
             except StopAsyncIteration:
                 break
-            request_state.stream_output_produced = True
             yield chunk
     finally:
         await _close_stream(model, retry_stream)
@@ -512,9 +508,24 @@ def _media_fallback_request(model: Model) -> Iterator[None]:
         _REQUEST_STATES.reset(token)
 
 
-async def _next_with_active_model(model: Model, stream: AsyncIterator[ModelResponse]) -> ModelResponse:
-    with _active_model(model):
-        return await anext(stream)
+async def _next_stream_response(
+    model: Model,
+    stream: AsyncIterator[ModelResponse],
+    request_state: _MediaFallbackRequestState,
+) -> ModelResponse:
+    try:
+        with _active_model(model):
+            response = await anext(stream)
+    except StopAsyncIteration:
+        raise
+    except Exception as error:
+        _raise_terminal_stream_error(
+            model,
+            error,
+            output_produced=request_state.stream_output_produced,
+        )
+    request_state.stream_output_produced = True
+    return response
 
 
 async def _close_stream(model: Model, stream: AsyncIterator[ModelResponse]) -> None:
