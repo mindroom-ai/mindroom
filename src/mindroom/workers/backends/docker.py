@@ -1018,11 +1018,11 @@ class DockerWorkerBackend:
         }
         if self.config.host_config_path is not None:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
+        env.update(self.config.extra_env)
         if self._tool_validation_snapshot is not None:
             env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(
                 Path(self.config.storage_mount_path) / ".runtime" / "startup_manifest.json",
             )
-        env.update(self.config.extra_env)
         return env
 
     def _write_startup_manifest(self, paths: LocalWorkerStatePaths, *, worker_key: str) -> None:

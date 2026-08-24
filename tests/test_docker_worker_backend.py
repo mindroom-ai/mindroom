@@ -1338,6 +1338,10 @@ def test_docker_backend_writes_authoritative_worker_validation_snapshot(
         tmp_path,
         tool_validation_snapshot=validation_snapshot,
     )
+    backend.config = replace(
+        backend.config,
+        extra_env={"MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/untrusted/manifest.json"},
+    )
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
