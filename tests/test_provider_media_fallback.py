@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
-from agno.exceptions import ModelProviderError, ModelRateLimitError
+from agno.exceptions import ModelProviderError, ModelRateLimitError, RetryableModelProviderError
 from agno.media import Audio, File, Image, Video
 from agno.models.anthropic import Claude
 from agno.models.base import Model
@@ -172,6 +172,33 @@ async def test_outer_blocking_retry_never_reattaches_rejected_media(tmp_path: Pa
     assert response.content == "recovered"
     assert cached.content == "cached"
     assert [bool(call[0].images) for call in model.blocking_calls] == [True, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_retry_with_guidance_keeps_media_and_does_not_teach_route(tmp_path: Path) -> None:
+    """Agno guidance retries are not evidence that a media kind is unsupported."""
+    guidance = "Retry with a valid function call."
+    model = _load(
+        _FakeModel(
+            blocking_outcomes=[
+                RetryableModelProviderError(
+                    original_error="malformed function call",
+                    retry_guidance_message=guidance,
+                ),
+                ModelResponse(content="guided recovery"),
+                ModelResponse(content="next"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    response = await model._ainvoke_with_retry(messages=[_image_message()])
+    next_response = await model.ainvoke(messages=[_image_message()])
+
+    assert response.content == "guided recovery"
+    assert next_response.content == "next"
+    assert [bool(call[0].images) for call in model.blocking_calls] == [True, True, True]
+    assert str(model.blocking_calls[1][-1].content) == guidance
 
 
 @pytest.mark.asyncio
@@ -357,6 +384,33 @@ async def test_outer_streaming_retry_never_reattaches_rejected_media(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_stream_retry_with_guidance_keeps_media_and_does_not_teach_route(tmp_path: Path) -> None:
+    """Streaming guidance retries stay media-bearing and leave the route unknown."""
+    guidance = "Retry with a valid function call."
+    model = _load(
+        _FakeModel(
+            streaming_outcomes=[
+                RetryableModelProviderError(
+                    original_error="malformed function call",
+                    retry_guidance_message=guidance,
+                ),
+                [ModelResponse(content="guided recovery")],
+                [ModelResponse(content="next")],
+            ],
+        ),
+        tmp_path,
+    )
+
+    chunks = [chunk async for chunk in model._ainvoke_stream_with_retry(messages=[_image_message()])]
+    next_chunks = [chunk async for chunk in model.ainvoke_stream(messages=[_image_message()])]
+
+    assert [chunk.content for chunk in chunks] == ["guided recovery"]
+    assert [chunk.content for chunk in next_chunks] == ["next"]
+    assert [bool(call[0].images) for call in model.streaming_calls] == [True, True, True]
+    assert str(model.streaming_calls[1][-1].content) == guidance
+
+
+@pytest.mark.asyncio
 async def test_loaded_claude_keeps_media_removed_during_transient_stream_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,6 +505,7 @@ async def test_outer_streaming_retry_does_not_replay_after_output(tmp_path: Path
         ModelRateLimitError(message="rate limited", status_code=429),
         ModelProviderError(message="payload too large", status_code=413),
         ModelProviderError(message="server unavailable", status_code=503),
+        RuntimeError("request entity too large"),
     ],
 )
 async def test_successful_retry_after_non_capability_failure_does_not_teach_route(

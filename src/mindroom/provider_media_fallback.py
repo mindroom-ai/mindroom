@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ContextWindowExceededError, ModelProviderError, RetryableModelProviderError
 from agno.models.message import Message
 
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, is_model_safeguard_refusal
@@ -451,7 +451,7 @@ def _route_text(value: str | None) -> str | None:
 
 
 def _should_retry(error: Exception) -> bool:
-    return not is_model_safeguard_refusal(error)
+    return not isinstance(error, RetryableModelProviderError) and not is_model_safeguard_refusal(error)
 
 
 def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
@@ -467,7 +467,10 @@ def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
     ):
         return False
     lowered_error_text = str(error).lower()
-    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
+    if (
+        f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text
+        or "request entity too large" in lowered_error_text
+    ):
         return False
     return not any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
 
