@@ -89,7 +89,7 @@ The task body still travels through Matrix as a custom timeline event and remain
 Every admitted silent run also writes a versioned JSON receipt to `<agent-workspace>/.mindroom/scheduled_runs/<sha256(source-event-id)>.json`.
 The receipt starts with `status: "started"` before generation and is atomically replaced with `status: "completed"`, a `result` of `reported`, `no_report`, or `suppressed`, and the final response text after response hooks.
 A receipt left in `started` shows that the run began but did not reach a final response decision.
-Version 1 always includes `schema_version`, `source_event_id`, `entity_name`, `agent_name`, `room_id`, `thread_id`, `prompt`, `status`, `result`, `response_text`, `started_at`, and `completed_at`, with result, response, thread, and completion fields set to `null` until applicable.
+Version 1 always includes `schema_version`, `source_event_id`, `entity_name`, `agent_name`, `room_id`, `thread_id`, `prompt`, `status`, `result`, `response_text`, `started_at`, and `completed_at`, with `result`, `response_text`, `thread_id`, and `completed_at` set to `null` until applicable.
 Timestamps use UTC RFC 3339 strings ending in `Z`.
 Replaying the same source event rewrites the same file and preserves a valid original `started_at` value.
 Team runs write one receipt to each member agent's workspace, and private agents write inside the matching requester-scoped workspace.
