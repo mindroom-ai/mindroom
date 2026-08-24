@@ -3798,9 +3798,8 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
 
     attachment_id = _attachment_id_for_event("$img-history")
     assert payload.attachment_ids == [attachment_id]
-    # History media is pinned to its thread-history message at execution
-    # preparation time, so the current-turn payload carries neither the
-    # attachment prompt nor inline media for it.
+    # History attachments remain ID-only, so the current-turn payload carries
+    # neither the attachment prompt nor inline media for them.
     assert payload.model_prompt is None
     assert payload.media.images == ()
     assert payload.media.audio == ()

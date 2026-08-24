@@ -15029,7 +15029,9 @@ Agents can still reference the files via attachment IDs and tools.
 This fallback is transparent — no user action is required.
 Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
 Provider safeguard refusals are returned as refusals and are not retried without media.
-When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+Failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
+Fallback retries are eligible only before provider output reaches the caller; streams are never replayed after partial output.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
@@ -15092,14 +15094,15 @@ Attachments sent with the current message (use tool calls to inspect or process 
 - att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
 
-Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+Current-turn attachments are offered to the model as inline media.
+Earlier attachments stay in chronological position through inline annotations, but their media bytes are not replayed to the provider:
 
-```
+```text
 @user:example.org: check this out
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
+Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -16827,7 +16830,7 @@ MindRoom's architecture consists of several key components working together.
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -16864,7 +16867,7 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
@@ -17289,7 +17292,8 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
 - **`src/mindroom/agent_policy.py`** — Resolves canonical execution policies and private-team eligibility derived from authored agent config.
 - **`src/mindroom/model_loading.py`** — Owns `get_model_instance()` and provider-specific model loader selection.
-- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying, queued-notice hooks, and inline-media fallback helpers used during execution.
+- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying and queued-notice hooks used during execution.
+- **`src/mindroom/provider_media_fallback.py`** — Owns provider-boundary inline-media retry and process-local capability learning per model route.
 - **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.

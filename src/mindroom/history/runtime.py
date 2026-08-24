@@ -81,8 +81,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Applied at history-runtime import so every entry point that replays persisted
-# history gets the Team roleful-input and inline-media dedupe patch before any
-# Agno run; slim entry points that only read leaf history types skip it.
+# history gets the Team roleful-input and historical-media stripping patch
+# before any Agno run; slim entry points that only read leaf history types skip it.
 agno_team_patch.apply_patch()
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"

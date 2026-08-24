@@ -149,7 +149,8 @@ Matrix sync callback
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
+| `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

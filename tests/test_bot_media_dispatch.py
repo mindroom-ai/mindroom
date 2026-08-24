@@ -799,8 +799,8 @@ class TestAgentBot(AgentBotTestBase):
                 thread_id="$thread_root",
             ),
         ]
-        # Only current-turn records convert to inline media; history media is
-        # pinned to its thread-history message instead.
+        # Only current-turn records convert to inline media; history records
+        # remain available by attachment ID.
         converted_records = mock_records_to_media.call_args.args[0]
         assert [record.attachment_id for record in converted_records] == [current_attachment_id]
 
@@ -900,7 +900,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Thread and history media stay pinned to their messages, not the current turn."""
+        """Thread and history attachments stay ID-only instead of joining the current turn."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()

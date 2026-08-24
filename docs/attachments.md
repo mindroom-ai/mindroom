@@ -54,14 +54,15 @@ Attachments sent with the current message (use tool calls to inspect or process 
 - att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
 
-Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+Current-turn attachments are offered to the model as inline media.
+Earlier attachments stay in chronological position through inline annotations, but their media bytes are not replayed to the provider:
 
-```
+```text
 @user:example.org: check this out
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
+Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
