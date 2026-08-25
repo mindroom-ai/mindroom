@@ -486,6 +486,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
+    "mindroom.agno_session_persistence_patch",
     "mindroom.constants",
     "mindroom.runtime_resolution",
 ]
@@ -500,6 +501,11 @@ visibility = [
     "mindroom.teams",
     "mindroom.turn_store",
 ]
+
+[[modules]]
+path = "mindroom.agno_session_persistence_patch"
+depends_on = ["mindroom.background_tasks"]
+visibility = ["mindroom.agent_storage"]
 
 [[modules]]
 path = "mindroom.agent_run_context"
