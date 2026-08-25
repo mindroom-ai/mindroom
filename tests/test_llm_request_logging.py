@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,11 +13,13 @@ from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
+from mindroom import llm_request_logging
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
     _RequestLogRef,
+    _write_llm_request_log,
     _write_llm_response_log,
     bind_llm_request_log_context,
     current_llm_request_log_context,
@@ -48,6 +51,64 @@ class _FakeModel:
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield ModelResponse(content="ok")
         yield ModelResponse(content="!", response_usage=self.response_usage)
+
+
+@pytest.mark.asyncio
+async def test_llm_request_payload_is_built_on_writer_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Message, tool, and model serialization should stay off the event loop."""
+    event_loop_thread = threading.get_ident()
+    observed_threads: dict[str, int] = {}
+    written_payloads: list[dict[str, object]] = []
+
+    def _record(name: str, value: object) -> object:
+        observed_threads[name] = threading.get_ident()
+        return value
+
+    monkeypatch.setattr(
+        llm_request_logging,
+        "_system_prompt",
+        lambda *_args: _record("system_prompt", "system"),
+    )
+    monkeypatch.setattr(
+        llm_request_logging,
+        "_request_message_payloads",
+        lambda *_args: _record("messages", [{"role": "user", "content": "hello"}]),
+    )
+    monkeypatch.setattr(
+        llm_request_logging,
+        "_json_safe",
+        lambda value: _record("tools", value),
+    )
+    monkeypatch.setattr(
+        llm_request_logging,
+        "model_params_payload",
+        lambda *_args: _record("model_params", {"temperature": 0.7}),
+    )
+
+    def _write(_path: Path, payload: dict[str, object]) -> None:
+        observed_threads["write"] = threading.get_ident()
+        written_payloads.append(payload)
+
+    monkeypatch.setattr(llm_request_logging, "_write_jsonl_line", _write)
+
+    await _write_llm_request_log(
+        model=_FakeModel(),  # type: ignore[arg-type]
+        agent_name="assistant",
+        messages=[Message(role="user", content="hello")],
+        tools=[{"name": "search"}],
+        log_path=tmp_path / "requests.jsonl",
+        request_context={"correlation_id": "request-1"},
+        request_log_id="log-1",
+    )
+
+    assert set(observed_threads) == {"system_prompt", "messages", "tools", "model_params", "write"}
+    assert len(set(observed_threads.values())) == 1
+    assert event_loop_thread not in observed_threads.values()
+    assert written_payloads[0]["messages"] == [{"role": "user", "content": "hello"}]
+    assert written_payloads[0]["tools"] == [{"name": "search"}]
 
 
 class _PlainAsyncIterator:

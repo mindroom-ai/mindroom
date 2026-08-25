@@ -321,7 +321,7 @@ class _RequestLogRef:
     log_path: Path
 
 
-async def _write_llm_request_log(
+def _write_llm_request_log_line(
     *,
     model: Model,
     agent_name: str,
@@ -331,12 +331,11 @@ async def _write_llm_request_log(
     request_context: dict[str, _JSONValue] | None = None,
     request_log_id: str,
 ) -> None:
-    """Persist one request record for an LLM invocation."""
+    """Build and persist one request record on the writer thread."""
     now = datetime.now().astimezone()
     resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
-    await asyncio.to_thread(
-        _write_jsonl_line,
-        log_path,
+    payload = cast(
+        "dict[str, _JSONValue]",
         {
             "timestamp": now.isoformat(),
             "request_log_id": request_log_id,
@@ -350,6 +349,30 @@ async def _write_llm_request_log(
             "tool_count": len(tools or []),
             "model_params": model_params_payload(model),
         },
+    )
+    _write_jsonl_line(log_path, payload)
+
+
+async def _write_llm_request_log(
+    *,
+    model: Model,
+    agent_name: str,
+    messages: Sequence[Message],
+    tools: list[dict[str, _JSONValue]] | None,
+    log_path: Path,
+    request_context: dict[str, _JSONValue] | None = None,
+    request_log_id: str,
+) -> None:
+    """Persist one request record for an LLM invocation."""
+    await asyncio.to_thread(
+        _write_llm_request_log_line,
+        model=model,
+        agent_name=agent_name,
+        messages=messages,
+        tools=tools,
+        log_path=log_path,
+        request_context=request_context,
+        request_log_id=request_log_id,
     )
 
 
