@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 type _Surface = Literal["agent", "team"]
 
+_CHILD_PROCESS_TIMEOUT_SECONDS = 30.0
+
 
 def _storage(tmp_path: Path, name: str = "sessions") -> BaseDb:
     return create_state_storage(
@@ -140,6 +142,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_CHILD_PROCESS_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stderr
 
@@ -543,12 +546,12 @@ async def test_native_asynchronous_database_delegates_unchanged(monkeypatch: pyt
 
 
 @pytest.mark.parametrize(
-    ("surface", "owner_attribute"),
+    ("surface", "nested_as_workflow"),
     [
-        ("agent", "team_id"),
-        ("agent", "workflow_id"),
-        ("team", "parent_team_id"),
-        ("team", "workflow_id"),
+        ("agent", False),
+        ("agent", True),
+        ("team", False),
+        ("team", True),
     ],
 )
 @pytest.mark.asyncio
@@ -556,13 +559,22 @@ async def test_nested_owners_delegate_to_upstream_no_op(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     surface: _Surface,
-    owner_attribute: str,
+    nested_as_workflow: bool,
 ) -> None:
     """Nested agent and team paths preserve the upstream no-write behavior."""
-    storage = _storage(tmp_path, f"nested-{surface}-{owner_attribute}")
+    nesting = "workflow" if nested_as_workflow else "parent"
+    storage = _storage(tmp_path, f"nested-{surface}-{nesting}")
     owner, session = _owner_and_session(surface, storage, "nested")
     calls: list[AgentSession | TeamSession] = []
-    setattr(owner, owner_attribute, "parent")
+    if isinstance(owner, Agent):
+        if nested_as_workflow:
+            owner.workflow_id = "parent"
+        else:
+            owner.team_id = "parent"
+    elif nested_as_workflow:
+        owner.workflow_id = "parent"
+    else:
+        owner.parent_team_id = "parent"
     monkeypatch.setattr(storage, "upsert_session", lambda saved: calls.append(saved))
     try:
         await owner.asave_session(session)
