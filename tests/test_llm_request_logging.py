@@ -58,6 +58,16 @@ class _FakeModel:
         yield ModelResponse(content="!", response_usage=self.response_usage)
 
 
+class _FalseyWorkerError(OSError):
+    def __bool__(self) -> bool:
+        return False
+
+
+class _FalseyCancelledError(asyncio.CancelledError):
+    def __bool__(self) -> bool:
+        return False
+
+
 @dataclass
 class _CancellableInvokeModel(_FakeModel):
     invocation_started: asyncio.Event = field(default_factory=asyncio.Event)
@@ -76,14 +86,17 @@ class _CancellableInvokeModel(_FakeModel):
 class _CancellableStreamModel(_FakeModel):
     invocation_started: asyncio.Event = field(default_factory=asyncio.Event)
     provider_cancellation: asyncio.CancelledError | None = None
+    falsey_cancellation: bool = False
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         self.invocation_started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError as exc:
+            if self.falsey_cancellation:
+                exc = _FalseyCancelledError(*exc.args)
             self.provider_cancellation = exc
-            raise
+            raise exc  # noqa: TRY201 - the falsey replacement is the behavior under test
         yield ModelResponse(content="unreachable")
 
 
@@ -602,14 +615,18 @@ async def test_provider_cancellation_remains_primary_during_request_write(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("falsey_worker_error", [False, True])
 async def test_provider_cancellation_chains_request_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    falsey_worker_error: bool,
 ) -> None:
     """Provider cancellation stays primary when accepted request persistence fails."""
     serializer_started = threading.Event()
     release_serializer = threading.Event()
-    worker_error = OSError("serialization failed")
+    error_type = _FalseyWorkerError if falsey_worker_error else OSError
+    worker_error = error_type("serialization failed")
 
     def failing_serialization(*_args: object, **_kwargs: object) -> str:
         serializer_started.set()
@@ -911,9 +928,12 @@ async def test_stream_cancellation_chains_request_worker_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("falsey_provider_cancel", [False, True])
 async def test_stream_provider_cancellation_chains_final_request_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    falsey_provider_cancel: bool,
 ) -> None:
     """Cleanup must retain a failed request task when no chunk was received."""
     serializer_started = threading.Event()
@@ -926,7 +946,7 @@ async def test_stream_provider_cancellation_chains_final_request_worker_failure(
         raise worker_error
 
     monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", failing_serialization)
-    model = _CancellableStreamModel()
+    model = _CancellableStreamModel(falsey_cancellation=falsey_provider_cancel)
     install_llm_request_logging(
         model,
         agent_name="default",

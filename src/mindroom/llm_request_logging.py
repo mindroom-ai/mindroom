@@ -151,7 +151,7 @@ async def _await_before_cancelling[Result](task: asyncio.Task[Result]) -> Result
                     break
                 raise
             observed_cancel_count = caller_cancel_count
-            deferred_cancel = deferred_cancel or exc
+            deferred_cancel = exc if deferred_cancel is None else deferred_cancel
         except BaseException:
             if task.done():
                 break
@@ -698,7 +698,7 @@ async def _await_log_finalizer(
     try:
         await _await_before_cancelling(task)
     except asyncio.CancelledError as exc:
-        deferred_cancel = deferred_cancel or exc
+        deferred_cancel = exc if deferred_cancel is None else deferred_cancel
         if isinstance(exc.__cause__, Exception):
             finalizer_error = exc.__cause__
     except Exception as exc:
@@ -717,14 +717,16 @@ async def _await_request_log_after_provider_cancellation(state: _RequestLogState
     try:
         await _await_before_cancelling(state.task)
     except asyncio.CancelledError as exc:
-        request_error = state.error or exc.__cause__
+        request_error = state.error
+        if request_error is None:
+            request_error = exc.__cause__
         if request_error is None and state.task.cancelled():
             request_error = exc
     except BaseException as exc:
-        request_error = state.error or exc
+        request_error = state.error if state.error is not None else exc
     finally:
         state.consumed = True
-    return state.error or request_error
+    return state.error if state.error is not None else request_error
 
 
 async def _write_llm_response_log_reporting_errors(
