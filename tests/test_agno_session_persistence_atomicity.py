@@ -160,8 +160,12 @@ async def test_live_session_cannot_mutate_while_sync_save_is_copying(  # noqa: P
         assert persisted.summary is not None
         assert persisted.summary.summary == "summary"
         assert persisted.summary.topics == ["topic"]
-        assert getattr(persisted, "agent_data", None) == ({"model": "model"} if surface == "agent" else None)
-        assert getattr(persisted, "team_data", None) == ({"mode": "coordinate"} if surface == "team" else None)
+        if surface == "agent":
+            assert isinstance(persisted, AgentSession)
+            assert persisted.agent_data == {"model": "model"}
+        else:
+            assert isinstance(persisted, TeamSession)
+            assert persisted.team_data == {"mode": "coordinate"}
         assert persisted.runs is not None
         assert persisted.runs[0].metrics is not None
         assert persisted.runs[0].metrics.total_tokens == 5
