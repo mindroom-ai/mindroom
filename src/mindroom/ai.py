@@ -33,6 +33,7 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
+from mindroom.claude_prompt_cache import prewarm_anthropic_async_client
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
@@ -1000,6 +1001,7 @@ async def _prepare_agent_and_prompt(
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
             )
+            prewarm_anthropic_async_client(agent.model)
         return runtime_model, agent
 
     memory_backend = config.resolve_entity(agent_name).memory_backend

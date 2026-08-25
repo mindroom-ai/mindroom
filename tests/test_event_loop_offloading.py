@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.models.anthropic import Claude
 from agno.models.message import Message
 
 import mindroom.ai as ai_module
@@ -94,6 +95,55 @@ async def test_prepare_agent_and_prompt_builds_agent_off_event_loop(
     gate.set()
     prepared_run = await prepare_task
     assert prepared_run.agent is built_agent
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_prewarms_anthropic_async_client_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first Anthropic async request must reuse a client built during agent construction."""
+    model = Claude(id="claude-sonnet-4-6", api_key="test-key")
+    client_build_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+    built_agent = MagicMock()
+    built_agent.model = model
+    built_agent.additional_context = ""
+
+    def _build_async_client() -> object:
+        client_build_thread_ids.append(threading.get_ident())
+        return object()
+
+    vars(model)["get_async_client"] = _build_async_client
+    monkeypatch.setattr(ai_module, "create_agent", lambda *_args, **_kwargs: built_agent)
+    monkeypatch.setattr(
+        ai_module,
+        "build_memory_prompt_parts",
+        AsyncMock(return_value=MemoryPromptParts()),
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "prepare_agent_execution_context",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                prepared_history=PreparedHistoryState(),
+                replay_plan=None,
+                unseen_event_ids=(),
+                messages=[],
+            ),
+        ),
+    )
+
+    prepared_run = await ai_module._prepare_agent_and_prompt(
+        make_turn_context("general"),
+        prompt="hello",
+        runtime_paths=test_runtime_paths(tmp_path),
+        config=Config.model_validate({"agents": {"general": {"display_name": "General", "role": "test"}}}),
+    )
+
+    assert prepared_run.agent is built_agent
+    assert len(client_build_thread_ids) == 1
+    assert client_build_thread_ids[0] != event_loop_thread_id
 
 
 @pytest.mark.asyncio

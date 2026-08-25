@@ -111,6 +111,13 @@ def as_anthropic_claude(model: object) -> AnthropicClaude | None:
     return cast("AnthropicClaude", model)
 
 
+def prewarm_anthropic_async_client(model: object) -> None:
+    """Build and cache a Claude async SDK client without making a request."""
+    claude_model = as_anthropic_claude(model)
+    if claude_model is not None:
+        claude_model.get_async_client()
+
+
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
     """Return the cache_control payload for one breakpoint marker."""
     cache_control: dict[str, str] = {"type": "ephemeral"}

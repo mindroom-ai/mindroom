@@ -6,8 +6,10 @@ import asyncio
 import os
 import signal
 import sys
+import threading
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -125,7 +127,6 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
-    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -1167,6 +1168,61 @@ class TestAgentBot(AgentBotTestBase):
 
         assert observed_logging_root == runtime_storage.resolve()
         assert observed_credentials_root == runtime_storage.resolve()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_offloads_initial_credential_and_storage_setup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Credential sync and initial storage creation must not block the event loop."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        storage_path = runtime_paths.storage_root
+        event_loop_thread_id = threading.get_ident()
+        setup_thread_ids: list[int] = []
+        events: list[str] = []
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after setup"))
+        mock_orchestrator.stop = AsyncMock()
+        stall_detector = MagicMock()
+        original_mkdir = Path.mkdir
+
+        def _record_storage_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+            if path == storage_path:
+                setup_thread_ids.append(threading.get_ident())
+                events.append("storage")
+            original_mkdir(path, *args, **kwargs)
+
+        def _sync_credentials(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            setup_thread_ids.append(threading.get_ident())
+            events.append("credentials")
+
+        def _construct_orchestrator(*_args: object, **_kwargs: object) -> MagicMock:
+            assert storage_path.is_dir()
+            events.append("orchestrator")
+            return mock_orchestrator
+
+        monkeypatch.setattr(Path, "mkdir", _record_storage_mkdir)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch(
+                "mindroom.orchestrator.start_event_loop_stall_detector",
+                return_value=stall_detector,
+            ) as start_detector,
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_sync_credentials),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_construct_orchestrator),
+            pytest.raises(RuntimeError, match="stop after setup"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        start_detector.assert_called_once_with(runtime_paths)
+        assert events == ["credentials", "storage", "orchestrator"]
+        assert len(setup_thread_ids) == 2
+        assert setup_thread_ids[0] == setup_thread_ids[1]
+        assert setup_thread_ids[0] != event_loop_thread_id
+        stall_detector.stop.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
