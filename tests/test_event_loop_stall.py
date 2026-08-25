@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from structlog.testing import capture_logs
@@ -229,7 +229,9 @@ async def test_detector_logs_process_cpu_and_other_python_thread_stacks() -> Non
     worker_stacks = [entry for entry in other_thread_stacks if entry["thread_name"] == "stall-context-worker"]
     assert len(worker_stacks) == 1
     assert "parked_worker" in worker_stacks[0]["stack"]
+    assert worker_stacks[0]["truncated"] is False
     assert detected[0]["omitted_thread_stack_count"] >= 0
+    assert "truncated_thread_stack_count" not in detected[0]
 
 
 def test_other_thread_stacks_uses_frame_snapshot_for_low_level_thread() -> None:
@@ -251,14 +253,14 @@ def test_other_thread_stacks_uses_frame_snapshot_for_low_level_thread() -> None:
     try:
         assert worker_started.wait(timeout=1.0)
         detector = _detector()
-        stacks, omitted, truncated = detector._other_thread_stacks()
+        frames = event_loop_stall.sys._current_frames()
+        stacks, omitted = detector._other_thread_stacks(frames)
     finally:
         release_worker.set()
     assert worker_stopped.wait(timeout=1.0)
 
     assert worker_ident[0] not in {thread.ident for thread in threading.enumerate()}
     assert omitted == 0
-    assert truncated == 0
     stack = next(entry for entry in stacks if entry["thread_ident"] == worker_ident[0])
     assert stack["thread_name"] == f"thread-{worker_ident[0]}"
     assert stack["daemon"] is None
@@ -276,7 +278,8 @@ def test_other_thread_stacks_keeps_snapshot_frame_when_thread_metadata_has_gone_
     monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
     monkeypatch.setattr(event_loop_stall.traceback, "format_stack", lambda *_args, **_kwargs: ["snapshot-frame"])
 
-    stacks, omitted, truncated = detector._other_thread_stacks()
+    frames = event_loop_stall.sys._current_frames()
+    stacks, omitted = detector._other_thread_stacks(frames)
 
     assert stacks == [
         {
@@ -284,51 +287,64 @@ def test_other_thread_stacks_keeps_snapshot_frame_when_thread_metadata_has_gone_
             "thread_ident": 123,
             "daemon": None,
             "stack": "snapshot-frame",
+            "truncated": False,
         },
     ]
     assert omitted == 0
-    assert truncated == 0
 
 
-def test_other_thread_stacks_excludes_loop_and_watcher_and_bounds_characters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only eligible snapshot frames consume the exact per-stack and total budgets."""
+def test_other_thread_stacks_keeps_complete_thread_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Thread metadata names are retained even when they exceed old limits."""
+    detector = _detector()
+    frame_ident = 123
+    frame = _FakeFrame()
+    complete_name = "thread-name-" + "x" * 200
+    monkeypatch.setattr(event_loop_stall.traceback, "format_stack", lambda *_args, **_kwargs: ["snapshot-frame"])
+    monkeypatch.setattr(
+        event_loop_stall.threading,
+        "enumerate",
+        lambda: [SimpleNamespace(ident=frame_ident, name=complete_name, daemon=False)],
+    )
+
+    stacks, omitted = detector._other_thread_stacks({frame_ident: frame})
+
+    assert stacks == [
+        {
+            "thread_name": complete_name,
+            "thread_ident": frame_ident,
+            "daemon": False,
+            "stack": "snapshot-frame",
+            "truncated": False,
+        },
+    ]
+    assert omitted == 0
+
+
+def test_other_thread_stacks_excludes_loop_and_watcher_and_bounds_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the first eight eligible frames are independently bounded."""
     detector = _detector()
     watcher_ident = threading.get_ident()
     loop_ident = 10
-    first_ident = 20
-    second_ident = 30
-    third_ident = 40
-    frames = {ident: _FakeFrame() for ident in (loop_ident, watcher_ident, first_ident, second_ident, third_ident)}
-    names = {
-        first_ident: SimpleNamespace(ident=first_ident, name="first", daemon=False),
-        second_ident: SimpleNamespace(ident=second_ident, name="second", daemon=True),
-        third_ident: SimpleNamespace(ident=third_ident, name="third", daemon=True),
-    }
+    candidate_idents = tuple(range(20, 120, 10))
+    candidate_count = len(candidate_idents)
+    frames = {ident: _FakeFrame() for ident in (loop_ident, watcher_ident, *candidate_idents)}
+    names = {ident: SimpleNamespace(ident=ident, name=f"thread-{ident}", daemon=False) for ident in candidate_idents}
     detector._loop_thread_ident = loop_ident
-    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: frames)
     monkeypatch.setattr(event_loop_stall.threading, "enumerate", lambda: list(names.values()))
     monkeypatch.setattr(
         event_loop_stall.traceback,
         "format_stack",
-        lambda frame, **_kwargs: {  # type: ignore[call-arg]
-            frames[first_ident]: ["abcdefgh"],
-            frames[second_ident]: ["ijklmnop"],
-            frames[third_ident]: ["qrstuvwx"],
-        }[frame],
+        lambda *_args, **_kwargs: ["unimportant\n" + "x" * 2_000, "active-frame\n"],
     )
-    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACKS", 3)
-    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_CHARACTERS", 5)
-    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS", 7)
 
-    stacks, omitted, truncated = detector._other_thread_stacks()
+    stacks, omitted = detector._other_thread_stacks(frames)
 
-    assert [(entry["thread_name"], entry["stack"]) for entry in stacks] == [
-        ("first", "defgh"),
-        ("second", "op"),
-    ]
-    assert omitted == 1
-    assert truncated == 2
-    assert sum(len(entry["stack"]) for entry in stacks) == 7
+    assert len(stacks) == 8
+    assert omitted == candidate_count - len(stacks)
+    assert all(entry["truncated"] is True for entry in stacks)
+    assert all(len(cast("str", entry["stack"])) <= 1_000 for entry in stacks)
+    assert all(cast("str", entry["stack"]).startswith("\n...\n") for entry in stacks)
+    assert all(cast("str", entry["stack"]).endswith("active-frame\n") for entry in stacks)
 
 
 def test_other_thread_stack_truncation_keeps_the_active_frame_tail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,24 +360,22 @@ def test_other_thread_stack_truncation_keeps_the_active_frame_tail(monkeypatch: 
         lambda *_args, **_kwargs: ["unimportant\n", "active-frame\n"],
     )
     monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_CHARACTERS", 20)
-    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS", 20)
 
-    stacks, omitted, truncated = detector._other_thread_stacks()
+    stacks, omitted = detector._other_thread_stacks({frame_ident: frame})
 
     assert stacks[0]["stack"] == "\n...\nt\nactive-frame\n"
     assert len(stacks[0]["stack"]) == 20
     assert stacks[0]["stack"].endswith("active-frame\n")
+    assert stacks[0]["truncated"] is True
     assert omitted == 0
-    assert truncated == 1
 
 
 def test_other_thread_stacks_counts_frame_limit_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The truncation count includes stacks whose older frames exceed the frame cap."""
+    """Each stack marks truncation when older frames exceed the frame cap."""
     detector = _detector()
     frame_ident = 123
     frame = _fake_frame_chain(event_loop_stall._MAX_STACK_FRAMES + 1)
     observed_limits: list[int | None] = []
-    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
     monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
     monkeypatch.setattr(
         event_loop_stall.traceback,
@@ -369,34 +383,33 @@ def test_other_thread_stacks_counts_frame_limit_truncation(monkeypatch: pytest.M
         lambda *_args, limit=None: observed_limits.append(limit) or ["active-frame\n"],
     )
 
-    stacks, omitted, truncated = detector._other_thread_stacks()
+    stacks, omitted = detector._other_thread_stacks({frame_ident: frame})
 
     assert stacks[0]["stack"] == "active-frame\n"
     assert observed_limits == [event_loop_stall._MAX_STACK_FRAMES]
     assert omitted == 0
-    assert truncated == 1
+    assert stacks[0]["truncated"] is True
 
 
-def test_stall_diagnostics_uses_one_heartbeat_snapshot_and_samples_cpu_before_formatting(
+def test_stall_diagnostics_uses_supplied_snapshot_and_cpu_sample(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CPU work is measured from the observed heartbeat before stack formatting begins."""
+    """Diagnostics use the coherent frame and process-CPU samples supplied by the watcher."""
     detector = _detector()
     heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=1.0, process_cpu_seconds=10.0)
     detector._heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=2.0, process_cpu_seconds=20.0)
     events: list[str] = []
-    monkeypatch.setattr(event_loop_stall.time, "process_time", lambda: events.append("cpu") or 12.345)
-    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", dict)
     monkeypatch.setattr(
         detector,
         "_other_thread_stacks",
-        lambda _frames: events.append("format") or ([], 0, 0),
+        lambda _frames: events.append("format") or ([], 0),
     )
 
-    diagnostics = detector._stall_diagnostics(heartbeat)
+    diagnostics = detector._stall_diagnostics(heartbeat, frames={}, current_process_cpu=12.345)
 
     assert diagnostics["process_cpu_seconds_since_heartbeat"] == 2.345
-    assert events == ["cpu", "format"]
+    assert events == ["format"]
+    assert "truncated_thread_stack_count" not in diagnostics
 
 
 def test_watch_passes_the_observed_heartbeat_snapshot_to_stall_reporting(monkeypatch: pytest.MonkeyPatch) -> None:

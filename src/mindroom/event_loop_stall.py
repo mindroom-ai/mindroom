@@ -40,9 +40,8 @@ _REPEAT_LOG_INTERVAL_SECONDS = 30.0
 _THREAD_JOIN_TIMEOUT_SECONDS = 2.0
 _MAX_OTHER_THREAD_STACKS = 8
 _MAX_STACK_FRAMES = 32
-_MAX_OTHER_THREAD_STACK_CHARACTERS = 2_000
-_MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS = 8_000
-_MAX_THREAD_NAME_CHARACTERS = 160
+# Eight one-thousand-character stacks bound stack text to eight thousand characters.
+_MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
 _STACK_TRUNCATION_MARKER = "\n...\n"
 
 
@@ -54,13 +53,11 @@ def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
     return float(raw)
 
 
-def _truncate_stack(stack: str, character_budget: int) -> str:
-    """Return an exact-budget stack suffix, marked when both can fit."""
-    if len(stack) <= character_budget:
+def _truncate_stack(stack: str) -> str:
+    """Return a bounded stack suffix while preserving its active tail."""
+    if len(stack) <= _MAX_OTHER_THREAD_STACK_CHARACTERS:
         return stack
-    if character_budget <= len(_STACK_TRUNCATION_MARKER):
-        return stack[-character_budget:] if character_budget > 0 else ""
-    tail_length = character_budget - len(_STACK_TRUNCATION_MARKER)
+    tail_length = _MAX_OTHER_THREAD_STACK_CHARACTERS - len(_STACK_TRUNCATION_MARKER)
     return f"{_STACK_TRUNCATION_MARKER}{stack[-tail_length:]}"
 
 
@@ -72,6 +69,14 @@ def _frame_chain_exceeds_limit(frame: FrameType, frame_limit: int) -> bool:
         if older_frame is None:
             return False
     return True
+
+
+def _format_bounded_stack(frame: FrameType) -> tuple[str, bool]:
+    """Format one stack and report whether its frame or character limit applied."""
+    frame_limit_truncated = _frame_chain_exceeds_limit(frame, _MAX_STACK_FRAMES)
+    full_stack = "".join(traceback.format_stack(frame, limit=_MAX_STACK_FRAMES))
+    stack = _truncate_stack(full_stack)
+    return stack, frame_limit_truncated or len(stack) < len(full_stack)
 
 
 @dataclass(frozen=True)
@@ -185,30 +190,24 @@ class EventLoopStallDetector:
             max_ms=milliseconds[-1],
         )
 
-    def _loop_thread_stack(self, frames: dict[int, FrameType] | None = None) -> str | None:
+    def _loop_thread_stack(self, frames: dict[int, FrameType]) -> str | None:
         """Return the loop thread's current stack, formatted for logging."""
         if self._loop_thread_ident is None:
             return None
-        captured_frames = frames if frames is not None else sys._current_frames()
-        frame = captured_frames.get(self._loop_thread_ident)
+        frame = frames.get(self._loop_thread_ident)
         if frame is None:
             return None
         return "".join(traceback.format_stack(frame))
 
     def _other_thread_stacks(
         self,
-        frames: dict[int, FrameType] | None = None,
-    ) -> tuple[list[dict[str, object]], int, int]:
+        frames: dict[int, FrameType],
+    ) -> tuple[list[dict[str, object]], int]:
         """Return bounded stacks from a frame snapshot, excluding loop and watcher."""
         current_ident = threading.get_ident()
-        captured_frames = frames if frames is not None else sys._current_frames()
         known_threads = {thread.ident: thread for thread in threading.enumerate() if thread.ident is not None}
         candidates = sorted(
-            (
-                thread_ident
-                for thread_ident in captured_frames
-                if thread_ident not in {self._loop_thread_ident, current_ident}
-            ),
+            (thread_ident for thread_ident in frames if thread_ident not in {self._loop_thread_ident, current_ident}),
             key=lambda thread_ident: (
                 known_threads[thread_ident].daemon if thread_ident in known_threads else True,
                 known_threads[thread_ident].name if thread_ident in known_threads else f"thread-{thread_ident}",
@@ -216,49 +215,30 @@ class EventLoopStallDetector:
             ),
         )
         stacks: list[dict[str, object]] = []
-        omitted = 0
-        truncated = 0
-        stack_characters = 0
-        for thread_ident in candidates:
-            if len(stacks) >= _MAX_OTHER_THREAD_STACKS:
-                omitted += 1
-                continue
-            remaining = _MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS - stack_characters
-            if remaining <= 0:
-                omitted += 1
-                continue
+        for thread_ident in candidates[:_MAX_OTHER_THREAD_STACKS]:
             thread = known_threads.get(thread_ident)
             thread_name = thread.name if thread is not None else f"thread-{thread_ident}"
-            frame = captured_frames[thread_ident]
-            frame_limit_truncated = _frame_chain_exceeds_limit(frame, _MAX_STACK_FRAMES)
-            full_stack = "".join(traceback.format_stack(frame, limit=_MAX_STACK_FRAMES))
-            stack = _truncate_stack(full_stack, min(_MAX_OTHER_THREAD_STACK_CHARACTERS, remaining))
-            if frame_limit_truncated or len(stack) < len(full_stack):
-                truncated += 1
-            stack_characters += len(stack)
+            stack, truncated = _format_bounded_stack(frames[thread_ident])
             stacks.append(
                 {
-                    "thread_name": thread_name[:_MAX_THREAD_NAME_CHARACTERS],
+                    "thread_name": thread_name,
                     "thread_ident": thread_ident,
                     "daemon": thread.daemon if thread is not None else None,
                     "stack": stack,
+                    "truncated": truncated,
                 },
             )
-        return stacks, omitted, truncated
+        return stacks, len(candidates) - len(stacks)
 
     def _stall_diagnostics(
         self,
         heartbeat: _Heartbeat,
         *,
-        frames: dict[int, FrameType] | None = None,
-        current_process_cpu: float | None = None,
+        frames: dict[int, FrameType],
+        current_process_cpu: float,
     ) -> dict[str, object]:
         """Capture process activity and competing Python work for one stall log."""
-        current_process_cpu = time.process_time() if current_process_cpu is None else current_process_cpu
-        captured_frames = sys._current_frames() if frames is None else frames
-        other_thread_stacks, omitted_thread_stack_count, truncated_thread_stack_count = self._other_thread_stacks(
-            captured_frames,
-        )
+        other_thread_stacks, omitted_thread_stack_count = self._other_thread_stacks(frames)
         return {
             "process_cpu_seconds_since_heartbeat": round(
                 max(0.0, current_process_cpu - heartbeat.process_cpu_seconds),
@@ -266,7 +246,6 @@ class EventLoopStallDetector:
             ),
             "other_thread_stacks": other_thread_stacks,
             "omitted_thread_stack_count": omitted_thread_stack_count,
-            "truncated_thread_stack_count": truncated_thread_stack_count,
         }
 
     def _note_stall_ended(self, fresh_beat: float) -> None:
