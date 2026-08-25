@@ -57,6 +57,20 @@ class _FakeModel:
         yield ModelResponse(content="!", response_usage=self.response_usage)
 
 
+@dataclass
+class _CancellableInvokeModel(_FakeModel):
+    invocation_started: asyncio.Event = field(default_factory=asyncio.Event)
+    provider_cancellation: asyncio.CancelledError | None = None
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        self.invocation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            self.provider_cancellation = exc
+            raise
+
+
 async def _assert_cancellation_is_deferred(task: asyncio.Task[Any]) -> None:
     """Observe one requested cancellation without releasing blocked work."""
     assert task.cancelling() > 0
@@ -510,6 +524,112 @@ async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
 
 
 @pytest.mark.asyncio
+async def test_provider_cancellation_remains_primary_during_request_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A later cancellation during request persistence must not replace the provider one."""
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    original_write = llm_request_logging._write_serialized_jsonl_line
+
+    def blocked_write(path: Path, line: str) -> None:
+        writer_started.set()
+        assert release_writer.wait(timeout=5)
+        original_write(path, line)
+
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", blocked_write)
+    model = _CancellableInvokeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    async def invoke_and_capture() -> tuple[asyncio.CancelledError, int]:
+        try:
+            await model.ainvoke(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+        except asyncio.CancelledError as exc:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            return exc, current_task.cancelling()
+        pytest.fail("cancellation was not delivered")
+
+    invoke_task = asyncio.create_task(invoke_and_capture())
+    try:
+        await model.invocation_started.wait()
+        invoke_task.cancel("provider cancellation")
+        assert await asyncio.to_thread(writer_started.wait, 5)
+        invoke_task.cancel("later cancellation")
+        await _assert_cancellation_is_deferred(invoke_task)
+        release_writer.set()
+        cancelled, cancel_count = await invoke_task
+    finally:
+        release_writer.set()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert model.provider_cancellation is not None
+    assert cancelled is model.provider_cancellation
+    assert cancelled.args == ("provider cancellation",)
+    assert cancel_count == 2
+    assert invoke_task.cancelling() == 2
+    assert len(_read_log_entries(tmp_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_chains_request_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Provider cancellation stays primary when accepted request persistence fails."""
+    serializer_started = threading.Event()
+    release_serializer = threading.Event()
+    worker_error = OSError("serialization failed")
+
+    def failing_serialization(*_args: object, **_kwargs: object) -> str:
+        serializer_started.set()
+        assert release_serializer.wait(timeout=5)
+        raise worker_error
+
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", failing_serialization)
+    model = _CancellableInvokeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    invoke_task = asyncio.create_task(
+        model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        ),
+    )
+    try:
+        await model.invocation_started.wait()
+        invoke_task.cancel("provider cancellation")
+        assert await asyncio.to_thread(serializer_started.wait, 5)
+        release_serializer.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await invoke_task
+    finally:
+        release_serializer.set()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert model.provider_cancellation is not None
+    assert cancelled.value is model.provider_cancellation
+    assert cancelled.value.args == ("provider cancellation",)
+    assert cancelled.value.__cause__ is worker_error
+    assert invoke_task.cancelling() == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_record", ["request", "response"])
 async def test_invoke_cancellation_waits_for_linked_success_logs(
     monkeypatch: pytest.MonkeyPatch,
@@ -721,6 +841,100 @@ async def test_stream_cancellation_finalizes_received_chunk_usage(
     assert cancelled.value.args == ("first cancellation",)
     assert next_chunk.cancelling() == 2
     assert [entry["usage_available"] for entry in logs] == [True]
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_chains_request_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stream cancellation must retain the accepted request worker's error."""
+    serializer_started = threading.Event()
+    release_serializer = threading.Event()
+    worker_error = OSError("serialization failed")
+
+    def failing_serialization(*_args: object, **_kwargs: object) -> str:
+        serializer_started.set()
+        assert release_serializer.wait(timeout=5)
+        raise worker_error
+
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", failing_serialization)
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+    next_chunk = asyncio.create_task(anext(stream))
+    try:
+        assert await asyncio.to_thread(serializer_started.wait, 5)
+        next_chunk.cancel("stream cancellation")
+        await _assert_cancellation_is_deferred(next_chunk)
+        release_serializer.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await next_chunk
+    finally:
+        release_serializer.set()
+        await asyncio.gather(next_chunk, return_exceptions=True)
+        await stream.aclose()
+
+    assert cancelled.value.args == ("stream cancellation",)
+    assert cancelled.value.__cause__ is worker_error
+    assert next_chunk.cancelling() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_uncancelled_request_worker_failure_remains_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    streaming: bool,
+) -> None:
+    """An ordinary request worker failure must not change uncancelled provider behavior."""
+    worker_error = OSError("serialization failed")
+
+    def failing_serialization(*_args: object, **_kwargs: object) -> str:
+        raise worker_error
+
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", failing_serialization)
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=3, output_tokens=2))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with capture_logs() as logs:
+        if streaming:
+            contents = [
+                chunk.content
+                async for chunk in model.ainvoke_stream(
+                    messages=[Message(role="user", content="hello")],
+                    assistant_message=Message(role="assistant"),
+                    tools=[],
+                )
+            ]
+        else:
+            response = await model.ainvoke(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+            contents = [response.content]
+
+    assert contents == (["ok", "!"] if streaming else ["ok"])
+    assert [entry["event"] for entry in logs] == [
+        "Failed to persist LLM request log",
+        "LLM usage",
+    ]
 
 
 @pytest.mark.asyncio

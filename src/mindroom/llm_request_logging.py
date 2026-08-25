@@ -593,7 +593,7 @@ async def _write_llm_request_log_if_enabled(
     )
 
 
-async def _write_llm_request_log_best_effort(
+async def _write_llm_request_log_reporting_errors(
     *,
     model: Model,
     agent_name: str,
@@ -603,7 +603,7 @@ async def _write_llm_request_log_best_effort(
     request_context: dict[str, _JSONValue],
     wire_tools_capture: _WireToolsCapture,
 ) -> _RequestLogRef | None:
-    """Persist an optional request record without changing model-call behavior."""
+    """Persist an optional request record and report any ordinary failure."""
     try:
         return await _write_llm_request_log_if_enabled(
             model=model,
@@ -620,6 +620,41 @@ async def _write_llm_request_log_best_effort(
             agent_name=agent_name,
             model_id=model.id,
         )
+        raise
+
+
+async def _write_llm_request_log_best_effort(
+    *,
+    model: Model,
+    agent_name: str,
+    kwargs: dict[str, object],
+    debug_config: DebugConfig,
+    default_log_dir: Path,
+    request_context: dict[str, _JSONValue],
+    wire_tools_capture: _WireToolsCapture,
+) -> _RequestLogRef | None:
+    """Persist an optional request record without changing model-call behavior."""
+    try:
+        return await _write_llm_request_log_reporting_errors(
+            model=model,
+            agent_name=agent_name,
+            kwargs=kwargs,
+            debug_config=debug_config,
+            default_log_dir=default_log_dir,
+            request_context=request_context,
+            wire_tools_capture=wire_tools_capture,
+        )
+    except Exception:
+        return None
+
+
+async def _await_request_log_task_best_effort(
+    task: asyncio.Task[_RequestLogRef | None],
+) -> _RequestLogRef | None:
+    """Return a reported request result without changing normal stream behavior."""
+    try:
+        return await _await_before_cancelling(task)
+    except Exception:
         return None
 
 
@@ -667,6 +702,25 @@ async def _invoke_with_llm_request_logging(
     try:
         with _model_request_scope(model, wire_tools_capture):
             response = await original_ainvoke(*args, **kwargs)
+    except asyncio.CancelledError as provider_cancel:
+        request_task = asyncio.create_task(
+            _write_llm_request_log_reporting_errors(
+                model=model,
+                agent_name=agent_name,
+                kwargs=kwargs,
+                debug_config=debug_config,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+                wire_tools_capture=wire_tools_capture,
+            ),
+        )
+        with suppress(BaseException):
+            await _await_before_cancelling(request_task)
+        try:
+            request_task.result()
+        except BaseException as request_error:
+            raise provider_cancel from request_error
+        raise
     except BaseException:
         await _write_llm_request_log_best_effort(
             model=model,
@@ -682,7 +736,7 @@ async def _invoke_with_llm_request_logging(
     async def _write_success_logs() -> None:
         request_error: Exception | None = None
         try:
-            request_log_ref = await _write_llm_request_log_if_enabled(
+            request_log_ref = await _write_llm_request_log_reporting_errors(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -692,11 +746,6 @@ async def _invoke_with_llm_request_logging(
                 wire_tools_capture=wire_tools_capture,
             )
         except Exception as exc:
-            logger.exception(
-                "Failed to persist LLM request log",
-                agent_name=agent_name,
-                model_id=model.id,
-            )
             request_log_ref = None
             request_error = exc
         await _write_llm_response_log_best_effort(
@@ -740,7 +789,7 @@ def _stream_with_llm_request_logging(
             nonlocal request_log_ref, request_log_task
             if request_log_task is None:
                 request_log_task = asyncio.create_task(
-                    _write_llm_request_log_best_effort(
+                    _write_llm_request_log_reporting_errors(
                         model=model,
                         agent_name=agent_name,
                         kwargs=kwargs,
@@ -750,7 +799,7 @@ def _stream_with_llm_request_logging(
                         wire_tools_capture=wire_tools_capture,
                     ),
                 )
-            request_log_ref = await _await_before_cancelling(request_log_task)
+            request_log_ref = await _await_request_log_task_best_effort(request_log_task)
 
         async def _finalize_stream_logs() -> None:
             await _write_request_once()
