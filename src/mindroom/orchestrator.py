@@ -21,7 +21,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.authorization import is_authorized_sender
-from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
@@ -2663,7 +2663,7 @@ async def main(
 
         # Credential synchronization and storage setup are synchronous. Keep the
         # ordered unit off-loop while retaining exception propagation to startup.
-        await asyncio.to_thread(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
+        await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

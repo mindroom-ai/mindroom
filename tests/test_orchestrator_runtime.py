@@ -1225,6 +1225,47 @@ class TestAgentBot(AgentBotTestBase):
         stall_detector.stop.assert_called_once_with()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_drains_cancelled_initial_setup_before_cleanup(self, tmp_path: Path) -> None:
+        """Cancellation must not let teardown overtake the active setup worker."""
+        reset_runtime_state()
+        setup_started = threading.Event()
+        release_setup = threading.Event()
+        events: list[str] = []
+        runtime_paths = self._runtime_paths(tmp_path)
+
+        def _blocked_credential_sync(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            events.append("setup_started")
+            setup_started.set()
+            assert release_setup.wait(2.0)
+            events.append("setup_finished")
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch("mindroom.orchestrator.start_event_loop_stall_detector", return_value=MagicMock()),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_blocked_credential_sync),
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda: events.append("cleanup"),
+            ),
+        ):
+            main_task = asyncio.create_task(main(log_level="INFO", runtime_paths=runtime_paths, api=False))
+            try:
+                assert await asyncio.to_thread(setup_started.wait, 2.0)
+                main_task.cancel()
+                await asyncio.sleep(0)
+                assert not main_task.done()
+                assert events == ["setup_started"]
+            finally:
+                release_setup.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await main_task
+
+        assert events == ["setup_started", "setup_finished", "cleanup"]
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
         """The orchestrator should clear stale workers before startup and shut them down on exit."""
         reset_runtime_state()

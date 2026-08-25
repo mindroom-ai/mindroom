@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager, nullcontext
 from threading import Event
 from types import SimpleNamespace
@@ -11,11 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
+from agno.models.anthropic import Claude
 from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -190,6 +193,55 @@ def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
         cache._build_agent(knowledge=None, refresh_scheduler=None)
 
     history_storage.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_prewarms_and_reuses_anthropic_async_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached call agent must initialize one reusable async client off the event loop."""
+    model = Claude(id="claude-sonnet-4-6", api_key="test-key")
+    install_claude_prompt_cache_hook(model)
+    client_parameter_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+    original_client_parameters = model._get_client_params
+
+    def _record_client_parameters() -> dict[str, object]:
+        client_parameter_thread_ids.append(threading.get_ident())
+        return original_client_parameters()
+
+    vars(model)["_get_client_params"] = _record_client_parameters
+    agent = MagicMock(model=model)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    try:
+        cached_agent = await cache._get_agent(
+            knowledge=None,
+            knowledge_identity=(),
+            refresh_scheduler=None,
+        )
+        first_client = cached_agent.model.get_async_client()
+        second_client = cached_agent.model.get_async_client()
+
+        assert first_client._client is second_client._client
+        assert vars(model)["async_client"] is first_client._client
+        assert client_parameter_thread_ids == [client_parameter_thread_ids[0]]
+        assert client_parameter_thread_ids[0] != event_loop_thread_id
+    finally:
+        async_client = vars(model).get("async_client")
+        if async_client is not None:
+            await async_client.close()
 
 
 @pytest.mark.asyncio

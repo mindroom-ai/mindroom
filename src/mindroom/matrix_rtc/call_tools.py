@@ -34,6 +34,7 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
+from mindroom.claude_prompt_cache import prewarm_anthropic_async_client
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.runtime import (
     close_agent_runtime_state_dbs,
@@ -292,7 +293,7 @@ class _CallAgentCache:
             execution_identity=self.execution_identity,
         )
         try:
-            return create_agent(
+            agent = create_agent(
                 self.agent_name,
                 self.config,
                 self.runtime_paths,
@@ -308,9 +309,12 @@ class _CallAgentCache:
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
             )
+            prewarm_anthropic_async_client(getattr(agent, "model", None))
         except Exception:
             history_storage.close()
             raise
+        else:
+            return agent
 
 
 async def build_call_tools(

@@ -25,6 +25,7 @@ from agno.utils.models.claude import format_messages
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
+from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
     _MAX_CACHE_MARKERS,
@@ -36,6 +37,7 @@ from mindroom.claude_prompt_cache import (
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
+    prewarm_anthropic_async_client,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -467,6 +469,27 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     assert model.aws_region == "us-east-1"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_prewarm_anthropic_async_client_skips_session_backed_client() -> None:
+    """Session-backed clients cannot retain an SDK client for a later async request."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    calls: list[None] = []
+
+    def _unexpected_client_build() -> object:
+        calls.append(None)
+        msg = "session-backed clients must not be prewarmed"
+        raise AssertionError(msg)
+
+    vars(model)["get_async_client"] = _unexpected_client_build
+
+    prewarm_anthropic_async_client(model)
+
+    assert calls == []
 
 
 def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
