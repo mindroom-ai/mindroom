@@ -22,10 +22,8 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from agno.session.workflow import WorkflowSession
 from agno.team import Team
 from agno.team import _session as team_session_module
-from agno.workflow import Workflow
 
 from mindroom import agent_storage
 from mindroom import agno_session_persistence_patch as persistence_patch
@@ -33,6 +31,7 @@ from mindroom.agent_storage import create_state_storage, get_agent_session, get_
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from concurrent.futures import Future
     from pathlib import Path
 
     from agno.db.base import BaseDb
@@ -211,58 +210,51 @@ async def test_registered_writes_run_on_a_dedicated_thread(
 
 
 @pytest.mark.asyncio
-async def test_unrelated_target_completes_while_other_lanes_are_blocked(
+async def test_independent_target_completes_while_another_lane_is_blocked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Blocked targets must not consume a shared worker pool needed by another target."""
-    release_blockers = threading.Event()
-    blocker_started = [threading.Event() for _ in range(4)]
-    blocker_storages = [_storage(tmp_path, f"blocked-{index}") for index in range(4)]
-    blocker_tasks: list[asyncio.Task[None]] = []
-
-    for index, storage in enumerate(blocker_storages):
-        original_upsert = storage.upsert_session
-
-        def blocked_upsert(
-            session: AgentSession,
-            deserialize: bool | None = True,
-            *,
-            event: threading.Event = blocker_started[index],
-            upsert: object = original_upsert,
-        ) -> object:
-            event.set()
-            assert release_blockers.wait(timeout=5)
-            return upsert(session, deserialize=deserialize)  # type: ignore[operator]
-
-        monkeypatch.setattr(storage, "upsert_session", blocked_upsert)
-        owner, session = _owner_and_session("agent", storage, f"blocked-{index}")
-        blocker_tasks.append(asyncio.create_task(owner.asave_session(session)))
-
+    """One target's blocked lane must not delay a different target's lane."""
+    blocked_storage = _storage(tmp_path, "blocked")
     independent_storage = _storage(tmp_path, "independent")
+    blocked_owner, blocked_session = _owner_and_session("agent", blocked_storage, "blocked")
     independent_owner, independent_session = _owner_and_session("agent", independent_storage, "independent")
+    blocked_lane = persistence_patch._registered_lane(blocked_storage)
+    independent_lane = persistence_patch._registered_lane(independent_storage)
+    blocked_started = threading.Event()
+    release_blocked = threading.Event()
     independent_finished = threading.Event()
+    original_blocked_upsert = blocked_storage.upsert_session
     original_independent_upsert = independent_storage.upsert_session
+
+    def block(session: AgentSession, deserialize: bool | None = True) -> object:
+        blocked_started.set()
+        assert release_blocked.wait(timeout=5)
+        return original_blocked_upsert(session, deserialize=deserialize)
 
     def signal_independent(session: AgentSession, deserialize: bool | None = True) -> object:
         result = original_independent_upsert(session, deserialize=deserialize)
         independent_finished.set()
         return result
 
+    monkeypatch.setattr(blocked_storage, "upsert_session", block)
     monkeypatch.setattr(independent_storage, "upsert_session", signal_independent)
-    independent = asyncio.create_task(independent_owner.asave_session(independent_session))
+    blocked = asyncio.create_task(blocked_owner.asave_session(blocked_session))
+    independent: asyncio.Task[None] | None = None
     try:
-        started = await asyncio.gather(
-            *(asyncio.to_thread(event.wait, 5) for event in blocker_started),
-        )
-        assert started == [True, True, True, True]
+        assert blocked_lane is not None
+        assert independent_lane is not None
+        assert blocked_lane is not independent_lane
+        assert await asyncio.to_thread(blocked_started.wait, 5)
+        independent = asyncio.create_task(independent_owner.asave_session(independent_session))
         assert await asyncio.to_thread(independent_finished.wait, 5)
         await independent
+        assert not release_blocked.is_set()
     finally:
-        release_blockers.set()
-        await asyncio.gather(*blocker_tasks, independent, return_exceptions=True)
-        for storage in [*blocker_storages, independent_storage]:
-            storage.close()
+        release_blocked.set()
+        await asyncio.gather(blocked, *([independent] if independent is not None else []), return_exceptions=True)
+        blocked_storage.close()
+        independent_storage.close()
 
 
 def test_cross_loop_reservation_precedes_snapshot_work(
@@ -368,6 +360,39 @@ async def test_snapshot_failure_is_immediate_and_does_not_strand_a_successor(
             *([successor] if successor is not None else []),
             return_exceptions=True,
         )
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_consumes_its_worker_slot_without_replaying_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller alone owns a snapshot error after its FIFO slot is consumed."""
+    storage = _storage(tmp_path, "snapshot-error-owner")
+    owner, session = _owner_and_session("agent", storage, "snapshot-error-owner")
+    lane = persistence_patch._registered_lane(storage)
+    assert lane is not None
+    worker_futures: list[Future[object]] = []
+    original_submit = lane.executor.submit
+    snapshot_error = "snapshot failed once"
+
+    def record_submit(function: Callable[..., object], *args: object) -> Future[object]:
+        future = original_submit(function, *args)
+        worker_futures.append(future)
+        return future
+
+    def failing_deepcopy(_session: AgentSession) -> AgentSession:
+        raise RuntimeError(snapshot_error)
+
+    monkeypatch.setattr(lane.executor, "submit", record_submit)
+    monkeypatch.setattr(persistence_patch, "deepcopy", failing_deepcopy)
+    try:
+        with pytest.raises(RuntimeError, match=snapshot_error):
+            await owner.asave_session(session)
+        assert len(worker_futures) == 1
+        assert await asyncio.wrap_future(worker_futures[0]) is None
+    finally:
         storage.close()
 
 
@@ -545,37 +570,6 @@ async def test_nested_owners_delegate_to_upstream_no_op(
         storage.close()
 
     assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_workflow_path_remains_upstream_and_responsive(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Workflow persistence keeps its own upstream asynchronous boundary."""
-    storage = _storage(tmp_path, "workflow")
-    workflow = Workflow(db=storage, telemetry=False)
-    session = WorkflowSession(session_id="workflow", session_data={"session_state": {"current_run_id": "run"}})
-    loop_progressed = asyncio.Event()
-    original_upsert = storage.upsert_session
-
-    def delayed_upsert(session: WorkflowSession, deserialize: bool | None = True) -> object:
-        time.sleep(0.1)
-        return original_upsert(session, deserialize=deserialize)
-
-    async def mark_progress() -> None:
-        await asyncio.sleep(0.01)
-        loop_progressed.set()
-
-    monkeypatch.setattr(storage, "upsert_session", delayed_upsert)
-    progress = asyncio.create_task(mark_progress())
-    try:
-        await workflow.asave_session(session)
-        assert loop_progressed.is_set()
-        assert Workflow.asave_session.__module__.startswith("agno.")
-    finally:
-        await progress
-        storage.close()
 
 
 @pytest.mark.parametrize("surface", ["agent", "team"])

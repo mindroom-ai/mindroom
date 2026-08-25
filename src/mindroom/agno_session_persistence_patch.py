@@ -12,12 +12,11 @@ from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
 from pathlib import Path
+from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.agent import _init as agent_init
 from agno.agent import _session as agent_session
 from agno.team import _session as team_session
-from agno.team._init import _has_async_db as team_has_async_db
 
 from mindroom.background_tasks import wait_for_future_until_complete
 
@@ -58,16 +57,6 @@ class _PersistenceLane:
     )
 
 
-@dataclass
-class _PreparedOperation:
-    """A reserved worker slot awaiting caller-thread snapshot preparation."""
-
-    ready: threading.Event = field(default_factory=threading.Event)
-    context: contextvars.Context | None = None
-    operation: Callable[[], object] | None = None
-    error: BaseException | None = None
-
-
 def _register_sync_session_storage(
     database: BaseDb,
     *,
@@ -89,14 +78,9 @@ def _registered_lane(database: BaseDb) -> _PersistenceLane | None:
         return _REGISTERED_LANES.get(database)
 
 
-def _run_prepared_operation(prepared: _PreparedOperation) -> object:
-    prepared.ready.wait()
-    if prepared.error is not None:
-        raise prepared.error
-    if prepared.context is None or prepared.operation is None:
-        msg = "Session persistence operation was released before preparation"
-        raise RuntimeError(msg)
-    return prepared.context.run(prepared.operation)
+def _run_prepared_operation(operations: SimpleQueue[Callable[[], object] | None]) -> object | None:
+    operation = operations.get()
+    return None if operation is None else operation()
 
 
 async def _offload_sync_save[Owner, Session](
@@ -105,31 +89,23 @@ async def _offload_sync_save[Owner, Session](
     owner: Owner,
     session: Session,
 ) -> None:
-    prepared = _PreparedOperation()
-    worker: Future[object] = lane.executor.submit(_run_prepared_operation, prepared)
+    operations: SimpleQueue[Callable[[], object] | None] = SimpleQueue()
+    worker: Future[object | None] = lane.executor.submit(_run_prepared_operation, operations)
     try:
         context = contextvars.copy_context()
         snapshot = deepcopy(session)
-        prepared.context = context
-        prepared.operation = partial(save, owner, snapshot)
-    except BaseException as error:
-        prepared.error = error
+        operation = partial(context.run, save, owner, snapshot)
+    except BaseException:
+        operations.put(None)
         raise
-    finally:
-        prepared.ready.set()
+    operations.put(operation)
 
     await wait_for_future_until_complete(asyncio.wrap_future(worker))
 
 
 async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
     database = agent.db
-    if (
-        database is None
-        or agent.team_id is not None
-        or agent.workflow_id is not None
-        or session.session_data is None
-        or agent_init.has_async_db(agent)
-    ):
+    if database is None or agent.team_id is not None or agent.workflow_id is not None or session.session_data is None:
         await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
 
@@ -143,7 +119,7 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
 
 async def _team_asave_session(team: Team, session: TeamSession) -> None:
     database = team.db
-    if database is None or team.parent_team_id is not None or team.workflow_id is not None or team_has_async_db(team):
+    if database is None or team.parent_team_id is not None or team.workflow_id is not None:
         await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
 
