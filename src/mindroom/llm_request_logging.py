@@ -126,12 +126,20 @@ def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     _write_serialized_jsonl_line(path, json.dumps(redact_sensitive_data(payload)))
 
 
+async def _checkpoint_for_cancellation() -> asyncio.CancelledError | None:
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError as exc:
+        return exc
+    return None
+
+
 async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
     """Finish one accepted task before propagating caller cancellation once."""
     current_task = asyncio.current_task()
     assert current_task is not None
+    deferred_cancel = await _checkpoint_for_cancellation()
     observed_cancel_count = current_task.cancelling()
-    deferred_cancel: asyncio.CancelledError | None = None
 
     while not task.done():
         try:

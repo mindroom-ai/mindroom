@@ -7,7 +7,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -33,7 +33,7 @@ from mindroom.llm_request_logging import (
 from mindroom.openai_tool_search import request_params_with_deferred_tool_search
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import AsyncIterator
     from pathlib import Path
     from typing import TextIO
 
@@ -57,30 +57,25 @@ class _FakeModel:
         yield ModelResponse(content="!", response_usage=self.response_usage)
 
 
-class _ShieldRetryObserver:
-    def __init__(self, retry_events: dict[int, asyncio.Event]) -> None:
-        self._retry_events = retry_events
-        self._original_shield = asyncio.shield
-        self._calls = 0
-
-    async def __call__(self, awaitable: Awaitable[object]) -> object:
-        self._calls += 1
-        retry_event = self._retry_events.get(self._calls)
-        if retry_event is not None:
-            retry_event.set()
-        return await self._original_shield(awaitable)
+async def _assert_cancellation_is_deferred(task: asyncio.Task[Any]) -> None:
+    """Observe one requested cancellation without releasing blocked work."""
+    assert task.cancelling() > 0
+    ready_callbacks_processed = asyncio.Event()
+    asyncio.get_running_loop().call_soon(ready_callbacks_processed.set)
+    await ready_callbacks_processed.wait()
+    assert not task.done()
 
 
-class _CoordinatedAppendHandle:
+class _InterleavingAppendHandle:
     def __init__(
         self,
         handle: TextIO,
-        first_writes: threading.Barrier,
+        split_body_writes: threading.Barrier,
     ) -> None:
         self._handle = handle
-        self._first_writes = first_writes
+        self._split_body_writes = split_body_writes
 
-    def __enter__(self) -> _CoordinatedAppendHandle:
+    def __enter__(self) -> _InterleavingAppendHandle:
         self._handle.__enter__()
         return self
 
@@ -89,10 +84,10 @@ class _CoordinatedAppendHandle:
 
     def write(self, value: str) -> int:
         if not value.endswith("\n"):
-            self._first_writes.wait(timeout=5)
+            self._split_body_writes.wait(timeout=5)
             written = self._handle.write(value)
             self._handle.flush()
-            self._first_writes.wait(timeout=5)
+            self._split_body_writes.wait(timeout=5)
             return written
         return self._handle.write(value)
 
@@ -171,13 +166,18 @@ def test_concurrent_jsonl_appends_remain_parseable(
     tmp_path: Path,
 ) -> None:
     """Concurrent worker appends must each remain one complete JSONL record."""
-    first_writes = threading.Barrier(2)
+    append_attempts = threading.Barrier(2)
+    split_body_writes = threading.Barrier(2)
     path_type = type(tmp_path)
     real_open = path_type.open
 
-    def coordinated_open(path: Path, *args: object, **kwargs: object) -> _CoordinatedAppendHandle:
+    def coordinated_open(path: Path, *args: object, **kwargs: object) -> _InterleavingAppendHandle:
         handle = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
-        return _CoordinatedAppendHandle(handle, first_writes)
+        return _InterleavingAppendHandle(handle, split_body_writes)
+
+    def append_after_rendezvous(log_path: Path, line: str) -> None:
+        append_attempts.wait(timeout=5)
+        llm_request_logging._write_serialized_jsonl_line(log_path, line)
 
     monkeypatch.setattr(path_type, "open", coordinated_open)
     log_path = tmp_path / "requests.jsonl"
@@ -186,11 +186,12 @@ def test_concurrent_jsonl_appends_remain_parseable(
         json.dumps({"record": "second"}),
     ]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        appends = [executor.submit(llm_request_logging._write_serialized_jsonl_line, log_path, line) for line in lines]
+        appends = [executor.submit(append_after_rendezvous, log_path, line) for line in lines]
         for append in appends:
             append.result(timeout=5)
     with real_open(log_path, encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle]
+    assert len(records) == 2
     assert {record["record"] for record in records} == {"first", "second"}
 
 
@@ -291,13 +292,52 @@ async def test_request_log_pins_container_membership_before_worker_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_pending_cancellation_waits_for_accepted_worker() -> None:
+    """Cancellation requested before helper entry must wait for accepted work."""
+    worker_started = asyncio.Event()
+    release_worker = asyncio.Event()
+    cancellation_requested = asyncio.Event()
+
+    async def accepted_worker() -> None:
+        worker_started.set()
+        await release_worker.wait()
+
+    worker = asyncio.create_task(accepted_worker())
+    await worker_started.wait()
+
+    async def cancel_before_helper_entry() -> tuple[bool, tuple[object, ...], int]:
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        current_task.cancel("pending cancellation")
+        cancellation_requested.set()
+        try:
+            await llm_request_logging._await_before_cancelling(worker)
+        except asyncio.CancelledError as exc:
+            return worker.done(), exc.args, current_task.cancelling()
+        pytest.fail("pending cancellation was not delivered")
+
+    caller = asyncio.create_task(cancel_before_helper_entry())
+    try:
+        await cancellation_requested.wait()
+        await _assert_cancellation_is_deferred(caller)
+        release_worker.set()
+        worker_done, cancel_args, cancel_count = await caller
+    finally:
+        release_worker.set()
+        await asyncio.gather(caller, worker, return_exceptions=True)
+
+    assert worker_done
+    assert cancel_args == ("pending cancellation",)
+    assert cancel_count == 1
+
+
+@pytest.mark.asyncio
 async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_persisted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cancellation must not release borrowed values before their record is durable."""
     serialization_started, release_serialization, serialization_finished = (threading.Event() for _ in range(3))
-    first_cancellation_deferred, second_cancellation_deferred = (asyncio.Event() for _ in range(2))
     original_serialize = llm_request_logging._serialize_llm_request_log_line
 
     def blocked_serialize(*args: object, **kwargs: object) -> str:
@@ -309,11 +349,6 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
             serialization_finished.set()
 
     monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", blocked_serialize)
-    monkeypatch.setattr(
-        llm_request_logging.asyncio,
-        "shield",
-        _ShieldRetryObserver({2: first_cancellation_deferred, 3: second_cancellation_deferred}),
-    )
     model = _FakeModel(id="submitted-model", temperature=0.7)
     messages = [Message(role="user", content="submitted message")]
     tools = [{"name": "submitted_tool"}]
@@ -329,11 +364,13 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
         ),
     )
     cancellation_observed = asyncio.Event()
+    caught_cancellations: list[asyncio.CancelledError] = []
 
     async def observe_cancellation() -> None:
         try:
             await write_task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            caught_cancellations.append(exc)
             _mutate_borrowed_request_values(model, messages, tools)
             cancellation_observed.set()
             raise
@@ -341,11 +378,11 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
     observer = asyncio.create_task(observe_cancellation())
     try:
         assert await asyncio.to_thread(serialization_started.wait, 5)
-        write_task.cancel()
-        await first_cancellation_deferred.wait()
-        write_task.cancel()
-        await second_cancellation_deferred.wait()
-        cancellation_was_deferred = not cancellation_observed.is_set()
+        write_task.cancel("first cancellation")
+        await _assert_cancellation_is_deferred(write_task)
+        write_task.cancel("second cancellation")
+        await _assert_cancellation_is_deferred(write_task)
+        assert not cancellation_observed.is_set()
         release_serialization.set()
         with pytest.raises(asyncio.CancelledError):
             await observer
@@ -354,7 +391,8 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
         release_serialization.set()
         await asyncio.gather(write_task, observer, return_exceptions=True)
 
-    assert cancellation_was_deferred
+    assert len(caught_cancellations) == 1
+    assert caught_cancellations[0].args == ("first cancellation",)
     assert write_task.cancelling() == 2
     payload = json.loads(log_path.read_text(encoding="utf-8"))
     assert payload["model_id"] == "submitted-model"
@@ -373,7 +411,7 @@ async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
 ) -> None:
     """Deferred cancellation must not fire again after the caller catches it."""
     serializer_started, release_serializer = (threading.Event() for _ in range(2))
-    cancellation_deferred, continuation_started, release_continuation = (asyncio.Event() for _ in range(3))
+    continuation_started, release_continuation = (asyncio.Event() for _ in range(2))
     serialization_error = OSError("serialization failed")
     original_serialize = llm_request_logging._serialize_llm_request_log_line
     caught_cancellations: list[asyncio.CancelledError] = []
@@ -386,7 +424,6 @@ async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
             raise serialization_error
         return original_serialize(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(llm_request_logging.asyncio, "shield", _ShieldRetryObserver({2: cancellation_deferred}))
     monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", controlled_serialization)
     model = _FakeModel()
     install_llm_request_logging(
@@ -416,7 +453,7 @@ async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
     try:
         assert await asyncio.to_thread(serializer_started.wait, 5)
         invoke_task.cancel("cancel request")
-        await cancellation_deferred.wait()
+        await _assert_cancellation_is_deferred(invoke_task)
         release_serializer.set()
         await continuation_started.wait()
         assert not invoke_task.done()
@@ -471,7 +508,6 @@ async def test_stream_cancellation_persists_one_request_record(
     """Generator cleanup must not retry an accepted request append."""
     writer_started = threading.Event()
     release_writer = threading.Event()
-    cancellation_deferred = asyncio.Event()
     original_write = llm_request_logging._write_serialized_jsonl_line
 
     def blocked_write(path: Path, line: str) -> None:
@@ -480,7 +516,6 @@ async def test_stream_cancellation_persists_one_request_record(
         original_write(path, line)
 
     monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", blocked_write)
-    monkeypatch.setattr(llm_request_logging.asyncio, "shield", _ShieldRetryObserver({2: cancellation_deferred}))
     model = _FakeModel()
     install_llm_request_logging(
         model,
@@ -497,7 +532,7 @@ async def test_stream_cancellation_persists_one_request_record(
     try:
         assert await asyncio.to_thread(writer_started.wait, 5)
         next_chunk.cancel("cancel stream")
-        await cancellation_deferred.wait()
+        await _assert_cancellation_is_deferred(next_chunk)
         release_writer.set()
         with pytest.raises(asyncio.CancelledError):
             await next_chunk
@@ -584,8 +619,8 @@ async def test_llm_request_timestamp_and_daily_file_share_submission_time(
     tmp_path: Path,
 ) -> None:
     """A writer delayed past midnight must stay in its submission day's file."""
-    submission_time = datetime(2026, 8, 25, 12, tzinfo=UTC)
-    worker_time = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    submission_time = datetime(2026, 8, 25, 12).astimezone()
+    worker_time = datetime(2026, 8, 26, 12).astimezone()
     observed_times = iter((submission_time, worker_time))
 
     class _Clock:
