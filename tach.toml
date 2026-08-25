@@ -4089,6 +4089,7 @@ expose = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "run_session_storage_operation",
 ]
 from = ["mindroom.agent_storage"]
 

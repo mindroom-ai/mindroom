@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.agent import _session as agent_session
 from agno.team import _session as team_session
 
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,7 +75,38 @@ def _register_sync_session_storage(
 
 def _registered_lane(database: BaseDb) -> _PersistenceLane | None:
     with _LANE_LOCK:
-        return _REGISTERED_LANES.get(database)
+        try:
+            return _REGISTERED_LANES.get(database)
+        except TypeError:
+            return None
+
+
+def _run_registered_storage_operation[Result](
+    create_database: Callable[[], BaseDb],
+    operation: Callable[[BaseDb], Result],
+) -> Result:
+    """Create, use, and close one database away from the event-loop thread."""
+    database = create_database()
+    try:
+        lane = _registered_lane(database)
+        if lane is None:
+            return operation(database)
+        context = contextvars.copy_context()
+        return cast("Result", lane.executor.submit(context.run, operation, database).result())
+    finally:
+        database.close()
+
+
+async def run_registered_storage_operation[Result](
+    create_database: Callable[[], BaseDb],
+    operation: Callable[[BaseDb], Result],
+) -> Result:
+    """Run one whole synchronous storage operation in its registered FIFO lane."""
+    return await run_blocking_until_complete(
+        _run_registered_storage_operation,
+        create_database,
+        operation,
+    )
 
 
 def _run_prepared_operation(operations: SimpleQueue[Callable[[], object] | None]) -> object | None:

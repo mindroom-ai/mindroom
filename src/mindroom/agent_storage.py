@@ -20,6 +20,7 @@ from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agno.agent import Agent
@@ -40,7 +41,19 @@ __all__ = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "run_session_storage_operation",
 ]
+
+
+async def run_session_storage_operation[Result](
+    create_storage: Callable[[], BaseDb],
+    operation: Callable[[BaseDb], Result],
+) -> Result:
+    """Run one application-owned synchronous storage operation off-loop and in order."""
+    return await agno_session_persistence_patch.run_registered_storage_operation(
+        create_storage,
+        operation,
+    )
 
 
 def get_agent_runtime_state_dbs(agent: Agent) -> tuple[BaseDb | None, BaseDb | None]:

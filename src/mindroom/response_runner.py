@@ -787,7 +787,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
         return self.deps.post_response_effects.build_deps(
@@ -1559,7 +1559,7 @@ class ResponseRunner:
     def _approval_response_event_persistence(
         self,
         continuation: ApprovalContinuation,
-    ) -> Callable[[str, str], None] | None:
+    ) -> Callable[[str, str], Awaitable[None]] | None:
         """Return the normal run-to-Matrix event linkage for a resumed response."""
         execution_identity = parse_tool_execution_identity_payload(
             continuation.execution_identity,
@@ -2386,21 +2386,17 @@ class ResponseRunner:
         session_id: str,
         session_type: SessionType,
         create_storage: Callable[[], BaseDb],
-    ) -> Callable[[str, str], None]:
+    ) -> Callable[[str, str], Awaitable[None]]:
         """Build the response-event persistence callback for one session-backed response."""
 
-        def persist_response_event_id(run_id: str, response_event_id: str) -> None:
-            storage = create_storage()
-            try:
-                self.deps.state_writer.persist_response_event_id_in_session_run(
-                    storage=storage,
-                    session_id=session_id,
-                    session_type=session_type,
-                    run_id=run_id,
-                    response_event_id=response_event_id,
-                )
-            finally:
-                storage.close()
+        async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
+            await self.deps.state_writer.apersist_response_event_id_in_session_run(
+                create_storage=create_storage,
+                session_id=session_id,
+                session_type=session_type,
+                run_id=run_id,
+                response_event_id=response_event_id,
+            )
 
         return persist_response_event_id
 

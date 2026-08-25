@@ -6434,10 +6434,15 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
     """Memory persistence and run-event linkage run on success and stay off after a failed delivery."""
     memory_calls: list[str] = []
     persisted: list[tuple[str, str]] = []
+
+    async def persist_response_event_id(run_id: str, event_id: str) -> None:
+        await asyncio.sleep(0)
+        persisted.append((run_id, event_id))
+
     deps = PostResponseEffectsDeps(
         logger=get_logger("tests.post_effects"),
         queue_memory_persistence=lambda: memory_calls.append("memory"),
-        persist_response_event_id=lambda run_id, event_id: persisted.append((run_id, event_id)),
+        persist_response_event_id=persist_response_event_id,
     )
 
     await apply_post_response_effects(

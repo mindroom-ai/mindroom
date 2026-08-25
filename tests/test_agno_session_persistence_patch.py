@@ -10,11 +10,13 @@ import time
 import weakref
 from contextvars import ContextVar
 from copy import deepcopy as copy_session
-from typing import TYPE_CHECKING, Literal
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 from agno.agent import Agent
 from agno.agent import _session as agent_session_module
+from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.db.sqlite.async_sqlite import AsyncSqliteDb
 from agno.models.message import Message
@@ -28,6 +30,10 @@ from agno.team import _session as team_session_module
 from mindroom import agent_storage
 from mindroom import agno_session_persistence_patch as persistence_patch
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.config.main import Config
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -114,6 +120,15 @@ def _recording_upsert(storage: BaseDb, write_order: list[str]) -> Callable[..., 
         return original_upsert(session, deserialize=deserialize)
 
     return record
+
+
+def _assert_response_link_persisted(storage: BaseDb) -> None:
+    persisted = get_agent_session(storage, "shared")
+    assert persisted is not None
+    assert persisted.session_data is not None
+    assert persisted.session_data["session_state"]["durable"] == "value"
+    assert persisted.runs is not None
+    assert persisted.runs[0].metadata == {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer"}
 
 
 def test_installation_is_exact_version_guarded_and_idempotent() -> None:
@@ -210,6 +225,228 @@ async def test_registered_writes_run_on_a_dedicated_thread(
 
     assert len(write_threads) == 1
     assert write_threads != [event_loop_thread]
+
+
+@pytest.mark.asyncio
+async def test_registered_storage_operation_runs_entirely_off_event_loop(tmp_path: Path) -> None:
+    """Storage construction, mutation, and close should stay off the event loop."""
+    event_loop_thread = threading.get_ident()
+    observed_threads: list[int] = []
+
+    def create_storage() -> BaseDb:
+        observed_threads.append(threading.get_ident())
+        storage = _storage(tmp_path, "registered-operation")
+        original_close = storage.close
+
+        def close() -> None:
+            observed_threads.append(threading.get_ident())
+            original_close()
+
+        storage.close = close  # type: ignore[method-assign]
+        return storage
+
+    def operation(_storage: BaseDb) -> None:
+        observed_threads.append(threading.get_ident())
+
+    await persistence_patch.run_registered_storage_operation(create_storage, operation)
+
+    assert len(observed_threads) == 3
+    assert event_loop_thread not in observed_threads
+
+
+@pytest.mark.asyncio
+async def test_unregistered_unhashable_storage_uses_off_loop_fallback() -> None:
+    """Duck-typed storage outside the lane registry should still run and close."""
+    event_loop_thread = threading.get_ident()
+    operation_threads: list[int] = []
+    storage_closed = False
+
+    def close() -> None:
+        nonlocal storage_closed
+        storage_closed = True
+
+    storage = SimpleNamespace(close=close)
+
+    await persistence_patch.run_registered_storage_operation(
+        lambda: cast("BaseDb", storage),
+        lambda _storage: operation_threads.append(threading.get_ident()),
+    )
+
+    assert operation_threads != [event_loop_thread]
+    assert storage_closed is True
+
+
+@pytest.mark.asyncio
+async def test_registered_storage_operation_shares_save_lane_fifo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct read-modify-write must not overtake an accepted session save."""
+    save_storage = _storage(tmp_path, "shared-operation")
+    owner, session = _owner_and_session("agent", save_storage, "shared")
+    lane = persistence_patch._registered_lane(save_storage)
+    assert lane is not None
+    save_started = threading.Event()
+    release_save = threading.Event()
+    operation_submitted = threading.Event()
+    operation_started = threading.Event()
+    original_upsert = save_storage.upsert_session
+    original_submit = lane.executor.submit
+
+    def blocked_upsert(session: AgentSession, deserialize: bool | None = True) -> object:
+        save_started.set()
+        assert release_save.wait(timeout=5)
+        return original_upsert(session, deserialize=deserialize)
+
+    def note_submit(function: Callable[..., object], *args: object) -> Future[object]:
+        future = original_submit(function, *args)
+        operation_submitted.set()
+        return future
+
+    monkeypatch.setattr(save_storage, "upsert_session", blocked_upsert)
+    save = asyncio.create_task(owner.asave_session(session))
+    operation: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(save_started.wait, 5)
+        monkeypatch.setattr(lane.executor, "submit", note_submit)
+        operation = asyncio.create_task(
+            persistence_patch.run_registered_storage_operation(
+                lambda: _storage(tmp_path, "shared-operation"),
+                lambda _storage: operation_started.set(),
+            ),
+        )
+        assert await asyncio.to_thread(operation_submitted.wait, 5)
+        assert not operation_started.is_set()
+
+        release_save.set()
+        await asyncio.gather(save, operation)
+    finally:
+        release_save.set()
+        await asyncio.gather(save, *([operation] if operation is not None else []), return_exceptions=True)
+        save_storage.close()
+
+    assert operation_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_response_link_update_follows_pending_save_without_lost_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real response-link path must serialize behind an accepted session save."""
+    storage_name = "response-link"
+    save_storage = _storage(tmp_path, storage_name)
+    owner, session = _owner_and_session("agent", save_storage, "shared")
+    save_started = threading.Event()
+    release_save = threading.Event()
+    link_started = threading.Event()
+    link_storage_closed = threading.Event()
+    link_threads: list[int] = []
+    event_loop_thread = threading.get_ident()
+    original_upsert = save_storage.upsert_session
+
+    def blocked_upsert(session: AgentSession, deserialize: bool | None = True) -> object:
+        save_started.set()
+        assert release_save.wait(timeout=5)
+        return original_upsert(session, deserialize=deserialize)
+
+    writer = ConversationStateWriter(
+        ConversationStateWriterDeps(
+            runtime=SimpleNamespace(config=Config()),
+            logger=SimpleNamespace(),
+            runtime_paths=test_runtime_paths(tmp_path),
+            agent_name="agent",
+        ),
+    )
+    original_persist = writer._persist_response_event_id_in_session_run
+
+    def record_link(**kwargs: object) -> None:
+        link_threads.append(threading.get_ident())
+        link_started.set()
+        original_persist(**kwargs)  # type: ignore[arg-type]
+
+    def create_link_storage() -> BaseDb:
+        link_threads.append(threading.get_ident())
+        storage = _storage(tmp_path, storage_name)
+        original_close = storage.close
+
+        def close() -> None:
+            link_threads.append(threading.get_ident())
+            original_close()
+            link_storage_closed.set()
+
+        storage.close = close  # type: ignore[method-assign]
+        return storage
+
+    monkeypatch.setattr(save_storage, "upsert_session", blocked_upsert)
+    monkeypatch.setattr(writer, "_persist_response_event_id_in_session_run", record_link)
+    save = asyncio.create_task(owner.asave_session(session))
+    link: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(save_started.wait, 5)
+        link = asyncio.create_task(
+            writer.apersist_response_event_id_in_session_run(
+                create_storage=create_link_storage,
+                session_id="shared",
+                session_type=SessionType.AGENT,
+                run_id="run",
+                response_event_id="$answer",
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not link_started.is_set()
+
+        release_save.set()
+        await asyncio.gather(save, link)
+    finally:
+        release_save.set()
+        await asyncio.gather(save, *([link] if link is not None else []), return_exceptions=True)
+
+    _assert_response_link_persisted(save_storage)
+    save_storage.close()
+    assert link_started.is_set()
+    assert link_storage_closed.is_set()
+    assert event_loop_thread not in link_threads
+
+
+@pytest.mark.asyncio
+async def test_registered_storage_operation_drains_and_closes_on_cancellation(tmp_path: Path) -> None:
+    """Cancellation should wait for an accepted mutation and its storage close."""
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    storage_closed = threading.Event()
+
+    def create_storage() -> BaseDb:
+        storage = _storage(tmp_path, "cancelled-operation")
+        original_close = storage.close
+
+        def close() -> None:
+            original_close()
+            storage_closed.set()
+
+        storage.close = close  # type: ignore[method-assign]
+        return storage
+
+    def blocked_operation(_storage: BaseDb) -> None:
+        operation_started.set()
+        assert release_operation.wait(timeout=5)
+
+    task = asyncio.create_task(
+        persistence_patch.run_registered_storage_operation(create_storage, blocked_operation),
+    )
+    try:
+        assert await asyncio.to_thread(operation_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_operation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_operation.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert storage_closed.is_set()
 
 
 @pytest.mark.asyncio
