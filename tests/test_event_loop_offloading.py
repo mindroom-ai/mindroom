@@ -14,6 +14,7 @@ from agno.models.message import Message
 
 import mindroom.ai as ai_module
 import mindroom.memory._file_backend as file_backend_module
+import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -279,6 +280,99 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
     assert prepare_history.await_args.kwargs["resolved_runtime_model"].model_name == "default"
     assert pipeline_timing.metadata["prompt_branches_parallel"] is False
     assert pipeline_timing.metadata["prompt_branches_serial_reason"] == "default_workspace_scaffold_pending"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_closes_built_agent_when_history_preparation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A built per-turn agent must be closed when later preparation fails."""
+    built_agent = MagicMock()
+    built_agent.additional_context = ""
+    close_runtime = MagicMock()
+    close_client = AsyncMock()
+    preparation_error = RuntimeError("history preparation failed")
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
+    monkeypatch.setattr(
+        ai_module,
+        "prepare_agent_execution_context",
+        AsyncMock(side_effect=preparation_error),
+    )
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config(),
+        )
+
+    assert raised.value is preparation_error
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
+
+
+@pytest.mark.asyncio
+async def test_serial_agent_build_cancellation_drains_and_closes_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must wait for a serial build and close its unreturned agent."""
+    build_started = threading.Event()
+    release_build = threading.Event()
+    built_agent = MagicMock()
+    built_agent.additional_context = ""
+    close_runtime = MagicMock()
+    close_client = AsyncMock()
+
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> MagicMock:
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        return built_agent
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", blocked_create_agent)
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
+
+    task = asyncio.create_task(
+        ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config("file"),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(build_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release_build.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_build.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
 
 
 @pytest.mark.asyncio
