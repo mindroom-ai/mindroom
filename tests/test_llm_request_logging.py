@@ -164,6 +164,75 @@ async def test_llm_request_log_uses_serialized_snapshot_when_file_write_is_delay
 
 
 @pytest.mark.asyncio
+async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation must not release borrowed values before their record is durable."""
+    serialization_started, release_serialization, serialization_finished = (threading.Event() for _ in range(3))
+    original_serialize = llm_request_logging._serialize_llm_request_log_line
+
+    def blocked_serialize(*args: object, **kwargs: object) -> str:
+        serialization_started.set()
+        assert release_serialization.wait(timeout=5)
+        try:
+            return original_serialize(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            serialization_finished.set()
+
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", blocked_serialize)
+    model = _FakeModel(id="submitted-model", temperature=0.7)
+    messages = [Message(role="user", content="submitted message")]
+    tools = [{"name": "submitted_tool"}]
+    log_path = tmp_path / "requests.jsonl"
+    write_task = asyncio.create_task(
+        _write_llm_request_log(
+            model=model,  # type: ignore[arg-type]
+            agent_name="assistant",
+            messages=messages,
+            tools=tools,
+            log_path=log_path,
+            request_log_id="log-1",
+        ),
+    )
+    cancellation_observed = asyncio.Event()
+
+    async def observe_cancellation() -> None:
+        try:
+            await write_task
+        except asyncio.CancelledError:
+            model.id = "mutated-model"
+            model.temperature = 1.0
+            messages[0].content = "mutated message"
+            tools[0]["name"] = "mutated_tool"
+            cancellation_observed.set()
+            raise
+
+    observer = asyncio.create_task(observe_cancellation())
+    try:
+        assert await asyncio.to_thread(serialization_started.wait, 5)
+        write_task.cancel()
+        await asyncio.sleep(0)
+        write_task.cancel()
+        await asyncio.sleep(0)
+        cancellation_was_deferred = not cancellation_observed.is_set()
+        release_serialization.set()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        assert await asyncio.to_thread(serialization_finished.wait, 5)
+    finally:
+        release_serialization.set()
+        await asyncio.gather(write_task, observer, return_exceptions=True)
+
+    assert cancellation_was_deferred
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+    assert payload["model_id"] == "submitted-model"
+    assert payload["messages"][0]["content"] == "submitted message"
+    assert payload["tools"] == [{"name": "submitted_tool"}]
+    assert payload["model_params"] == {"temperature": 0.7}
+
+
+@pytest.mark.asyncio
 async def test_wire_tool_normalization_runs_on_request_serializer_thread(tmp_path: Path) -> None:
     """Provider wire-tool capture should borrow values until off-loop serialization."""
     event_loop_thread = threading.get_ident()

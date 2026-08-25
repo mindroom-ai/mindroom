@@ -123,6 +123,41 @@ def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     _write_serialized_jsonl_line(path, json.dumps(redact_sensitive_data(payload)))
 
 
+async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
+    """Finish one accepted task before restoring caller cancellation."""
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    deferred_cancel_count = 0
+    deferred_cancel: asyncio.CancelledError | None = None
+
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            caller_cancel_count = current_task.cancelling()
+            if caller_cancel_count <= 0:
+                raise
+            for _ in range(caller_cancel_count):
+                current_task.uncancel()
+            deferred_cancel_count += caller_cancel_count
+            deferred_cancel = deferred_cancel or exc
+
+    try:
+        task.result()
+    except BaseException as task_error:
+        if deferred_cancel is None:
+            raise
+        for _ in range(deferred_cancel_count):
+            current_task.cancel()
+        raise deferred_cancel from task_error
+
+    if deferred_cancel is None:
+        return
+    for _ in range(deferred_cancel_count):
+        current_task.cancel()
+    raise deferred_cancel
+
+
 def _json_safe(value: object) -> _JSONValue:
     normalized: object = value
     if isinstance(normalized, BaseModel):
@@ -367,18 +402,23 @@ async def _write_llm_request_log(
     request_log_id: str,
     timestamp: datetime | None = None,
 ) -> None:
-    """Serialize borrowed request values off-loop, then append the immutable line."""
-    serialized_line = await asyncio.to_thread(
-        _serialize_llm_request_log_line,
-        model=model,
-        agent_name=agent_name,
-        messages=messages,
-        tools=tools,
-        request_context=request_context,
-        request_log_id=request_log_id,
-        timestamp=timestamp or datetime.now().astimezone(),
-    )
-    await asyncio.to_thread(_write_serialized_jsonl_line, log_path, serialized_line)
+    """Serialize and append off-loop before exposing caller cancellation."""
+    request_timestamp = timestamp or datetime.now().astimezone()
+
+    def serialize_and_write() -> None:
+        serialized_line = _serialize_llm_request_log_line(
+            model=model,
+            agent_name=agent_name,
+            messages=messages,
+            tools=tools,
+            request_context=request_context,
+            request_log_id=request_log_id,
+            timestamp=request_timestamp,
+        )
+        _write_serialized_jsonl_line(log_path, serialized_line)
+
+    write_task = asyncio.create_task(asyncio.to_thread(serialize_and_write))
+    await _await_before_cancelling(write_task)
 
 
 def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
