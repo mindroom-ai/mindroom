@@ -570,7 +570,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         )
         return "It is sunny."
 
-    cached_agent = SimpleNamespace(additional_context="base context")
+    cached_agent = SimpleNamespace(additional_context="base context", model=None)
     create_agent_mock = MagicMock(return_value=cached_agent)
     history_storage = MagicMock()
     create_scope_session_storage_mock = MagicMock(return_value=history_storage)
@@ -1034,8 +1034,8 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         ai_calls.append((turn, kwargs))
         return f"answer-{len(ai_calls)}"
 
-    first_agent = SimpleNamespace(additional_context="first base")
-    second_agent = SimpleNamespace(additional_context="second base")
+    first_agent = SimpleNamespace(additional_context="first base", model=None)
+    second_agent = SimpleNamespace(additional_context="second base", model=None)
     create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
     close_agent_mock = MagicMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", resolve_knowledge)
@@ -1131,7 +1131,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base context")),
+        MagicMock(return_value=SimpleNamespace(additional_context="base context", model=None)),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(

@@ -309,7 +309,7 @@ class _CallAgentCache:
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
             )
-            prewarm_anthropic_async_client(getattr(agent, "model", None))
+            prewarm_anthropic_async_client(agent.model)
         except Exception:
             history_storage.close()
             raise

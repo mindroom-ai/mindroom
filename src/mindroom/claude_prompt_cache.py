@@ -63,6 +63,8 @@ if TYPE_CHECKING:
 
     from agno.models.anthropic import Claude as AnthropicClaude
 
+    from mindroom.bedrock_claude import MindRoomBedrockClaude
+
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_claude_deferred_tool_names"
 # The Anthropic API allows at most four cache_control markers per request.
@@ -97,6 +99,7 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
 
 
 _ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
+_BEDROCK_CLAUDE_CLASS = ("mindroom.bedrock_claude", "MindRoomBedrockClaude")
 
 
 def as_anthropic_claude(model: object) -> AnthropicClaude | None:
@@ -111,10 +114,17 @@ def as_anthropic_claude(model: object) -> AnthropicClaude | None:
     return cast("AnthropicClaude", model)
 
 
+def _is_session_backed_bedrock_claude(model: object) -> bool:
+    """Return whether a Bedrock model will not retain a prewarmed client."""
+    if not isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS):
+        return False
+    return cast("MindRoomBedrockClaude", model).session is not None
+
+
 def prewarm_anthropic_async_client(model: object) -> None:
     """Build and cache a Claude async SDK client without making a request."""
     claude_model = as_anthropic_claude(model)
-    if claude_model is None or getattr(claude_model, "session", None) is not None:
+    if claude_model is None or _is_session_backed_bedrock_claude(claude_model):
         return
     claude_model.get_async_client()
 
