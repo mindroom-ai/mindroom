@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -2325,6 +2326,131 @@ class TestAgentBot(AgentBotTestBase):
         redact_message_event.assert_not_awaited()
         add_stop_button.assert_not_awaited()
         bot.client.room_send.assert_not_awaited()
+        receipt_path = (
+            runtime_paths_for(config).storage_root
+            / "agents"
+            / "calculator"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "940ffb8fc9eedd9c606a71df9cf9f467e5d3c1e94d1874613e496ae5b6d8c752.json"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["status"] == "completed"
+        assert receipt["result"] == ("reported" if expected_event_id is not None else "no_report")
+        assert receipt["response_text"] == response_text
+        assert receipt["started_at"] <= receipt["completed_at"]
+
+    @pytest.mark.asyncio
+    async def test_silent_schedule_writes_started_receipt_before_locked_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A locked-preparation failure must leave machine-readable evidence that the silent run started."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        receipt_path = (
+            runtime_paths_for(config).storage_root
+            / "agents"
+            / "calculator"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "940ffb8fc9eedd9c606a71df9cf9f467e5d3c1e94d1874613e496ae5b6d8c752.json"
+        )
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_event_id": "$event",
+                    "started_at": "2026-08-24T12:00:00Z",
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch.object(
+                bot._response_runner,
+                "_prepare_request_after_lock",
+                AsyncMock(side_effect=RuntimeError("preparation failed")),
+            ),
+            pytest.raises(RuntimeError, match="preparation failed"),
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Check for updates",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Check for updates",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                    ),
+                ),
+            )
+
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt == {
+            "agent_name": "calculator",
+            "completed_at": None,
+            "entity_name": "calculator",
+            "prompt": "Check for updates",
+            "result": None,
+            "response_text": None,
+            "room_id": "!test:localhost",
+            "schema_version": 1,
+            "source_event_id": "$event",
+            "started_at": receipt["started_at"],
+            "status": "started",
+            "thread_id": None,
+        }
+        assert receipt["started_at"].endswith("Z")
+
+    @pytest.mark.asyncio
+    async def test_silent_schedule_terminal_source_does_not_write_started_receipt(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A source rejected by the locked terminal gate never claims that execution started."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+
+        event_id = await bot._response_runner.generate_response(
+            ResponseRequest(
+                prompt="Check for updates",
+                thread_history=[],
+                user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$terminal-event",
+                    prompt="Check for updates",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                    source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                ),
+                prepare_source_turn=AsyncMock(return_value=True),
+            ),
+        )
+
+        assert event_id is None
+        receipt_directory = (
+            runtime_paths_for(config).storage_root
+            / "agents"
+            / "calculator"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+        )
+        assert not receipt_directory.exists()
 
     @pytest.mark.asyncio
     async def test_generate_response_refreshes_thread_history_after_lock(

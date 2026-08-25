@@ -72,6 +72,7 @@ from mindroom.matrix_delivery import (
     TurnHandoff,
 )
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     FinalTextTransform,
@@ -139,6 +140,7 @@ class ResponseIdentity:
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
+    participating_agent_names: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1289,6 +1291,15 @@ class DeliveryGateway:
                 no_report_text = strip_matching_visible_tool_markers(no_report_text, draft.tool_trace)
             if constants.is_silent_schedule_no_report_response(no_report_text):
                 suppression_reason = "silent_no_report"
+        await record_silent_schedule_result_if_needed(
+            entity_name=self.deps.agent_name,
+            agent_names=request.identity.participating_agent_names or (self.deps.agent_name,),
+            envelope=request.identity.response_envelope,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            suppression_reason=suppression_reason,
+            response_text=draft.response_text,
+        )
         if suppression_reason is not None:
             self.deps.logger.info(
                 "Response suppressed",

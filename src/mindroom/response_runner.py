@@ -86,6 +86,7 @@ from mindroom.response_terminal import (
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
@@ -431,6 +432,7 @@ class ResponseRequest:
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
+    participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
@@ -1436,6 +1438,7 @@ class ResponseRunner:
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
             correlation_id=continuation.correlation_id,
+            participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
 
     def _approval_post_response_outcome(
@@ -2578,6 +2581,7 @@ class ResponseRunner:
             response_kind=response_kind,
             response_envelope=request.response_envelope,
             correlation_id=self._correlation_id_for_request(request),
+            participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
 
     def _agent_turn_context(
@@ -2727,19 +2731,16 @@ class ResponseRunner:
             reply_entity_names=reply_entity_names,
         )
 
-    async def _begin_locked_turn(
+    async def _admit_locked_turn(
         self,
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
-        placeholder_message: str | None = None,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
         reply_entity_names: tuple[str, ...] = (),
     ) -> ResponseRequest | None:
-        """Expose a locked turn before running its potentially slow preparation."""
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        """Pass locked replay, authorization, and terminal-source gates before setup."""
         if not await self._locked_turn_can_begin(
             request,
             history_scope=history_scope,
@@ -2773,6 +2774,27 @@ class ResponseRunner:
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
             return None
+        await record_silent_schedule_started_if_needed(
+            entity_name=self.deps.agent_name,
+            agent_names=request.participating_agent_names or (self.deps.agent_name,),
+            envelope=request.response_envelope,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+        return request
+
+    async def _prepare_admitted_locked_turn(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+        placeholder_message: str | None = None,
+        early_placeholder_state: _EarlyPlaceholderState | None = None,
+    ) -> ResponseRequest:
+        """Run placeholder and request preparation for an already-admitted locked turn."""
+        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         placeholder_event_id = None
         if (
             placeholder_message is not None
@@ -2813,6 +2835,36 @@ class ResponseRunner:
             exclude_history_event_id=placeholder_event_id,
         )
         return self._request_with_locked_target(request, resolved_target)
+
+    async def _begin_locked_turn(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+        placeholder_message: str | None = None,
+        early_placeholder_state: _EarlyPlaceholderState | None = None,
+        reply_entity_names: tuple[str, ...] = (),
+    ) -> ResponseRequest | None:
+        """Admit and prepare one turn after its lifecycle lock is acquired."""
+        admitted_request = await self._admit_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+            reply_entity_names=reply_entity_names,
+        )
+        if admitted_request is None:
+            return None
+        return await self._prepare_admitted_locked_turn(
+            admitted_request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+            placeholder_message=placeholder_message,
+            early_placeholder_state=early_placeholder_state,
+        )
 
     def _sync_restart_retry_is_current(
         self,
@@ -3221,6 +3273,7 @@ class ResponseRunner:
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
         ]
+        request = replace(request, participating_agent_names=tuple(agent_names))
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
@@ -3230,6 +3283,16 @@ class ResponseRunner:
                 execution_identity=retry_execution_identity,
                 reply_entity_names=tuple(agent_names),
             )
+        admitted_request = await self._admit_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=session_scope,
+            execution_identity=retry_execution_identity,
+            reply_entity_names=tuple(agent_names),
+        )
+        if admitted_request is None:
+            return None
+        request = admitted_request
         turn_models = (
             None
             if team_request.resolution_reason is not None
@@ -3242,18 +3305,14 @@ class ResponseRunner:
                 thread_id=resolved_target.resolved_thread_id,
             )
         )
-        prepared_request = await self._begin_locked_turn(
+        request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
             placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
             early_placeholder_state=placeholder_state,
-            reply_entity_names=tuple(agent_names),
         )
-        if prepared_request is None:
-            return None
-        request = prepared_request
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
@@ -4344,6 +4403,7 @@ class ResponseRunner:
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        request = replace(request, participating_agent_names=(self.deps.agent_name,))
         history_scope = self.deps.state_writer.history_scope()
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
@@ -4357,6 +4417,15 @@ class ResponseRunner:
                 history_scope=history_scope,
                 execution_identity=execution_identity,
             )
+        admitted_request = await self._admit_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        )
+        if admitted_request is None:
+            return None
+        request = admitted_request
         response_thread_id = _response_thread_id(request, resolved_target)
         active_model_name = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
@@ -4364,7 +4433,7 @@ class ResponseRunner:
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
         ).model_name
-        prepared_request = await self._begin_locked_turn(
+        request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
@@ -4372,9 +4441,6 @@ class ResponseRunner:
             placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
-        if prepared_request is None:
-            return None
-        request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,
