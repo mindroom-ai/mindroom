@@ -20,6 +20,7 @@ from agno.agent import _init as agent_init
 from agno.agent import _run as agent_run
 from agno.agent import _session as agent_session
 from agno.agent import _storage as agent_storage
+from agno.run.team import TeamRunOutput
 from agno.team import _run as team_run
 from agno.team import _session as team_session
 from agno.team import _storage as team_storage
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
-    from agno.run.team import TeamRunOutput
     from agno.session import AgentSession, TeamSession, WorkflowSession
     from agno.team import Team
 
@@ -260,8 +260,8 @@ def _is_agno_background_task() -> bool:
     return task is not None and (task in agent_run._background_tasks or task in team_run._background_tasks)
 
 
-def _remove_transient_session_state(session: object) -> None:
-    session_data = getattr(session, "session_data", None)
+def _remove_transient_session_state(session: AgentSession | TeamSession) -> None:
+    session_data = session.session_data
     if session_data is None:
         return
     session_state = session_data.get("session_state")
@@ -276,13 +276,12 @@ def _prepare_team_session_snapshot(team: Team, session: TeamSession) -> TeamSess
     _remove_transient_session_state(session)
     if session.runs is not None:
         for run in session.runs:
-            if not hasattr(run, "member_responses"):
+            if not isinstance(run, TeamRunOutput):
                 continue
-            team_run_output = cast("TeamRunOutput", run)
             if not team.store_member_responses:
-                team_run_output.member_responses = []
+                run.member_responses = []
             else:
-                _ORIGINAL_TEAM_SCRUB_MEMBER_RESPONSES(team, team_run_output.member_responses)
+                _ORIGINAL_TEAM_SCRUB_MEMBER_RESPONSES(team, run.member_responses)
     return deepcopy(session)
 
 
@@ -319,6 +318,8 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
 
     reservation = _reserve_registered_write(target)
     if _is_agno_background_task():
+        # Agno's detached task sets are not joined before application DB teardown.
+        # Preserve blocking completion so no persistence worker outlives its handle.
         _attach_registered_write(
             reservation,
             lambda: _ORIGINAL_AGENT_SAVE_SESSION(agent, session),
@@ -326,8 +327,9 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
         return
 
     try:
-        _remove_transient_session_state(session)
-        snapshot = deepcopy(session)
+        standalone_session = cast("AgentSession", session)
+        _remove_transient_session_state(standalone_session)
+        snapshot = deepcopy(standalone_session)
         owner = cast("Agent", _DatabaseOwner(cast("BaseDb", database)))
     except BaseException as error:
         _fail_reserved_write(reservation, error)
@@ -354,6 +356,8 @@ async def _team_asave_session(team: Team, session: TeamSession) -> None:
 
     reservation = _reserve_registered_write(target)
     if _is_agno_background_task():
+        # Agno's detached task sets are not joined before application DB teardown.
+        # Preserve blocking completion so no persistence worker outlives its handle.
         _attach_registered_write(
             reservation,
             lambda: _ORIGINAL_TEAM_SAVE_SESSION(team, session),

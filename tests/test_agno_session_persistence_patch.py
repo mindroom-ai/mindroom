@@ -11,7 +11,6 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from copy import deepcopy as copy_session
-from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
 import pytest
@@ -31,6 +30,7 @@ from agno.team import _run as team_run
 from agno.workflow import Workflow
 from sqlalchemy import create_engine
 
+from mindroom import agno_session_persistence_patch as persistence_patch
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 
 if TYPE_CHECKING:
@@ -75,8 +75,6 @@ def _owner_and_session(
 
 def test_supported_agno_session_sources_are_patched() -> None:
     """Pinned source compatibility must remain visible to CI."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-
     assert persistence_patch._apply_patch() is True
     assert persistence_patch._is_applied() is True
 
@@ -235,7 +233,6 @@ def test_snapshot_reservation_preserves_cross_loop_invocation_order(  # noqa: PL
     surface: _Surface,
 ) -> None:
     """A later snapshot must remain behind an earlier blocked snapshot."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     first_storage = _storage(tmp_path, f"{surface}-snapshot-order")
     second_storage = _storage(tmp_path, f"{surface}-snapshot-order")
     baseline_owner, baseline_session = _owner_and_session(surface, first_storage, "baseline")
@@ -339,7 +336,6 @@ def test_snapshot_failure_releases_reservation_and_tail(  # noqa: PLR0915
     surface: _Surface,
 ) -> None:
     """Snapshot failure must preserve its error and unblock its successor."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     first_storage = _storage(tmp_path, f"{surface}-snapshot-failure")
     second_storage = _storage(tmp_path, f"{surface}-snapshot-failure")
     baseline_owner, baseline_session = _owner_and_session(surface, first_storage, "baseline")
@@ -467,7 +463,6 @@ def test_snapshot_failure_releases_reservation_and_tail(  # noqa: PLR0915
 
 def test_application_storage_is_registered_with_an_opaque_target(tmp_path: Path) -> None:
     """Only the application constructor opts a synchronous DB into offloading."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "registered")
     try:
         target = persistence_patch._registered_target(storage)
@@ -481,7 +476,6 @@ def test_application_storage_is_registered_with_an_opaque_target(tmp_path: Path)
 
 def test_storage_registration_has_weak_lifecycle(tmp_path: Path) -> None:
     """Registration must not retain a DB after application ownership ends."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "weak-registration")
     storage_reference = weakref.ref(storage)
 
@@ -496,7 +490,6 @@ def test_storage_registration_has_weak_lifecycle(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_unregistered_postgres_delegates_upstream_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Arbitrary PostgreSQL engines, including connect args, are not offloaded."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     database = PostgresDb(
         db_engine=create_engine(
             "postgresql+psycopg://user:credential@localhost/app",
@@ -539,7 +532,6 @@ async def test_unregistered_sqlite_uri_delegates_upstream_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Arbitrary SQLite URI spellings do not opt into application offloading."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     database = SqliteDb(db_url=db_url, session_table="records")
     owner = Agent(db=database, telemetry=False)
     session = AgentSession(session_id="sqlite", session_data={"session_state": {}})
@@ -636,7 +628,6 @@ async def test_worker_error_propagates_and_does_not_strand_later_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unexpected worker errors must surface and advance the database queue."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path)
     owner, first_session = _owner_and_session("agent", storage, "first")
     _, second_session = _owner_and_session("agent", storage, "second")
@@ -667,7 +658,6 @@ async def test_submission_failure_does_not_strand_later_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Executor submission failure must abandon its reserved queue ticket."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "submission-failure")
     owner, first_session = _owner_and_session("agent", storage, "first")
     _, second_session = _owner_and_session("agent", storage, "second")
@@ -696,7 +686,6 @@ async def test_completed_target_tail_is_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Completed writes must not retain targets, futures, or write closures."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "tail-lifecycle")
     owner, session = _owner_and_session("agent", storage, "tail")
     target = persistence_patch._registered_target(storage)
@@ -808,7 +797,6 @@ async def test_worker_error_wins_over_cancellation_after_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled waiter must still observe a submitted worker failure."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "worker-error")
     owner, session = _owner_and_session("agent", storage, "worker-error")
     write_started = threading.Event()
@@ -860,16 +848,17 @@ async def test_async_database_delegates_to_upstream_path(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_team_save_preserves_live_member_response_scrubbing(tmp_path: Path) -> None:
-    """Snapshotting must retain Agno's mutation of the live TeamSession."""
+    """Snapshotting must scrub team runs and preserve accepted agent runs."""
     storage = _storage(tmp_path, "team-scrub")
     team = Team(db=storage, members=[], store_member_responses=False, telemetry=False)
     member_response = RunOutput(run_id="member", agent_id="member", content="member")
+    agent_run_output = RunOutput(run_id="agent-run", agent_id="member", content="agent")
     run = TeamRunOutput(run_id="run", team_id="team", member_responses=[member_response])
     session = TeamSession(
         session_id="team-scrub",
         team_id="team",
         session_data={"session_state": {"current_run_id": "run"}},
-        runs=[run],
+        runs=[agent_run_output, run],
         created_at=int(time.time()),
     )
     try:
@@ -881,23 +870,27 @@ async def test_team_save_preserves_live_member_response_scrubbing(tmp_path: Path
     assert run.member_responses == []
     assert persisted is not None
     assert persisted.runs is not None
-    assert isinstance(persisted.runs[0], TeamRunOutput)
-    assert persisted.runs[0].member_responses == []
+    assert isinstance(persisted.runs[0], RunOutput)
+    assert persisted.runs[0].content == "agent"
+    assert isinstance(persisted.runs[1], TeamRunOutput)
+    assert persisted.runs[1].member_responses == []
 
 
 @pytest.mark.parametrize("surface", ["agent", "team"])
 @pytest.mark.asyncio
-async def test_agno_background_tasks_wait_for_dedicated_save(
+async def test_agno_background_save_completes_before_storage_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     surface: _Surface,
 ) -> None:
-    """Detached callers return only after their dedicated worker completes."""
+    """An unjoined Agno task must finish persistence before its DB can close."""
     storage = _storage(tmp_path, f"{surface}-background")
     owner, session = _owner_and_session(surface, storage, "background")
     persistence_threads: list[int] = []
     write_completed = threading.Event()
     original_upsert = storage.upsert_session
+    original_close = storage.close
+    storage_closed = False
     background_tasks = agent_run._background_tasks if surface == "agent" else team_run._background_tasks
 
     def record_thread(
@@ -909,17 +902,26 @@ async def test_agno_background_tasks_wait_for_dedicated_save(
         write_completed.set()
         return result
 
+    def checked_close() -> None:
+        nonlocal storage_closed
+        assert write_completed.is_set()
+        original_close()
+        storage_closed = True
+
     monkeypatch.setattr(storage, "upsert_session", record_thread)
+    monkeypatch.setattr(storage, "close", checked_close)
     task = asyncio.current_task()
     assert task is not None
     background_tasks.add(task)
     try:
         await owner.asave_session(session)
-        assert write_completed.is_set()
+        storage.close()
     finally:
         background_tasks.discard(task)
-        storage.close()
+        if not storage_closed:
+            original_close()
 
+    assert storage_closed
     assert len(persistence_threads) == 1
     assert persistence_threads != [threading.get_ident()]
 
@@ -999,7 +1001,6 @@ async def test_background_save_cannot_block_before_prior_worker_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ready background save sees the prior dedicated submission first."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "background-scheduler-window")
     baseline_owner, baseline_session = _owner_and_session("agent", storage, "baseline")
     first_owner, first_session = _owner_and_session("agent", storage, "first")
