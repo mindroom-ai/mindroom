@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import inspect
 import threading
 import weakref
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import partial
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote, urlsplit
 
 from agno.agent import _init as agent_init
 from agno.agent import _run as agent_run
@@ -71,13 +74,20 @@ class _SqlitePersistenceTarget:
 
 
 @dataclass(frozen=True)
+class _SqliteMemoryPersistenceTarget:
+    """Opaque identity for one named shared-memory SQLite session table."""
+
+    digest: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
 class _PostgresPersistenceTarget:
     """Opaque identity for one PostgreSQL session table."""
 
     digest: bytes = field(repr=False)
 
 
-type _PersistenceTarget = _SqlitePersistenceTarget | _PostgresPersistenceTarget
+type _PersistenceTarget = _SqlitePersistenceTarget | _SqliteMemoryPersistenceTarget | _PostgresPersistenceTarget
 
 
 @dataclass(frozen=True)
@@ -168,25 +178,59 @@ def _target_digest(*parts: str) -> bytes:
     return digest.digest()
 
 
+def _sqlite_uri_path(database_name: str) -> str:
+    uri_path = unquote(database_name.removeprefix("file:"))
+    if not uri_path.startswith("//"):
+        return uri_path
+    parsed = urlsplit(f"file:{uri_path}")
+    if parsed.netloc in ("", "localhost"):
+        return parsed.path
+    return f"//{parsed.netloc}{parsed.path}"
+
+
+def _postgres_host_identity(host: object) -> str:
+    return ",".join(part if part.startswith("/") else part.lower() for part in str(host).split(","))
+
+
+def _sqlite_coordination_identity(database: SqliteDb) -> _PersistenceTarget | None:
+    url = database.db_engine.url
+    database_name = url.database
+    if database_name in (None, "", ":memory:"):
+        return None
+    uri_enabled = str(url.query.get("uri", "")).lower() == "true"
+    if uri_enabled and database_name.startswith("file:"):
+        uri_path = _sqlite_uri_path(database_name)
+        mode = str(url.query.get("mode", "")).lower()
+        if mode == "memory" or uri_path == ":memory:":
+            if str(url.query.get("cache", "")).lower() != "shared":
+                return None
+            return _SqliteMemoryPersistenceTarget(
+                _target_digest("sqlite-memory", uri_path, database.session_table_name),
+            )
+        if not uri_path:
+            return None
+        normalized_database = str(Path(uri_path).resolve())
+    else:
+        normalized_database = str(Path(database_name).resolve())
+    return _SqlitePersistenceTarget(
+        _target_digest("sqlite", normalized_database, database.session_table_name),
+    )
+
+
 def _database_coordination_identity(database: BaseDb) -> _PersistenceTarget | None:
     """Return a credential-free identity for a supported durable target."""
     if isinstance(database, SqliteDb):
-        database_name = database.db_engine.url.database
-        if database_name in (None, "", ":memory:"):
-            return None
-        normalized_database = database_name if database_name.startswith("file:") else str(Path(database_name).resolve())
-        return _SqlitePersistenceTarget(
-            _target_digest("sqlite", normalized_database, database.session_table_name),
-        )
+        return _sqlite_coordination_identity(database)
 
     if isinstance(database, PostgresDb):
         url = database.db_engine.url
+        _, connect_arguments = database.db_engine.dialect.create_connect_args(url)
         return _PostgresPersistenceTarget(
             _target_digest(
                 "postgresql",
-                (url.host or "").lower(),
-                str(url.port or 5432),
-                url.database or "",
+                _postgres_host_identity(connect_arguments.get("host", "")),
+                str(connect_arguments.get("port") or 5432),
+                str(connect_arguments.get("dbname", url.database or "")),
                 database.db_schema,
                 database.session_table_name,
             ),
@@ -255,13 +299,12 @@ async def _run_ordered_write(
     ticket: int,
     write: Callable[[], object],
 ) -> object:
-    worker_awaitable: object | None = None
     try:
-        worker_awaitable = asyncio.to_thread(queue.run, ticket, write)
-        worker = asyncio.create_task(cast("Any", worker_awaitable))
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        worker_call = partial(context.run, queue.run, ticket, write)
+        worker = loop.run_in_executor(None, worker_call)
     except BaseException:
-        if inspect.iscoroutine(worker_awaitable):
-            worker_awaitable.close()
         queue.abandon(ticket)
         raise
 
