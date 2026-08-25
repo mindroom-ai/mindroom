@@ -8,14 +8,17 @@ import inspect
 import threading
 import weakref
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import version
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import _init as agent_init
 from agno.agent import _run as agent_run
 from agno.agent import _session as agent_session
 from agno.agent import _storage as agent_storage
+from agno.db.postgres import PostgresDb
+from agno.db.sqlite import SqliteDb
 from agno.team import _run as team_run
 from agno.team import _session as team_session
 from agno.team import _storage as team_storage
@@ -55,7 +58,26 @@ _ORIGINAL_TEAM_SCRUB_MEMBER_RESPONSES = team_run._scrub_member_responses
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
 _DATABASE_QUEUES_GUARD = threading.Lock()
+_TARGET_QUEUES: weakref.WeakValueDictionary[_PersistenceTarget, _DatabaseWriteQueue] = weakref.WeakValueDictionary()
+_ENGINE_QUEUES: weakref.WeakKeyDictionary[object, _DatabaseWriteQueue] = weakref.WeakKeyDictionary()
 _DATABASE_QUEUES: weakref.WeakKeyDictionary[BaseDb, _DatabaseWriteQueue] = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class _SqlitePersistenceTarget:
+    """Opaque identity for one durable SQLite session table."""
+
+    digest: bytes = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _PostgresPersistenceTarget:
+    """Opaque identity for one PostgreSQL session table."""
+
+    digest: bytes = field(repr=False)
+
+
+type _PersistenceTarget = _SqlitePersistenceTarget | _PostgresPersistenceTarget
 
 
 @dataclass(frozen=True)
@@ -72,6 +94,7 @@ class _DatabaseWriteQueue:
         self._condition = threading.Condition()
         self._next_ticket = 0
         self._serving_ticket = 0
+        self._active_ticket: int | None = None
         self._abandoned_tickets: set[int] = set()
 
     def reserve(self) -> int:
@@ -81,24 +104,33 @@ class _DatabaseWriteQueue:
             return ticket
 
     def abandon(self, ticket: int) -> None:
-        """Release a ticket whose snapshot failed before worker submission."""
+        """Idempotently release a ticket that did not enter its write."""
         with self._condition:
+            if ticket < self._serving_ticket or ticket == self._active_ticket:
+                return
             self._abandoned_tickets.add(ticket)
             self._advance_abandoned()
             self._condition.notify_all()
 
     def run(self, ticket: int, write: Callable[[], object]) -> object:
         with self._condition:
-            self._condition.wait_for(lambda: ticket == self._serving_ticket)
+            self._condition.wait_for(lambda: ticket <= self._serving_ticket)
+            if ticket < self._serving_ticket:
+                msg = "Cannot run an abandoned database write ticket"
+                raise RuntimeError(msg)
+            self._active_ticket = ticket
         try:
             return write()
         finally:
             with self._condition:
+                self._active_ticket = None
                 self._serving_ticket += 1
                 self._advance_abandoned()
                 self._condition.notify_all()
 
     def _advance_abandoned(self) -> None:
+        if self._active_ticket is not None:
+            return
         while self._serving_ticket in self._abandoned_tickets:
             self._abandoned_tickets.remove(self._serving_ticket)
             self._serving_ticket += 1
@@ -127,8 +159,59 @@ def _supported_sources_are_loaded() -> bool:
     return all(_source_hash(function) == _EXPECTED_SOURCE_HASHES[name] for name, function in loaded_sources.items())
 
 
+def _target_digest(*parts: str) -> bytes:
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = part.encode()
+        digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        digest.update(encoded)
+    return digest.digest()
+
+
+def _database_coordination_identity(database: BaseDb) -> _PersistenceTarget | None:
+    """Return a credential-free identity for a supported durable target."""
+    if isinstance(database, SqliteDb):
+        database_name = database.db_engine.url.database
+        if database_name in (None, "", ":memory:"):
+            return None
+        normalized_database = database_name if database_name.startswith("file:") else str(Path(database_name).resolve())
+        return _SqlitePersistenceTarget(
+            _target_digest("sqlite", normalized_database, database.session_table_name),
+        )
+
+    if isinstance(database, PostgresDb):
+        url = database.db_engine.url
+        return _PostgresPersistenceTarget(
+            _target_digest(
+                "postgresql",
+                (url.host or "").lower(),
+                str(url.port or 5432),
+                url.database or "",
+                database.db_schema,
+                database.session_table_name,
+            ),
+        )
+
+    return None
+
+
 def _database_queue(database: BaseDb) -> _DatabaseWriteQueue:
     with _DATABASE_QUEUES_GUARD:
+        target = _database_coordination_identity(database)
+        if target is not None:
+            queue = _TARGET_QUEUES.get(target)
+            if queue is None:
+                queue = _DatabaseWriteQueue()
+                _TARGET_QUEUES[target] = queue
+            return queue
+
+        if isinstance(database, SqliteDb):
+            queue = _ENGINE_QUEUES.get(database.db_engine)
+            if queue is None:
+                queue = _DatabaseWriteQueue()
+                _ENGINE_QUEUES[database.db_engine] = queue
+            return queue
+
         queue = _DATABASE_QUEUES.get(database)
         if queue is None:
             queue = _DatabaseWriteQueue()
@@ -172,14 +255,27 @@ async def _run_ordered_write(
     ticket: int,
     write: Callable[[], object],
 ) -> object:
-    worker = asyncio.create_task(asyncio.to_thread(queue.run, ticket, write))
-    cancellation: asyncio.CancelledError | None = None
-    while not worker.done():
-        try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError as error:
-            cancellation = error
-    result = worker.result()
+    worker_awaitable: object | None = None
+    try:
+        worker_awaitable = asyncio.to_thread(queue.run, ticket, write)
+        worker = asyncio.create_task(cast("Any", worker_awaitable))
+    except BaseException:
+        if inspect.iscoroutine(worker_awaitable):
+            worker_awaitable.close()
+        queue.abandon(ticket)
+        raise
+
+    try:
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        result = worker.result()
+    except BaseException:
+        queue.abandon(ticket)
+        raise
     if cancellation is not None:
         raise cancellation
     return result
@@ -193,13 +289,15 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
         or agent.workflow_id is not None
         or session.session_data is None
         or agent_init.has_async_db(agent)
-        or _is_agno_background_task()
     ):
         await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
 
     queue = _database_queue(cast("BaseDb", database))
     ticket = queue.reserve()
+    if _is_agno_background_task():
+        queue.run(ticket, lambda: _ORIGINAL_AGENT_SAVE_SESSION(agent, session))
+        return
     try:
         _remove_transient_session_state(session)
         snapshot = deepcopy(session)
@@ -218,18 +316,15 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
 
 async def _team_asave_session(team: Team, session: TeamSession) -> None:
     database = team.db
-    if (
-        database is None
-        or team.parent_team_id is not None
-        or team.workflow_id is not None
-        or team_has_async_db(team)
-        or _is_agno_background_task()
-    ):
+    if database is None or team.parent_team_id is not None or team.workflow_id is not None or team_has_async_db(team):
         await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
 
     queue = _database_queue(cast("BaseDb", database))
     ticket = queue.reserve()
+    if _is_agno_background_task():
+        queue.run(ticket, lambda: _ORIGINAL_TEAM_SAVE_SESSION(team, session))
+        return
     try:
         snapshot = _prepare_team_session_snapshot(team, session)
     except BaseException:

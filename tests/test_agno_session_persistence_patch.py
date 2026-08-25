@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import subprocess
 import threading
 import time
+import weakref
 from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 from agno.agent import Agent
 from agno.agent import _run as agent_run
+from agno.db.postgres import PostgresDb
 from agno.db.sqlite.async_sqlite import AsyncSqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -22,6 +25,7 @@ from agno.session.workflow import WorkflowSession
 from agno.team import Team
 from agno.team import _run as team_run
 from agno.workflow import Workflow
+from sqlalchemy import create_engine
 
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 
@@ -150,6 +154,131 @@ def test_sync_saves_are_ordered_across_event_loops(
     assert started == ["first", "second"]
 
 
+def test_distinct_sqlite_handles_share_write_order(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handles for one SQLite table must not commit an older save last."""
+    first_storage = _storage(tmp_path, "shared-target")
+    second_storage = _storage(tmp_path, "shared-target")
+    first_owner, first_session = _owner_and_session("agent", first_storage, "shared")
+    second_owner, second_session = _owner_and_session("agent", second_storage, "shared")
+    baseline_owner, baseline_session = _owner_and_session("agent", first_storage, "baseline")
+    asyncio.run(baseline_owner.asave_session(baseline_session))
+    first_session.user_id = "user"
+    second_session.user_id = "user"
+    first_session.metadata = {"write": "first"}
+    second_session.metadata = {"write": "second"}
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+    errors: list[BaseException] = []
+    original_first_upsert = first_storage.upsert_session
+    original_second_upsert = second_storage.upsert_session
+
+    def first_upsert(
+        session: AgentSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        first_started.set()
+        assert release_first.wait(timeout=5)
+        return original_first_upsert(session, deserialize=deserialize)
+
+    def second_upsert(
+        session: AgentSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        second_started.set()
+        return original_second_upsert(session, deserialize=deserialize)
+
+    def run_save(owner: Agent, session: AgentSession) -> None:
+        try:
+            asyncio.run(owner.asave_session(session))
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    monkeypatch.setattr(first_storage, "upsert_session", first_upsert)
+    monkeypatch.setattr(second_storage, "upsert_session", second_upsert)
+    first = threading.Thread(target=run_save, args=(first_owner, first_session))
+    second = threading.Thread(target=run_save, args=(second_owner, second_session))
+    first.start()
+    try:
+        assert first_started.wait(timeout=5)
+        second.start()
+        assert not second_started.wait(timeout=0.2)
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        persisted = get_agent_session(first_storage, "shared")
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        first_storage.close()
+        second_storage.close()
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert persisted is not None
+    assert persisted.metadata == {"write": "second"}
+
+
+def test_postgres_handles_use_credential_free_target_identity() -> None:
+    """Equivalent PostgreSQL handles coordinate without retaining credentials."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    first = PostgresDb(
+        db_engine=create_engine("postgresql+psycopg://first:secret-one@LOCALHOST:5432/app"),
+        db_schema="sessions",
+        session_table="records",
+    )
+    second = PostgresDb(
+        db_engine=create_engine("postgresql+psycopg://second:secret-two@localhost:5432/app"),
+        db_schema="sessions",
+        session_table="records",
+    )
+
+    first_identity = persistence_patch._database_coordination_identity(first)
+    second_identity = persistence_patch._database_coordination_identity(second)
+
+    assert first_identity == second_identity
+    identity_repr = repr(first_identity)
+    assert "secret" not in identity_repr
+    assert "localhost" not in identity_repr.lower()
+    assert "app" not in identity_repr
+
+
+def test_target_queue_registry_has_weak_lifecycle(tmp_path: Path) -> None:
+    """A durable target identity must not create an unbounded queue registry."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    storage = _storage(tmp_path, "weak-target")
+    identity = persistence_patch._database_coordination_identity(storage)
+    queue = persistence_patch._database_queue(storage)
+    queue_reference = weakref.ref(queue)
+
+    assert identity in persistence_patch._TARGET_QUEUES
+    del queue
+    gc.collect()
+
+    assert queue_reference() is None
+    assert identity not in persistence_patch._TARGET_QUEUES
+    storage.close()
+
+
+def test_abandoning_an_already_served_ticket_is_a_noop() -> None:
+    """Late cleanup must not retain stale tickets or disturb later writes."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    queue = persistence_patch._DatabaseWriteQueue()
+    first_ticket = queue.reserve()
+
+    assert queue.run(first_ticket, lambda: "first") == "first"
+    queue.abandon(first_ticket)
+    second_ticket = queue.reserve()
+
+    assert queue.run(second_ticket, lambda: "second") == "second"
+    assert queue._abandoned_tickets == set()
+
+
 @pytest.mark.asyncio
 async def test_cancellation_drains_write_before_later_save_and_close(  # noqa: PLR0915
     tmp_path: Path,
@@ -248,6 +377,43 @@ async def test_worker_error_propagates_and_does_not_strand_later_save(
         assert get_agent_session(storage, "second") is not None
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_failure_does_not_strand_later_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Executor submission failure must abandon its reserved queue ticket."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    storage = _storage(tmp_path, "submission-failure")
+    owner, first_session = _owner_and_session("agent", storage, "first")
+    _, second_session = _owner_and_session("agent", storage, "second")
+    queue = persistence_patch._database_queue(storage)
+    original_to_thread = persistence_patch.asyncio.to_thread
+
+    async def fail_submission(*_args: object, **_kwargs: object) -> object:
+        error_message = "executor unavailable"
+        raise RuntimeError(error_message)
+
+    monkeypatch.setattr(persistence_patch.asyncio, "to_thread", fail_submission)
+    try:
+        with pytest.raises(RuntimeError, match="executor unavailable"):
+            await owner.asave_session(first_session)
+        assert queue._serving_ticket == 1
+        monkeypatch.setattr(persistence_patch.asyncio, "to_thread", original_to_thread)
+        second_save = asyncio.create_task(owner.asave_session(second_session))
+        done, _ = await asyncio.wait({second_save}, timeout=5)
+        completed_without_repair = second_save in done
+        if not completed_without_repair:
+            # Repair the pre-fix queue so the RED test does not leak a worker.
+            queue.abandon(0)
+        await second_save
+        assert get_agent_session(storage, "second") is not None
+    finally:
+        storage.close()
+
+    assert completed_without_repair
 
 
 @pytest.mark.asyncio
@@ -366,6 +532,105 @@ async def test_agno_background_tasks_keep_upstream_synchronous_save(
         storage.close()
 
     assert persistence_threads == [event_loop_thread]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["agent", "team"])
+async def test_agno_background_save_waits_for_earlier_worker(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _Surface,
+) -> None:
+    """A detached synchronous save must not overtake a queued worker save."""
+    storage = _storage(tmp_path, f"{surface}-background-order")
+    first_owner, first_session = _owner_and_session(surface, storage, "shared")
+    second_owner, second_session = _owner_and_session(surface, storage, "shared")
+    baseline_owner, baseline_session = _owner_and_session(surface, storage, "baseline")
+    await baseline_owner.asave_session(baseline_session)
+    first_session.user_id = "user"
+    second_session.user_id = "user"
+    first_session.metadata = {"write": "first"}
+    second_session.metadata = {"write": "second"}
+    first_started = threading.Event()
+    release_first = threading.Event()
+    started: list[str] = []
+    second_entered_before_release: list[bool] = []
+    original_upsert = storage.upsert_session
+
+    def blocking_upsert(
+        session: AgentSession | TeamSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        write_marker = str((session.metadata or {}).get("write", ""))
+        started.append(write_marker)
+        if write_marker == "first":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_entered_before_release.append(not release_first.is_set())
+        return original_upsert(session, deserialize=deserialize)
+
+    def release_later() -> None:
+        if first_started.wait(timeout=5):
+            time.sleep(0.2)
+            release_first.set()
+
+    monkeypatch.setattr(storage, "upsert_session", blocking_upsert)
+    release_thread = threading.Thread(target=release_later)
+    release_thread.start()
+    first = asyncio.create_task(first_owner.asave_session(first_session))
+    current = asyncio.current_task()
+    assert current is not None
+    background_tasks = agent_run._background_tasks if surface == "agent" else team_run._background_tasks
+    try:
+        assert await asyncio.to_thread(first_started.wait, 5)
+        background_tasks.add(current)
+        try:
+            await second_owner.asave_session(second_session)
+        finally:
+            background_tasks.discard(current)
+        await first
+        persisted = get_agent_session(storage, "shared") if surface == "agent" else get_team_session(storage, "shared")
+    finally:
+        release_first.set()
+        release_thread.join(timeout=1)
+        await asyncio.gather(first, return_exceptions=True)
+        storage.close()
+
+    assert started == ["first", "second"]
+    assert second_entered_before_release == [False]
+    assert persisted is not None
+    assert persisted.metadata == {"write": "second"}
+
+
+@pytest.mark.parametrize(
+    ("surface", "owner_attribute"),
+    [
+        ("agent", "team_id"),
+        ("agent", "workflow_id"),
+        ("team", "parent_team_id"),
+        ("team", "workflow_id"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_nested_owners_do_not_delegate_a_sync_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _Surface,
+    owner_attribute: str,
+) -> None:
+    """Agno's nested-owner branches are no-ops and cannot bypass ordering."""
+    storage = _storage(tmp_path, f"nested-{surface}-{owner_attribute}")
+    owner, session = _owner_and_session(surface, storage, "nested")
+    calls: list[object] = []
+    setattr(owner, owner_attribute, "parent")
+    monkeypatch.setattr(storage, "upsert_session", lambda saved: calls.append(saved))
+    try:
+        await owner.asave_session(session)
+    finally:
+        storage.close()
+
+    assert calls == []
 
 
 @pytest.mark.asyncio
