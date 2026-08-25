@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from inspect import isfunction, ismethod, signature
-from types import MethodType
-from typing import TYPE_CHECKING, Any
+from inspect import signature
+from types import FunctionType, MethodType
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from weakref import ReferenceType, ref
 
 from agno.tools.function import Function, UserInputField
@@ -17,8 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_CACHE_POSTPROCESSOR_ATTR = "_mindroom_schema_cache_postprocessor"
-_CACHE_SOURCE_ATTR = "_mindroom_schema_cache_source"
+_CACHE_METADATA_ATTR = "_mindroom_schema_cache_metadata"
 type _SchemaCachePostprocessor = Callable[[Function, bool], None]
 
 
@@ -29,6 +28,21 @@ class _ProcessedFunctionSchema:
     parameters: dict[str, Any]
     description: str | None
     user_input_schema: tuple[UserInputField, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SchemaCacheMetadata:
+    """Typed cache customization attached to an Agno Function."""
+
+    postprocessor: _SchemaCachePostprocessor | None = None
+    cache_source: FunctionType | None = None
+
+
+@runtime_checkable
+class _HasSchemaCacheMetadata(Protocol):
+    """Agno Function extension carrying MindRoom schema-cache metadata."""
+
+    _mindroom_schema_cache_metadata: _SchemaCacheMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,33 +64,51 @@ def set_schema_cache_postprocessor(function: Function, postprocessor: _SchemaCac
     processor's complete behavior to a cache-owned ``Function``.
     """
     if (
-        not isfunction(postprocessor)
+        not isinstance(postprocessor, FunctionType)
         or "<locals>" in postprocessor.__qualname__
         or postprocessor.__closure__ is not None
     ):
         msg = "Schema cache postprocessors must be module-level functions."
         raise TypeError(msg)
-    object.__setattr__(function, _CACHE_POSTPROCESSOR_ATTR, postprocessor)
+    metadata = _schema_cache_metadata(function) or _SchemaCacheMetadata()
+    object.__setattr__(
+        function,
+        _CACHE_METADATA_ATTR,
+        replace(metadata, postprocessor=postprocessor),
+    )
 
 
 def set_schema_cache_source(function: Function, source: Callable[..., object]) -> None:
     """Set a private stable cache source without changing the live entrypoint."""
-    cache_source = source.__func__ if ismethod(source) else source
-    if not isfunction(cache_source):
+    cache_source = source.__func__ if isinstance(source, MethodType) else source
+    if not isinstance(cache_source, FunctionType):
         msg = "Schema cache sources must be functions."
         raise TypeError(msg)
-    object.__setattr__(function, _CACHE_SOURCE_ATTR, cache_source)
+    metadata = _schema_cache_metadata(function) or _SchemaCacheMetadata()
+    object.__setattr__(
+        function,
+        _CACHE_METADATA_ATTR,
+        replace(metadata, cache_source=cache_source),
+    )
 
 
-def get_schema_cache_source(function: Function) -> Callable[..., object] | None:
+def _schema_cache_metadata(function: Function) -> _SchemaCacheMetadata | None:
+    if isinstance(function, _HasSchemaCacheMetadata):
+        return function._mindroom_schema_cache_metadata
+    return None
+
+
+def get_schema_cache_source(function: Function) -> FunctionType | None:
     """Return the private stable cache source for a custom schema processor."""
-    source = getattr(function, _CACHE_SOURCE_ATTR, None)
-    return source if isfunction(source) else None
+    metadata = _schema_cache_metadata(function)
+    return metadata.cache_source if metadata is not None else None
 
 
 def _is_stable_cache_postprocessor(postprocessor: object) -> bool:
     return (
-        isfunction(postprocessor) and "<locals>" not in postprocessor.__qualname__ and postprocessor.__closure__ is None
+        isinstance(postprocessor, FunctionType)
+        and "<locals>" not in postprocessor.__qualname__
+        and postprocessor.__closure__ is None
     )
 
 
@@ -90,24 +122,27 @@ def _uses_default_entrypoint_processor(function: Function) -> bool:
 
 
 def _schema_cache_entrypoint(function: Function) -> _SchemaCacheEntrypoint | None:
-    if function.entrypoint is None or not callable(function.entrypoint):
+    entrypoint = function.entrypoint
+    if not isinstance(entrypoint, (FunctionType, MethodType)):
         return None
 
-    source_callable = get_schema_cache_source(function) or function.entrypoint
-    if isinstance(source_callable, MethodType) or ismethod(source_callable):
+    source_callable = get_schema_cache_source(function) or entrypoint
+    if isinstance(source_callable, MethodType):
         source_callable = source_callable.__func__
-    elif not isfunction(source_callable):
+    if not isinstance(source_callable, FunctionType):
+        return None
+    if source_callable.__closure__ is not None:
         return None
 
     try:
         return _SchemaCacheEntrypoint(
             cache_source=source_callable,
             schema_fingerprint=(
-                str(signature(function.entrypoint)),
-                repr(getattr(function.entrypoint, "__annotations__", {})),
-                getattr(function.entrypoint, "__doc__", None),
+                str(signature(entrypoint)),
+                repr(entrypoint.__annotations__),
+                entrypoint.__doc__,
             ),
-            entrypoint_ref=ref(function.entrypoint),
+            entrypoint_ref=ref(entrypoint),
         )
     except (TypeError, ValueError):
         return None
@@ -120,7 +155,8 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
     parameters cannot form a stable cache key, in which case callers must fall
     back to full entrypoint processing on a private copy.
     """
-    cache_postprocessor = getattr(function, _CACHE_POSTPROCESSOR_ATTR, None)
+    metadata = _schema_cache_metadata(function)
+    cache_postprocessor = metadata.postprocessor if metadata is not None else None
     if not _uses_default_entrypoint_processor(function) and cache_postprocessor is None:
         return None
     if cache_postprocessor is not None and not _is_stable_cache_postprocessor(cache_postprocessor):

@@ -241,3 +241,32 @@ def test_cached_processed_schema_does_not_retain_wrapped_method_owner(tmp_path: 
         assert second == first
     finally:
         clear_tool_schema_cache()
+
+
+def test_cached_processed_schema_does_not_retain_wrapped_closure_owner(tmp_path: Path) -> None:
+    """Cached snapshots must not keep a closure's captured owner alive."""
+
+    class ReportExporter:
+        report_prefix = "report"
+
+    def build_function() -> tuple[Function, ref[ReportExporter]]:
+        owner = ReportExporter()
+
+        def export_report(report_id: str) -> str:
+            return f"{owner.report_prefix}:{report_id}"
+
+        return Function(name="export_report", entrypoint=export_report), ref(owner)
+
+    clear_tool_schema_cache()
+    function, owner_ref = build_function()
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+    try:
+        cached_processed_schema(function, strict=False)
+
+        del function
+        gc.collect()
+
+        assert owner_ref() is None
+    finally:
+        clear_tool_schema_cache()
