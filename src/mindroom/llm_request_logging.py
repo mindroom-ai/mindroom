@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
 _INSTALLED_ATTR = "_mindroom_llm_request_logging_installed"
 logger = get_logger(__name__)
+_JSONL_APPEND_LOCK = Lock()
 
 
 _SKIP_MODEL_PARAM_NAMES = {
@@ -72,7 +74,7 @@ _ACTIVE_MODEL_CALLS = ContextVar[frozenset[int]]("mindroom_llm_observability_act
 
 @dataclass
 class _WireToolsCapture:
-    """Request-local borrowed tools observed after provider wire transformations."""
+    """Request-local tool membership whose elements stay borrowed through logging."""
 
     enabled: bool
     observed: bool = False
@@ -113,14 +115,27 @@ def _model_params(model: Model) -> dict[str, _JSONValue]:
 
 
 def _write_serialized_jsonl_line(path: Path, line: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.write("\n")
+    record = f"{line}\n"
+    with _JSONL_APPEND_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(record)
 
 
 def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     _write_serialized_jsonl_line(path, json.dumps(redact_sensitive_data(payload)))
+
+
+def _consume_task_cancellations(task: asyncio.Task[object]) -> int:
+    cancel_count = task.cancelling()
+    for _ in range(cancel_count):
+        task.uncancel()
+    return cancel_count
+
+
+def _restore_task_cancellations(task: asyncio.Task[object], cancel_count: int) -> None:
+    for _ in range(cancel_count):
+        task.cancel()
 
 
 async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
@@ -134,27 +149,27 @@ async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
-            caller_cancel_count = current_task.cancelling()
+            caller_cancel_count = _consume_task_cancellations(current_task)
             if caller_cancel_count <= 0:
                 raise
-            for _ in range(caller_cancel_count):
-                current_task.uncancel()
             deferred_cancel_count += caller_cancel_count
             deferred_cancel = deferred_cancel or exc
+        except BaseException:
+            if task.done():
+                break
+            raise
 
     try:
         task.result()
     except BaseException as task_error:
         if deferred_cancel is None:
             raise
-        for _ in range(deferred_cancel_count):
-            current_task.cancel()
+        _restore_task_cancellations(current_task, deferred_cancel_count)
         raise deferred_cancel from task_error
 
     if deferred_cancel is None:
         return
-    for _ in range(deferred_cancel_count):
-        current_task.cancel()
+    _restore_task_cancellations(current_task, deferred_cancel_count)
     raise deferred_cancel
 
 
@@ -206,12 +221,12 @@ def _request_tools(value: object) -> list[dict[str, _JSONValue]] | None:
 
 
 def record_llm_request_tools(tools: object) -> None:
-    """Borrow final provider tools until the active model invocation is logged."""
+    """Capture final tool membership while borrowing elements until logging."""
     capture = _WIRE_TOOLS_CAPTURE.get()
     if capture is None or not capture.enabled:
         return
     capture.observed = True
-    capture.tools = tools
+    capture.tools = list(tools) if isinstance(tools, list) else tools
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -402,15 +417,17 @@ async def _write_llm_request_log(
     request_log_id: str,
     timestamp: datetime | None = None,
 ) -> None:
-    """Serialize and append off-loop before exposing caller cancellation."""
+    """Pin container membership, then borrow elements through the awaited write."""
     request_timestamp = timestamp or datetime.now().astimezone()
+    captured_messages = tuple(messages)
+    captured_tools = list(tools) if isinstance(tools, list) else tools
 
     def serialize_and_write() -> None:
         serialized_line = _serialize_llm_request_log_line(
             model=model,
             agent_name=agent_name,
-            messages=messages,
-            tools=tools,
+            messages=captured_messages,
+            tools=captured_tools,
             request_context=request_context,
             request_log_id=request_log_id,
             timestamp=request_timestamp,
@@ -530,6 +547,8 @@ async def _write_llm_request_log_if_present(
 ) -> _RequestLogRef | None:
     """Write one request log entry when provider kwargs include API request messages.
 
+    Model configuration plus message and tool elements remain borrowed until
+    this awaited call returns or raises; their top-level containers are pinned.
     Returns the written record's join key and file so the matching response
     record can be joined to it later, in the same daily file.
     """
@@ -697,6 +716,7 @@ def _stream_with_llm_request_logging(
             nonlocal request_log_ref, request_logged
             if request_logged:
                 return
+            request_logged = True
             request_log_ref = await _write_llm_request_log_best_effort(
                 model=model,
                 agent_name=agent_name,
@@ -706,7 +726,6 @@ def _stream_with_llm_request_logging(
                 request_context=request_context,
                 wire_tools_capture=wire_tools_capture,
             )
-            request_logged = True
 
         # finally: an abandoned stream (consumer break -> aclose()) must
         # still record any usage already reported; awaiting during aclose()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -32,8 +33,9 @@ from mindroom.llm_request_logging import (
 from mindroom.openai_tool_search import request_params_with_deferred_tool_search
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
     from pathlib import Path
+    from typing import TextIO
 
 
 @dataclass
@@ -53,6 +55,61 @@ class _FakeModel:
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield ModelResponse(content="ok")
         yield ModelResponse(content="!", response_usage=self.response_usage)
+
+
+class _ShieldRetryObserver:
+    def __init__(self, retry_events: dict[int, asyncio.Event]) -> None:
+        self._retry_events = retry_events
+        self._original_shield = asyncio.shield
+        self._calls = 0
+
+    async def __call__(self, awaitable: Awaitable[object]) -> object:
+        self._calls += 1
+        retry_event = self._retry_events.get(self._calls)
+        if retry_event is not None:
+            retry_event.set()
+        return await self._original_shield(awaitable)
+
+
+class _CoordinatedAppendHandle:
+    def __init__(
+        self,
+        handle: TextIO,
+        first_writes: threading.Barrier,
+        lock_observations: list[bool],
+    ) -> None:
+        self._handle = handle
+        self._first_writes = first_writes
+        self._lock_observations = lock_observations
+
+    def __enter__(self) -> _CoordinatedAppendHandle:
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._handle.__exit__(*args)  # type: ignore[arg-type]
+
+    def write(self, value: str) -> int:
+        append_lock = getattr(llm_request_logging, "_JSONL_APPEND_LOCK", None)
+        lock_held = append_lock is not None and append_lock.locked()
+        self._lock_observations.append(lock_held)
+        if not lock_held and value != "\n":
+            self._first_writes.wait(timeout=5)
+            written = self._handle.write(value)
+            self._first_writes.wait(timeout=5)
+            return written
+        return self._handle.write(value)
+
+
+def _mutate_borrowed_request_values(
+    model: _FakeModel,
+    messages: list[Message],
+    tools: list[dict[str, str]],
+) -> None:
+    model.id = "mutated-model"
+    model.temperature = 1.0
+    messages[0].content = "mutated message"
+    tools[0]["name"] = "mutated_tool"
 
 
 @pytest.mark.asyncio
@@ -113,6 +170,36 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     assert payload["tools"] == [{"name": "search"}]
 
 
+def test_concurrent_large_jsonl_appends_remain_parseable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent worker appends must each remain one complete JSONL record."""
+    first_writes = threading.Barrier(2)
+    path_type = type(tmp_path)
+    real_open = path_type.open
+    lock_observations: list[bool] = []
+
+    def coordinated_open(path: Path, *args: object, **kwargs: object) -> _CoordinatedAppendHandle:
+        handle = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        return _CoordinatedAppendHandle(handle, first_writes, lock_observations)
+
+    monkeypatch.setattr(path_type, "open", coordinated_open)
+    log_path = tmp_path / "requests.jsonl"
+    lines = [
+        json.dumps({"record": "first", "payload": "a" * 1_000_000}),
+        json.dumps({"record": "second", "payload": "b" * 1_000_000}),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        appends = [executor.submit(llm_request_logging._write_serialized_jsonl_line, log_path, line) for line in lines]
+        for append in appends:
+            append.result(timeout=5)
+    with real_open(log_path, encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle]
+    assert {record["record"] for record in records} == {"first", "second"}
+    assert lock_observations == [True, True]
+
+
 @pytest.mark.asyncio
 async def test_llm_request_log_uses_serialized_snapshot_when_file_write_is_delayed(
     monkeypatch: pytest.MonkeyPatch,
@@ -164,12 +251,59 @@ async def test_llm_request_log_uses_serialized_snapshot_when_file_write_is_delay
 
 
 @pytest.mark.asyncio
+async def test_request_log_pins_container_membership_before_worker_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Queued serialization borrows elements from shallow-copied containers."""
+    worker_queued = asyncio.Event()
+    release_worker = asyncio.Event()
+    original_to_thread = asyncio.to_thread
+
+    async def delayed_to_thread(function: object, /, *args: object, **kwargs: object) -> object:
+        worker_queued.set()
+        await release_worker.wait()
+        return await original_to_thread(function, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(llm_request_logging.asyncio, "to_thread", delayed_to_thread)
+    submitted_message = Message(role="user", content="submitted message")
+    submitted_tool = {"name": "submitted_tool"}
+    messages = [submitted_message]
+    tools = [submitted_tool]
+    log_path = tmp_path / "requests.jsonl"
+    write_task = asyncio.create_task(
+        _write_llm_request_log(
+            model=_FakeModel(),  # type: ignore[arg-type]
+            agent_name="assistant",
+            messages=messages,
+            tools=tools,
+            log_path=log_path,
+            request_log_id="log-1",
+        ),
+    )
+    try:
+        await worker_queued.wait()
+        messages[:] = [Message(role="user", content="replacement message")]
+        tools[:] = [{"name": "replacement_tool"}]
+        release_worker.set()
+        await write_task
+    finally:
+        release_worker.set()
+        await asyncio.gather(write_task, return_exceptions=True)
+
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+    assert payload["messages"][0]["content"] == "submitted message"
+    assert payload["tools"] == [{"name": "submitted_tool"}]
+
+
+@pytest.mark.asyncio
 async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_persisted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Cancellation must not release borrowed values before their record is durable."""
     serialization_started, release_serialization, serialization_finished = (threading.Event() for _ in range(3))
+    first_cancellation_deferred, second_cancellation_deferred = (asyncio.Event() for _ in range(2))
     original_serialize = llm_request_logging._serialize_llm_request_log_line
 
     def blocked_serialize(*args: object, **kwargs: object) -> str:
@@ -181,6 +315,11 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
             serialization_finished.set()
 
     monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", blocked_serialize)
+    monkeypatch.setattr(
+        llm_request_logging.asyncio,
+        "shield",
+        _ShieldRetryObserver({2: first_cancellation_deferred, 3: second_cancellation_deferred}),
+    )
     model = _FakeModel(id="submitted-model", temperature=0.7)
     messages = [Message(role="user", content="submitted message")]
     tools = [{"name": "submitted_tool"}]
@@ -201,10 +340,7 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
         try:
             await write_task
         except asyncio.CancelledError:
-            model.id = "mutated-model"
-            model.temperature = 1.0
-            messages[0].content = "mutated message"
-            tools[0]["name"] = "mutated_tool"
+            _mutate_borrowed_request_values(model, messages, tools)
             cancellation_observed.set()
             raise
 
@@ -212,9 +348,9 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
     try:
         assert await asyncio.to_thread(serialization_started.wait, 5)
         write_task.cancel()
-        await asyncio.sleep(0)
+        await first_cancellation_deferred.wait()
         write_task.cancel()
-        await asyncio.sleep(0)
+        await second_cancellation_deferred.wait()
         cancellation_was_deferred = not cancellation_observed.is_set()
         release_serialization.set()
         with pytest.raises(asyncio.CancelledError):
@@ -225,6 +361,7 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
         await asyncio.gather(write_task, observer, return_exceptions=True)
 
     assert cancellation_was_deferred
+    assert write_task.cancelling() == 2
     payload = json.loads(log_path.read_text(encoding="utf-8"))
     assert payload["model_id"] == "submitted-model"
     assert payload["messages"][0]["content"] == "submitted message"
@@ -233,8 +370,104 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
 
 
 @pytest.mark.asyncio
+async def test_invoke_cancellation_wins_when_request_log_worker_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed accepted write must not turn caller cancellation into success."""
+    serializer_started = threading.Event()
+    release_serializer = threading.Event()
+    cancellation_deferred = asyncio.Event()
+    serialization_error = OSError("serialization failed")
+
+    def fail_serialization(**_kwargs: object) -> str:
+        serializer_started.set()
+        assert release_serializer.wait(timeout=5)
+        raise serialization_error
+
+    monkeypatch.setattr(llm_request_logging.asyncio, "shield", _ShieldRetryObserver({2: cancellation_deferred}))
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", fail_serialization)
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    invoke_task = asyncio.create_task(
+        model.ainvoke(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(serializer_started.wait, 5)
+        invoke_task.cancel("cancel request")
+        await cancellation_deferred.wait()
+        release_serializer.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await invoke_task
+    finally:
+        release_serializer.set()
+        await asyncio.gather(invoke_task, return_exceptions=True)
+
+    assert cancelled.value.args == ("cancel request",)
+    assert invoke_task.cancelling() == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_persists_one_request_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generator cleanup must not retry an accepted request append."""
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    cancellation_deferred = asyncio.Event()
+    original_write = llm_request_logging._write_serialized_jsonl_line
+
+    def blocked_write(path: Path, line: str) -> None:
+        writer_started.set()
+        assert release_writer.wait(timeout=5)
+        original_write(path, line)
+
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", blocked_write)
+    monkeypatch.setattr(llm_request_logging.asyncio, "shield", _ShieldRetryObserver({2: cancellation_deferred}))
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+    next_chunk = asyncio.create_task(anext(stream))
+    try:
+        assert await asyncio.to_thread(writer_started.wait, 5)
+        next_chunk.cancel("cancel stream")
+        await cancellation_deferred.wait()
+        release_writer.set()
+        with pytest.raises(asyncio.CancelledError):
+            await next_chunk
+    finally:
+        release_writer.set()
+        await asyncio.gather(next_chunk, return_exceptions=True)
+        await stream.aclose()
+
+    entries = _read_log_entries(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["messages"][0]["role"] == "user"
+    assert entries[0]["messages"][0]["content"] == "hello"
+
+
+@pytest.mark.asyncio
 async def test_wire_tool_normalization_runs_on_request_serializer_thread(tmp_path: Path) -> None:
-    """Provider wire-tool capture should borrow values until off-loop serialization."""
+    """Capture pins membership while element traversal stays off-loop."""
     event_loop_thread = threading.get_ident()
     traversal_threads: list[int] = []
 
@@ -245,12 +478,14 @@ async def test_wire_tool_normalization_runs_on_request_serializer_thread(tmp_pat
 
     capture = llm_request_logging._WireToolsCapture(enabled=True)
     token = llm_request_logging._WIRE_TOOLS_CAPTURE.set(capture)
+    wire_tools = [TraversalProbe({"name": "search"})]
     try:
-        record_llm_request_tools([TraversalProbe({"name": "search"})])
+        record_llm_request_tools(wire_tools)
     finally:
         llm_request_logging._WIRE_TOOLS_CAPTURE.reset(token)
 
     assert traversal_threads == []
+    wire_tools.clear()
     await _write_llm_request_log(
         model=_FakeModel(),  # type: ignore[arg-type]
         agent_name="assistant",
