@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -66,16 +66,41 @@ async def _assert_cancellation_is_deferred(task: asyncio.Task[Any]) -> None:
     assert not task.done()
 
 
-class _InterleavingAppendHandle:
+@dataclass
+class _AppendBoundaryProbe:
+    first_writer_started: threading.Event = field(default_factory=threading.Event)
+    release_first_writer: threading.Event = field(default_factory=threading.Event)
+    guard: threading.Lock = field(default_factory=threading.Lock)
+    write_calls: int = 0
+    active_writers: int = 0
+    overlap_detected: bool = False
+
+
+class _ReleaseFirstWriterOnContention:
+    def __init__(self, probe: _AppendBoundaryProbe) -> None:
+        self._probe = probe
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> _ReleaseFirstWriterOnContention:
+        if not self._lock.acquire(blocking=False):
+            self._probe.release_first_writer.set()
+            assert self._lock.acquire(timeout=5)
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._lock.release()
+
+
+class _ObservedAppendHandle:
     def __init__(
         self,
         handle: TextIO,
-        split_body_writes: threading.Barrier,
+        probe: _AppendBoundaryProbe,
     ) -> None:
         self._handle = handle
-        self._split_body_writes = split_body_writes
+        self._probe = probe
 
-    def __enter__(self) -> _InterleavingAppendHandle:
+    def __enter__(self) -> _ObservedAppendHandle:
         self._handle.__enter__()
         return self
 
@@ -83,13 +108,23 @@ class _InterleavingAppendHandle:
         self._handle.__exit__(*args)  # type: ignore[arg-type]
 
     def write(self, value: str) -> int:
-        if not value.endswith("\n"):
-            self._split_body_writes.wait(timeout=5)
+        with self._probe.guard:
+            is_first_writer = self._probe.write_calls == 0
+            self._probe.write_calls += 1
+            self._probe.active_writers += 1
+            if self._probe.active_writers > 1:
+                self._probe.overlap_detected = True
+                self._probe.release_first_writer.set()
+        if is_first_writer:
+            self._probe.first_writer_started.set()
+            assert self._probe.release_first_writer.wait(timeout=5)
+        try:
             written = self._handle.write(value)
             self._handle.flush()
-            self._split_body_writes.wait(timeout=5)
             return written
-        return self._handle.write(value)
+        finally:
+            with self._probe.guard:
+                self._probe.active_writers -= 1
 
 
 def _mutate_borrowed_request_values(
@@ -161,36 +196,35 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     assert payload["tools"] == [{"name": "search"}]
 
 
-def test_concurrent_jsonl_appends_remain_parseable(
+def test_concurrent_jsonl_appends_serialize_writer_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Concurrent worker appends must each remain one complete JSONL record."""
-    append_attempts = threading.Barrier(2)
-    split_body_writes = threading.Barrier(2)
+    """Concurrent appends must not overlap at the real-file writer boundary."""
+    probe = _AppendBoundaryProbe()
     path_type = type(tmp_path)
     real_open = path_type.open
 
-    def coordinated_open(path: Path, *args: object, **kwargs: object) -> _InterleavingAppendHandle:
+    def observed_open(path: Path, *args: object, **kwargs: object) -> _ObservedAppendHandle:
         handle = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
-        return _InterleavingAppendHandle(handle, split_body_writes)
+        return _ObservedAppendHandle(handle, probe)
 
-    def append_after_rendezvous(log_path: Path, line: str) -> None:
-        append_attempts.wait(timeout=5)
-        llm_request_logging._write_serialized_jsonl_line(log_path, line)
-
-    monkeypatch.setattr(path_type, "open", coordinated_open)
+    monkeypatch.setattr(llm_request_logging, "_JSONL_APPEND_LOCK", _ReleaseFirstWriterOnContention(probe))
+    monkeypatch.setattr(path_type, "open", observed_open)
     log_path = tmp_path / "requests.jsonl"
     lines = [
         json.dumps({"record": "first"}),
         json.dumps({"record": "second"}),
     ]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        appends = [executor.submit(append_after_rendezvous, log_path, line) for line in lines]
-        for append in appends:
-            append.result(timeout=5)
+        first_append = executor.submit(llm_request_logging._write_serialized_jsonl_line, log_path, lines[0])
+        assert probe.first_writer_started.wait(timeout=5)
+        second_append = executor.submit(llm_request_logging._write_serialized_jsonl_line, log_path, lines[1])
+        first_append.result(timeout=5)
+        second_append.result(timeout=5)
     with real_open(log_path, encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle]
+    assert not probe.overlap_detected
     assert len(records) == 2
     assert {record["record"] for record in records} == {"first", "second"}
 
