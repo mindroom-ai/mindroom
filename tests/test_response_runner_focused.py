@@ -6430,6 +6430,35 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
 
 
 @pytest.mark.asyncio
+async def test_response_event_persistence_callback_forwards_session_identity(tmp_path: Path) -> None:
+    """The runner callback must preserve its storage factory and run identifiers."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    create_storage = MagicMock()
+    persist_response_event_id = AsyncMock()
+
+    with patch.object(
+        runner.deps.state_writer,
+        "apersist_response_event_id_in_session_run",
+        new=persist_response_event_id,
+    ):
+        callback = runner._build_persist_response_event_id_effect(
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            create_storage=create_storage,
+        )
+        await callback("run-1", "$response")
+
+    persist_response_event_id.assert_awaited_once_with(
+        create_storage=create_storage,
+        session_id="session-1",
+        session_type=SessionType.AGENT,
+        run_id="run-1",
+        response_event_id="$response",
+    )
+
+
+@pytest.mark.asyncio
 async def test_apply_post_response_effects_gates_success_only_side_effects() -> None:
     """Memory persistence and run-event linkage run on success and stay off after a failed delivery."""
     memory_calls: list[str] = []

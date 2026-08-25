@@ -272,7 +272,8 @@ async def test_unregistered_unhashable_storage_uses_off_loop_fallback() -> None:
         lambda _storage: operation_threads.append(threading.get_ident()),
     )
 
-    assert operation_threads != [event_loop_thread]
+    assert len(operation_threads) == 1
+    assert operation_threads[0] != event_loop_thread
     assert storage_closed is True
 
 
