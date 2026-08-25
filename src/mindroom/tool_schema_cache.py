@@ -49,12 +49,12 @@ class _HasSchemaCacheMetadata(Protocol):
 class _SchemaCacheEntrypoint:
     """Hashable schema inputs while retaining the live entrypoint out of the cache key."""
 
-    cache_source: Callable[..., object]
+    cache_source_ref: ReferenceType[Callable[..., object]]
     schema_fingerprint: tuple[str, str, str | None]
     entrypoint_ref: ReferenceType[Callable[..., object]] = field(compare=False, hash=False, repr=False)
 
     def __hash__(self) -> int:
-        return hash((self.cache_source, self.schema_fingerprint))
+        return hash((self.cache_source_ref, self.schema_fingerprint))
 
 
 def set_schema_cache_postprocessor(function: Function, postprocessor: _SchemaCachePostprocessor) -> None:
@@ -79,12 +79,16 @@ def set_schema_cache_postprocessor(function: Function, postprocessor: _SchemaCac
 
 
 def set_schema_cache_source(function: Function, source: Callable[..., object]) -> None:
-    """Set a private stable cache source without changing the live entrypoint."""
+    """Set a stable cache source, or leave unsupported callable forms uncached."""
+    metadata = _schema_cache_metadata(function) or _SchemaCacheMetadata()
     cache_source = source.__func__ if isinstance(source, MethodType) else source
     if not isinstance(cache_source, FunctionType):
-        msg = "Schema cache sources must be functions."
-        raise TypeError(msg)
-    metadata = _schema_cache_metadata(function) or _SchemaCacheMetadata()
+        object.__setattr__(
+            function,
+            _CACHE_METADATA_ATTR,
+            replace(metadata, cache_source=None),
+        )
+        return
     object.__setattr__(
         function,
         _CACHE_METADATA_ATTR,
@@ -136,7 +140,7 @@ def _schema_cache_entrypoint(function: Function) -> _SchemaCacheEntrypoint | Non
 
     try:
         return _SchemaCacheEntrypoint(
-            cache_source=source_callable,
+            cache_source_ref=ref(source_callable),
             schema_fingerprint=(
                 str(signature(entrypoint)),
                 repr(entrypoint.__annotations__),

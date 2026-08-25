@@ -178,6 +178,33 @@ def test_cached_processed_schema_rejects_partial_custom_processor_without_opt_in
     assert cached_processed_schema(function, strict=False) is None
 
 
+@pytest.mark.parametrize("entrypoint_kind", ["partial", "builtin", "callable"])
+def test_output_wrapper_falls_back_for_unsupported_cache_sources(
+    entrypoint_kind: str,
+    tmp_path: Path,
+) -> None:
+    """Valid callables without stable function identity must remain usable uncached."""
+
+    def export_report(report_id: str) -> str:
+        return report_id
+
+    class ReportExporter:
+        def __call__(self, report_id: str) -> str:
+            return report_id
+
+    entrypoint = {
+        "partial": partial(export_report),
+        "builtin": len,
+        "callable": ReportExporter(),
+    }[entrypoint_kind]
+    function = Function(name="export_report", entrypoint=entrypoint)
+
+    wrapped = wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+    assert wrapped is function
+    assert cached_processed_schema(function, strict=False) is None
+
+
 def test_set_schema_cache_postprocessor_rejects_nested_functions() -> None:
     """Cache processors must have stable module-level identity."""
 
@@ -263,6 +290,66 @@ def test_cached_processed_schema_does_not_retain_wrapped_closure_owner(tmp_path:
 
     try:
         cached_processed_schema(function, strict=False)
+
+        del function
+        gc.collect()
+
+        assert owner_ref() is None
+    finally:
+        clear_tool_schema_cache()
+
+
+def test_cached_processed_schema_does_not_retain_default_bound_owner(tmp_path: Path) -> None:
+    """Cache keys must not retain owners captured by source-function defaults."""
+
+    class ReportExporter:
+        report_prefix = "report"
+
+    def build_function() -> tuple[Function, ref[ReportExporter]]:
+        owner = ReportExporter()
+
+        def export_report(report_id: str, retained_owner: ReportExporter = owner) -> str:
+            return f"{retained_owner.report_prefix}:{report_id}"
+
+        return Function(name="export_report", entrypoint=export_report), ref(owner)
+
+    clear_tool_schema_cache()
+    function, owner_ref = build_function()
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+    try:
+        assert cached_processed_schema(function, strict=False) is not None
+
+        del function
+        gc.collect()
+
+        assert owner_ref() is None
+    finally:
+        clear_tool_schema_cache()
+
+
+def test_cached_processed_schema_does_not_retain_wrapped_attribute_owner(tmp_path: Path) -> None:
+    """Cache keys must not retain owners referenced by a source's wrapped attribute."""
+
+    class ReportExporter:
+        def export_report(self, report_id: str) -> str:
+            return report_id
+
+    def build_function() -> tuple[Function, ref[ReportExporter]]:
+        owner = ReportExporter()
+
+        def export_report(report_id: str) -> str:
+            return report_id
+
+        export_report.__wrapped__ = owner.export_report  # type: ignore[attr-defined]
+        return Function(name="export_report", entrypoint=export_report), ref(owner)
+
+    clear_tool_schema_cache()
+    function, owner_ref = build_function()
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+    try:
+        assert cached_processed_schema(function, strict=False) is not None
 
         del function
         gc.collect()

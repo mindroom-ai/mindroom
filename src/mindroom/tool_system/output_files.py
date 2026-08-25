@@ -253,10 +253,6 @@ def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = F
     ensure_output_path_schema_optional(self)
 
 
-def _process_cached_entrypoint_with_output_path_schema(function: Function, strict: bool) -> None:
-    _process_entrypoint_with_output_path_schema(function, strict=strict)
-
-
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
     model_copy_parameters = inspect.signature(Function.model_copy).parameters
     if "update" in model_copy_parameters:
@@ -291,7 +287,7 @@ def _install_output_path_schema_postprocessor(
         "process_entrypoint",
         MethodType(_process_entrypoint_with_output_path_schema, function),
     )
-    set_schema_cache_postprocessor(function, _process_cached_entrypoint_with_output_path_schema)
+    set_schema_cache_postprocessor(function, _process_entrypoint_with_output_path_schema)
     if cache_source is not None:
         set_schema_cache_source(function, cache_source)
     object.__setattr__(
