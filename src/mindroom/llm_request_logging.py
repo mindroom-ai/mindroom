@@ -7,7 +7,6 @@ import base64
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -69,28 +68,18 @@ type _JSONScalar = str | int | float | bool | None
 type _JSONValue = _JSONScalar | list["_JSONValue"] | dict[str, "_JSONValue"]
 _REQUEST_CONTEXT = ContextVar[dict[str, _JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 _ACTIVE_MODEL_CALLS = ContextVar[frozenset[int]]("mindroom_llm_observability_active_models", default=frozenset())
-_UNSNAPSHOTTABLE = object()
 
 
 @dataclass
 class _WireToolsCapture:
-    """Request-local tools observed after provider wire transformations."""
+    """Request-local borrowed tools observed after provider wire transformations."""
 
     enabled: bool
     observed: bool = False
-    tools: list[dict[str, _JSONValue]] | None = None
+    tools: object = None
 
 
 _WIRE_TOOLS_CAPTURE = ContextVar[_WireToolsCapture | None]("mindroom_llm_wire_tools_capture", default=None)
-
-
-@dataclass(frozen=True)
-class _RequestModelSnapshot:
-    """Detached model values needed to build one durable request record."""
-
-    id: str
-    system_prompt: str
-    params: dict[str, object]
 
 
 def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
@@ -98,67 +87,40 @@ def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -
     return base_dir / f"llm-requests-{now.date().isoformat()}.jsonl"
 
 
-def _system_prompt(messages: Sequence[Message], model: Model | _RequestModelSnapshot) -> str:
+def _system_prompt(messages: Sequence[Message], model: Model) -> str:
     for message in messages:
         if message.role == "system":
             return message.get_content_string()
     return model.system_prompt or ""
 
 
-def _model_param_values(model: Model) -> dict[str, object]:
+def _model_params(model: Model) -> dict[str, _JSONValue]:
     if not is_dataclass(model):
         return {}
-    payload: dict[str, object] = {}
+    payload: dict[str, _JSONValue] = {}
     for field in fields(model):
         if field.name in _SKIP_MODEL_PARAM_NAMES:
             continue
         value = vars(model).get(field.name)
         if value is None:
             continue
-        payload[field.name] = value
-    return payload
-
-
-def _serializable_model_params(values: dict[str, object]) -> dict[str, _JSONValue]:
-    payload: dict[str, _JSONValue] = {}
-    for name, value in values.items():
         try:
             json.dumps(value)
         except TypeError:
             continue
-        payload[name] = cast("_JSONValue", value)
+        payload[field.name] = value
     return payload
 
 
-def _model_params(model: Model) -> dict[str, _JSONValue]:
-    return _serializable_model_params(_model_param_values(model))
-
-
-def _snapshot_model_param(value: object) -> object:
-    try:
-        return deepcopy(value)
-    except Exception:
-        return _UNSNAPSHOTTABLE
-
-
-def _snapshot_request_model(model: Model) -> _RequestModelSnapshot:
-    params: dict[str, object] = {}
-    for name, value in _model_param_values(model).items():
-        snapshot = _snapshot_model_param(value)
-        if snapshot is not _UNSNAPSHOTTABLE:
-            params[name] = snapshot
-    return _RequestModelSnapshot(
-        id=model.id,
-        system_prompt=cast("str", deepcopy(model.system_prompt) or ""),
-        params=params,
-    )
+def _write_serialized_jsonl_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.write("\n")
 
 
 def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(payload)))
-        handle.write("\n")
+    _write_serialized_jsonl_line(path, json.dumps(redact_sensitive_data(payload)))
 
 
 def _json_safe(value: object) -> _JSONValue:
@@ -209,13 +171,12 @@ def _request_tools(value: object) -> list[dict[str, _JSONValue]] | None:
 
 
 def record_llm_request_tools(tools: object) -> None:
-    """Record the final provider tools for the active request-log scope."""
+    """Borrow final provider tools until the active model invocation is logged."""
     capture = _WIRE_TOOLS_CAPTURE.get()
     if capture is None or not capture.enabled:
         return
     capture.observed = True
-    normalized_tools = _json_safe(tools)
-    capture.tools = _request_tools(normalized_tools)
+    capture.tools = tools
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -238,10 +199,8 @@ def current_llm_request_log_context() -> dict[str, _JSONValue]:
     return _snapshot_request_log_context()
 
 
-def model_params_payload(model: Model | _RequestModelSnapshot) -> dict[str, _JSONValue]:
+def model_params_payload(model: Model) -> dict[str, _JSONValue]:
     """Return JSON-safe model parameters suitable for durable request metadata."""
-    if isinstance(model, _RequestModelSnapshot):
-        return _serializable_model_params(model.params)
     return _model_params(model)
 
 
@@ -365,45 +324,36 @@ class _RequestLogRef:
     log_path: Path
 
 
-@dataclass(frozen=True)
-class _RequestLogSnapshot:
-    """Invocation-time values consumed later by the request writer thread."""
-
-    model: _RequestModelSnapshot
-    messages: tuple[Message, ...]
-    tools: list[dict[str, _JSONValue]] | None
-    request_context: dict[str, _JSONValue] | None
-    timestamp: datetime
-
-
-def _write_llm_request_log_line(
+def _serialize_llm_request_log_line(
     *,
-    snapshot: _RequestLogSnapshot,
+    model: Model,
     agent_name: str,
-    log_path: Path,
+    messages: Sequence[Message],
+    tools: object,
+    request_context: dict[str, _JSONValue] | None,
     request_log_id: str,
-) -> None:
-    """Build and persist one request record on the writer thread."""
-    resolved_request_context = (
-        snapshot.request_context if snapshot.request_context is not None else _snapshot_request_log_context()
-    )
+    timestamp: datetime,
+) -> str:
+    """Serialize one immutable request-log line on a worker thread."""
+    resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
+    normalized_tools = _request_tools(_json_safe(tools))
     payload = cast(
         "dict[str, _JSONValue]",
         {
-            "timestamp": snapshot.timestamp.isoformat(),
+            "timestamp": timestamp.isoformat(),
             "request_log_id": request_log_id,
             "agent_id": agent_name,
             **resolved_request_context,
-            "model_id": snapshot.model.id,
-            "system_prompt": _system_prompt(snapshot.messages, snapshot.model),
-            "messages": _request_message_payloads(snapshot.messages),
-            "message_count": len(snapshot.messages),
-            "tools": _json_safe(snapshot.tools),
-            "tool_count": len(snapshot.tools or []),
-            "model_params": model_params_payload(snapshot.model),
+            "model_id": model.id,
+            "system_prompt": _system_prompt(messages, model),
+            "messages": _request_message_payloads(messages),
+            "message_count": len(messages),
+            "tools": normalized_tools,
+            "tool_count": len(normalized_tools or []),
+            "model_params": model_params_payload(model),
         },
     )
-    _write_jsonl_line(log_path, payload)
+    return json.dumps(redact_sensitive_data(payload))
 
 
 async def _write_llm_request_log(
@@ -411,27 +361,24 @@ async def _write_llm_request_log(
     model: Model,
     agent_name: str,
     messages: Sequence[Message],
-    tools: list[dict[str, _JSONValue]] | None,
+    tools: object,
     log_path: Path,
     request_context: dict[str, _JSONValue] | None = None,
     request_log_id: str,
     timestamp: datetime | None = None,
 ) -> None:
-    """Persist one request record for an LLM invocation."""
-    snapshot = _RequestLogSnapshot(
-        model=_snapshot_request_model(model),
-        messages=tuple(deepcopy(messages)),
-        tools=deepcopy(tools),
-        request_context=deepcopy(request_context),
+    """Serialize borrowed request values off-loop, then append the immutable line."""
+    serialized_line = await asyncio.to_thread(
+        _serialize_llm_request_log_line,
+        model=model,
+        agent_name=agent_name,
+        messages=messages,
+        tools=tools,
+        request_context=request_context,
+        request_log_id=request_log_id,
         timestamp=timestamp or datetime.now().astimezone(),
     )
-    await asyncio.to_thread(
-        _write_llm_request_log_line,
-        snapshot=snapshot,
-        agent_name=agent_name,
-        log_path=log_path,
-        request_log_id=request_log_id,
-    )
+    await asyncio.to_thread(_write_serialized_jsonl_line, log_path, serialized_line)
 
 
 def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
@@ -558,7 +505,7 @@ async def _write_llm_request_log_if_present(
         model=model,
         agent_name=agent_name,
         messages=messages,
-        tools=(wire_tools_capture.tools if wire_tools_capture.observed else _request_tools(kwargs.get("tools"))),
+        tools=(wire_tools_capture.tools if wire_tools_capture.observed else kwargs.get("tools")),
         log_path=request_log_ref.log_path,
         request_context=request_context,
         request_log_id=request_log_ref.request_log_id,

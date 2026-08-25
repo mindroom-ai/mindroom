@@ -63,7 +63,7 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     """Message, tool, and model serialization should stay off the event loop."""
     event_loop_thread = threading.get_ident()
     observed_threads: dict[str, int] = {}
-    written_payloads: list[dict[str, object]] = []
+    written_lines: list[str] = []
 
     def _record(name: str, value: object) -> object:
         observed_threads[name] = threading.get_ident()
@@ -90,11 +90,11 @@ async def test_llm_request_payload_is_built_on_writer_thread(
         lambda *_args: _record("model_params", {"temperature": 0.7}),
     )
 
-    def _write(_path: Path, payload: dict[str, object]) -> None:
+    def _write(_path: Path, line: str) -> None:
         observed_threads["write"] = threading.get_ident()
-        written_payloads.append(payload)
+        written_lines.append(line)
 
-    monkeypatch.setattr(llm_request_logging, "_write_jsonl_line", _write)
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", _write)
 
     await _write_llm_request_log(
         model=_FakeModel(),  # type: ignore[arg-type]
@@ -107,34 +107,28 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     )
 
     assert set(observed_threads) == {"system_prompt", "messages", "tools", "model_params", "write"}
-    assert len(set(observed_threads.values())) == 1
     assert event_loop_thread not in observed_threads.values()
-    assert written_payloads[0]["messages"] == [{"role": "user", "content": "hello"}]
-    assert written_payloads[0]["tools"] == [{"name": "search"}]
+    payload = json.loads(written_lines[0])
+    assert payload["messages"] == [{"role": "user", "content": "hello"}]
+    assert payload["tools"] == [{"name": "search"}]
 
 
 @pytest.mark.asyncio
-async def test_llm_request_payload_uses_submission_snapshot_when_writer_is_delayed(
+async def test_llm_request_log_uses_serialized_snapshot_when_file_write_is_delayed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Executor delay must not let later mutation rewrite an accepted log entry."""
-    writer_queued = asyncio.Event()
-    release_writer = asyncio.Event()
-    written_payloads: list[dict[str, object]] = []
-    original_to_thread = asyncio.to_thread
+    """Mutation after serialization must not rewrite a queued immutable line."""
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    written_lines: list[str] = []
 
-    async def delayed_to_thread(function: object, /, *args: object, **kwargs: object) -> object:
-        writer_queued.set()
-        await release_writer.wait()
-        return await original_to_thread(function, *args, **kwargs)  # type: ignore[arg-type]
+    def delayed_write(_path: Path, line: str) -> None:
+        writer_started.set()
+        assert release_writer.wait(timeout=5)
+        written_lines.append(line)
 
-    monkeypatch.setattr(llm_request_logging.asyncio, "to_thread", delayed_to_thread)
-    monkeypatch.setattr(
-        llm_request_logging,
-        "_write_jsonl_line",
-        lambda _path, payload: written_payloads.append(payload),
-    )
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", delayed_write)
     model = _FakeModel(id="submitted-model", temperature=0.7)
     messages = [Message(role="user", content="submitted message")]
     tools = [{"name": "submitted_tool"}]
@@ -150,7 +144,7 @@ async def test_llm_request_payload_uses_submission_snapshot_when_writer_is_delay
         ),
     )
     try:
-        await writer_queued.wait()
+        assert await asyncio.to_thread(writer_started.wait, 5)
         model.id = "mutated-model"
         model.temperature = 1.0
         messages[0].content = "mutated message"
@@ -161,12 +155,76 @@ async def test_llm_request_payload_uses_submission_snapshot_when_writer_is_delay
         release_writer.set()
         await asyncio.gather(write_task, return_exceptions=True)
 
-    assert len(written_payloads) == 1
-    payload = written_payloads[0]
+    assert len(written_lines) == 1
+    payload = json.loads(written_lines[0])
     assert payload["model_id"] == "submitted-model"
     assert payload["messages"][0]["content"] == "submitted message"  # type: ignore[index]
     assert payload["tools"] == [{"name": "submitted_tool"}]
     assert payload["model_params"] == {"temperature": 0.7}
+
+
+@pytest.mark.asyncio
+async def test_wire_tool_normalization_runs_on_request_serializer_thread(tmp_path: Path) -> None:
+    """Provider wire-tool capture should borrow values until off-loop serialization."""
+    event_loop_thread = threading.get_ident()
+    traversal_threads: list[int] = []
+
+    class TraversalProbe(dict[str, object]):
+        def items(self):  # noqa: ANN202
+            traversal_threads.append(threading.get_ident())
+            return super().items()
+
+    capture = llm_request_logging._WireToolsCapture(enabled=True)
+    token = llm_request_logging._WIRE_TOOLS_CAPTURE.set(capture)
+    try:
+        record_llm_request_tools([TraversalProbe({"name": "search"})])
+    finally:
+        llm_request_logging._WIRE_TOOLS_CAPTURE.reset(token)
+
+    assert traversal_threads == []
+    await _write_llm_request_log(
+        model=_FakeModel(),  # type: ignore[arg-type]
+        agent_name="assistant",
+        messages=[Message(role="user", content="hello")],
+        tools=capture.tools,
+        log_path=tmp_path / "requests.jsonl",
+        request_log_id="log-1",
+    )
+
+    assert traversal_threads
+    assert event_loop_thread not in traversal_threads
+    payload = json.loads((tmp_path / "requests.jsonl").read_text(encoding="utf-8"))
+    assert payload["tools"] == [{"name": "search"}]
+
+
+@pytest.mark.asyncio
+async def test_llm_request_logging_preserves_serializable_values_that_reject_deepcopy(tmp_path: Path) -> None:
+    """Offloading must not narrow the logger's accepted JSON-compatible values."""
+
+    class CopyDisabledError(RuntimeError):
+        pass
+
+    class SerializableButNotCopyable(dict[str, object]):
+        def __deepcopy__(self, _memo: dict[int, object]) -> object:
+            raise CopyDisabledError
+
+    content = SerializableButNotCopyable({"nested": ["kept"]})
+    model = _FakeModel()
+    model.temperature = content  # type: ignore[assignment]
+
+    await _write_llm_request_log(
+        model=model,  # type: ignore[arg-type]
+        agent_name="assistant",
+        messages=[Message.model_construct(role="user", content=[content])],
+        tools=[{"payload": content}],
+        log_path=tmp_path / "requests.jsonl",
+        request_log_id="log-1",
+    )
+
+    payload = json.loads((tmp_path / "requests.jsonl").read_text(encoding="utf-8"))
+    assert payload["messages"][0]["content"] == [{"nested": ["kept"]}]
+    assert payload["tools"] == [{"payload": {"nested": ["kept"]}}]
+    assert payload["model_params"] == {"temperature": {"nested": ["kept"]}}
 
 
 @pytest.mark.asyncio
