@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -109,6 +111,95 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     assert event_loop_thread not in observed_threads.values()
     assert written_payloads[0]["messages"] == [{"role": "user", "content": "hello"}]
     assert written_payloads[0]["tools"] == [{"name": "search"}]
+
+
+@pytest.mark.asyncio
+async def test_llm_request_payload_uses_submission_snapshot_when_writer_is_delayed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Executor delay must not let later mutation rewrite an accepted log entry."""
+    writer_queued = asyncio.Event()
+    release_writer = asyncio.Event()
+    written_payloads: list[dict[str, object]] = []
+    original_to_thread = asyncio.to_thread
+
+    async def delayed_to_thread(function: object, /, *args: object, **kwargs: object) -> object:
+        writer_queued.set()
+        await release_writer.wait()
+        return await original_to_thread(function, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(llm_request_logging.asyncio, "to_thread", delayed_to_thread)
+    monkeypatch.setattr(
+        llm_request_logging,
+        "_write_jsonl_line",
+        lambda _path, payload: written_payloads.append(payload),
+    )
+    model = _FakeModel(id="submitted-model", temperature=0.7)
+    messages = [Message(role="user", content="submitted message")]
+    tools = [{"name": "submitted_tool"}]
+
+    write_task = asyncio.create_task(
+        _write_llm_request_log(
+            model=model,  # type: ignore[arg-type]
+            agent_name="assistant",
+            messages=messages,
+            tools=tools,
+            log_path=tmp_path / "requests.jsonl",
+            request_log_id="log-1",
+        ),
+    )
+    try:
+        await writer_queued.wait()
+        model.id = "mutated-model"
+        model.temperature = 1.0
+        messages[0].content = "mutated message"
+        tools[0]["name"] = "mutated_tool"
+        release_writer.set()
+        await write_task
+    finally:
+        release_writer.set()
+        await asyncio.gather(write_task, return_exceptions=True)
+
+    assert len(written_payloads) == 1
+    payload = written_payloads[0]
+    assert payload["model_id"] == "submitted-model"
+    assert payload["messages"][0]["content"] == "submitted message"  # type: ignore[index]
+    assert payload["tools"] == [{"name": "submitted_tool"}]
+    assert payload["model_params"] == {"temperature": 0.7}
+
+
+@pytest.mark.asyncio
+async def test_llm_request_timestamp_and_daily_file_share_submission_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A writer delayed past midnight must stay in its submission day's file."""
+    submission_time = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    worker_time = datetime(2026, 8, 26, 12, tzinfo=UTC)
+    observed_times = iter((submission_time, worker_time))
+
+    class _Clock:
+        @classmethod
+        def now(cls) -> datetime:
+            return next(observed_times)
+
+    monkeypatch.setattr(llm_request_logging, "datetime", _Clock)
+
+    request_log_ref = await llm_request_logging._write_llm_request_log_if_present(
+        model=_FakeModel(),  # type: ignore[arg-type]
+        agent_name="assistant",
+        kwargs={"messages": [Message(role="user", content="hello")], "tools": []},
+        log_dir=str(tmp_path),
+        default_log_dir=tmp_path / "unused",
+        request_context={},
+        wire_tools_capture=llm_request_logging._WireToolsCapture(enabled=True),
+    )
+
+    assert request_log_ref is not None
+    assert request_log_ref.log_path.name == "llm-requests-2026-08-25.jsonl"
+    entry = json.loads(request_log_ref.log_path.read_text(encoding="utf-8"))
+    assert entry["timestamp"] == submission_time.astimezone().isoformat()
 
 
 class _PlainAsyncIterator:
