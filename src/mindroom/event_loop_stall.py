@@ -35,6 +35,8 @@ _HEARTBEAT_INTERVAL_SECONDS = 0.05
 _SCHEDULER_LAG_WINDOW_SECONDS = 60.0
 _REPEAT_LOG_INTERVAL_SECONDS = 30.0
 _THREAD_JOIN_TIMEOUT_SECONDS = 2.0
+_MAX_OTHER_THREAD_STACKS = 16
+_MAX_STACK_FRAMES = 64
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -68,6 +70,7 @@ class EventLoopStallDetector:
         self._loop_thread_ident: int | None = None
         self._heartbeat_handle: asyncio.TimerHandle | None = None
         self._last_beat: float = 0.0
+        self._last_beat_process_cpu: float = 0.0
         self._stalled_beat: float | None = None
         self._next_repeat_log: float = 0.0
         self._scheduler_lag_samples: deque[float] = deque(
@@ -83,6 +86,7 @@ class EventLoopStallDetector:
         self._loop = asyncio.get_running_loop()
         self._loop_thread_ident = threading.get_ident()
         self._last_beat = time.monotonic()
+        self._last_beat_process_cpu = time.process_time()
         self._scheduler_lag_window_started_at = time.monotonic()
         self._schedule_heartbeat(self._loop.time() + self.heartbeat_interval_seconds)
         self._thread = threading.Thread(
@@ -117,6 +121,7 @@ class EventLoopStallDetector:
         assert self._loop is not None
         actual_loop_time = self._loop.time()
         self._last_beat = time.monotonic()
+        self._last_beat_process_cpu = time.process_time()
         with self._scheduler_lag_lock:
             self._scheduler_lag_samples.append(max(0.0, actual_loop_time - scheduled_loop_time))
         if not self._stop_event.is_set():
@@ -151,6 +156,45 @@ class EventLoopStallDetector:
             return None
         return "".join(traceback.format_stack(frame))
 
+    def _other_thread_stacks(self) -> tuple[list[dict[str, object]], int]:
+        """Return bounded stacks for Python threads other than the loop and watcher."""
+        current_ident = threading.get_ident()
+        frames = sys._current_frames()
+        candidates = sorted(
+            (
+                thread
+                for thread in threading.enumerate()
+                if thread.ident is not None
+                and thread.ident not in {self._loop_thread_ident, current_ident}
+                and thread.ident in frames
+            ),
+            key=lambda thread: (thread.daemon, thread.name, thread.ident or 0),
+        )
+        reported = candidates[:_MAX_OTHER_THREAD_STACKS]
+        stacks = [
+            {
+                "thread_name": thread.name,
+                "thread_ident": thread.ident,
+                "daemon": thread.daemon,
+                "stack": "".join(traceback.format_stack(frames[thread.ident], limit=_MAX_STACK_FRAMES)),
+            }
+            for thread in reported
+            if thread.ident is not None
+        ]
+        return stacks, len(candidates) - len(reported)
+
+    def _stall_diagnostics(self) -> dict[str, object]:
+        """Capture process activity and competing Python work for one stall log."""
+        other_thread_stacks, omitted_thread_stack_count = self._other_thread_stacks()
+        return {
+            "process_cpu_seconds_since_heartbeat": round(
+                max(0.0, time.process_time() - self._last_beat_process_cpu),
+                3,
+            ),
+            "other_thread_stacks": other_thread_stacks,
+            "omitted_thread_stack_count": omitted_thread_stack_count,
+        }
+
     def _note_stall_ended(self, fresh_beat: float) -> None:
         """Log the end of one stall using the heartbeat gap as its duration."""
         assert self._stalled_beat is not None
@@ -171,6 +215,7 @@ class EventLoopStallDetector:
                 stalled_for_seconds=stalled_for_seconds,
                 threshold_seconds=self.threshold_seconds,
                 stack=self._loop_thread_stack(),
+                **self._stall_diagnostics(),
             )
         elif now >= self._next_repeat_log:
             self._next_repeat_log = now + self.repeat_log_interval_seconds
@@ -179,6 +224,7 @@ class EventLoopStallDetector:
                 stalled_for_seconds=stalled_for_seconds,
                 threshold_seconds=self.threshold_seconds,
                 stack=self._loop_thread_stack(),
+                **self._stall_diagnostics(),
             )
 
     def _watch(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -172,6 +173,44 @@ async def test_detector_logs_blocking_stack_and_stall_duration() -> None:
     ended = [entry for entry in logs if entry["event"] == "event_loop_stall_ended"]
     assert len(ended) == 1
     assert ended[0]["stall_duration_seconds"] >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_detector_logs_process_cpu_and_other_python_thread_stacks() -> None:
+    """A stall report must distinguish process activity and expose competing Python work."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def parked_worker() -> None:
+        worker_started.set()
+        release_worker.wait()
+
+    worker = threading.Thread(target=parked_worker, name="stall-context-worker")
+    worker.start()
+    assert worker_started.wait(timeout=1.0)
+
+    detector = _detector()
+    try:
+        with capture_logs() as logs:
+            detector.start()
+            await asyncio.sleep(0.1)
+            time.sleep(0.6)  # noqa: ASYNC251 - deliberately block the event loop.
+            await asyncio.sleep(0.2)
+            detector.stop()
+    finally:
+        release_worker.set()
+        worker.join(timeout=1.0)
+
+    detected = [entry for entry in logs if entry["event"] == "event_loop_stall_detected"]
+    assert len(detected) == 1
+    assert isinstance(detected[0]["process_cpu_seconds_since_heartbeat"], float)
+    assert detected[0]["process_cpu_seconds_since_heartbeat"] >= 0
+    other_thread_stacks = detected[0]["other_thread_stacks"]
+    assert isinstance(other_thread_stacks, list)
+    worker_stacks = [entry for entry in other_thread_stacks if entry["thread_name"] == "stall-context-worker"]
+    assert len(worker_stacks) == 1
+    assert "parked_worker" in worker_stacks[0]["stack"]
+    assert detected[0]["omitted_thread_stack_count"] >= 0
 
 
 @pytest.mark.asyncio
