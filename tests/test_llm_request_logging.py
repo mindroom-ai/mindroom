@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -93,6 +94,10 @@ async def _assert_cancellation_is_deferred(task: asyncio.Task[Any]) -> None:
     asyncio.get_running_loop().call_soon(ready_callbacks_processed.set)
     await ready_callbacks_processed.wait()
     assert not task.done()
+
+
+def _traceback_frame_names(error: BaseException) -> list[str]:
+    return [frame.name for frame in traceback.extract_tb(error.__traceback__)]
 
 
 @dataclass
@@ -641,6 +646,7 @@ async def test_provider_cancellation_chains_request_worker_failure(
     assert cancelled.value is model.provider_cancellation
     assert cancelled.value.args == ("provider cancellation",)
     assert cancelled.value.__cause__ is worker_error
+    assert "failing_serialization" in _traceback_frame_names(worker_error)
     assert invoke_task.cancelling() == 1
 
 
@@ -952,6 +958,7 @@ async def test_stream_provider_cancellation_chains_final_request_worker_failure(
     assert cancelled.value is model.provider_cancellation
     assert cancelled.value.args == ("provider stream cancellation",)
     assert cancelled.value.__cause__ is worker_error
+    assert "failing_serialization" in _traceback_frame_names(worker_error)
     assert next_chunk.cancelling() == 2
 
 
@@ -1066,6 +1073,7 @@ async def test_response_worker_failure_is_chained_to_deferred_cancellation(
 
     assert cancelled.args == ("first cancellation",)
     assert cancelled.__cause__ is worker_error
+    assert "failing_response_write" in _traceback_frame_names(worker_error)
     assert cancel_count == 2
     assert call_task.cancelling() == 2
     entries = _read_log_entries(tmp_path)
@@ -1080,18 +1088,22 @@ async def test_settled_stream_request_task_does_not_reenter_cancellation_boundar
 ) -> None:
     """Later chunks and cleanup must use the settled request result directly."""
     original_await = llm_request_logging._await_before_cancelling
-    settled_request_task: asyncio.Task[_RequestLogRef | None] | None = None
+    original_request_write = llm_request_logging._write_llm_request_log_reporting_errors
+    settled_request_task: asyncio.Task[Any] | None = None
     settled_request_reentered_boundary = False
 
-    async def observe_boundary[Result](task: asyncio.Task[Result]) -> Result:
-        nonlocal settled_request_reentered_boundary, settled_request_task
-        if task is settled_request_task:
-            settled_request_reentered_boundary = True
-        result = await original_await(task)
-        if isinstance(result, _RequestLogRef):
-            settled_request_task = task
-        return result
+    async def observe_request_write(*args: object, **kwargs: object) -> _RequestLogRef | None:
+        nonlocal settled_request_task
+        settled_request_task = asyncio.current_task()
+        return await original_request_write(*args, **kwargs)  # type: ignore[arg-type]
 
+    async def observe_boundary[Result](task: asyncio.Task[Result]) -> Result:
+        nonlocal settled_request_reentered_boundary
+        if task is settled_request_task and task.done():
+            settled_request_reentered_boundary = True
+        return await original_await(task)
+
+    monkeypatch.setattr(llm_request_logging, "_write_llm_request_log_reporting_errors", observe_request_write)
     monkeypatch.setattr(llm_request_logging, "_await_before_cancelling", observe_boundary)
     model = _FakeModel(response_usage=MessageMetrics(input_tokens=3, output_tokens=2))
     install_llm_request_logging(
@@ -1114,6 +1126,58 @@ async def test_settled_stream_request_task_does_not_reenter_cancellation_boundar
     assert settled_request_task is not None
     assert not settled_request_reentered_boundary
     assert [entry.get("record") for entry in _read_log_entries(tmp_path)] == [None, "response"]
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_request_task_is_consumed_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Later chunks and cleanup must retain one failed request-task outcome."""
+    worker_error = OSError("serialization failed")
+    original_await = llm_request_logging._await_before_cancelling
+    original_request_write = llm_request_logging._write_llm_request_log_reporting_errors
+    failed_request_task: asyncio.Task[Any] | None = None
+    failed_request_reentered_boundary = False
+
+    def failing_serialization(*_args: object, **_kwargs: object) -> str:
+        raise worker_error
+
+    async def observe_request_write(*args: object, **kwargs: object) -> _RequestLogRef | None:
+        nonlocal failed_request_task
+        failed_request_task = asyncio.current_task()
+        return await original_request_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def observe_boundary[Result](task: asyncio.Task[Result]) -> Result:
+        nonlocal failed_request_reentered_boundary
+        if task is failed_request_task and task.done():
+            failed_request_reentered_boundary = True
+        return await original_await(task)
+
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", failing_serialization)
+    monkeypatch.setattr(llm_request_logging, "_write_llm_request_log_reporting_errors", observe_request_write)
+    monkeypatch.setattr(llm_request_logging, "_await_before_cancelling", observe_boundary)
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=3, output_tokens=2))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    contents = [
+        chunk.content
+        async for chunk in model.ainvoke_stream(
+            messages=[Message(role="user", content="hello")],
+            assistant_message=Message(role="assistant"),
+            tools=[],
+        )
+    ]
+
+    assert contents == ["ok", "!"]
+    assert failed_request_task is not None
+    assert not failed_request_reentered_boundary
+    assert "failing_serialization" in _traceback_frame_names(worker_error)
 
 
 @pytest.mark.asyncio

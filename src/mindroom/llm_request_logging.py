@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
@@ -370,6 +370,16 @@ class _RequestLogRef:
     log_path: Path
 
 
+@dataclass
+class _RequestLogState:
+    """One accepted request write and its explicitly retained outcome."""
+
+    request_log_ref: _RequestLogRef | None = None
+    error: Exception | None = None
+    task: asyncio.Task[None] | None = None
+    consumed: bool = False
+
+
 def _serialize_llm_request_log_line(
     *,
     model: Model,
@@ -623,6 +633,17 @@ async def _write_llm_request_log_reporting_errors(
         raise
 
 
+async def _capture_request_log_outcome(
+    state: _RequestLogState,
+    write_request: Callable[[], Coroutine[object, object, _RequestLogRef | None]],
+) -> None:
+    """Retain a request result or already-reported ordinary error."""
+    try:
+        state.request_log_ref = await write_request()
+    except Exception as exc:
+        state.error = exc
+
+
 async def _write_llm_request_log_best_effort(
     *,
     model: Model,
@@ -648,16 +669,23 @@ async def _write_llm_request_log_best_effort(
         return None
 
 
-async def _await_request_log_task_best_effort(
-    task: asyncio.Task[_RequestLogRef | None],
-) -> _RequestLogRef | None:
-    """Return a reported request result without changing normal stream behavior."""
+async def _await_request_log_once(
+    state: _RequestLogState,
+    write_request: Callable[[], Coroutine[object, object, _RequestLogRef | None]],
+) -> None:
+    """Consume one accepted stream request task and retain its outcome."""
+    if state.consumed:
+        return
+    if state.task is None:
+        state.task = asyncio.create_task(_capture_request_log_outcome(state, write_request))
     try:
-        if task.done():
-            return task.result()
-        return await _await_before_cancelling(task)
-    except Exception:
-        return None
+        await _await_before_cancelling(state.task)
+    except asyncio.CancelledError as exc:
+        if exc.__cause__ is None and state.error is not None:
+            raise exc from state.error
+        raise
+    finally:
+        state.consumed = True
 
 
 async def _await_log_finalizer(
@@ -671,12 +699,8 @@ async def _await_log_finalizer(
         await _await_before_cancelling(task)
     except asyncio.CancelledError as exc:
         deferred_cancel = deferred_cancel or exc
-    except Exception as exc:
-        finalizer_error = exc
-    try:
-        task.result()
-    except asyncio.CancelledError as exc:
-        deferred_cancel = deferred_cancel or exc
+        if isinstance(exc.__cause__, Exception):
+            finalizer_error = exc.__cause__
     except Exception as exc:
         finalizer_error = exc
     if deferred_cancel is None:
@@ -686,13 +710,21 @@ async def _await_log_finalizer(
     raise deferred_cancel
 
 
-def _settled_task_error[Result](task: asyncio.Task[Result]) -> Exception | None:
-    """Return one ordinary error from an already-settled task."""
+async def _await_request_log_after_provider_cancellation(state: _RequestLogState) -> BaseException | None:
+    """Settle one provider-cancellation request write without replacing it."""
+    assert state.task is not None
+    request_error: BaseException | None = None
     try:
-        task.result()
-    except Exception as exc:
-        return exc
-    return None
+        await _await_before_cancelling(state.task)
+    except asyncio.CancelledError as exc:
+        request_error = state.error or exc.__cause__
+        if request_error is None and state.task.cancelled():
+            request_error = exc
+    except BaseException as exc:
+        request_error = state.error or exc
+    finally:
+        state.consumed = True
+    return state.error or request_error
 
 
 async def _write_llm_response_log_reporting_errors(
@@ -765,8 +797,10 @@ async def _invoke_with_llm_request_logging(
         with _model_request_scope(model, wire_tools_capture):
             response = await original_ainvoke(*args, **kwargs)
     except asyncio.CancelledError as provider_cancel:
-        request_task = asyncio.create_task(
-            _write_llm_request_log_reporting_errors(
+        request_state = _RequestLogState()
+
+        def _write_cancelled_request() -> Coroutine[object, object, _RequestLogRef | None]:
+            return _write_llm_request_log_reporting_errors(
                 model=model,
                 agent_name=agent_name,
                 kwargs=kwargs,
@@ -774,13 +808,13 @@ async def _invoke_with_llm_request_logging(
                 default_log_dir=default_log_dir,
                 request_context=request_context,
                 wire_tools_capture=wire_tools_capture,
-            ),
+            )
+
+        request_state.task = asyncio.create_task(
+            _capture_request_log_outcome(request_state, _write_cancelled_request),
         )
-        with suppress(BaseException):
-            await _await_before_cancelling(request_task)
-        try:
-            request_task.result()
-        except BaseException as request_error:
+        request_error = await _await_request_log_after_provider_cancellation(request_state)
+        if request_error is not None:
             raise provider_cancel from request_error
         raise
     except BaseException:
@@ -844,40 +878,32 @@ def _stream_with_llm_request_logging(
 
     async def _stream() -> AsyncIterator[ModelResponse]:
         wire_tools_capture = _WireToolsCapture(enabled=debug_config.log_llm_requests)
-        request_log_ref: _RequestLogRef | None = None
-        request_log_task: asyncio.Task[_RequestLogRef | None] | None = None
+        request_state = _RequestLogState()
         last_usage: MessageMetrics | None = None
 
-        async def _write_request_once() -> None:
-            nonlocal request_log_ref, request_log_task
-            if request_log_task is None:
-                request_log_task = asyncio.create_task(
-                    _write_llm_request_log_reporting_errors(
-                        model=model,
-                        agent_name=agent_name,
-                        kwargs=kwargs,
-                        debug_config=debug_config,
-                        default_log_dir=default_log_dir,
-                        request_context=request_context,
-                        wire_tools_capture=wire_tools_capture,
-                    ),
-                )
-            request_log_ref = await _await_request_log_task_best_effort(request_log_task)
+        def _write_request() -> Coroutine[object, object, _RequestLogRef | None]:
+            return _write_llm_request_log_reporting_errors(
+                model=model,
+                agent_name=agent_name,
+                kwargs=kwargs,
+                debug_config=debug_config,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+                wire_tools_capture=wire_tools_capture,
+            )
 
         async def _finalize_stream_logs() -> None:
-            await _write_request_once()
-            assert request_log_task is not None
-            request_error = _settled_task_error(request_log_task)
+            await _await_request_log_once(request_state, _write_request)
             response_error = await _capture_llm_response_log_error(
                 model=model,
                 agent_name=agent_name,
                 configured_provider=configured_provider,
-                request_log_ref=request_log_ref,
+                request_log_ref=request_state.request_log_ref,
                 usage=last_usage,
                 request_context=request_context,
             )
-            if request_error is not None:
-                raise request_error
+            if request_state.error is not None:
+                raise request_state.error
             if response_error is not None:
                 raise response_error
 
@@ -893,7 +919,7 @@ def _stream_with_llm_request_logging(
             async for chunk in scoped_stream:
                 if chunk.response_usage is not None:
                     last_usage = chunk.response_usage
-                await _write_request_once()
+                await _await_request_log_once(request_state, _write_request)
                 yield chunk
         except asyncio.CancelledError as exc:
             deferred_cancel = exc
