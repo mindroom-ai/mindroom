@@ -20,7 +20,11 @@ from pydantic import BaseModel
 from mindroom import agno_function_patch
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.tool_schema_cache import set_schema_cache_postprocessor
+from mindroom.tool_schema_cache import (
+    get_schema_cache_source,
+    set_schema_cache_postprocessor,
+    set_schema_cache_source,
+)
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -272,11 +276,15 @@ def _model_copy_with_output_path_schema(
     deep: bool = False,
 ) -> Function:
     copied = _copy_function_model(self, update=update, deep=deep)
-    _install_output_path_schema_postprocessor(copied)
+    _install_output_path_schema_postprocessor(copied, cache_source=get_schema_cache_source(self))
     return copied
 
 
-def _install_output_path_schema_postprocessor(function: Function) -> None:
+def _install_output_path_schema_postprocessor(
+    function: Function,
+    *,
+    cache_source: Callable[..., object] | None = None,
+) -> None:
     """Install a per-function schema sanitizer that survives Agno's Function copies."""
     object.__setattr__(
         function,
@@ -284,6 +292,8 @@ def _install_output_path_schema_postprocessor(function: Function) -> None:
         MethodType(_process_entrypoint_with_output_path_schema, function),
     )
     set_schema_cache_postprocessor(function, _process_cached_entrypoint_with_output_path_schema)
+    if cache_source is not None:
+        set_schema_cache_source(function, cache_source)
     object.__setattr__(
         function,
         "model_copy",
@@ -739,7 +749,6 @@ def _wrap_entrypoint(
     wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
-    wrapper.__dict__["__wrapped__"] = entrypoint
     _copy_annotations_with_output_path(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
@@ -758,9 +767,10 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
         return function
 
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
-    function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
+    source_entrypoint = function.entrypoint
+    function.entrypoint = _wrap_entrypoint(source_entrypoint, policy, tool_name=function.name)
     function.strict = False
-    _install_output_path_schema_postprocessor(function)
+    _install_output_path_schema_postprocessor(function, cache_source=source_entrypoint)
     if uses_custom_parameters:
         ensure_output_path_schema_optional(function)
     return function

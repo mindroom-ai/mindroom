@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
-from inspect import isfunction, ismethod
+from inspect import isfunction, ismethod, signature
 from types import MethodType
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 
 _CACHE_POSTPROCESSOR_ATTR = "_mindroom_schema_cache_postprocessor"
+_CACHE_SOURCE_ATTR = "_mindroom_schema_cache_source"
 type _SchemaCachePostprocessor = Callable[[Function, bool], None]
 
 
@@ -29,16 +30,86 @@ class _ProcessedFunctionSchema:
     user_input_schema: tuple[UserInputField, ...] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _SchemaCacheEntrypoint:
+    """Hashable schema inputs while retaining the live entrypoint out of the cache key."""
+
+    cache_source: Callable[..., object]
+    schema_fingerprint: tuple[str, str, str | None]
+    entrypoint: Callable[..., object] = field(compare=False, hash=False, repr=False)
+
+    def __hash__(self) -> int:
+        return hash((self.cache_source, self.schema_fingerprint))
+
+
 def set_schema_cache_postprocessor(function: Function, postprocessor: _SchemaCachePostprocessor) -> None:
     """Allow a custom entrypoint processor to reuse cached schema preparation.
 
     ``postprocessor`` must be a module-level function that applies the custom
     processor's complete behavior to a cache-owned ``Function``.
     """
-    if not isfunction(postprocessor):
+    if (
+        not isfunction(postprocessor)
+        or "<locals>" in postprocessor.__qualname__
+        or postprocessor.__closure__ is not None
+    ):
         msg = "Schema cache postprocessors must be module-level functions."
         raise TypeError(msg)
     object.__setattr__(function, _CACHE_POSTPROCESSOR_ATTR, postprocessor)
+
+
+def set_schema_cache_source(function: Function, source: Callable[..., object]) -> None:
+    """Set a private stable cache source without changing the live entrypoint."""
+    cache_source = source.__func__ if ismethod(source) else source
+    if not isfunction(cache_source):
+        msg = "Schema cache sources must be functions."
+        raise TypeError(msg)
+    object.__setattr__(function, _CACHE_SOURCE_ATTR, cache_source)
+
+
+def get_schema_cache_source(function: Function) -> Callable[..., object] | None:
+    """Return the private stable cache source for a custom schema processor."""
+    source = getattr(function, _CACHE_SOURCE_ATTR, None)
+    return source if isfunction(source) else None
+
+
+def _is_stable_cache_postprocessor(postprocessor: object) -> bool:
+    return (
+        isfunction(postprocessor) and "<locals>" not in postprocessor.__qualname__ and postprocessor.__closure__ is None
+    )
+
+
+def _uses_default_entrypoint_processor(function: Function) -> bool:
+    processor = function.process_entrypoint
+    return (
+        isinstance(processor, MethodType)
+        and processor.__self__ is function
+        and processor.__func__ is Function.process_entrypoint
+    )
+
+
+def _schema_cache_entrypoint(function: Function) -> _SchemaCacheEntrypoint | None:
+    if function.entrypoint is None or not callable(function.entrypoint):
+        return None
+
+    source_callable = get_schema_cache_source(function) or function.entrypoint
+    if isinstance(source_callable, MethodType) or ismethod(source_callable):
+        source_callable = source_callable.__func__
+    elif not isfunction(source_callable):
+        return None
+
+    try:
+        return _SchemaCacheEntrypoint(
+            cache_source=source_callable,
+            schema_fingerprint=(
+                str(signature(function.entrypoint)),
+                repr(getattr(function.entrypoint, "__annotations__", {})),
+                getattr(function.entrypoint, "__doc__", None),
+            ),
+            entrypoint=function.entrypoint,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFunctionSchema | None:
@@ -52,20 +123,13 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         return None
 
     cache_postprocessor = getattr(function, _CACHE_POSTPROCESSOR_ATTR, None)
-    processor = function.process_entrypoint
-    if (
-        isinstance(processor, MethodType)
-        and processor.__func__ is not Function.process_entrypoint
-        and cache_postprocessor is None
-    ):
+    if not _uses_default_entrypoint_processor(function) and cache_postprocessor is None:
         return None
-    if cache_postprocessor is not None and not isfunction(cache_postprocessor):
+    if cache_postprocessor is not None and not _is_stable_cache_postprocessor(cache_postprocessor):
         return None
 
-    source_callable = getattr(function.entrypoint, "__wrapped__", function.entrypoint)
-    if isinstance(source_callable, MethodType) or ismethod(source_callable):
-        source_callable = source_callable.__func__
-    elif not isfunction(source_callable):
+    entrypoint = _schema_cache_entrypoint(function)
+    if entrypoint is None:
         return None
 
     try:
@@ -74,7 +138,7 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         return None
 
     snapshot = _cached_processed_function_schema(
-        source_callable,
+        entrypoint,
         function.name,
         function.description,
         parameters_json,
@@ -100,7 +164,7 @@ def clear_tool_schema_cache() -> None:
 
 @lru_cache(maxsize=4096)
 def _cached_processed_function_schema(
-    source_callable: Callable[..., object],
+    entrypoint: _SchemaCacheEntrypoint,
     name: str,
     description: str | None,
     parameters_json: str,
@@ -115,7 +179,7 @@ def _cached_processed_function_schema(
         name=name,
         description=description,
         parameters=json.loads(parameters_json),
-        entrypoint=source_callable,
+        entrypoint=entrypoint.entrypoint,
         skip_entrypoint_processing=skip_entrypoint_processing,
         requires_user_input=requires_user_input,
         user_input_fields=list(user_input_fields) if user_input_fields is not None else None,
