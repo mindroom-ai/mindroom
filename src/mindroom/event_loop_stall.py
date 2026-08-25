@@ -43,6 +43,7 @@ _MAX_STACK_FRAMES = 32
 _MAX_OTHER_THREAD_STACK_CHARACTERS = 2_000
 _MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS = 8_000
 _MAX_THREAD_NAME_CHARACTERS = 160
+_STACK_TRUNCATION_MARKER = "\n...\n"
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -51,6 +52,16 @@ def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
     if not raw:
         return _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS
     return float(raw)
+
+
+def _truncate_stack(stack: str, character_budget: int) -> str:
+    """Return an exact-budget stack suffix, marked when both can fit."""
+    if len(stack) <= character_budget:
+        return stack
+    if character_budget <= len(_STACK_TRUNCATION_MARKER):
+        return stack[-character_budget:] if character_budget > 0 else ""
+    tail_length = character_budget - len(_STACK_TRUNCATION_MARKER)
+    return f"{_STACK_TRUNCATION_MARKER}{stack[-tail_length:]}"
 
 
 @dataclass(frozen=True)
@@ -209,7 +220,7 @@ class EventLoopStallDetector:
             thread = known_threads.get(thread_ident)
             thread_name = thread.name if thread is not None else f"thread-{thread_ident}"
             full_stack = "".join(traceback.format_stack(captured_frames[thread_ident], limit=_MAX_STACK_FRAMES))
-            stack = full_stack[: min(_MAX_OTHER_THREAD_STACK_CHARACTERS, remaining)]
+            stack = _truncate_stack(full_stack, min(_MAX_OTHER_THREAD_STACK_CHARACTERS, remaining))
             if len(stack) < len(full_stack):
                 truncated += 1
             stack_characters += len(stack)

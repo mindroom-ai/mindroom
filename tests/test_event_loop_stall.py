@@ -306,10 +306,37 @@ def test_other_thread_stacks_excludes_loop_and_watcher_and_bounds_characters(mon
 
     stacks, omitted, truncated = detector._other_thread_stacks()
 
-    assert [(entry["thread_name"], entry["stack"]) for entry in stacks] == [("first", "abcde"), ("second", "ij")]
+    assert [(entry["thread_name"], entry["stack"]) for entry in stacks] == [
+        ("first", "defgh"),
+        ("second", "op"),
+    ]
     assert omitted == 1
     assert truncated == 2
     assert sum(len(entry["stack"]) for entry in stacks) == 7
+
+
+def test_other_thread_stack_truncation_keeps_the_active_frame_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bounded stack retains its active frame at the formatted-stack tail."""
+    detector = _detector()
+    frame_ident = 123
+    frame = object()
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
+    monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
+    monkeypatch.setattr(
+        event_loop_stall.traceback,
+        "format_stack",
+        lambda *_args, **_kwargs: ["unimportant\n", "active-frame\n"],
+    )
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_CHARACTERS", 20)
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS", 20)
+
+    stacks, omitted, truncated = detector._other_thread_stacks()
+
+    assert stacks[0]["stack"] == "\n...\nt\nactive-frame\n"
+    assert len(stacks[0]["stack"]) == 20
+    assert stacks[0]["stack"].endswith("active-frame\n")
+    assert omitted == 0
+    assert truncated == 1
 
 
 def test_stall_diagnostics_uses_one_heartbeat_snapshot_and_samples_cpu_before_formatting(
