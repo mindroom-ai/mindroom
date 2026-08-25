@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime
@@ -134,7 +134,7 @@ async def _checkpoint_for_cancellation() -> asyncio.CancelledError | None:
     return None
 
 
-async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
+async def _await_before_cancelling[Result](task: asyncio.Task[Result]) -> Result:
     """Finish one accepted task before propagating caller cancellation once."""
     current_task = asyncio.current_task()
     assert current_task is not None
@@ -158,15 +158,15 @@ async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
             raise
 
     try:
-        task.result()
+        result = task.result()
     except BaseException as task_error:
         if deferred_cancel is None:
             raise
         raise deferred_cancel from task_error
 
-    if deferred_cancel is None:
-        return
-    raise deferred_cancel
+    if deferred_cancel is not None:
+        raise deferred_cancel
+    return result
 
 
 def _json_safe(value: object) -> _JSONValue:
@@ -667,8 +667,8 @@ async def _invoke_with_llm_request_logging(
     try:
         with _model_request_scope(model, wire_tools_capture):
             response = await original_ainvoke(*args, **kwargs)
-    finally:
-        request_log_ref = await _write_llm_request_log_best_effort(
+    except BaseException:
+        await _write_llm_request_log_best_effort(
             model=model,
             agent_name=agent_name,
             kwargs=kwargs,
@@ -677,14 +677,42 @@ async def _invoke_with_llm_request_logging(
             request_context=request_context,
             wire_tools_capture=wire_tools_capture,
         )
-    await _write_llm_response_log_best_effort(
-        model=model,
-        agent_name=agent_name,
-        configured_provider=configured_provider,
-        request_log_ref=request_log_ref,
-        usage=response.response_usage,
-        request_context=request_context,
-    )
+        raise
+
+    async def _write_success_logs() -> None:
+        request_error: Exception | None = None
+        try:
+            request_log_ref = await _write_llm_request_log_if_enabled(
+                model=model,
+                agent_name=agent_name,
+                kwargs=kwargs,
+                debug_config=debug_config,
+                default_log_dir=default_log_dir,
+                request_context=request_context,
+                wire_tools_capture=wire_tools_capture,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to persist LLM request log",
+                agent_name=agent_name,
+                model_id=model.id,
+            )
+            request_log_ref = None
+            request_error = exc
+        await _write_llm_response_log_best_effort(
+            model=model,
+            agent_name=agent_name,
+            configured_provider=configured_provider,
+            request_log_ref=request_log_ref,
+            usage=response.response_usage,
+            request_context=request_context,
+        )
+        if request_error is not None:
+            raise request_error
+
+    finalizer = asyncio.create_task(_write_success_logs())
+    with suppress(Exception):
+        await _await_before_cancelling(finalizer)
     return response
 
 
@@ -705,38 +733,26 @@ def _stream_with_llm_request_logging(
     async def _stream() -> AsyncIterator[ModelResponse]:
         wire_tools_capture = _WireToolsCapture(enabled=debug_config.log_llm_requests)
         request_log_ref: _RequestLogRef | None = None
-        request_logged = False
+        request_log_task: asyncio.Task[_RequestLogRef | None] | None = None
         last_usage: MessageMetrics | None = None
 
         async def _write_request_once() -> None:
-            nonlocal request_log_ref, request_logged
-            if request_logged:
-                return
-            request_logged = True
-            request_log_ref = await _write_llm_request_log_best_effort(
-                model=model,
-                agent_name=agent_name,
-                kwargs=kwargs,
-                debug_config=debug_config,
-                default_log_dir=default_log_dir,
-                request_context=request_context,
-                wire_tools_capture=wire_tools_capture,
-            )
+            nonlocal request_log_ref, request_log_task
+            if request_log_task is None:
+                request_log_task = asyncio.create_task(
+                    _write_llm_request_log_best_effort(
+                        model=model,
+                        agent_name=agent_name,
+                        kwargs=kwargs,
+                        debug_config=debug_config,
+                        default_log_dir=default_log_dir,
+                        request_context=request_context,
+                        wire_tools_capture=wire_tools_capture,
+                    ),
+                )
+            request_log_ref = await _await_before_cancelling(request_log_task)
 
-        # finally: an abandoned stream (consumer break -> aclose()) must
-        # still record any usage already reported; awaiting during aclose()
-        # is allowed for async generators as long as nothing is yielded.
-        try:
-            scoped_stream = context_bound_async_stream(
-                context_factory=lambda: _model_request_scope(model, wire_tools_capture),
-                stream_factory=lambda: original_ainvoke_stream(*args, **kwargs),
-            )
-            async for chunk in scoped_stream:
-                await _write_request_once()
-                if chunk.response_usage is not None:
-                    last_usage = chunk.response_usage
-                yield chunk
-        finally:
+        async def _finalize_stream_logs() -> None:
             await _write_request_once()
             await _write_llm_response_log_best_effort(
                 model=model,
@@ -746,6 +762,31 @@ def _stream_with_llm_request_logging(
                 usage=last_usage,
                 request_context=request_context,
             )
+
+        # finally: an abandoned stream (consumer break -> aclose()) must
+        # still record any usage already reported; awaiting during aclose()
+        # is allowed for async generators as long as nothing is yielded.
+        deferred_cancel: asyncio.CancelledError | None = None
+        try:
+            scoped_stream = context_bound_async_stream(
+                context_factory=lambda: _model_request_scope(model, wire_tools_capture),
+                stream_factory=lambda: original_ainvoke_stream(*args, **kwargs),
+            )
+            async for chunk in scoped_stream:
+                if chunk.response_usage is not None:
+                    last_usage = chunk.response_usage
+                await _write_request_once()
+                yield chunk
+        except asyncio.CancelledError as exc:
+            deferred_cancel = exc
+        finally:
+            finalizer = asyncio.create_task(_finalize_stream_logs())
+            try:
+                await _await_before_cancelling(finalizer)
+            except asyncio.CancelledError as exc:
+                deferred_cancel = deferred_cancel or exc
+            if deferred_cancel is not None:
+                raise deferred_cancel
 
     return _stream()
 

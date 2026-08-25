@@ -510,6 +510,78 @@ async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_record", ["request", "response"])
+async def test_invoke_cancellation_waits_for_linked_success_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    blocked_record: str,
+) -> None:
+    """Successful-call cancellation must wait for its linked request and response."""
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    continuation_started = asyncio.Event()
+    release_continuation = asyncio.Event()
+    original_write = llm_request_logging._write_serialized_jsonl_line
+
+    def blocked_write(path: Path, line: str) -> None:
+        record_type = json.loads(line).get("record", "request")
+        if record_type == blocked_record:
+            writer_started.set()
+            assert release_writer.wait(timeout=5)
+        original_write(path, line)
+
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", blocked_write)
+    model = _FakeModel(response_usage=MessageMetrics(input_tokens=5, output_tokens=7))
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    async def invoke_and_continue() -> tuple[tuple[object, ...], int]:
+        try:
+            await model.ainvoke(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+        except asyncio.CancelledError as exc:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            continuation_started.set()
+            await release_continuation.wait()
+            return exc.args, current_task.cancelling()
+        pytest.fail("cancellation was not delivered")
+
+    with capture_logs() as logs:
+        invoke_task = asyncio.create_task(invoke_and_continue())
+        try:
+            assert await asyncio.to_thread(writer_started.wait, 5)
+            invoke_task.cancel("first cancellation")
+            await _assert_cancellation_is_deferred(invoke_task)
+            invoke_task.cancel("second cancellation")
+            await _assert_cancellation_is_deferred(invoke_task)
+            release_writer.set()
+            await continuation_started.wait()
+            release_continuation.set()
+            cancel_args, cancel_count = await invoke_task
+        finally:
+            release_writer.set()
+            release_continuation.set()
+            await asyncio.gather(invoke_task, return_exceptions=True)
+
+    request_entry, response_entry = _read_log_entries(tmp_path)
+    assert response_entry["record"] == "response"
+    assert response_entry["request_log_id"] == request_entry["request_log_id"]
+    assert response_entry["usage"]["input_tokens"] == 5
+    assert cancel_args == ("first cancellation",)
+    assert cancel_count == 2
+    assert invoke_task.cancelling() == 2
+    assert [entry["usage_available"] for entry in logs] == [True]
+
+
+@pytest.mark.asyncio
 async def test_inner_worker_cancellation_is_not_counted_as_caller_cancellation() -> None:
     """A cancelled worker must not masquerade as a new outer request."""
 
@@ -579,6 +651,76 @@ async def test_stream_cancellation_persists_one_request_record(
     assert len(entries) == 1
     assert entries[0]["messages"][0]["role"] == "user"
     assert entries[0]["messages"][0]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_stream_cancellation_finalizes_received_chunk_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after a usage chunk must persist one linked response first."""
+
+    @dataclass
+    class _UsageOnFirstChunkModel(_FakeModel):
+        async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+            yield ModelResponse(content="ok", response_usage=MessageMetrics(input_tokens=3, output_tokens=2))
+
+    request_writer_started = threading.Event()
+    release_request_writer = threading.Event()
+    response_writer_started = threading.Event()
+    release_response_writer = threading.Event()
+    original_write = llm_request_logging._write_serialized_jsonl_line
+
+    def blocked_write(path: Path, line: str) -> None:
+        if json.loads(line).get("record") == "response":
+            response_writer_started.set()
+            assert release_response_writer.wait(timeout=5)
+        else:
+            request_writer_started.set()
+            assert release_request_writer.wait(timeout=5)
+        original_write(path, line)
+
+    monkeypatch.setattr(llm_request_logging, "_write_serialized_jsonl_line", blocked_write)
+    model = _UsageOnFirstChunkModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    stream = model.ainvoke_stream(
+        messages=[Message(role="user", content="hello")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+
+    with capture_logs() as logs:
+        next_chunk = asyncio.create_task(anext(stream))
+        try:
+            assert await asyncio.to_thread(request_writer_started.wait, 5)
+            next_chunk.cancel("first cancellation")
+            await _assert_cancellation_is_deferred(next_chunk)
+            release_request_writer.set()
+            assert await asyncio.to_thread(response_writer_started.wait, 5)
+            next_chunk.cancel("second cancellation")
+            await _assert_cancellation_is_deferred(next_chunk)
+            release_response_writer.set()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await next_chunk
+        finally:
+            release_request_writer.set()
+            release_response_writer.set()
+            await asyncio.gather(next_chunk, return_exceptions=True)
+            await stream.aclose()
+
+    request_entry, response_entry = _read_log_entries(tmp_path)
+    assert response_entry["record"] == "response"
+    assert response_entry["request_log_id"] == request_entry["request_log_id"]
+    assert response_entry["usage"]["input_tokens"] == 3
+    assert response_entry["usage"]["output_tokens"] == 2
+    assert cancelled.value.args == ("first cancellation",)
+    assert next_chunk.cancelling() == 2
+    assert [entry["usage_available"] for entry in logs] == [True]
 
 
 @pytest.mark.asyncio
