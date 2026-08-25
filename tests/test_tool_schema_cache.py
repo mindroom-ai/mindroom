@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import inspect
 from functools import partial
 from typing import TYPE_CHECKING
+from weakref import ref
 
 import pytest
 from agno.tools.function import Function
@@ -206,3 +208,36 @@ def test_cached_processed_schema_uses_bound_method_cache_source(tmp_path: Path) 
 
     assert snapshot is not None
     assert snapshot.parameters["required"] == ["report_id"]
+
+
+def test_cached_processed_schema_does_not_retain_wrapped_method_owner(tmp_path: Path) -> None:
+    """Cached snapshots must not keep a wrapper's bound-method owner alive."""
+
+    class ReportExporter:
+        def export_report(self, report_id: str) -> str:
+            return report_id
+
+    clear_tool_schema_cache()
+    owner = ReportExporter()
+    owner_ref = ref(owner)
+    function = Function(name="export_report", entrypoint=owner.export_report)
+    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+    try:
+        first = cached_processed_schema(function, strict=False)
+        assert first is not None
+
+        del function
+        del owner
+        gc.collect()
+
+        assert owner_ref() is None
+
+        next_function = Function(name="export_report", entrypoint=ReportExporter().export_report)
+        wrap_function_for_output_files(next_function, ToolOutputFilePolicy(workspace_root=tmp_path))
+
+        second = cached_processed_schema(next_function, strict=False)
+
+        assert second == first
+    finally:
+        clear_tool_schema_cache()

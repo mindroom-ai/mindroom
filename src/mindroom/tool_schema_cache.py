@@ -9,6 +9,7 @@ from functools import lru_cache
 from inspect import isfunction, ismethod, signature
 from types import MethodType
 from typing import TYPE_CHECKING, Any
+from weakref import ReferenceType, ref
 
 from agno.tools.function import Function, UserInputField
 
@@ -36,7 +37,7 @@ class _SchemaCacheEntrypoint:
 
     cache_source: Callable[..., object]
     schema_fingerprint: tuple[str, str, str | None]
-    entrypoint: Callable[..., object] = field(compare=False, hash=False, repr=False)
+    entrypoint_ref: ReferenceType[Callable[..., object]] = field(compare=False, hash=False, repr=False)
 
     def __hash__(self) -> int:
         return hash((self.cache_source, self.schema_fingerprint))
@@ -106,7 +107,7 @@ def _schema_cache_entrypoint(function: Function) -> _SchemaCacheEntrypoint | Non
                 repr(getattr(function.entrypoint, "__annotations__", {})),
                 getattr(function.entrypoint, "__doc__", None),
             ),
-            entrypoint=function.entrypoint,
+            entrypoint_ref=ref(function.entrypoint),
         )
     except (TypeError, ValueError):
         return None
@@ -119,9 +120,6 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
     parameters cannot form a stable cache key, in which case callers must fall
     back to full entrypoint processing on a private copy.
     """
-    if function.entrypoint is None:
-        return None
-
     cache_postprocessor = getattr(function, _CACHE_POSTPROCESSOR_ATTR, None)
     if not _uses_default_entrypoint_processor(function) and cache_postprocessor is None:
         return None
@@ -149,6 +147,8 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         strict,
         cache_postprocessor,
     )
+    if snapshot is None:
+        return None
     # Copy at the boundary so callers can never corrupt the shared LRU entry.
     return _ProcessedFunctionSchema(
         parameters=deepcopy(snapshot.parameters),
@@ -174,12 +174,15 @@ def _cached_processed_function_schema(
     function_strict: bool | None,
     strict: bool,
     cache_postprocessor: _SchemaCachePostprocessor | None,
-) -> _ProcessedFunctionSchema:
+) -> _ProcessedFunctionSchema | None:
+    schema_entrypoint = entrypoint.entrypoint_ref()
+    if schema_entrypoint is None:
+        return None
     function = Function(
         name=name,
         description=description,
         parameters=json.loads(parameters_json),
-        entrypoint=entrypoint.entrypoint,
+        entrypoint=schema_entrypoint,
         skip_entrypoint_processing=skip_entrypoint_processing,
         requires_user_input=requires_user_input,
         user_input_fields=list(user_input_fields) if user_input_fields is not None else None,
