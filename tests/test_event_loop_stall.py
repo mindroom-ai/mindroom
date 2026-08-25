@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import _thread
 import asyncio
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import event_loop_stall
 from mindroom.constants import RuntimePaths
 from mindroom.event_loop_stall import (
     _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS,
@@ -180,26 +183,26 @@ async def test_detector_logs_process_cpu_and_other_python_thread_stacks() -> Non
     """A stall report must distinguish process activity and expose competing Python work."""
     worker_started = threading.Event()
     release_worker = threading.Event()
+    detector = _detector()
 
     def parked_worker() -> None:
         worker_started.set()
         release_worker.wait()
 
     worker = threading.Thread(target=parked_worker, name="stall-context-worker")
-    worker.start()
-    assert worker_started.wait(timeout=1.0)
-
-    detector = _detector()
     try:
+        worker.start()
+        assert worker_started.wait(timeout=1.0)
         with capture_logs() as logs:
             detector.start()
             await asyncio.sleep(0.1)
             time.sleep(0.6)  # noqa: ASYNC251 - deliberately block the event loop.
             await asyncio.sleep(0.2)
-            detector.stop()
     finally:
+        detector.stop()
         release_worker.set()
         worker.join(timeout=1.0)
+    assert not worker.is_alive()
 
     detected = [entry for entry in logs if entry["event"] == "event_loop_stall_detected"]
     assert len(detected) == 1
@@ -211,6 +214,149 @@ async def test_detector_logs_process_cpu_and_other_python_thread_stacks() -> Non
     assert len(worker_stacks) == 1
     assert "parked_worker" in worker_stacks[0]["stack"]
     assert detected[0]["omitted_thread_stack_count"] >= 0
+
+
+def test_other_thread_stacks_uses_frame_snapshot_for_low_level_thread() -> None:
+    """A live native thread is reported even when threading does not know about it."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_stopped = threading.Event()
+    worker_ident: list[int] = []
+
+    def low_level_worker() -> None:
+        try:
+            worker_ident.append(threading.get_ident())
+            worker_started.set()
+            release_worker.wait()
+        finally:
+            worker_stopped.set()
+
+    _thread.start_new_thread(low_level_worker, ())
+    try:
+        assert worker_started.wait(timeout=1.0)
+        detector = _detector()
+        stacks, omitted, truncated = detector._other_thread_stacks()
+    finally:
+        release_worker.set()
+    assert worker_stopped.wait(timeout=1.0)
+
+    assert worker_ident[0] not in {thread.ident for thread in threading.enumerate()}
+    assert omitted == 0
+    assert truncated == 0
+    stack = next(entry for entry in stacks if entry["thread_ident"] == worker_ident[0])
+    assert stack["thread_name"] == f"thread-{worker_ident[0]}"
+    assert stack["daemon"] is None
+    assert "low_level_worker" in stack["stack"]
+
+
+def test_other_thread_stacks_keeps_snapshot_frame_when_thread_metadata_has_gone_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame present in the snapshot remains reportable through metadata lookup races."""
+    detector = _detector()
+    frame_ident = 123
+    frame = object()
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
+    monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
+    monkeypatch.setattr(event_loop_stall.traceback, "format_stack", lambda *_args, **_kwargs: ["snapshot-frame"])
+
+    stacks, omitted, truncated = detector._other_thread_stacks()
+
+    assert stacks == [
+        {
+            "thread_name": "thread-123",
+            "thread_ident": 123,
+            "daemon": None,
+            "stack": "snapshot-frame",
+        },
+    ]
+    assert omitted == 0
+    assert truncated == 0
+
+
+def test_other_thread_stacks_excludes_loop_and_watcher_and_bounds_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only eligible snapshot frames consume the exact per-stack and total budgets."""
+    detector = _detector()
+    watcher_ident = threading.get_ident()
+    loop_ident = 10
+    first_ident = 20
+    second_ident = 30
+    third_ident = 40
+    frames = {ident: object() for ident in (loop_ident, watcher_ident, first_ident, second_ident, third_ident)}
+    names = {
+        first_ident: SimpleNamespace(ident=first_ident, name="first", daemon=False),
+        second_ident: SimpleNamespace(ident=second_ident, name="second", daemon=True),
+        third_ident: SimpleNamespace(ident=third_ident, name="third", daemon=True),
+    }
+    detector._loop_thread_ident = loop_ident
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: frames)
+    monkeypatch.setattr(event_loop_stall.threading, "enumerate", lambda: list(names.values()))
+    monkeypatch.setattr(
+        event_loop_stall.traceback,
+        "format_stack",
+        lambda frame, **_kwargs: {  # type: ignore[call-arg]
+            frames[first_ident]: ["abcdefgh"],
+            frames[second_ident]: ["ijklmnop"],
+            frames[third_ident]: ["qrstuvwx"],
+        }[frame],
+    )
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACKS", 3)
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_CHARACTERS", 5)
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACK_TOTAL_CHARACTERS", 7)
+
+    stacks, omitted, truncated = detector._other_thread_stacks()
+
+    assert [(entry["thread_name"], entry["stack"]) for entry in stacks] == [("first", "abcde"), ("second", "ij")]
+    assert omitted == 1
+    assert truncated == 2
+    assert sum(len(entry["stack"]) for entry in stacks) == 7
+
+
+def test_stall_diagnostics_uses_one_heartbeat_snapshot_and_samples_cpu_before_formatting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU work is measured from the observed heartbeat before stack formatting begins."""
+    detector = _detector()
+    heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=1.0, process_cpu_seconds=10.0)
+    detector._heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=2.0, process_cpu_seconds=20.0)
+    events: list[str] = []
+    monkeypatch.setattr(event_loop_stall.time, "process_time", lambda: events.append("cpu") or 12.345)
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", dict)
+    monkeypatch.setattr(
+        detector,
+        "_other_thread_stacks",
+        lambda _frames: events.append("format") or ([], 0, 0),
+    )
+
+    diagnostics = detector._stall_diagnostics(heartbeat)
+
+    assert diagnostics["process_cpu_seconds_since_heartbeat"] == 2.345
+    assert events == ["cpu", "format"]
+
+
+def test_watch_passes_the_observed_heartbeat_snapshot_to_stall_reporting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The watcher never pairs a stale monotonic time with a newer CPU baseline."""
+    detector = _detector(threshold_seconds=0.1)
+    heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=1.0, process_cpu_seconds=10.0)
+    detector._heartbeat = heartbeat
+    observed: list[object] = []
+
+    class _OnePollStopEvent:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        def wait(self, _timeout: float) -> bool:
+            self.polls += 1
+            return self.polls > 1
+
+    detector._stop_event = _OnePollStopEvent()  # type: ignore[assignment]
+    monkeypatch.setattr(detector, "_report_scheduler_lag", lambda _now: None)
+    monkeypatch.setattr(event_loop_stall.time, "monotonic", lambda: 2.0)
+    monkeypatch.setattr(detector, "_note_stalled", lambda _now, seen: observed.append(seen))
+
+    detector._watch()
+
+    assert observed == [heartbeat]
 
 
 @pytest.mark.asyncio
