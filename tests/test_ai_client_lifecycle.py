@@ -5,13 +5,18 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.models.message import Message
 
 from mindroom import ai
+from mindroom.history.types import PreparedHistoryState
+from tests.conftest import make_turn_context, test_runtime_paths
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
 
 
@@ -110,3 +115,53 @@ async def test_reusable_agent_turn_does_not_close_shared_client(
     await _callbacks(holder, retain_agent_runtime_state=True).finalize_attempt(None)
 
     close_client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_run_context_closes_agent_when_metadata_assembly_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preparation owns the built agent until the full run context is returned."""
+    agent = cast("Any", SimpleNamespace(model=object()))
+    prepared_run = ai._PreparedAgentRun(
+        agent=agent,
+        messages=(Message(role="user", content="hello"),),
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
+    )
+    preparation_error = RuntimeError("metadata assembly failed")
+    config = MagicMock()
+    config.get_prompt.side_effect = preparation_error
+    close_unreturned_agent = AsyncMock()
+    monkeypatch.setattr(ai, "_prepare_agent_and_prompt", AsyncMock(return_value=prepared_run))
+    monkeypatch.setattr(ai, "close_unreturned_agent", close_unreturned_agent)
+
+    with pytest.raises(RuntimeError) as raised:
+        await ai._prepare_agent_run_context(
+            make_turn_context("assistant"),
+            prompt="hello",
+            session_id="session-1",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=config,
+            scope_context=None,
+            thread_history=None,
+            knowledge=None,
+            include_interactive_questions=True,
+            tool_function_filter=None,
+            include_openai_compat_guidance=False,
+            execution_identity=None,
+            compaction_lifecycle=None,
+            delegation_depth=0,
+            refresh_scheduler=None,
+            model_prompt=None,
+            current_timestamp_ms=None,
+            current_event_id=None,
+            current_prompt_is_structured=False,
+            turn_recorder=None,
+            pipeline_timing=None,
+        )
+
+    assert raised.value is preparation_error
+    close_unreturned_agent.assert_awaited_once_with(agent, None, None)

@@ -7,7 +7,7 @@ import contextvars
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 
@@ -36,6 +36,15 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
         agent=agent_name,
         error=repr(error),
     )
+
+
+def prewarm_agent_model_client(agent: Agent, shared_scope_storage: BaseDb | None) -> None:
+    """Prewarm one built agent or reclaim its runtime state on failure."""
+    try:
+        prewarm_anthropic_async_client(agent.model)
+    except Exception:
+        close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
+        raise
 
 
 async def close_unreturned_agent(

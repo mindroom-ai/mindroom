@@ -323,6 +323,35 @@ async def test_prepare_agent_and_prompt_closes_built_agent_when_history_preparat
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_closes_built_agent_when_prewarm_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed client prewarm must reclaim the agent built in the worker."""
+    built_agent = MagicMock()
+    close_runtime = MagicMock()
+
+    monkeypatch.setattr(ai_module, "build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
+    monkeypatch.setattr(ai_module, "create_agent", MagicMock(return_value=built_agent))
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "prewarm_anthropic_async_client",
+        MagicMock(side_effect=RuntimeError("prewarm failed")),
+    )
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_runtime)
+
+    with pytest.raises(RuntimeError, match="prewarm failed"):
+        await ai_module._prepare_agent_and_prompt(
+            make_turn_context("general"),
+            prompt="hello",
+            runtime_paths=test_runtime_paths(tmp_path),
+            config=_prompt_preparation_config(),
+        )
+
+    close_runtime.assert_called_once_with(built_agent, shared_scope_storage=None)
+
+
+@pytest.mark.asyncio
 async def test_serial_agent_build_cancellation_drains_and_closes_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

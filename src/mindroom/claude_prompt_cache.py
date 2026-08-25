@@ -53,8 +53,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm_request_logging import record_llm_request_tools
+from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
 
@@ -100,6 +102,7 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
 
 _ANTHROPIC_CLAUDE_CLASS = ("agno.models.anthropic.claude", "Claude")
 _BEDROCK_CLAUDE_CLASS = ("mindroom.bedrock_claude", "MindRoomBedrockClaude")
+logger = get_logger(__name__)
 
 
 def as_anthropic_claude(model: object) -> AnthropicClaude | None:
@@ -115,7 +118,7 @@ def as_anthropic_claude(model: object) -> AnthropicClaude | None:
 
 
 def _is_session_backed_bedrock_claude(model: object) -> bool:
-    """Return whether a Bedrock model will not retain a prewarmed client."""
+    """Return whether a Bedrock model refreshes credentials from a session."""
     if not isinstance_of_loaded(model, _BEDROCK_CLAUDE_CLASS):
         return False
     return cast("MindRoomBedrockClaude", model).session is not None
@@ -124,19 +127,50 @@ def _is_session_backed_bedrock_claude(model: object) -> bool:
 def prewarm_anthropic_async_client(model: object) -> None:
     """Build and cache a Claude async SDK client without making a request."""
     claude_model = as_anthropic_claude(model)
-    if claude_model is None or _is_session_backed_bedrock_claude(claude_model):
+    if claude_model is None:
         return
-    claude_model.get_async_client()
+    try:
+        claude_model.get_async_client()
+    except Exception:
+        async_client, claude_model.async_client = claude_model.async_client, None
+        if async_client is not None:
+            try:
+                asyncio.run(async_client.close())
+            except Exception:
+                logger.exception("Failed to close partially initialized Claude async client")
+        raise
 
 
 async def aclose_anthropic_async_client(model: object) -> None:
     """Close and clear a retained Claude async SDK client, if present."""
     claude_model = as_anthropic_claude(model)
-    if claude_model is None or _is_session_backed_bedrock_claude(claude_model):
+    if claude_model is None:
         return
     async_client, claude_model.async_client = claude_model.async_client, None
     if async_client is not None:
         await async_client.close()
+
+
+async def arefresh_session_backed_bedrock_async_client(model: object) -> None:
+    """Refresh one retained session-backed client between serialized turns."""
+    if not _is_session_backed_bedrock_claude(model):
+        return
+    claude_model = cast("MindRoomBedrockClaude", model)
+    previous_client = claude_model.async_client
+
+    def replace_client() -> None:
+        claude_model.async_client = None
+        try:
+            prewarm_anthropic_async_client(claude_model)
+        except BaseException:
+            claude_model.async_client = previous_client
+            raise
+
+    try:
+        await run_blocking_until_complete(replace_client)
+    finally:
+        if previous_client is not None and claude_model.async_client is not previous_client:
+            await run_coroutine_until_complete(previous_client.close())
 
 
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:

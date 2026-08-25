@@ -34,7 +34,7 @@ from mindroom.ai_run_metadata import (
     empty_request_metric_totals,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
+from mindroom.claude_prompt_cache import aclose_anthropic_async_client
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
@@ -67,7 +67,12 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.pre_model_preparation import build_agent_off_loop, close_unreturned_agent, prepare_prompt_branches
+from mindroom.pre_model_preparation import (
+    build_agent_off_loop,
+    close_unreturned_agent,
+    prepare_prompt_branches,
+    prewarm_agent_model_client,
+)
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -1050,7 +1055,10 @@ async def _prepare_agent_and_prompt(
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
             )
-            prewarm_anthropic_async_client(agent.model)
+            prewarm_agent_model_client(
+                agent,
+                scope_context.storage if scope_context is not None else None,
+            )
         return runtime_model, agent
 
     memory_backend = config.resolve_entity(agent_name).memory_backend
@@ -1251,41 +1259,46 @@ async def _prepare_agent_run_context(
         supports_native_tool_approval=supports_native_tool_approval,
         reusable_agent=reusable_agent,
     )
-    if pipeline_timing is not None:
-        pipeline_timing.mark("history_ready", overwrite=True)
-        note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
+    async with _close_agent_on_preparation_failure(
+        prepared_run.agent,
+        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        caller_owned_agent=reusable_agent,
+    ):
+        if pipeline_timing is not None:
+            pipeline_timing.mark("history_ready", overwrite=True)
+            note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
 
-    agent = prepared_run.agent
-    if agent.model is not None:
-        ai_runtime.install_queued_message_notice_hook(
-            agent.model,
-            notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+        agent = prepared_run.agent
+        if agent.model is not None:
+            ai_runtime.install_queued_message_notice_hook(
+                agent.model,
+                notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+            )
+
+        run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
+        metadata = build_matrix_run_metadata(
+            ctx.reply_to_event_id,
+            prepared_run.unseen_event_ids,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            requester_id=ctx.requester_id,
+            correlation_id=ctx.correlation_id,
+            tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
+            model_params=model_params_payload(agent.model) if agent.model is not None else {},
+            extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
         )
+        if turn_recorder is not None:
+            turn_recorder.set_run_metadata(metadata)
 
-    run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
-    metadata = build_matrix_run_metadata(
-        ctx.reply_to_event_id,
-        prepared_run.unseen_event_ids,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        requester_id=ctx.requester_id,
-        correlation_id=ctx.correlation_id,
-        tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
-        model_params=model_params_payload(agent.model) if agent.model is not None else {},
-        extra_metadata=deep_merge_metadata(ctx.matrix_run_metadata, run_extra_content),
-    )
-    if turn_recorder is not None:
-        turn_recorder.set_run_metadata(metadata)
-
-    return _AgentRunContext(
-        turn=ctx,
-        session_id=session_id,
-        prompt=prompt,
-        model_prompt=model_prompt,
-        prepared_run=prepared_run,
-        run_input=prepared_run.run_input,
-        metadata=metadata,
-    )
+        return _AgentRunContext(
+            turn=ctx,
+            session_id=session_id,
+            prompt=prompt,
+            model_prompt=model_prompt,
+            prepared_run=prepared_run,
+            run_input=prepared_run.run_input,
+            metadata=metadata,
+        )
 
 
 async def ai_response(  # noqa: C901
