@@ -91,16 +91,23 @@ def _create_sqlite_state_storage(
     db_file = str(db_dir / f"{storage_name}.db")
     engine = _state_engine(db_file)
     if prompt_roles is not None:
-        return _ConversationSqliteDb(
+        database = _ConversationSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
             db_engine=engine,
         )
-    # Both: the engine is what the database is reached through, and the path
-    # is what it reports itself as. Handing over an engine alone leaves
-    # ``db_file`` empty on a store that is very much file-backed.
-    return SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
+    else:
+        # Both: the engine is what the database is reached through, and the path
+        # is what it reports itself as. Handing over an engine alone leaves
+        # ``db_file`` empty on a store that is very much file-backed.
+        database = SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
+    agno_session_persistence_patch._register_sync_session_storage(
+        database,
+        db_file=db_file,
+        session_table=session_table,
+    )
+    return database
 
 
 def create_session_storage(

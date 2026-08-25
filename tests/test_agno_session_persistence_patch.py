@@ -8,10 +8,10 @@ import subprocess
 import threading
 import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from importlib import import_module
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import quote
 
 import pytest
 from agno.agent import Agent
@@ -227,154 +227,100 @@ def test_distinct_sqlite_handles_share_write_order(  # noqa: PLR0915
     assert persisted.metadata == {"write": "second"}
 
 
-def test_postgres_handles_use_credential_free_target_identity() -> None:
-    """Equivalent PostgreSQL handles coordinate without retaining credentials."""
+def test_application_storage_is_registered_with_an_opaque_target(tmp_path: Path) -> None:
+    """Only the application constructor opts a synchronous DB into offloading."""
     persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-    first = PostgresDb(
-        db_engine=create_engine("postgresql+psycopg://first:secret-one@LOCALHOST:5432/app"),
-        db_schema="sessions",
-        session_table="records",
-    )
-    second = PostgresDb(
-        db_engine=create_engine("postgresql+psycopg://second:secret-two@localhost:5432/app"),
-        db_schema="sessions",
-        session_table="records",
-    )
-
-    first_identity = persistence_patch._database_coordination_identity(first)
-    second_identity = persistence_patch._database_coordination_identity(second)
-
-    assert first_identity == second_identity
-    identity_repr = repr(first_identity)
-    assert "secret" not in identity_repr
-    assert "localhost" not in identity_repr.lower()
-    assert "app" not in identity_repr
-
-
-def test_sqlite_file_uris_share_the_filesystem_target(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Path spelling, URI query splitting, and encoding must not split FIFO."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-    database_path = tmp_path / "equivalent.db"
-    encoded_path = quote(str(database_path), safe="")
-    monkeypatch.chdir(tmp_path)
-    databases = [
-        SqliteDb(db_url=f"sqlite:///{database_path}", session_table="records"),
-        SqliteDb(db_url=f"sqlite:///file:{database_path}?mode=rwc&uri=true", session_table="records"),
-        SqliteDb(db_url=f"sqlite:///file:{encoded_path}?uri=true&mode=rwc", session_table="records"),
-        SqliteDb(db_url="sqlite:///relative.db", session_table="records"),
-        SqliteDb(db_url="sqlite:///file:relative.db?mode=rwc&uri=true", session_table="records"),
-        SqliteDb(db_url="sqlite:///file:relative.db", session_table="records"),
-    ]
+    storage = _storage(tmp_path, "registered")
     try:
-        absolute_identities = {
-            persistence_patch._database_coordination_identity(database) for database in databases[:3]
-        }
-        relative_identities = {
-            persistence_patch._database_coordination_identity(database) for database in databases[3:5]
-        }
-        literal_file_prefix_identity = persistence_patch._database_coordination_identity(databases[5])
+        target = persistence_patch._registered_target(storage)
     finally:
-        for database in databases:
-            database.close()
+        storage.close()
 
-    assert len(absolute_identities) == 1
-    assert len(relative_identities) == 1
-    assert literal_file_prefix_identity not in relative_identities
+    assert target is not None
+    assert str(tmp_path) not in repr(target)
+    assert "registered" not in repr(target)
 
 
-def test_sqlite_memory_modes_do_not_collide_with_files_or_private_engines() -> None:
-    """Only named shared-memory URI handles may share a cross-engine queue."""
+def test_storage_registration_has_weak_lifecycle(tmp_path: Path) -> None:
+    """Registration must not retain a DB after application ownership ends."""
     persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-    shared = [
-        SqliteDb(db_url="sqlite:///file:shared?mode=memory&cache=shared&uri=true", session_table="records")
-        for _ in range(2)
-    ]
-    private = [
-        SqliteDb(db_url="sqlite:///file:shared?mode=memory&cache=private&uri=true", session_table="records")
-        for _ in range(2)
-    ]
-    disk = SqliteDb(db_url="sqlite:///file:shared?mode=rwc&uri=true", session_table="records")
-    ordinary_memory = SqliteDb(db_url="sqlite:///:memory:", session_table="records")
-    try:
-        shared_identities = [persistence_patch._database_coordination_identity(database) for database in shared]
-        private_identities = [persistence_patch._database_coordination_identity(database) for database in private]
-        disk_identity = persistence_patch._database_coordination_identity(disk)
-        ordinary_memory_identity = persistence_patch._database_coordination_identity(ordinary_memory)
-        private_queues = [persistence_patch._database_queue(database) for database in private]
-    finally:
-        for database in [*shared, *private, disk, ordinary_memory]:
-            database.close()
+    storage = _storage(tmp_path, "weak-registration")
+    storage_reference = weakref.ref(storage)
 
-    assert shared_identities[0] is not None
-    assert shared_identities[0] == shared_identities[1]
-    assert private_identities == [None, None]
-    assert ordinary_memory_identity is None
-    assert disk_identity != shared_identities[0]
-    assert private_queues[0] is not private_queues[1]
-
-
-def test_postgres_effective_socket_target_participates_in_identity() -> None:
-    """Query-routed sockets must neither collide nor split equivalent targets."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-
-    def identity(url: str) -> object:
-        database = PostgresDb(
-            db_engine=create_engine(url),
-            db_schema="sessions",
-            session_table="records",
-        )
-        try:
-            return persistence_patch._database_coordination_identity(database)
-        finally:
-            database.close()
-
-    authority = identity("postgresql+psycopg://user:one@LOCALHOST/app")
-    query_network = identity("postgresql+psycopg://other:two@/app?host=localhost&port=5432")
-    overridden_socket = identity(
-        "postgresql+psycopg://user:one@ignored:6543/app?host=%2Fsocket%2Fone&port=5433",
-    )
-    direct_socket = identity("postgresql+psycopg://other:two@/app?host=%2Fsocket%2Fone&port=5433")
-    other_socket = identity("postgresql+psycopg://user:one@/app?host=%2Fsocket%2Ftwo&port=5433")
-    other_port = identity("postgresql+psycopg://user:one@/app?host=%2Fsocket%2Fone&port=5434")
-
-    assert authority == query_network
-    assert overridden_socket == direct_socket
-    assert len({direct_socket, other_socket, other_port}) == 3
-    assert "/socket" not in repr(direct_socket)
-
-
-def test_target_queue_registry_has_weak_lifecycle(tmp_path: Path) -> None:
-    """A durable target identity must not create an unbounded queue registry."""
-    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-    storage = _storage(tmp_path, "weak-target")
-    identity = persistence_patch._database_coordination_identity(storage)
-    queue = persistence_patch._database_queue(storage)
-    queue_reference = weakref.ref(queue)
-
-    assert identity in persistence_patch._TARGET_QUEUES
-    del queue
+    assert persistence_patch._registered_target(storage) is not None
+    storage.close()
+    del storage
     gc.collect()
 
-    assert queue_reference() is None
-    assert identity not in persistence_patch._TARGET_QUEUES
-    storage.close()
+    assert storage_reference() is None
 
 
-def test_abandoning_an_already_served_ticket_is_a_noop() -> None:
-    """Late cleanup must not retain stale tickets or disturb later writes."""
+@pytest.mark.asyncio
+async def test_unregistered_postgres_delegates_upstream_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arbitrary PostgreSQL engines, including connect args, are not offloaded."""
     persistence_patch = import_module("mindroom.agno_session_persistence_patch")
-    queue = persistence_patch._DatabaseWriteQueue()
-    first_ticket = queue.reserve()
+    database = PostgresDb(
+        db_engine=create_engine(
+            "postgresql+psycopg://user:credential@localhost/app",
+            connect_args={"connect_timeout": 1},
+        ),
+        db_schema="sessions",
+        session_table="records",
+    )
+    owner = Agent(db=database, telemetry=False)
+    session = AgentSession(session_id="postgres", session_data={"session_state": {}})
+    event_loop_thread = threading.get_ident()
+    observed: list[tuple[int, AgentSession]] = []
 
-    assert queue.run(first_ticket, lambda: "first") == "first"
-    queue.abandon(first_ticket)
-    second_ticket = queue.reserve()
+    def upstream_probe(session: AgentSession, deserialize: bool | None = True) -> AgentSession:
+        _ = deserialize
+        observed.append((threading.get_ident(), session))
+        return session
 
-    assert queue.run(second_ticket, lambda: "second") == "second"
-    assert queue._abandoned_tickets == set()
+    monkeypatch.setattr(database, "upsert_session", upstream_probe)
+    try:
+        await owner.asave_session(session)
+    finally:
+        database.close()
+
+    assert persistence_patch._registered_target(database) is None
+    assert observed == [(event_loop_thread, session)]
+
+
+@pytest.mark.parametrize(
+    "db_url",
+    [
+        "sqlite:///:memory:",
+        "sqlite:///file:shared?mode=memory&cache=shared&uri=true",
+        "sqlite:///file:relative.db?mode=rwc&uri=true",
+    ],
+)
+@pytest.mark.asyncio
+async def test_unregistered_sqlite_uri_delegates_upstream_unchanged(
+    db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arbitrary SQLite URI spellings do not opt into application offloading."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    database = SqliteDb(db_url=db_url, session_table="records")
+    owner = Agent(db=database, telemetry=False)
+    session = AgentSession(session_id="sqlite", session_data={"session_state": {}})
+    event_loop_thread = threading.get_ident()
+    observed: list[int] = []
+
+    def upstream_probe(session: AgentSession, deserialize: bool | None = True) -> AgentSession:
+        _ = deserialize
+        observed.append(threading.get_ident())
+        return session
+
+    monkeypatch.setattr(database, "upsert_session", upstream_probe)
+    try:
+        await owner.asave_session(session)
+    finally:
+        database.close()
+
+    assert persistence_patch._registered_target(database) is None
+    assert observed == [event_loop_thread]
 
 
 @pytest.mark.asyncio
@@ -487,32 +433,105 @@ async def test_submission_failure_does_not_strand_later_save(
     storage = _storage(tmp_path, "submission-failure")
     owner, first_session = _owner_and_session("agent", storage, "first")
     _, second_session = _owner_and_session("agent", storage, "second")
-    queue = persistence_patch._database_queue(storage)
-    loop = asyncio.get_running_loop()
-    original_run_in_executor = loop.run_in_executor
+    target = persistence_patch._registered_target(storage)
+    original_submit = persistence_patch._PERSISTENCE_EXECUTOR.submit
 
     def fail_submission(*_args: object, **_kwargs: object) -> object:
         error_message = "executor unavailable"
         raise RuntimeError(error_message)
 
-    monkeypatch.setattr(loop, "run_in_executor", fail_submission)
+    monkeypatch.setattr(persistence_patch._PERSISTENCE_EXECUTOR, "submit", fail_submission)
     try:
         with pytest.raises(RuntimeError, match="executor unavailable"):
             await owner.asave_session(first_session)
-        assert queue._serving_ticket == 1
-        monkeypatch.setattr(loop, "run_in_executor", original_run_in_executor)
-        second_save = asyncio.create_task(owner.asave_session(second_session))
-        done, _ = await asyncio.wait({second_save}, timeout=5)
-        completed_without_repair = second_save in done
-        if not completed_without_repair:
-            # Repair the pre-fix queue so the RED test does not leak a worker.
-            queue.abandon(0)
-        await second_save
+        assert target not in persistence_patch._TARGET_TAILS
+        monkeypatch.setattr(persistence_patch._PERSISTENCE_EXECUTOR, "submit", original_submit)
+        await owner.asave_session(second_session)
         assert get_agent_session(storage, "second") is not None
     finally:
         storage.close()
 
-    assert completed_without_repair
+
+@pytest.mark.asyncio
+async def test_completed_target_tail_is_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed writes must not retain targets, futures, or write closures."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    storage = _storage(tmp_path, "tail-lifecycle")
+    owner, session = _owner_and_session("agent", storage, "tail")
+    target = persistence_patch._registered_target(storage)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_upsert = storage.upsert_session
+
+    def blocked_upsert(
+        session: AgentSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        write_started.set()
+        assert release_write.wait(timeout=5)
+        return original_upsert(session, deserialize=deserialize)
+
+    monkeypatch.setattr(storage, "upsert_session", blocked_upsert)
+    save = asyncio.create_task(owner.asave_session(session))
+    try:
+        assert await asyncio.to_thread(write_started.wait, 5)
+        assert persistence_patch._TARGET_TAILS.get(target) is not None
+        release_write.set()
+        await save
+    finally:
+        release_write.set()
+        await asyncio.gather(save, return_exceptions=True)
+        storage.close()
+
+    assert target not in persistence_patch._TARGET_TAILS
+
+
+@pytest.mark.asyncio
+async def test_registered_save_ignores_default_executor_starvation(tmp_path: Path) -> None:
+    """Registered persistence must use a lane independent of loop-default work."""
+    loop = asyncio.get_running_loop()
+    await asyncio.to_thread(lambda: None)
+    original_default_executor = loop._default_executor
+    assert original_default_executor is not None
+    starved_executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(starved_executor)
+    default_worker_started = threading.Event()
+    release_default_worker = asyncio.Event()
+    save_finished = threading.Event()
+    watchdog_released_default = threading.Event()
+
+    def block_on_event_loop() -> None:
+        default_worker_started.set()
+        waiter = asyncio.run_coroutine_threadsafe(release_default_worker.wait(), loop)
+        assert waiter.result(timeout=10) is True
+
+    def release_if_save_stalls() -> None:
+        if not save_finished.wait(timeout=5):
+            watchdog_released_default.set()
+            loop.call_soon_threadsafe(release_default_worker.set)
+
+    blocker = loop.run_in_executor(None, block_on_event_loop)
+    watchdog = threading.Thread(target=release_if_save_stalls)
+    watchdog.start()
+    storage = _storage(tmp_path, "dedicated-executor")
+    owner, session = _owner_and_session("agent", storage, "dedicated")
+    try:
+        assert default_worker_started.wait(timeout=5)
+        await owner.asave_session(session)
+        save_finished.set()
+    finally:
+        save_finished.set()
+        release_default_worker.set()
+        await blocker
+        loop.set_default_executor(original_default_executor)
+        starved_executor.shutdown(wait=True)
+        watchdog.join(timeout=1)
+        storage.close()
+
+    assert not watchdog_released_default.is_set()
 
 
 @pytest.mark.asyncio
@@ -630,16 +649,16 @@ async def test_team_save_preserves_live_member_response_scrubbing(tmp_path: Path
 
 @pytest.mark.parametrize("surface", ["agent", "team"])
 @pytest.mark.asyncio
-async def test_agno_background_tasks_keep_upstream_synchronous_save(
+async def test_agno_background_tasks_wait_for_dedicated_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     surface: _Surface,
 ) -> None:
-    """Library-owned detached tasks must not outlive their synchronous DB handle."""
+    """Detached callers return only after their dedicated worker completes."""
     storage = _storage(tmp_path, f"{surface}-background")
     owner, session = _owner_and_session(surface, storage, "background")
-    event_loop_thread = threading.get_ident()
     persistence_threads: list[int] = []
+    write_completed = threading.Event()
     original_upsert = storage.upsert_session
     background_tasks = agent_run._background_tasks if surface == "agent" else team_run._background_tasks
 
@@ -648,7 +667,9 @@ async def test_agno_background_tasks_keep_upstream_synchronous_save(
         deserialize: bool | None = True,
     ) -> object:
         persistence_threads.append(threading.get_ident())
-        return original_upsert(session, deserialize=deserialize)
+        result = original_upsert(session, deserialize=deserialize)
+        write_completed.set()
+        return result
 
     monkeypatch.setattr(storage, "upsert_session", record_thread)
     task = asyncio.current_task()
@@ -656,11 +677,13 @@ async def test_agno_background_tasks_keep_upstream_synchronous_save(
     background_tasks.add(task)
     try:
         await owner.asave_session(session)
+        assert write_completed.is_set()
     finally:
         background_tasks.discard(task)
         storage.close()
 
-    assert persistence_threads == [event_loop_thread]
+    assert len(persistence_threads) == 1
+    assert persistence_threads != [threading.get_ident()]
 
 
 @pytest.mark.asyncio
@@ -735,46 +758,41 @@ async def test_agno_background_save_waits_for_earlier_worker(  # noqa: PLR0915
 @pytest.mark.asyncio
 async def test_background_save_cannot_block_before_prior_worker_submission(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ready background save must not deadlock the prior lazy worker ticket."""
+    """A ready background save sees the prior dedicated submission first."""
     persistence_patch = import_module("mindroom.agno_session_persistence_patch")
     storage = _storage(tmp_path, "background-scheduler-window")
     baseline_owner, baseline_session = _owner_and_session("agent", storage, "baseline")
     first_owner, first_session = _owner_and_session("agent", storage, "first")
     second_owner, second_session = _owner_and_session("agent", storage, "second")
     await baseline_owner.asave_session(baseline_session)
-    queue = persistence_patch._database_queue(storage)
-    background_finished = threading.Event()
-    repair_was_needed = threading.Event()
+    submitted = threading.Event()
+    original_submit = persistence_patch._PERSISTENCE_EXECUTOR.submit
 
-    def repair_lazy_submission_deadlock() -> None:
-        if not background_finished.wait(timeout=5):
-            repair_was_needed.set()
-            queue.abandon(0)
+    def record_submit(*args: object, **kwargs: object) -> object:
+        submitted.set()
+        return original_submit(*args, **kwargs)
 
-    repair = threading.Thread(target=repair_lazy_submission_deadlock)
-    repair.start()
+    monkeypatch.setattr(persistence_patch._PERSISTENCE_EXECUTOR, "submit", record_submit)
     foreground = asyncio.create_task(first_owner.asave_session(first_session))
     current = asyncio.current_task()
     assert current is not None
     try:
-        # The foreground task reserves and reaches its first await. Do not wait
-        # for any signal from the worker before making the background save ready.
+        # The foreground reaches its first await. Do not wait for a worker-side
+        # signal before making the detached save ready.
         await asyncio.sleep(0)
+        assert submitted.is_set()
         agent_run._background_tasks.add(current)
         try:
             await second_owner.asave_session(second_session)
         finally:
             agent_run._background_tasks.discard(current)
-            background_finished.set()
         foreground_result = await asyncio.gather(foreground, return_exceptions=True)
     finally:
-        background_finished.set()
-        repair.join(timeout=1)
         await asyncio.gather(foreground, return_exceptions=True)
         storage.close()
 
-    assert not repair_was_needed.is_set()
     assert foreground_result == [None]
 
 

@@ -8,20 +8,18 @@ import hashlib
 import inspect
 import threading
 import weakref
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import unquote, urlsplit
 
 from agno.agent import _init as agent_init
 from agno.agent import _run as agent_run
 from agno.agent import _session as agent_session
 from agno.agent import _storage as agent_storage
-from agno.db.postgres import PostgresDb
-from agno.db.sqlite import SqliteDb
 from agno.team import _run as team_run
 from agno.team import _session as team_session
 from agno.team import _storage as team_storage
@@ -60,34 +58,17 @@ _ORIGINAL_TEAM_SCRUB_MEMBER_RESPONSES = team_run._scrub_member_responses
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
-_DATABASE_QUEUES_GUARD = threading.Lock()
-_TARGET_QUEUES: weakref.WeakValueDictionary[_PersistenceTarget, _DatabaseWriteQueue] = weakref.WeakValueDictionary()
-_ENGINE_QUEUES: weakref.WeakKeyDictionary[object, _DatabaseWriteQueue] = weakref.WeakKeyDictionary()
-_DATABASE_QUEUES: weakref.WeakKeyDictionary[BaseDb, _DatabaseWriteQueue] = weakref.WeakKeyDictionary()
+_PERSISTENCE_LOCK = threading.RLock()
+_PERSISTENCE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="session-persistence")
+_REGISTERED_TARGETS: weakref.WeakKeyDictionary[BaseDb, _RegisteredPersistenceTarget] = weakref.WeakKeyDictionary()
+_TARGET_TAILS: dict[_RegisteredPersistenceTarget, Future[object]] = {}
 
 
 @dataclass(frozen=True)
-class _SqlitePersistenceTarget:
-    """Opaque identity for one durable SQLite session table."""
+class _RegisteredPersistenceTarget:
+    """Opaque identity for one explicitly registered persistence target."""
 
     digest: bytes = field(repr=False)
-
-
-@dataclass(frozen=True)
-class _SqliteMemoryPersistenceTarget:
-    """Opaque identity for one named shared-memory SQLite session table."""
-
-    digest: bytes = field(repr=False)
-
-
-@dataclass(frozen=True)
-class _PostgresPersistenceTarget:
-    """Opaque identity for one PostgreSQL session table."""
-
-    digest: bytes = field(repr=False)
-
-
-type _PersistenceTarget = _SqlitePersistenceTarget | _SqliteMemoryPersistenceTarget | _PostgresPersistenceTarget
 
 
 @dataclass(frozen=True)
@@ -95,55 +76,6 @@ class _DatabaseOwner:
     """Minimal owner accepted by Agno's captured storage helpers."""
 
     db: BaseDb
-
-
-class _DatabaseWriteQueue:
-    """Cross-loop FIFO for writes sharing one synchronous database."""
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._next_ticket = 0
-        self._serving_ticket = 0
-        self._active_ticket: int | None = None
-        self._abandoned_tickets: set[int] = set()
-
-    def reserve(self) -> int:
-        with self._condition:
-            ticket = self._next_ticket
-            self._next_ticket += 1
-            return ticket
-
-    def abandon(self, ticket: int) -> None:
-        """Idempotently release a ticket that did not enter its write."""
-        with self._condition:
-            if ticket < self._serving_ticket or ticket == self._active_ticket:
-                return
-            self._abandoned_tickets.add(ticket)
-            self._advance_abandoned()
-            self._condition.notify_all()
-
-    def run(self, ticket: int, write: Callable[[], object]) -> object:
-        with self._condition:
-            self._condition.wait_for(lambda: ticket <= self._serving_ticket)
-            if ticket < self._serving_ticket:
-                msg = "Cannot run an abandoned database write ticket"
-                raise RuntimeError(msg)
-            self._active_ticket = ticket
-        try:
-            return write()
-        finally:
-            with self._condition:
-                self._active_ticket = None
-                self._serving_ticket += 1
-                self._advance_abandoned()
-                self._condition.notify_all()
-
-    def _advance_abandoned(self) -> None:
-        if self._active_ticket is not None:
-            return
-        while self._serving_ticket in self._abandoned_tickets:
-            self._abandoned_tickets.remove(self._serving_ticket)
-            self._serving_ticket += 1
 
 
 def _source_hash(function: Callable[..., Any]) -> str | None:
@@ -178,89 +110,83 @@ def _target_digest(*parts: str) -> bytes:
     return digest.digest()
 
 
-def _sqlite_uri_path(database_name: str) -> str:
-    uri_path = unquote(database_name.removeprefix("file:"))
-    if not uri_path.startswith("//"):
-        return uri_path
-    parsed = urlsplit(f"file:{uri_path}")
-    if parsed.netloc in ("", "localhost"):
-        return parsed.path
-    return f"//{parsed.netloc}{parsed.path}"
-
-
-def _postgres_host_identity(host: object) -> str:
-    return ",".join(part if part.startswith("/") else part.lower() for part in str(host).split(","))
-
-
-def _sqlite_coordination_identity(database: SqliteDb) -> _PersistenceTarget | None:
-    url = database.db_engine.url
-    database_name = url.database
-    if database_name in (None, "", ":memory:"):
-        return None
-    uri_enabled = str(url.query.get("uri", "")).lower() == "true"
-    if uri_enabled and database_name.startswith("file:"):
-        uri_path = _sqlite_uri_path(database_name)
-        mode = str(url.query.get("mode", "")).lower()
-        if mode == "memory" or uri_path == ":memory:":
-            if str(url.query.get("cache", "")).lower() != "shared":
-                return None
-            return _SqliteMemoryPersistenceTarget(
-                _target_digest("sqlite-memory", uri_path, database.session_table_name),
-            )
-        if not uri_path:
-            return None
-        normalized_database = str(Path(uri_path).resolve())
-    else:
-        normalized_database = str(Path(database_name).resolve())
-    return _SqlitePersistenceTarget(
-        _target_digest("sqlite", normalized_database, database.session_table_name),
+def _register_sync_session_storage(
+    database: BaseDb,
+    *,
+    db_file: str,
+    session_table: str,
+) -> None:
+    """Opt one application-owned synchronous session database into offloading."""
+    target = _RegisteredPersistenceTarget(
+        _target_digest("sqlite", str(Path(db_file).resolve()), session_table),
     )
+    with _PERSISTENCE_LOCK:
+        _REGISTERED_TARGETS[database] = target
 
 
-def _database_coordination_identity(database: BaseDb) -> _PersistenceTarget | None:
-    """Return a credential-free identity for a supported durable target."""
-    if isinstance(database, SqliteDb):
-        return _sqlite_coordination_identity(database)
-
-    if isinstance(database, PostgresDb):
-        url = database.db_engine.url
-        _, connect_arguments = database.db_engine.dialect.create_connect_args(url)
-        return _PostgresPersistenceTarget(
-            _target_digest(
-                "postgresql",
-                _postgres_host_identity(connect_arguments.get("host", "")),
-                str(connect_arguments.get("port") or 5432),
-                str(connect_arguments.get("dbname", url.database or "")),
-                database.db_schema,
-                database.session_table_name,
-            ),
-        )
-
-    return None
+def _registered_target(database: BaseDb) -> _RegisteredPersistenceTarget | None:
+    with _PERSISTENCE_LOCK:
+        return _REGISTERED_TARGETS.get(database)
 
 
-def _database_queue(database: BaseDb) -> _DatabaseWriteQueue:
-    with _DATABASE_QUEUES_GUARD:
-        target = _database_coordination_identity(database)
-        if target is not None:
-            queue = _TARGET_QUEUES.get(target)
-            if queue is None:
-                queue = _DatabaseWriteQueue()
-                _TARGET_QUEUES[target] = queue
-            return queue
+def _remove_completed_tail(
+    target: _RegisteredPersistenceTarget,
+    completion: Future[object],
+    _finished: Future[object],
+) -> None:
+    with _PERSISTENCE_LOCK:
+        if _TARGET_TAILS.get(target) is completion:
+            del _TARGET_TAILS[target]
 
-        if isinstance(database, SqliteDb):
-            queue = _ENGINE_QUEUES.get(database.db_engine)
-            if queue is None:
-                queue = _DatabaseWriteQueue()
-                _ENGINE_QUEUES[database.db_engine] = queue
-            return queue
 
-        queue = _DATABASE_QUEUES.get(database)
-        if queue is None:
-            queue = _DatabaseWriteQueue()
-            _DATABASE_QUEUES[database] = queue
-        return queue
+def _transfer_worker_result(completion: Future[object], worker: Future[object]) -> None:
+    try:
+        result = worker.result()
+    except BaseException as error:
+        completion.set_exception(error)
+    else:
+        completion.set_result(result)
+
+
+def _start_registered_write(
+    completion: Future[object],
+    context: contextvars.Context,
+    write: Callable[[], object],
+) -> None:
+    try:
+        worker = _PERSISTENCE_EXECUTOR.submit(context.run, write)
+    except BaseException as error:
+        completion.set_exception(error)
+        return
+    worker.add_done_callback(partial(_transfer_worker_result, completion))
+
+
+def _start_after_predecessor(
+    completion: Future[object],
+    context: contextvars.Context,
+    write: Callable[[], object],
+    _predecessor: Future[object],
+) -> None:
+    _start_registered_write(completion, context, write)
+
+
+def _submit_registered_write(
+    target: _RegisteredPersistenceTarget,
+    write: Callable[[], object],
+) -> Future[object]:
+    completion: Future[object] = Future()
+    context = contextvars.copy_context()
+    completion.add_done_callback(partial(_remove_completed_tail, target, completion))
+    with _PERSISTENCE_LOCK:
+        predecessor = _TARGET_TAILS.get(target)
+        _TARGET_TAILS[target] = completion
+        if predecessor is None:
+            _start_registered_write(completion, context, write)
+        else:
+            predecessor.add_done_callback(
+                partial(_start_after_predecessor, completion, context, write),
+            )
+    return completion
 
 
 def _is_agno_background_task() -> bool:
@@ -294,31 +220,15 @@ def _prepare_team_session_snapshot(team: Team, session: TeamSession) -> TeamSess
     return deepcopy(session)
 
 
-async def _run_ordered_write(
-    queue: _DatabaseWriteQueue,
-    ticket: int,
-    write: Callable[[], object],
-) -> object:
-    try:
-        loop = asyncio.get_running_loop()
-        context = contextvars.copy_context()
-        worker_call = partial(context.run, queue.run, ticket, write)
-        worker = loop.run_in_executor(None, worker_call)
-    except BaseException:
-        queue.abandon(ticket)
-        raise
-
-    try:
-        cancellation: asyncio.CancelledError | None = None
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError as error:
-                cancellation = error
-        result = worker.result()
-    except BaseException:
-        queue.abandon(ticket)
-        raise
+async def _await_registered_write(worker: Future[object]) -> object:
+    wrapped_worker = asyncio.wrap_future(worker)
+    cancellation: asyncio.CancelledError | None = None
+    while not wrapped_worker.done():
+        try:
+            await asyncio.shield(wrapped_worker)
+        except asyncio.CancelledError as error:
+            cancellation = error
+    result = wrapped_worker.result()
     if cancellation is not None:
         raise cancellation
     return result
@@ -336,23 +246,26 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
         await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
 
-    queue = _database_queue(cast("BaseDb", database))
-    ticket = queue.reserve()
-    if _is_agno_background_task():
-        queue.run(ticket, lambda: _ORIGINAL_AGENT_SAVE_SESSION(agent, session))
+    target = _registered_target(cast("BaseDb", database))
+    if target is None:
+        await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
-    try:
-        _remove_transient_session_state(session)
-        snapshot = deepcopy(session)
-    except BaseException:
-        queue.abandon(ticket)
-        raise
+
+    if _is_agno_background_task():
+        _submit_registered_write(
+            target,
+            lambda: _ORIGINAL_AGENT_SAVE_SESSION(agent, session),
+        ).result()
+        return
+    _remove_transient_session_state(session)
+    snapshot = deepcopy(session)
 
     owner = cast("Agent", _DatabaseOwner(cast("BaseDb", database)))
-    await _run_ordered_write(
-        queue,
-        ticket,
-        lambda: _ORIGINAL_AGENT_UPSERT_SESSION(owner, snapshot),
+    await _await_registered_write(
+        _submit_registered_write(
+            target,
+            lambda: _ORIGINAL_AGENT_UPSERT_SESSION(owner, snapshot),
+        ),
     )
     agent_session.log_debug(f"Created or updated AgentSession record: {session.session_id}")
 
@@ -363,22 +276,25 @@ async def _team_asave_session(team: Team, session: TeamSession) -> None:
         await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
 
-    queue = _database_queue(cast("BaseDb", database))
-    ticket = queue.reserve()
-    if _is_agno_background_task():
-        queue.run(ticket, lambda: _ORIGINAL_TEAM_SAVE_SESSION(team, session))
+    target = _registered_target(cast("BaseDb", database))
+    if target is None:
+        await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
-    try:
-        snapshot = _prepare_team_session_snapshot(team, session)
-    except BaseException:
-        queue.abandon(ticket)
-        raise
+
+    if _is_agno_background_task():
+        _submit_registered_write(
+            target,
+            lambda: _ORIGINAL_TEAM_SAVE_SESSION(team, session),
+        ).result()
+        return
+    snapshot = _prepare_team_session_snapshot(team, session)
 
     owner = cast("Team", _DatabaseOwner(cast("BaseDb", database)))
-    await _run_ordered_write(
-        queue,
-        ticket,
-        lambda: _ORIGINAL_TEAM_UPSERT_SESSION(owner, snapshot),
+    await _await_registered_write(
+        _submit_registered_write(
+            target,
+            lambda: _ORIGINAL_TEAM_UPSERT_SESSION(owner, snapshot),
+        ),
     )
     team_session.log_debug(f"Created or updated TeamSession record: {session.session_id}")
 
