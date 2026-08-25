@@ -9,8 +9,13 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
+from agno.team import Team as AgnoTeam
 
+from mindroom.agent_storage import get_team_session
 from mindroom.config.models import ModelConfig
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
@@ -64,6 +69,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_runner_helpers import _PersistenceSeamProbe
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
@@ -85,6 +91,133 @@ def mock_agent_user() -> AgentMatrixUser:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_team_finalization_persists_response_link_behind_pending_save(  # noqa: PLR0915
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Team finalization must join the scoped SQLite save lane and close its handle."""
+        config = _configured_team_test_config(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        matrix_ids = entity_ids(config, runtime_paths)
+        team_agents = [matrix_ids["general"]]
+        bot = make_test_team_bot(
+            _configured_team_user(config, runtime_paths),
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_mode="coordinate",
+        )
+        _wrap_extracted_collaborators(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="team prompt",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$source",
+                prompt="team prompt",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
+        )
+        target = request.response_envelope.target
+        execution_identity = runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        )
+        session_scope = runner.deps.state_writer.team_history_scope(
+            team_agents,
+            requester_user_id=execution_identity.requester_id,
+        )
+        original_create_storage = runner.deps.state_writer.create_storage
+        save_storage = original_create_storage(execution_identity, scope=session_scope)
+        probe = _PersistenceSeamProbe(save_storage, original_create_storage)
+        save_task: asyncio.Task[None] | None = None
+
+        async def persist_session_before_delivery(*_args: object, **kwargs: object) -> str:
+            nonlocal save_task
+            run_id = "team-run"
+            cast("Callable[[str], None]", kwargs["run_id_callback"])(run_id)
+            cast("TurnRecorder", kwargs["turn_recorder"]).mark_completed()
+            owner = AgnoTeam(db=save_storage, members=[], telemetry=False)
+            session = TeamSession(
+                session_id=target.session_id,
+                team_id=session_scope.scope_id,
+                session_data={"session_state": {"durable": "kept"}},
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    TeamRunOutput(
+                        run_id=run_id,
+                        team_id=session_scope.scope_id,
+                        session_id=target.session_id,
+                        metadata={"preserved": True},
+                    ),
+                ],
+            )
+            save_task = asyncio.create_task(owner.asave_session(session))
+            assert await asyncio.to_thread(probe.save_started.wait, 5)
+            probe.arm_link_storage()
+            return "Team answer"
+
+        response_task: asyncio.Task[str | None] | None = None
+        persisted: TeamSession | None = None
+        try:
+            with (
+                patch.object(save_storage, "upsert_session", new=probe.blocked_upsert),
+                patch.object(runner.deps.state_writer, "create_storage", new=probe.create_storage),
+                patch(
+                    "mindroom.delivery_gateway.send_message_outcome",
+                    new=AsyncMock(side_effect=delivered_matrix_side_effect("$answer")),
+                ),
+                patch_response_runner_module(
+                    typing_indicator=_noop_typing_indicator,
+                    should_use_streaming=AsyncMock(return_value=False),
+                    team_response=AsyncMock(side_effect=persist_session_before_delivery),
+                ),
+            ):
+                response_task = asyncio.create_task(
+                    runner.generate_team_response_helper(
+                        request,
+                        team_agents=team_agents,
+                        team_mode="coordinate",
+                    ),
+                )
+                assert await asyncio.to_thread(probe.link_storage_created.wait, 5)
+                assert not response_task.done()
+                assert not probe.link_storage_closed.is_set()
+                probe.release_save.set()
+                assert await asyncio.wait_for(response_task, timeout=5) == "$answer"
+        finally:
+            probe.release_save.set()
+            await asyncio.gather(
+                *([response_task] if response_task is not None else []),
+                *([save_task] if save_task is not None else []),
+                return_exceptions=True,
+            )
+            try:
+                persisted = get_team_session(save_storage, target.session_id)
+            finally:
+                save_storage.close()
+
+        assert persisted is not None
+        assert persisted.session_data == {"session_state": {"durable": "kept"}}
+        assert persisted.runs is not None
+        assert len(persisted.runs) == 1
+        assert persisted.runs[0].metadata == {
+            "preserved": True,
+            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer",
+        }
+        assert probe.link_storage_closed.is_set()
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(

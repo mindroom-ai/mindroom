@@ -55,7 +55,7 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
-    persist_response_event_id: Callable[[str, str], None] | None = None
+    persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
 
@@ -135,7 +135,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -214,7 +214,7 @@ async def apply_post_response_effects(
         and deps.persist_response_event_id is not None
     ):
         try:
-            deps.persist_response_event_id(outcome.response_run_id, response_event_id)
+            await deps.persist_response_event_id(outcome.response_run_id, response_event_id)
         except Exception:
             deps.logger.exception(
                 "Failed to persist response event linkage in run metadata",

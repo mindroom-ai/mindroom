@@ -24,12 +24,14 @@ from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
+from agno.session.agent import AgentSession
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
 from mindroom import approval_receipt, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
+from mindroom.agent_storage import get_agent_session
 from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
@@ -38,6 +40,7 @@ from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -122,6 +125,7 @@ from tests.response_runner_helpers import (
     _config,
     _envelope,
     _noop_typing,
+    _PersistenceSeamProbe,
     _plain_request,
     _target,
 )
@@ -6430,14 +6434,104 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
 
 
 @pytest.mark.asyncio
+async def test_agent_finalization_persists_response_link_behind_pending_save(tmp_path: Path) -> None:
+    """Agent finalization must join the real SQLite save lane and close its handle."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread")
+    request = _plain_request(target)
+    execution_identity = runner.deps.tool_runtime.build_execution_identity(
+        target=target,
+        user_id=request.user_id,
+    )
+    original_create_storage = runner.deps.state_writer.create_storage
+    save_storage = original_create_storage(execution_identity)
+    probe = _PersistenceSeamProbe(save_storage, original_create_storage)
+    save_task: asyncio.Task[None] | None = None
+
+    async def persist_session_before_delivery(*_args: object, **kwargs: object) -> _ResponseGenerationOutcome:
+        nonlocal save_task
+        run_id = cast("str", kwargs["run_id"])
+        attempt_run_ids = cast("list[str]", kwargs["attempt_run_id_collector"])
+        attempt_run_ids.append(run_id)
+        owner = AgnoAgent(db=save_storage, telemetry=False)
+        session = AgentSession(
+            session_id=target.session_id,
+            agent_id=runner.deps.agent_name,
+            session_data={"session_state": {"durable": "kept"}},
+            created_at=1,
+            updated_at=1,
+            runs=[
+                RunOutput(
+                    run_id=run_id,
+                    agent_id=runner.deps.agent_name,
+                    session_id=target.session_id,
+                    metadata={"preserved": True},
+                ),
+            ],
+        )
+        save_task = asyncio.create_task(owner.asave_session(session))
+        assert await asyncio.to_thread(probe.save_started.wait, 5)
+        probe.arm_link_storage()
+        return _ResponseGenerationOutcome(
+            delivery=_completed_outcome("$answer", body="answer"),
+            run_succeeded=True,
+        )
+
+    response_task: asyncio.Task[str | None] | None = None
+    persisted: AgentSession | None = None
+    try:
+        with (
+            patch.object(save_storage, "upsert_session", new=probe.blocked_upsert),
+            patch.object(runner.deps.state_writer, "create_storage", new=probe.create_storage),
+            patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+            patch.object(runner, "_process_and_respond", new=persist_session_before_delivery),
+            patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
+        ):
+            response_task = asyncio.create_task(runner.generate_response(request))
+            assert await asyncio.to_thread(probe.link_storage_created.wait, 5)
+            assert not response_task.done()
+            assert not probe.link_storage_closed.is_set()
+            probe.release_save.set()
+            assert await asyncio.wait_for(response_task, timeout=5) == "$answer"
+    finally:
+        probe.release_save.set()
+        await asyncio.gather(
+            *([response_task] if response_task is not None else []),
+            *([save_task] if save_task is not None else []),
+            return_exceptions=True,
+        )
+        try:
+            persisted = get_agent_session(save_storage, target.session_id)
+        finally:
+            save_storage.close()
+
+    assert persisted is not None
+    assert persisted.session_data == {"session_state": {"durable": "kept"}}
+    assert persisted.runs is not None
+    assert len(persisted.runs) == 1
+    persisted_run = persisted.runs[0]
+    assert persisted_run.metadata == {
+        "preserved": True,
+        MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer",
+    }
+    assert probe.link_storage_closed.is_set()
+
+
+@pytest.mark.asyncio
 async def test_apply_post_response_effects_gates_success_only_side_effects() -> None:
     """Memory persistence and run-event linkage run on success and stay off after a failed delivery."""
     memory_calls: list[str] = []
     persisted: list[tuple[str, str]] = []
+
+    async def persist_response_event_id(run_id: str, event_id: str) -> None:
+        await asyncio.sleep(0)
+        persisted.append((run_id, event_id))
+
     deps = PostResponseEffectsDeps(
         logger=get_logger("tests.post_effects"),
         queue_memory_persistence=lambda: memory_calls.append("memory"),
-        persist_response_event_id=lambda run_id, event_id: persisted.append((run_id, event_id)),
+        persist_response_event_id=persist_response_event_id,
     )
 
     await apply_post_response_effects(

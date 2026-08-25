@@ -93,7 +93,7 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
     )
 
     try:
-        writer.persist_response_event_id_in_session_run(
+        writer._persist_response_event_id_in_session_run(
             storage=storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
