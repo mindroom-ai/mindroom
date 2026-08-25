@@ -653,12 +653,49 @@ async def _await_request_log_task_best_effort(
 ) -> _RequestLogRef | None:
     """Return a reported request result without changing normal stream behavior."""
     try:
+        if task.done():
+            return task.result()
         return await _await_before_cancelling(task)
     except Exception:
         return None
 
 
-async def _write_llm_response_log_best_effort(
+async def _await_log_finalizer(
+    task: asyncio.Task[None],
+    *,
+    deferred_cancel: asyncio.CancelledError | None = None,
+) -> None:
+    """Settle accepted logging, preserving cancellation and one worker error."""
+    finalizer_error: Exception | None = None
+    try:
+        await _await_before_cancelling(task)
+    except asyncio.CancelledError as exc:
+        deferred_cancel = deferred_cancel or exc
+    except Exception as exc:
+        finalizer_error = exc
+    try:
+        task.result()
+    except asyncio.CancelledError as exc:
+        deferred_cancel = deferred_cancel or exc
+    except Exception as exc:
+        finalizer_error = exc
+    if deferred_cancel is None:
+        return
+    if deferred_cancel.__cause__ is None and finalizer_error is not None:
+        raise deferred_cancel from finalizer_error
+    raise deferred_cancel
+
+
+def _settled_task_error[Result](task: asyncio.Task[Result]) -> Exception | None:
+    """Return one ordinary error from an already-settled task."""
+    try:
+        task.result()
+    except Exception as exc:
+        return exc
+    return None
+
+
+async def _write_llm_response_log_reporting_errors(
     *,
     model: Model,
     agent_name: str,
@@ -667,7 +704,7 @@ async def _write_llm_response_log_best_effort(
     usage: MessageMetrics | None,
     request_context: dict[str, _JSONValue],
 ) -> None:
-    """Emit usage and optional response records without affecting the model call."""
+    """Emit usage and an optional response record, reporting ordinary failure."""
     try:
         await _write_llm_response_log(
             model=model,
@@ -683,6 +720,31 @@ async def _write_llm_response_log_best_effort(
             agent_name=agent_name,
             model_id=model.id,
         )
+        raise
+
+
+async def _capture_llm_response_log_error(
+    *,
+    model: Model,
+    agent_name: str,
+    configured_provider: str | None,
+    request_log_ref: _RequestLogRef | None,
+    usage: MessageMetrics | None,
+    request_context: dict[str, _JSONValue],
+) -> Exception | None:
+    """Complete response logging and return an already-reported failure."""
+    try:
+        await _write_llm_response_log_reporting_errors(
+            model=model,
+            agent_name=agent_name,
+            configured_provider=configured_provider,
+            request_log_ref=request_log_ref,
+            usage=usage,
+            request_context=request_context,
+        )
+    except Exception as exc:
+        return exc
+    return None
 
 
 async def _invoke_with_llm_request_logging(
@@ -748,7 +810,7 @@ async def _invoke_with_llm_request_logging(
         except Exception as exc:
             request_log_ref = None
             request_error = exc
-        await _write_llm_response_log_best_effort(
+        response_error = await _capture_llm_response_log_error(
             model=model,
             agent_name=agent_name,
             configured_provider=configured_provider,
@@ -758,10 +820,11 @@ async def _invoke_with_llm_request_logging(
         )
         if request_error is not None:
             raise request_error
+        if response_error is not None:
+            raise response_error
 
     finalizer = asyncio.create_task(_write_success_logs())
-    with suppress(Exception):
-        await _await_before_cancelling(finalizer)
+    await _await_log_finalizer(finalizer)
     return response
 
 
@@ -803,7 +866,9 @@ def _stream_with_llm_request_logging(
 
         async def _finalize_stream_logs() -> None:
             await _write_request_once()
-            await _write_llm_response_log_best_effort(
+            assert request_log_task is not None
+            request_error = _settled_task_error(request_log_task)
+            response_error = await _capture_llm_response_log_error(
                 model=model,
                 agent_name=agent_name,
                 configured_provider=configured_provider,
@@ -811,6 +876,10 @@ def _stream_with_llm_request_logging(
                 usage=last_usage,
                 request_context=request_context,
             )
+            if request_error is not None:
+                raise request_error
+            if response_error is not None:
+                raise response_error
 
         # finally: an abandoned stream (consumer break -> aclose()) must
         # still record any usage already reported; awaiting during aclose()
@@ -830,12 +899,7 @@ def _stream_with_llm_request_logging(
             deferred_cancel = exc
         finally:
             finalizer = asyncio.create_task(_finalize_stream_logs())
-            try:
-                await _await_before_cancelling(finalizer)
-            except asyncio.CancelledError as exc:
-                deferred_cancel = deferred_cancel or exc
-            if deferred_cancel is not None:
-                raise deferred_cancel
+            await _await_log_finalizer(finalizer, deferred_cancel=deferred_cancel)
 
     return _stream()
 
