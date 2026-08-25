@@ -369,6 +369,73 @@ async def test_call_agent_cache_closes_runtime_dbs_when_async_client_close_is_ca
 
 
 @pytest.mark.asyncio
+async def test_call_agent_cache_drains_cleanup_before_propagating_outer_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted client and DB cleanup must finish before caller cancellation escapes."""
+    client_close_started = asyncio.Event()
+    allow_client_close = asyncio.Event()
+    client_close_finished = asyncio.Event()
+    db_close_started = Event()
+    allow_db_close = Event()
+    db_close_finished = Event()
+
+    async def close_client() -> None:
+        client_close_started.set()
+        await allow_client_close.wait()
+        client_close_finished.set()
+
+    def close_runtime_dbs(_agent: object) -> None:
+        db_close_started.set()
+        if not allow_db_close.wait(timeout=1):
+            msg = "test did not release runtime DB cleanup"
+            raise TimeoutError(msg)
+        db_close_finished.set()
+
+    async_client = MagicMock()
+    async_client.close = AsyncMock(side_effect=close_client)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", async_client=async_client)
+    agent = MagicMock(model=model)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_runtime_dbs)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+        agent=agent,
+    )
+
+    close_task = asyncio.create_task(cache.aclose())
+    try:
+        await asyncio.wait_for(client_close_started.wait(), timeout=1)
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert not close_task.done()
+
+        allow_client_close.set()
+        assert await asyncio.to_thread(db_close_started.wait, 1)
+        assert not close_task.done()
+
+        allow_db_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        assert client_close_finished.is_set()
+        assert db_close_finished.is_set()
+    finally:
+        allow_client_close.set()
+        allow_db_close.set()
+        if not close_task.done():
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+
+
+@pytest.mark.asyncio
 async def test_wrapped_tool_executes_sync_entrypoint_in_context() -> None:
     """Sync entrypoints run in a worker thread with the runtime context bound."""
     seen_context: list[object] = []
