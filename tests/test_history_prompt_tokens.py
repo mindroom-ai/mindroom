@@ -37,11 +37,15 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_schema_cache import clear_tool_schema_cache
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from tests.conftest import (
     FakeModel,
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -437,6 +441,48 @@ def test_tool_definition_payloads_cached_equal_ordered_and_isolated() -> None:
     cast("dict[str, object]", first[1]["parameters"])["injected"] = True
 
     assert agent_tool_definition_payloads_for_logging(warm_agent) == cached
+
+
+def test_output_wrapped_tool_schema_is_reused_across_agent_instances(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Static-token preparation should process one shared wrapped schema only once."""
+
+    def export_report(report_id: str) -> str:
+        """Export one report."""
+        return report_id
+
+    original_process_entrypoint = Function.process_entrypoint
+    process_calls = 0
+
+    def _counting_process_entrypoint(self: Function, strict: bool = False) -> None:
+        nonlocal process_calls
+        process_calls += 1
+        original_process_entrypoint(self, strict=strict)
+
+    monkeypatch.setattr(Function, "process_entrypoint", _counting_process_entrypoint)
+    clear_tool_schema_cache()
+
+    def make_agent() -> Agent:
+        function = Function(name="export_report", entrypoint=export_report)
+        wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path))
+        agent = _agent()
+        agent.tools = [function]
+        return agent
+
+    first_agent = make_agent()
+    second_agent = make_agent()
+
+    first_estimate = estimate_agent_static_tokens(first_agent, "Current prompt")
+    second_estimate = estimate_agent_static_tokens(second_agent, "Current prompt")
+    first_payloads = agent_tool_definition_payloads_for_logging(first_agent)
+    second_payloads = agent_tool_definition_payloads_for_logging(second_agent)
+
+    assert first_estimate == second_estimate
+    assert first_payloads == second_payloads
+    assert process_calls == 1
+    clear_tool_schema_cache()
 
 
 def test_tool_surfaces_are_keyed_per_agent_instance() -> None:
