@@ -15,6 +15,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine
 
+from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
 
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _BUSY_TIMEOUT_SECONDS = 30.0
+
+agno_session_persistence_patch.apply_patch()
 
 __all__ = [
     "create_culture_storage",
