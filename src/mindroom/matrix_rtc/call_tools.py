@@ -34,7 +34,7 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
-from mindroom.claude_prompt_cache import prewarm_anthropic_async_client
+from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.runtime import (
     close_agent_runtime_state_dbs,
@@ -250,7 +250,15 @@ class _CallAgentCache:
             self.knowledge_identity = ()
             self.refresh_scheduler = None
             if agent is not None:
-                await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
+                await self._close_agent(agent)
+
+    @staticmethod
+    async def _close_agent(agent: AgnoAgent) -> None:
+        """Release one cached agent's async client and runtime databases."""
+        try:
+            await aclose_anthropic_async_client(agent.model)
+        finally:
+            await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
 
     async def _get_agent(
         self,
@@ -266,8 +274,10 @@ class _CallAgentCache:
         ):
             return self.agent
         if self.agent is not None:
-            await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
-            self.agent = None
+            agent, self.agent = self.agent, None
+            self.knowledge_identity = ()
+            self.refresh_scheduler = None
+            await self._close_agent(agent)
         agent = await asyncio.to_thread(
             self._build_agent,
             knowledge=knowledge,

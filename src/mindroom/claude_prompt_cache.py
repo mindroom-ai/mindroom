@@ -129,6 +129,16 @@ def prewarm_anthropic_async_client(model: object) -> None:
     claude_model.get_async_client()
 
 
+async def aclose_anthropic_async_client(model: object) -> None:
+    """Close and clear a retained Claude async SDK client, if present."""
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None or _is_session_backed_bedrock_claude(claude_model):
+        return
+    async_client, claude_model.async_client = claude_model.async_client, None
+    if async_client is not None:
+        await async_client.close()
+
+
 def _prompt_cache_control(*, extended_cache_time: bool = False) -> dict[str, str]:
     """Return the cache_control payload for one breakpoint marker."""
     cache_control: dict[str, str] = {"type": "ephemeral"}
