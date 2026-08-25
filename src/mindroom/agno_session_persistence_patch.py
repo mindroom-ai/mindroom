@@ -71,6 +71,19 @@ class _RegisteredPersistenceTarget:
     digest: bytes = field(repr=False)
 
 
+@dataclass
+class _ReservedPersistenceWrite:
+    """Tail placeholder whose write starts only after preparation and its predecessor."""
+
+    target: _RegisteredPersistenceTarget
+    completion: Future[object]
+    predecessor_finished: bool = False
+    context: contextvars.Context | None = None
+    write: Callable[[], object] | None = None
+    preparation_error: BaseException | None = None
+    started: bool = False
+
+
 @dataclass(frozen=True)
 class _DatabaseOwner:
     """Minimal owner accepted by Agno's captured storage helpers."""
@@ -161,32 +174,85 @@ def _start_registered_write(
     worker.add_done_callback(partial(_transfer_worker_result, completion))
 
 
-def _start_after_predecessor(
-    completion: Future[object],
-    context: contextvars.Context,
-    write: Callable[[], object],
+def _take_ready_registered_write(
+    reservation: _ReservedPersistenceWrite,
+) -> tuple[Future[object], contextvars.Context, Callable[[], object]] | None:
+    if (
+        reservation.started
+        or not reservation.predecessor_finished
+        or reservation.preparation_error is not None
+        or reservation.context is None
+        or reservation.write is None
+    ):
+        return None
+    reservation.started = True
+    return reservation.completion, reservation.context, reservation.write
+
+
+def _take_ready_registered_failure(reservation: _ReservedPersistenceWrite) -> BaseException | None:
+    if reservation.started or not reservation.predecessor_finished or reservation.preparation_error is None:
+        return None
+    reservation.started = True
+    return reservation.preparation_error
+
+
+def _predecessor_finished(
+    reservation: _ReservedPersistenceWrite,
     _predecessor: Future[object],
 ) -> None:
-    _start_registered_write(completion, context, write)
+    with _PERSISTENCE_LOCK:
+        reservation.predecessor_finished = True
+        ready_error = _take_ready_registered_failure(reservation)
+        ready_write = None if ready_error is not None else _take_ready_registered_write(reservation)
+    if ready_error is not None:
+        reservation.completion.set_exception(ready_error)
+    elif ready_write is not None:
+        _start_registered_write(*ready_write)
 
 
-def _submit_registered_write(
+def _reserve_registered_write(
     target: _RegisteredPersistenceTarget,
-    write: Callable[[], object],
-) -> Future[object]:
+) -> _ReservedPersistenceWrite:
     completion: Future[object] = Future()
-    context = contextvars.copy_context()
+    reservation = _ReservedPersistenceWrite(target=target, completion=completion)
     completion.add_done_callback(partial(_remove_completed_tail, target, completion))
     with _PERSISTENCE_LOCK:
         predecessor = _TARGET_TAILS.get(target)
         _TARGET_TAILS[target] = completion
         if predecessor is None:
-            _start_registered_write(completion, context, write)
+            reservation.predecessor_finished = True
         else:
             predecessor.add_done_callback(
-                partial(_start_after_predecessor, completion, context, write),
+                partial(_predecessor_finished, reservation),
             )
-    return completion
+    return reservation
+
+
+def _fail_reserved_write(reservation: _ReservedPersistenceWrite, error: BaseException) -> None:
+    with _PERSISTENCE_LOCK:
+        reservation.preparation_error = error
+        ready_error = _take_ready_registered_failure(reservation)
+    if ready_error is not None:
+        reservation.completion.set_exception(ready_error)
+
+
+def _attach_registered_write(
+    reservation: _ReservedPersistenceWrite,
+    write: Callable[[], object],
+) -> Future[object]:
+    try:
+        context = contextvars.copy_context()
+    except BaseException as error:
+        _fail_reserved_write(reservation, error)
+        raise
+
+    with _PERSISTENCE_LOCK:
+        reservation.context = context
+        reservation.write = write
+        ready_write = _take_ready_registered_write(reservation)
+    if ready_write is not None:
+        _start_registered_write(*ready_write)
+    return reservation.completion
 
 
 def _is_agno_background_task() -> bool:
@@ -251,19 +317,24 @@ async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
         await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
 
+    reservation = _reserve_registered_write(target)
     if _is_agno_background_task():
-        _submit_registered_write(
-            target,
+        _attach_registered_write(
+            reservation,
             lambda: _ORIGINAL_AGENT_SAVE_SESSION(agent, session),
         ).result()
         return
-    _remove_transient_session_state(session)
-    snapshot = deepcopy(session)
 
-    owner = cast("Agent", _DatabaseOwner(cast("BaseDb", database)))
+    try:
+        _remove_transient_session_state(session)
+        snapshot = deepcopy(session)
+        owner = cast("Agent", _DatabaseOwner(cast("BaseDb", database)))
+    except BaseException as error:
+        _fail_reserved_write(reservation, error)
+        raise
     await _await_registered_write(
-        _submit_registered_write(
-            target,
+        _attach_registered_write(
+            reservation,
             lambda: _ORIGINAL_AGENT_UPSERT_SESSION(owner, snapshot),
         ),
     )
@@ -281,18 +352,23 @@ async def _team_asave_session(team: Team, session: TeamSession) -> None:
         await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
 
+    reservation = _reserve_registered_write(target)
     if _is_agno_background_task():
-        _submit_registered_write(
-            target,
+        _attach_registered_write(
+            reservation,
             lambda: _ORIGINAL_TEAM_SAVE_SESSION(team, session),
         ).result()
         return
-    snapshot = _prepare_team_session_snapshot(team, session)
 
-    owner = cast("Team", _DatabaseOwner(cast("BaseDb", database)))
+    try:
+        snapshot = _prepare_team_session_snapshot(team, session)
+        owner = cast("Team", _DatabaseOwner(cast("BaseDb", database)))
+    except BaseException as error:
+        _fail_reserved_write(reservation, error)
+        raise
     await _await_registered_write(
-        _submit_registered_write(
-            target,
+        _attach_registered_write(
+            reservation,
             lambda: _ORIGINAL_TEAM_UPSERT_SESSION(owner, snapshot),
         ),
     )

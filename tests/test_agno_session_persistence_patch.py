@@ -10,6 +10,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
+from copy import deepcopy as copy_session
 from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
@@ -225,6 +226,243 @@ def test_distinct_sqlite_handles_share_write_order(  # noqa: PLR0915
     assert errors == []
     assert persisted is not None
     assert persisted.metadata == {"write": "second"}
+
+
+@pytest.mark.parametrize("surface", ["agent", "team"])
+def test_snapshot_reservation_preserves_cross_loop_invocation_order(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _Surface,
+) -> None:
+    """A later snapshot must remain behind an earlier blocked snapshot."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    first_storage = _storage(tmp_path, f"{surface}-snapshot-order")
+    second_storage = _storage(tmp_path, f"{surface}-snapshot-order")
+    baseline_owner, baseline_session = _owner_and_session(surface, first_storage, "baseline")
+    asyncio.run(baseline_owner.asave_session(baseline_session))
+    first_owner, first_session = _owner_and_session(surface, first_storage, "shared")
+    second_owner, second_session = _owner_and_session(surface, second_storage, "shared")
+    first_session.metadata = {"write": "first"}
+    second_session.metadata = {"write": "second"}
+    first_snapshot_started = threading.Event()
+    second_snapshot_finished = threading.Event()
+    release_first_snapshot = threading.Event()
+    first_write_started = threading.Event()
+    second_write_started = threading.Event()
+    release_first_write = threading.Event()
+    first_finished = threading.Event()
+    second_finished = threading.Event()
+    errors: list[BaseException] = []
+    original_first_upsert = first_storage.upsert_session
+    original_second_upsert = second_storage.upsert_session
+
+    def controlled_deepcopy(session: AgentSession | TeamSession) -> AgentSession | TeamSession:
+        if session.metadata == {"write": "first"}:
+            first_snapshot_started.set()
+            assert release_first_snapshot.wait(timeout=5)
+        else:
+            second_snapshot_finished.set()
+        return copy_session(session)
+
+    def first_upsert(
+        session: AgentSession | TeamSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        first_write_started.set()
+        assert release_first_write.wait(timeout=5)
+        return original_first_upsert(session, deserialize=deserialize)
+
+    def second_upsert(
+        session: AgentSession | TeamSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        second_write_started.set()
+        return original_second_upsert(session, deserialize=deserialize)
+
+    def run_save(
+        owner: Agent | Team,
+        session: AgentSession | TeamSession,
+        finished: threading.Event,
+    ) -> None:
+        try:
+            asyncio.run(owner.asave_session(session))
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(persistence_patch, "deepcopy", controlled_deepcopy)
+    monkeypatch.setattr(first_storage, "upsert_session", first_upsert)
+    monkeypatch.setattr(second_storage, "upsert_session", second_upsert)
+    first = threading.Thread(target=run_save, args=(first_owner, first_session, first_finished))
+    second = threading.Thread(target=run_save, args=(second_owner, second_session, second_finished))
+    first.start()
+    try:
+        assert first_snapshot_started.wait(timeout=5)
+        second.start()
+        assert second_snapshot_finished.wait(timeout=5)
+        assert not second_write_started.wait(timeout=0.2)
+        assert not second_finished.is_set()
+        release_first_snapshot.set()
+        assert first_write_started.wait(timeout=5)
+        assert not second_write_started.is_set()
+        release_first_write.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        persisted = (
+            get_agent_session(first_storage, "shared")
+            if surface == "agent"
+            else get_team_session(first_storage, "shared")
+        )
+    finally:
+        release_first_snapshot.set()
+        release_first_write.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        first_storage.close()
+        second_storage.close()
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert first_finished.is_set()
+    assert second_finished.is_set()
+    assert second_write_started.is_set()
+    assert errors == []
+    assert persisted is not None
+    assert persisted.metadata == {"write": "second"}
+
+
+@pytest.mark.parametrize("surface", ["agent", "team"])
+def test_snapshot_failure_releases_reservation_and_tail(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _Surface,
+) -> None:
+    """Snapshot failure must preserve its error and unblock its successor."""
+    persistence_patch = import_module("mindroom.agno_session_persistence_patch")
+    first_storage = _storage(tmp_path, f"{surface}-snapshot-failure")
+    second_storage = _storage(tmp_path, f"{surface}-snapshot-failure")
+    baseline_owner, baseline_session = _owner_and_session(surface, first_storage, "baseline")
+    asyncio.run(baseline_owner.asave_session(baseline_session))
+    predecessor_owner, predecessor_session = _owner_and_session(surface, first_storage, "shared")
+    failing_owner, failing_session = _owner_and_session(surface, second_storage, "shared")
+    successor_owner, successor_session = _owner_and_session(surface, second_storage, "shared")
+    predecessor_session.metadata = {"write": "predecessor"}
+    failing_session.metadata = {"write": "failure"}
+    successor_session.metadata = {"write": "successor"}
+    target = persistence_patch._registered_target(first_storage)
+    predecessor_write_started = threading.Event()
+    release_predecessor_write = threading.Event()
+    failure_snapshot_started = threading.Event()
+    release_failure_snapshot = threading.Event()
+    successor_snapshot_finished = threading.Event()
+    successor_write_started = threading.Event()
+    predecessor_finished = threading.Event()
+    failure_finished = threading.Event()
+    successor_finished = threading.Event()
+    failure = RuntimeError("snapshot failed")
+    predecessor_errors: list[BaseException] = []
+    failure_errors: list[BaseException] = []
+    successor_errors: list[BaseException] = []
+    original_first_upsert = first_storage.upsert_session
+    original_second_upsert = second_storage.upsert_session
+
+    def failing_deepcopy(session: AgentSession | TeamSession) -> AgentSession | TeamSession:
+        if session.metadata == {"write": "failure"}:
+            failure_snapshot_started.set()
+            assert release_failure_snapshot.wait(timeout=5)
+            raise failure
+        if session.metadata == {"write": "successor"}:
+            successor_snapshot_finished.set()
+        return copy_session(session)
+
+    def first_upsert(
+        session: AgentSession | TeamSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        predecessor_write_started.set()
+        assert release_predecessor_write.wait(timeout=5)
+        return original_first_upsert(session, deserialize=deserialize)
+
+    def second_upsert(
+        session: AgentSession | TeamSession,
+        deserialize: bool | None = True,
+    ) -> object:
+        successor_write_started.set()
+        return original_second_upsert(session, deserialize=deserialize)
+
+    def run_save(
+        owner: Agent | Team,
+        session: AgentSession | TeamSession,
+        finished: threading.Event,
+        errors: list[BaseException],
+    ) -> None:
+        try:
+            asyncio.run(owner.asave_session(session))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(persistence_patch, "deepcopy", failing_deepcopy)
+    monkeypatch.setattr(first_storage, "upsert_session", first_upsert)
+    monkeypatch.setattr(second_storage, "upsert_session", second_upsert)
+    predecessor = threading.Thread(
+        target=run_save,
+        args=(predecessor_owner, predecessor_session, predecessor_finished, predecessor_errors),
+    )
+    failing = threading.Thread(
+        target=run_save,
+        args=(failing_owner, failing_session, failure_finished, failure_errors),
+    )
+    successor = threading.Thread(
+        target=run_save,
+        args=(successor_owner, successor_session, successor_finished, successor_errors),
+    )
+    predecessor.start()
+    try:
+        assert predecessor_write_started.wait(timeout=5)
+        predecessor_tail = persistence_patch._TARGET_TAILS.get(target)
+        assert predecessor_tail is not None
+        failing.start()
+        assert failure_snapshot_started.wait(timeout=5)
+        assert persistence_patch._TARGET_TAILS.get(target) is not predecessor_tail
+        successor.start()
+        assert successor_snapshot_finished.wait(timeout=5)
+        release_failure_snapshot.set()
+        failing.join(timeout=5)
+        assert failure_errors == [failure]
+        assert not successor_write_started.wait(timeout=0.2)
+        assert not successor_finished.is_set()
+        release_predecessor_write.set()
+        predecessor.join(timeout=5)
+        successor.join(timeout=5)
+        persisted = (
+            get_agent_session(first_storage, "shared")
+            if surface == "agent"
+            else get_team_session(first_storage, "shared")
+        )
+    finally:
+        release_failure_snapshot.set()
+        release_predecessor_write.set()
+        for thread in (predecessor, failing, successor):
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        first_storage.close()
+        second_storage.close()
+
+    assert not predecessor.is_alive()
+    assert not failing.is_alive()
+    assert not successor.is_alive()
+    assert predecessor_finished.is_set()
+    assert failure_finished.is_set()
+    assert successor_finished.is_set()
+    assert predecessor_errors == []
+    assert failure_errors == [failure]
+    assert successor_errors == []
+    assert persisted is not None
+    assert persisted.metadata == {"write": "successor"}
+    assert target not in persistence_patch._TARGET_TAILS
 
 
 def test_application_storage_is_registered_with_an_opaque_target(tmp_path: Path) -> None:
