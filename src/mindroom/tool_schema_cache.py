@@ -16,6 +16,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+_CACHE_POSTPROCESSOR_ATTR = "_mindroom_schema_cache_postprocessor"
+type _SchemaCachePostprocessor = Callable[[Function, bool], None]
+
+
 @dataclass(frozen=True, slots=True)
 class _ProcessedFunctionSchema:
     """Processed prompt schema snapshot for one Function."""
@@ -23,6 +27,18 @@ class _ProcessedFunctionSchema:
     parameters: dict[str, Any]
     description: str | None
     user_input_schema: tuple[UserInputField, ...] | None
+
+
+def set_schema_cache_postprocessor(function: Function, postprocessor: _SchemaCachePostprocessor) -> None:
+    """Allow a custom entrypoint processor to reuse cached schema preparation.
+
+    ``postprocessor`` must be a module-level function that applies the custom
+    processor's complete behavior to a cache-owned ``Function``.
+    """
+    if not isfunction(postprocessor):
+        msg = "Schema cache postprocessors must be module-level functions."
+        raise TypeError(msg)
+    object.__setattr__(function, _CACHE_POSTPROCESSOR_ATTR, postprocessor)
 
 
 def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFunctionSchema | None:
@@ -35,8 +51,15 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
     if function.entrypoint is None:
         return None
 
+    cache_postprocessor = getattr(function, _CACHE_POSTPROCESSOR_ATTR, None)
     processor = function.process_entrypoint
-    if isinstance(processor, MethodType) and processor.__func__ is not Function.process_entrypoint:
+    if (
+        isinstance(processor, MethodType)
+        and processor.__func__ is not Function.process_entrypoint
+        and cache_postprocessor is None
+    ):
+        return None
+    if cache_postprocessor is not None and not isfunction(cache_postprocessor):
         return None
 
     source_callable = getattr(function.entrypoint, "__wrapped__", function.entrypoint)
@@ -60,6 +83,7 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         tuple(function.user_input_fields) if function.user_input_fields is not None else None,
         function.strict,
         strict,
+        cache_postprocessor,
     )
     # Copy at the boundary so callers can never corrupt the shared LRU entry.
     return _ProcessedFunctionSchema(
@@ -85,6 +109,7 @@ def _cached_processed_function_schema(
     user_input_fields: tuple[str, ...] | None,
     function_strict: bool | None,
     strict: bool,
+    cache_postprocessor: _SchemaCachePostprocessor | None,
 ) -> _ProcessedFunctionSchema:
     function = Function(
         name=name,
@@ -96,7 +121,10 @@ def _cached_processed_function_schema(
         user_input_fields=list(user_input_fields) if user_input_fields is not None else None,
         strict=function_strict,
     )
-    function.process_entrypoint(strict=strict)
+    if cache_postprocessor is None:
+        function.process_entrypoint(strict=strict)
+    else:
+        cache_postprocessor(function, strict)
     return _ProcessedFunctionSchema(
         parameters=deepcopy(function.parameters),
         description=function.description,

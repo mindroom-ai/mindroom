@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from mindroom import agno_function_patch
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.tool_schema_cache import set_schema_cache_postprocessor
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -248,6 +249,10 @@ def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = F
     ensure_output_path_schema_optional(self)
 
 
+def _process_cached_entrypoint_with_output_path_schema(function: Function, strict: bool) -> None:
+    _process_entrypoint_with_output_path_schema(function, strict=strict)
+
+
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
     model_copy_parameters = inspect.signature(Function.model_copy).parameters
     if "update" in model_copy_parameters:
@@ -278,6 +283,7 @@ def _install_output_path_schema_postprocessor(function: Function) -> None:
         "process_entrypoint",
         MethodType(_process_entrypoint_with_output_path_schema, function),
     )
+    set_schema_cache_postprocessor(function, _process_cached_entrypoint_with_output_path_schema)
     object.__setattr__(
         function,
         "model_copy",
@@ -733,6 +739,7 @@ def _wrap_entrypoint(
     wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
+    wrapper.__dict__["__wrapped__"] = entrypoint
     _copy_annotations_with_output_path(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper

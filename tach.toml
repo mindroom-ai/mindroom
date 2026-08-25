@@ -89,6 +89,7 @@ depends_on = []
 visibility = [
     "mindroom.history.prompt_tokens",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.output_files",
 ]
 
 [[modules]]
@@ -3429,6 +3430,7 @@ path = "mindroom.tool_system.output_files"
 depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
+    "mindroom.tool_schema_cache",
     "mindroom.workspaces",
 ]
 
