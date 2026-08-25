@@ -126,33 +126,23 @@ def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     _write_serialized_jsonl_line(path, json.dumps(redact_sensitive_data(payload)))
 
 
-def _consume_task_cancellations(task: asyncio.Task[object]) -> int:
-    cancel_count = task.cancelling()
-    for _ in range(cancel_count):
-        task.uncancel()
-    return cancel_count
-
-
-def _restore_task_cancellations(task: asyncio.Task[object], cancel_count: int) -> None:
-    for _ in range(cancel_count):
-        task.cancel()
-
-
 async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
-    """Finish one accepted task before restoring caller cancellation."""
+    """Finish one accepted task before propagating caller cancellation once."""
     current_task = asyncio.current_task()
     assert current_task is not None
-    deferred_cancel_count = 0
+    observed_cancel_count = current_task.cancelling()
     deferred_cancel: asyncio.CancelledError | None = None
 
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
-            caller_cancel_count = _consume_task_cancellations(current_task)
-            if caller_cancel_count <= 0:
+            caller_cancel_count = current_task.cancelling()
+            if caller_cancel_count <= observed_cancel_count:
+                if task.done():
+                    break
                 raise
-            deferred_cancel_count += caller_cancel_count
+            observed_cancel_count = caller_cancel_count
             deferred_cancel = deferred_cancel or exc
         except BaseException:
             if task.done():
@@ -164,12 +154,10 @@ async def _await_before_cancelling(task: asyncio.Task[None]) -> None:
     except BaseException as task_error:
         if deferred_cancel is None:
             raise
-        _restore_task_cancellations(current_task, deferred_cancel_count)
         raise deferred_cancel from task_error
 
     if deferred_cancel is None:
         return
-    _restore_task_cancellations(current_task, deferred_cancel_count)
     raise deferred_cancel
 
 

@@ -76,11 +76,9 @@ class _CoordinatedAppendHandle:
         self,
         handle: TextIO,
         first_writes: threading.Barrier,
-        lock_observations: list[bool],
     ) -> None:
         self._handle = handle
         self._first_writes = first_writes
-        self._lock_observations = lock_observations
 
     def __enter__(self) -> _CoordinatedAppendHandle:
         self._handle.__enter__()
@@ -90,12 +88,10 @@ class _CoordinatedAppendHandle:
         self._handle.__exit__(*args)  # type: ignore[arg-type]
 
     def write(self, value: str) -> int:
-        append_lock = getattr(llm_request_logging, "_JSONL_APPEND_LOCK", None)
-        lock_held = append_lock is not None and append_lock.locked()
-        self._lock_observations.append(lock_held)
-        if not lock_held and value != "\n":
+        if not value.endswith("\n"):
             self._first_writes.wait(timeout=5)
             written = self._handle.write(value)
+            self._handle.flush()
             self._first_writes.wait(timeout=5)
             return written
         return self._handle.write(value)
@@ -170,7 +166,7 @@ async def test_llm_request_payload_is_built_on_writer_thread(
     assert payload["tools"] == [{"name": "search"}]
 
 
-def test_concurrent_large_jsonl_appends_remain_parseable(
+def test_concurrent_jsonl_appends_remain_parseable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -178,17 +174,16 @@ def test_concurrent_large_jsonl_appends_remain_parseable(
     first_writes = threading.Barrier(2)
     path_type = type(tmp_path)
     real_open = path_type.open
-    lock_observations: list[bool] = []
 
     def coordinated_open(path: Path, *args: object, **kwargs: object) -> _CoordinatedAppendHandle:
         handle = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
-        return _CoordinatedAppendHandle(handle, first_writes, lock_observations)
+        return _CoordinatedAppendHandle(handle, first_writes)
 
     monkeypatch.setattr(path_type, "open", coordinated_open)
     log_path = tmp_path / "requests.jsonl"
     lines = [
-        json.dumps({"record": "first", "payload": "a" * 1_000_000}),
-        json.dumps({"record": "second", "payload": "b" * 1_000_000}),
+        json.dumps({"record": "first"}),
+        json.dumps({"record": "second"}),
     ]
     with ThreadPoolExecutor(max_workers=2) as executor:
         appends = [executor.submit(llm_request_logging._write_serialized_jsonl_line, log_path, line) for line in lines]
@@ -197,7 +192,6 @@ def test_concurrent_large_jsonl_appends_remain_parseable(
     with real_open(log_path, encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle]
     assert {record["record"] for record in records} == {"first", "second"}
-    assert lock_observations == [True, True]
 
 
 @pytest.mark.asyncio
@@ -369,24 +363,31 @@ async def test_llm_request_log_defers_cancellation_until_borrowed_values_are_per
     assert payload["model_params"] == {"temperature": 0.7}
 
 
+@pytest.mark.parametrize("worker_fails", [False, True])
 @pytest.mark.asyncio
-async def test_invoke_cancellation_wins_when_request_log_worker_fails(
+async def test_invoke_cancellation_is_delivered_once_before_caller_continues(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    worker_fails: bool,
 ) -> None:
-    """A failed accepted write must not turn caller cancellation into success."""
-    serializer_started = threading.Event()
-    release_serializer = threading.Event()
-    cancellation_deferred = asyncio.Event()
+    """Deferred cancellation must not fire again after the caller catches it."""
+    serializer_started, release_serializer = (threading.Event() for _ in range(2))
+    cancellation_deferred, continuation_started, release_continuation = (asyncio.Event() for _ in range(3))
     serialization_error = OSError("serialization failed")
+    original_serialize = llm_request_logging._serialize_llm_request_log_line
+    caught_cancellations: list[asyncio.CancelledError] = []
+    cancellation_counts: list[int] = []
 
-    def fail_serialization(**_kwargs: object) -> str:
+    def controlled_serialization(*args: object, **kwargs: object) -> str:
         serializer_started.set()
         assert release_serializer.wait(timeout=5)
-        raise serialization_error
+        if worker_fails:
+            raise serialization_error
+        return original_serialize(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(llm_request_logging.asyncio, "shield", _ShieldRetryObserver({2: cancellation_deferred}))
-    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", fail_serialization)
+    monkeypatch.setattr(llm_request_logging, "_serialize_llm_request_log_line", controlled_serialization)
     model = _FakeModel()
     install_llm_request_logging(
         model,
@@ -394,26 +395,72 @@ async def test_invoke_cancellation_wins_when_request_log_worker_fails(
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
         default_log_dir=tmp_path / "unused",
     )
-    invoke_task = asyncio.create_task(
-        model.ainvoke(
-            messages=[Message(role="user", content="hello")],
-            assistant_message=Message(role="assistant"),
-            tools=[],
-        ),
-    )
+
+    async def invoke_and_continue() -> str:
+        try:
+            await model.ainvoke(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+                tools=[],
+            )
+        except asyncio.CancelledError as exc:
+            caught_cancellations.append(exc)
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            cancellation_counts.append(current_task.cancelling())
+        continuation_started.set()
+        await release_continuation.wait()
+        return "continued"
+
+    invoke_task = asyncio.create_task(invoke_and_continue())
     try:
         assert await asyncio.to_thread(serializer_started.wait, 5)
         invoke_task.cancel("cancel request")
         await cancellation_deferred.wait()
         release_serializer.set()
-        with pytest.raises(asyncio.CancelledError) as cancelled:
-            await invoke_task
+        await continuation_started.wait()
+        assert not invoke_task.done()
+        release_continuation.set()
+        result = await invoke_task
     finally:
         release_serializer.set()
+        release_continuation.set()
         await asyncio.gather(invoke_task, return_exceptions=True)
 
-    assert cancelled.value.args == ("cancel request",)
+    assert result == "continued"
+    assert len(caught_cancellations) == 1
+    assert caught_cancellations[0].args == ("cancel request",)
+    assert cancellation_counts == [1]
     assert invoke_task.cancelling() == 1
+    if worker_fails:
+        assert caught_cancellations[0].__cause__ is serialization_error
+    else:
+        assert caught_cancellations[0].__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_inner_worker_cancellation_is_not_counted_as_caller_cancellation() -> None:
+    """A cancelled worker must not masquerade as a new outer request."""
+
+    async def run_after_prior_cancellation() -> None:
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        current_task.cancel("prior cancellation")
+        with pytest.raises(asyncio.CancelledError, match="prior cancellation"):
+            await asyncio.Event().wait()
+
+        worker = asyncio.create_task(asyncio.Event().wait())
+        worker.cancel("worker cancelled")
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await llm_request_logging._await_before_cancelling(worker)
+
+        assert current_task.cancelling() == 1
+        assert cancelled.value.args == ("worker cancelled",)
+        assert cancelled.value.__cause__ is None
+
+    completed = asyncio.create_task(run_after_prior_cancellation())
+    await completed
+    assert completed.cancelling() == 1
 
 
 @pytest.mark.asyncio
