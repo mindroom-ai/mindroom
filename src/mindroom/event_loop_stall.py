@@ -64,6 +64,16 @@ def _truncate_stack(stack: str, character_budget: int) -> str:
     return f"{_STACK_TRUNCATION_MARKER}{stack[-tail_length:]}"
 
 
+def _frame_chain_exceeds_limit(frame: FrameType, frame_limit: int) -> bool:
+    """Return whether walking at most ``frame_limit`` frames omits an ancestor."""
+    older_frame: FrameType | None = frame
+    for _ in range(frame_limit):
+        older_frame = older_frame.f_back
+        if older_frame is None:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class _Heartbeat:
     """One atomically published heartbeat and its matching process CPU baseline."""
@@ -219,9 +229,11 @@ class EventLoopStallDetector:
                 continue
             thread = known_threads.get(thread_ident)
             thread_name = thread.name if thread is not None else f"thread-{thread_ident}"
-            full_stack = "".join(traceback.format_stack(captured_frames[thread_ident], limit=_MAX_STACK_FRAMES))
+            frame = captured_frames[thread_ident]
+            frame_limit_truncated = _frame_chain_exceeds_limit(frame, _MAX_STACK_FRAMES)
+            full_stack = "".join(traceback.format_stack(frame, limit=_MAX_STACK_FRAMES))
             stack = _truncate_stack(full_stack, min(_MAX_OTHER_THREAD_STACK_CHARACTERS, remaining))
-            if len(stack) < len(full_stack):
+            if frame_limit_truncated or len(stack) < len(full_stack):
                 truncated += 1
             stack_characters += len(stack)
             stacks.append(

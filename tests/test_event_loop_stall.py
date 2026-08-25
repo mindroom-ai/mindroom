@@ -51,6 +51,22 @@ class _LoopClock:
         callback(scheduled_loop_time)
 
 
+class _FakeFrame:
+    """Minimal frame chain for deterministic stack-depth tests."""
+
+    def __init__(self, f_back: _FakeFrame | None = None) -> None:
+        self.f_back = f_back
+
+
+def _fake_frame_chain(depth: int) -> _FakeFrame:
+    """Return an active fake frame with ``depth`` linked frames."""
+    frame: _FakeFrame | None = None
+    for _ in range(depth):
+        frame = _FakeFrame(frame)
+    assert frame is not None
+    return frame
+
+
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
     fake = Path("/var/empty/mindroom-test")
     return RuntimePaths(
@@ -255,7 +271,7 @@ def test_other_thread_stacks_keeps_snapshot_frame_when_thread_metadata_has_gone_
     """A frame present in the snapshot remains reportable through metadata lookup races."""
     detector = _detector()
     frame_ident = 123
-    frame = object()
+    frame = _FakeFrame()
     monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
     monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
     monkeypatch.setattr(event_loop_stall.traceback, "format_stack", lambda *_args, **_kwargs: ["snapshot-frame"])
@@ -282,7 +298,7 @@ def test_other_thread_stacks_excludes_loop_and_watcher_and_bounds_characters(mon
     first_ident = 20
     second_ident = 30
     third_ident = 40
-    frames = {ident: object() for ident in (loop_ident, watcher_ident, first_ident, second_ident, third_ident)}
+    frames = {ident: _FakeFrame() for ident in (loop_ident, watcher_ident, first_ident, second_ident, third_ident)}
     names = {
         first_ident: SimpleNamespace(ident=first_ident, name="first", daemon=False),
         second_ident: SimpleNamespace(ident=second_ident, name="second", daemon=True),
@@ -319,7 +335,7 @@ def test_other_thread_stack_truncation_keeps_the_active_frame_tail(monkeypatch: 
     """A bounded stack retains its active frame at the formatted-stack tail."""
     detector = _detector()
     frame_ident = 123
-    frame = object()
+    frame = _FakeFrame()
     monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
     monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
     monkeypatch.setattr(
@@ -335,6 +351,28 @@ def test_other_thread_stack_truncation_keeps_the_active_frame_tail(monkeypatch: 
     assert stacks[0]["stack"] == "\n...\nt\nactive-frame\n"
     assert len(stacks[0]["stack"]) == 20
     assert stacks[0]["stack"].endswith("active-frame\n")
+    assert omitted == 0
+    assert truncated == 1
+
+
+def test_other_thread_stacks_counts_frame_limit_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The truncation count includes stacks whose older frames exceed the frame cap."""
+    detector = _detector()
+    frame_ident = 123
+    frame = _fake_frame_chain(event_loop_stall._MAX_STACK_FRAMES + 1)
+    observed_limits: list[int | None] = []
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", lambda: {frame_ident: frame})
+    monkeypatch.setattr(event_loop_stall.threading, "enumerate", list)
+    monkeypatch.setattr(
+        event_loop_stall.traceback,
+        "format_stack",
+        lambda *_args, limit=None: observed_limits.append(limit) or ["active-frame\n"],
+    )
+
+    stacks, omitted, truncated = detector._other_thread_stacks()
+
+    assert stacks[0]["stack"] == "active-frame\n"
+    assert observed_limits == [event_loop_stall._MAX_STACK_FRAMES]
     assert omitted == 0
     assert truncated == 1
 
