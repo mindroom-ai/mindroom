@@ -145,7 +145,7 @@ A successful response also includes `scope`, token `totals`, `session_count`, an
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
 The admin response groups session aggregates by configured agent or team ID.
-The self response has no breakdown because its scope is already one agent and requester.
+The self-response omits only the entity breakdown because its scope is already one agent and requester; it still includes `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
 Both responses group retained top-level runs by provider and model in `model_breakdown`.
 Model rows include token totals and run counts and are sorted by total tokens.
