@@ -984,6 +984,8 @@ agents:
       - todo
       - subagents
       - matrix_message
+      - name: thread_model
+        defer: true
       - thread_tags
       - thread_summary
     skills:
