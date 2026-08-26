@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager, nullcontext
 from threading import Event
 from types import SimpleNamespace
@@ -11,11 +12,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
+from agno.models.anthropic import Claude
 from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.bedrock_claude import MindRoomBedrockClaude
+from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -190,6 +194,433 @@ def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
         cache._build_agent(knowledge=None, refresh_scheduler=None)
 
     history_storage.close.assert_called_once_with()
+
+
+def test_call_agent_cache_closes_agent_runtime_when_prewarm_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prewarm failure must reclaim the already-created cached agent."""
+    history_storage = MagicMock()
+    agent = MagicMock()
+    close_runtime = MagicMock()
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
+        MagicMock(return_value=history_storage),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        MagicMock(return_value=agent),
+    )
+    monkeypatch.setattr(
+        "mindroom.pre_model_preparation.prewarm_anthropic_async_client",
+        MagicMock(side_effect=RuntimeError("prewarm failed")),
+    )
+    monkeypatch.setattr(
+        "mindroom.pre_model_preparation.close_agent_runtime_state_dbs",
+        close_runtime,
+    )
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    with pytest.raises(RuntimeError, match="prewarm failed"):
+        cache._build_agent(knowledge=None, refresh_scheduler=None)
+
+    close_runtime.assert_called_once_with(agent, shared_scope_storage=history_storage)
+    history_storage.close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_build_cancellation_reclaims_completed_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation must drain an accepted build and close its unreturned result."""
+    build_started = Event()
+    release_build = Event()
+    build_finished = Event()
+    history_storage = MagicMock()
+    agent = MagicMock(model=None)
+    close_client = AsyncMock()
+    close_runtime = MagicMock()
+
+    def _build_agent(*_args: object, **_kwargs: object) -> MagicMock:
+        build_started.set()
+        if not release_build.wait(timeout=5):
+            msg = "test did not release cached agent construction"
+            raise TimeoutError(msg)
+        build_finished.set()
+        return agent
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
+        MagicMock(return_value=history_storage),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _build_agent)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.aclose_anthropic_async_client", close_client)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_runtime)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    build_task = asyncio.create_task(
+        cache._get_agent(
+            knowledge=None,
+            knowledge_identity=(),
+            refresh_scheduler=None,
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(build_started.wait, 5)
+        build_task.cancel()
+        await asyncio.sleep(0)
+        assert not build_task.done()
+
+        release_build.set()
+        with pytest.raises(asyncio.CancelledError):
+            await build_task
+    finally:
+        release_build.set()
+        assert await asyncio.to_thread(build_finished.wait, 5)
+        await asyncio.gather(build_task, return_exceptions=True)
+
+    assert cache.agent is None
+    close_client.assert_awaited_once_with(agent.model)
+    close_runtime.assert_called_once_with(agent)
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_refreshes_session_client_before_reused_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long-lived call agent must refresh session credentials between turns."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    built_clients: list[_FakeSessionClient] = []
+
+    class _FakeSessionClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        async def close(self) -> None:
+            self.closed = True
+
+    def _build_client(**_kwargs: object) -> _FakeSessionClient:
+        client = _FakeSessionClient()
+        built_clients.append(client)
+        return client
+
+    vars(model)["_get_client_params"] = dict
+    monkeypatch.setattr("mindroom.bedrock_claude.AsyncAnthropicBedrockMantle", _build_client)
+    agent = MagicMock(model=model)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+    used_clients: list[_FakeSessionClient] = []
+
+    async def _use_client(cached_agent: object) -> str:
+        used_clients.append(cached_agent.model.get_async_client())  # type: ignore[attr-defined]
+        return "ok"
+
+    try:
+        assert (
+            await cache.run(
+                knowledge=None,
+                knowledge_identity=(),
+                refresh_scheduler=None,
+                operation=_use_client,
+            )
+            == "ok"
+        )
+        assert (
+            await cache.run(
+                knowledge=None,
+                knowledge_identity=(),
+                refresh_scheduler=None,
+                operation=_use_client,
+            )
+            == "ok"
+        )
+
+        assert used_clients == built_clients
+        assert len(built_clients) == 2
+        assert built_clients[0].closed is True
+        assert built_clients[1].closed is False
+        assert model.async_client is built_clients[1]
+    finally:
+        await cache.aclose()
+        for client in built_clients:
+            if not client.closed:
+                await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_prewarms_and_reuses_anthropic_async_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached call agent must initialize one reusable async client off the event loop."""
+    model = Claude(id="claude-sonnet-5", api_key="test-key")
+    install_claude_prompt_cache_hook(model)
+    client_parameter_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+    original_client_parameters = model._get_client_params
+
+    def _record_client_parameters() -> dict[str, object]:
+        client_parameter_thread_ids.append(threading.get_ident())
+        return original_client_parameters()
+
+    vars(model)["_get_client_params"] = _record_client_parameters
+    agent = MagicMock(model=model)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    try:
+        cached_agent = await cache._get_agent(
+            knowledge=None,
+            knowledge_identity=(),
+            refresh_scheduler=None,
+        )
+        first_client = cached_agent.model.get_async_client()
+        second_client = cached_agent.model.get_async_client()
+
+        assert first_client._client is second_client._client
+        assert vars(model)["async_client"] is first_client._client
+        assert client_parameter_thread_ids == [client_parameter_thread_ids[0]]
+        assert client_parameter_thread_ids[0] != event_loop_thread_id
+    finally:
+        async_client = vars(model).get("async_client")
+        if async_client is not None:
+            await async_client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_closes_prewarmed_async_client_on_aclose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing a call cache must release the retained model connection pool."""
+    model = Claude(id="claude-sonnet-5", api_key="test-key")
+    agent = MagicMock(model=model)
+    close_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    cached_agent = await cache._get_agent(
+        knowledge=None,
+        knowledge_identity=(),
+        refresh_scheduler=None,
+    )
+    async_client = vars(model)["async_client"]
+    try:
+        await cache.aclose()
+
+        assert async_client.is_closed()
+        assert model.async_client is None
+        close_agent_mock.assert_called_once_with(cached_agent)
+    finally:
+        if not async_client.is_closed():
+            await async_client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_closes_prewarmed_async_client_on_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing a call agent must release the previous model connection pool."""
+    first_model = Claude(id="claude-sonnet-5", api_key="test-key")
+    second_model = Claude(id="claude-sonnet-5", api_key="test-key")
+    first_agent = MagicMock(model=first_model)
+    second_agent = MagicMock(model=second_model)
+    close_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.create_agent",
+        MagicMock(side_effect=(first_agent, second_agent)),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+    )
+
+    await cache._get_agent(
+        knowledge=None,
+        knowledge_identity=(1,),
+        refresh_scheduler=None,
+    )
+    first_async_client = vars(first_model)["async_client"]
+    second_async_client = None
+    try:
+        await cache._get_agent(
+            knowledge=None,
+            knowledge_identity=(2,),
+            refresh_scheduler=None,
+        )
+        second_async_client = vars(second_model)["async_client"]
+
+        assert first_async_client.is_closed()
+        assert first_model.async_client is None
+        assert not second_async_client.is_closed()
+        close_agent_mock.assert_called_once_with(first_agent)
+    finally:
+        await cache.aclose()
+        for async_client in (first_async_client, second_async_client):
+            if async_client is not None and not async_client.is_closed():
+                await async_client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_closes_runtime_dbs_when_async_client_close_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-close cancellation must not skip the existing runtime DB cleanup."""
+    async_client = MagicMock()
+    async_client.is_closed.return_value = False
+    async_client.close = AsyncMock(side_effect=asyncio.CancelledError)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", async_client=async_client)
+    agent = MagicMock(model=model)
+    close_agent_mock = MagicMock()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+        agent=agent,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await cache.aclose()
+
+    async_client.close.assert_awaited_once_with()
+    close_agent_mock.assert_called_once_with(agent)
+    assert cache.agent is None
+
+
+@pytest.mark.asyncio
+async def test_call_agent_cache_drains_cleanup_before_propagating_outer_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted client and DB cleanup must finish before caller cancellation escapes."""
+    client_close_started = asyncio.Event()
+    allow_client_close = asyncio.Event()
+    client_close_finished = asyncio.Event()
+    db_close_started = Event()
+    allow_db_close = Event()
+    db_close_finished = Event()
+
+    async def close_client() -> None:
+        client_close_started.set()
+        await allow_client_close.wait()
+        client_close_finished.set()
+
+    def close_runtime_dbs(_agent: object) -> None:
+        db_close_started.set()
+        if not allow_db_close.wait(timeout=1):
+            msg = "test did not release runtime DB cleanup"
+            raise TimeoutError(msg)
+        db_close_finished.set()
+
+    async_client = MagicMock()
+    async_client.close = AsyncMock(side_effect=close_client)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", async_client=async_client)
+    agent = MagicMock(model=model)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_runtime_dbs)
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        session_id="call-session",
+        active_model_name="default",
+        agent=agent,
+    )
+
+    close_task = asyncio.create_task(cache.aclose())
+    try:
+        await asyncio.wait_for(client_close_started.wait(), timeout=1)
+        close_task.cancel()
+        await asyncio.sleep(0)
+        assert not close_task.done()
+
+        allow_client_close.set()
+        assert await asyncio.to_thread(db_close_started.wait, 1)
+        assert not close_task.done()
+
+        allow_db_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        assert client_close_finished.is_set()
+        assert db_close_finished.is_set()
+    finally:
+        allow_client_close.set()
+        allow_db_close.set()
+        if not close_task.done():
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
 
 
 @pytest.mark.asyncio
@@ -518,7 +949,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         )
         return "It is sunny."
 
-    cached_agent = SimpleNamespace(additional_context="base context")
+    cached_agent = SimpleNamespace(additional_context="base context", model=None)
     create_agent_mock = MagicMock(return_value=cached_agent)
     history_storage = MagicMock()
     create_scope_session_storage_mock = MagicMock(return_value=history_storage)
@@ -982,8 +1413,8 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         ai_calls.append((turn, kwargs))
         return f"answer-{len(ai_calls)}"
 
-    first_agent = SimpleNamespace(additional_context="first base")
-    second_agent = SimpleNamespace(additional_context="second base")
+    first_agent = SimpleNamespace(additional_context="first base", model=None)
+    second_agent = SimpleNamespace(additional_context="second base", model=None)
     create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
     close_agent_mock = MagicMock()
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", resolve_knowledge)
@@ -1079,7 +1510,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base context")),
+        MagicMock(return_value=SimpleNamespace(additional_context="base context", model=None)),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(

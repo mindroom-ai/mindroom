@@ -21,7 +21,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.authorization import is_authorized_sender
-from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
@@ -2626,6 +2626,13 @@ async def _wait_for_runtime_shutdown_cleanup(
             return
 
 
+def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_path: Path) -> None:
+    """Complete the synchronous startup setup that must precede runtime construction."""
+    logger.info("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials(runtime_paths=runtime_paths)
+    storage_path.mkdir(parents=True, exist_ok=True)
+
+
 async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
@@ -2654,11 +2661,9 @@ async def main(
 
         stall_detector = start_event_loop_stall_detector(runtime_paths)
 
-        logger.info("Syncing API keys from environment to CredentialsManager...")
-        sync_env_to_credentials(runtime_paths=runtime_paths)
-
-        # Ensure storage exists before any runtime components try to write into it.
-        storage_path.mkdir(parents=True, exist_ok=True)
+        # Credential synchronization and storage setup are synchronous. Keep the
+        # ordered unit off-loop while retaining exception propagation to startup.
+        await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

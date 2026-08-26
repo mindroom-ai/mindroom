@@ -25,6 +25,8 @@ from agno.utils.models.claude import format_messages
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
+import mindroom.bedrock_claude as bedrock_claude_module
+from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
     _MAX_CACHE_MARKERS,
@@ -33,9 +35,11 @@ from mindroom.claude_prompt_cache import (
     _PromptCacheClientProxy,
     _request_kwargs_with_prompt_cache_ladder,
     _request_kwargs_with_replay_safe_tool_search_results,
+    aclose_anthropic_async_client,
     install_claude_deferred_tool_search,
     install_claude_prompt_cache_hook,
     native_tool_search_supported,
+    prewarm_anthropic_async_client,
 )
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -467,6 +471,133 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     assert model.aws_region == "us-east-1"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_session_backed_bedrock_async_client_is_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-backed model must reuse the client built before its request."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    factory_calls: list[dict[str, object]] = []
+
+    class _FakeAsyncClient:
+        def is_closed(self) -> bool:
+            return False
+
+    built_client = _FakeAsyncClient()
+
+    def _build_client(**kwargs: object) -> _FakeAsyncClient:
+        factory_calls.append(kwargs)
+        return built_client
+
+    monkeypatch.setattr(bedrock_claude_module, "AsyncAnthropicBedrockMantle", _build_client)
+    vars(model)["_get_client_params"] = dict
+
+    first_client = model.get_async_client()
+    second_client = model.get_async_client()
+
+    assert first_client is built_client
+    assert second_client is built_client
+    assert model.async_client is built_client
+    assert factory_calls == [{}]
+
+
+def test_prewarm_anthropic_async_client_builds_cacheable_bedrock_client() -> None:
+    """A non-session Bedrock model should build its retained client off-loop."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    built_client = object()
+    calls: list[None] = []
+
+    def _build_client() -> object:
+        calls.append(None)
+        return built_client
+
+    vars(model)["get_async_client"] = _build_client
+
+    prewarm_anthropic_async_client(model)
+
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_cacheable_bedrock_client() -> None:
+    """A retained non-session Bedrock client should be closed and detached."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+@pytest.mark.asyncio
+async def test_aclose_anthropic_async_client_closes_session_backed_bedrock_client() -> None:
+    """A retained session-backed client must have the same deterministic owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+        session=object(),
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    model.async_client = _FakeAsyncClient()  # type: ignore[assignment]
+
+    await aclose_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
+
+
+def test_prewarm_anthropic_async_client_closes_partial_client_on_failure() -> None:
+    """A client retained before a failed prewarm must not lose its owner."""
+    model = MindRoomBedrockClaude(
+        id="anthropic.claude-opus-5",
+        aws_region="us-east-1",
+    )
+    closed = False
+
+    class _FakeAsyncClient:
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    partial_client = _FakeAsyncClient()
+
+    def _fail_after_retaining_client() -> object:
+        model.async_client = partial_client  # type: ignore[assignment]
+        msg = "client initialization failed"
+        raise RuntimeError(msg)
+
+    vars(model)["get_async_client"] = _fail_after_retaining_client
+
+    with pytest.raises(RuntimeError, match="client initialization failed"):
+        prewarm_anthropic_async_client(model)
+
+    assert closed is True
+    assert model.async_client is None
 
 
 def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(

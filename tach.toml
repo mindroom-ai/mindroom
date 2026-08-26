@@ -354,7 +354,10 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.ai"]
+visibility = [
+    "mindroom.ai",
+    "mindroom.matrix_rtc.call_tools",
+]
 
 # The shared response-turn drivers own the turn lifecycle for both the agent
 # and (after adoption) team envelopes; entity modules inject adapters.
@@ -2882,6 +2885,7 @@ depends_on = [
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
     "mindroom.message_target",
+    "mindroom.pre_model_preparation",
     "mindroom.session_ids",
     "mindroom.tool_approval",
     "mindroom.tool_system.declarations",

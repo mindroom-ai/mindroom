@@ -38,6 +38,7 @@ from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
@@ -487,7 +488,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Sync API keys from environment to CredentialsManager
     logger.info("Syncing API credentials from runtime env")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
+    await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
 
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None

@@ -6,8 +6,10 @@ import asyncio
 import os
 import signal
 import sys
+import threading
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -125,7 +127,6 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
-    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -1167,6 +1168,102 @@ class TestAgentBot(AgentBotTestBase):
 
         assert observed_logging_root == runtime_storage.resolve()
         assert observed_credentials_root == runtime_storage.resolve()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_offloads_initial_credential_and_storage_setup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Credential sync and initial storage creation must not block the event loop."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        storage_path = runtime_paths.storage_root
+        event_loop_thread_id = threading.get_ident()
+        setup_thread_ids: list[int] = []
+        events: list[str] = []
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after setup"))
+        mock_orchestrator.stop = AsyncMock()
+        stall_detector = MagicMock()
+        original_mkdir = Path.mkdir
+
+        def _record_storage_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+            if path == storage_path:
+                setup_thread_ids.append(threading.get_ident())
+                events.append("storage")
+            original_mkdir(path, *args, **kwargs)
+
+        def _sync_credentials(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            setup_thread_ids.append(threading.get_ident())
+            events.append("credentials")
+
+        def _construct_orchestrator(*_args: object, **_kwargs: object) -> MagicMock:
+            assert storage_path.is_dir()
+            events.append("orchestrator")
+            return mock_orchestrator
+
+        monkeypatch.setattr(Path, "mkdir", _record_storage_mkdir)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch(
+                "mindroom.orchestrator.start_event_loop_stall_detector",
+                return_value=stall_detector,
+            ) as start_detector,
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_sync_credentials),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_construct_orchestrator),
+            pytest.raises(RuntimeError, match="stop after setup"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        start_detector.assert_called_once_with(runtime_paths)
+        assert events == ["credentials", "storage", "orchestrator"]
+        assert len(setup_thread_ids) == 2
+        assert setup_thread_ids[0] == setup_thread_ids[1]
+        assert setup_thread_ids[0] != event_loop_thread_id
+        stall_detector.stop.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_drains_cancelled_initial_setup_before_cleanup(self, tmp_path: Path) -> None:
+        """Cancellation must not let teardown overtake the active setup worker."""
+        reset_runtime_state()
+        setup_started = threading.Event()
+        release_setup = threading.Event()
+        events: list[str] = []
+        runtime_paths = self._runtime_paths(tmp_path)
+
+        def _blocked_credential_sync(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            events.append("setup_started")
+            setup_started.set()
+            assert release_setup.wait(2.0)
+            events.append("setup_finished")
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch("mindroom.orchestrator.start_event_loop_stall_detector", return_value=MagicMock()),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_blocked_credential_sync),
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda: events.append("cleanup"),
+            ),
+        ):
+            main_task = asyncio.create_task(main(log_level="INFO", runtime_paths=runtime_paths, api=False))
+            try:
+                assert await asyncio.to_thread(setup_started.wait, 2.0)
+                main_task.cancel()
+                await asyncio.sleep(0)
+                assert not main_task.done()
+                assert events == ["setup_started"]
+            finally:
+                release_setup.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await main_task
+
+        assert events == ["setup_started", "setup_finished", "cleanup"]
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
