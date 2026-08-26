@@ -2718,6 +2718,7 @@ async def team_response(  # noqa: C901, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -2791,6 +2792,11 @@ async def team_response(  # noqa: C901, PLR0915
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
         """Run one prepared team attempt."""
+        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
+            holder.member_model_names = dict.fromkeys(
+                requested_agent_names,
+                continuation_state.active_model_name,
+            )
         attempt_members = await _ensure_attempt_team_members(
             holder,
             agent_names,
@@ -2805,7 +2811,7 @@ async def team_response(  # noqa: C901, PLR0915
         # instance and the run metadata cannot disagree.
         attempt_runtime_model = config.resolve_runtime_model(
             entity_name=configured_team_name,
-            active_model_name=model_name,
+            active_model_name=continuation_state.active_model_name or model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
@@ -2882,7 +2888,11 @@ async def team_response(  # noqa: C901, PLR0915
         holder.attempt_run_id = attempt_run_id
         holder.attempt_started = True
         try:
-            response = await _run(ai_runtime.copy_run_input(run_input), attempt_run_id)
+            response = await ai_runtime.run_attempt_with_model(
+                attempt_model_runtime,
+                active_model_name=attempt_runtime_model.model_name,
+                operation=lambda: _run(ai_runtime.copy_run_input(run_input), attempt_run_id),
+            )
         except Exception as e:
             logger.exception("team_response_failed", agents=agent_list)
             error_text = get_user_friendly_error_message(e, team_name)
@@ -3021,6 +3031,7 @@ async def team_response(  # noqa: C901, PLR0915
             session_id=response_session_id,
             run_id=response_run_id,
             attempt_run_id=attempt_run_id,
+            runtime_model_name=attempt_runtime_model.model_name,
             output_tokens=response_output_tokens,
             tool_executions=tuple(run_tool_executions),
             completed_tools=tuple(
@@ -3148,6 +3159,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     configured_team_name: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -3226,6 +3238,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
+        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
+            holder.member_model_names = dict.fromkeys(
+                requested_agent_names,
+                continuation_state.active_model_name,
+            )
         attempt_members = await _ensure_attempt_team_members(
             holder,
             requested_agent_names,
@@ -3240,7 +3257,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         # instance and the run metadata cannot disagree.
         attempt_runtime_model = config.resolve_runtime_model(
             entity_name=configured_team_name,
-            active_model_name=model_name,
+            active_model_name=continuation_state.active_model_name or model_name,
             room_id=ctx.room_id,
             thread_id=ctx.thread_id,
             runtime_paths=orchestrator.runtime_paths,
@@ -3369,14 +3386,23 @@ async def team_response_stream(  # noqa: C901, PLR0915
 
         ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
 
-        raw_stream = await _team_response_stream_raw(
-            team=team,
-            team_members=attempt_members,
-            prompt=attempt_run_input,
-            metadata=run_metadata,
-            session_id=ctx.session_id,
-            run_id=attempt_run_id,
-            user_id=user_id,
+        raw_stream = await ai_runtime.run_attempt_with_model(
+            attempt_model_runtime,
+            active_model_name=attempt_runtime_model.model_name,
+            operation=lambda: _team_response_stream_raw(
+                team=team,
+                team_members=attempt_members,
+                prompt=attempt_run_input,
+                metadata=run_metadata,
+                session_id=ctx.session_id,
+                run_id=attempt_run_id,
+                user_id=user_id,
+            ),
+        )
+        raw_stream = ai_runtime.stream_attempt_with_model(
+            attempt_model_runtime,
+            raw_stream,
+            active_model_name=attempt_runtime_model.model_name,
         )
         raw_stream = _capture_stream_interrupt(
             stream_with_llm_request_log_context(
@@ -3490,6 +3516,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         session_id=event.session_id,
                         run_id=event.run_id,
                         attempt_run_id=attempt_run_id,
+                        runtime_model_name=attempt_runtime_model.model_name,
                         output_tokens=event.metrics.output_tokens if event.metrics is not None else None,
                         tool_executions=tuple(event_tool_executions),
                         completed_tools=tuple(_extract_completed_team_tool_trace(event)),
@@ -3690,6 +3717,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 is_empty=not emitted_output and not completed_tool_executions,
                 run_id=attempt_run_id,
                 attempt_run_id=attempt_run_id,
+                runtime_model_name=attempt_runtime_model.model_name,
                 output_tokens=usage.request_metric_totals.get("output_tokens"),
                 tool_executions=tuple(completed_tool_executions),
                 completed_tools=tuple(completed_tools),

@@ -130,6 +130,24 @@ def _dynamic_tool_execution(tool_name: str = "sleep") -> ToolExecution:
     )
 
 
+def _model_switch_execution(when: str) -> ToolExecution:
+    return ToolExecution(
+        tool_call_id="call-switch-model",
+        tool_name="switch_thread_model",
+        tool_args={"model_name": "large", "when": when},
+        result=json.dumps(
+            {
+                "action": "switch",
+                "model": "large",
+                "status": "ok",
+                "tool": "thread_model",
+                "when": when,
+            },
+        ),
+        stop_after_tool_call=True,
+    )
+
+
 def _ctx(**overrides: object) -> ResponseTurnContext:
     values: dict[str, Any] = {
         "entity_label": "helper",
@@ -800,6 +818,67 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
     # The final recording carries the first attempt's tools plus the second's.
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
+
+
+def test_blocking_after_toolcall_switch_selects_new_continuation_model() -> None:
+    """Dropping the requested alias during continuation would rebuild the old model."""
+    log = _AdapterLog()
+    active_models: list[str | None] = []
+
+    async def _attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        active_models.append(continuation.active_model_name)
+        if len(active_models) == 1:
+            return CompletedAttempt(
+                attempt_run_id="run-1",
+                tool_executions=(_model_switch_execution("after-toolcall"),),
+            )
+        return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(),
+            continuation=_continuation("original ask"),
+        ),
+    )
+
+    assert result == "final"
+    assert active_models == [None, "large"]
+
+
+def test_blocking_next_turn_switch_keeps_current_model_for_continuation() -> None:
+    """Re-reading the persisted override would apply a next-turn switch too early."""
+    log = _AdapterLog()
+    active_models: list[str | None] = []
+
+    async def _attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        active_models.append(continuation.active_model_name)
+        if len(active_models) == 1:
+            return CompletedAttempt(
+                attempt_run_id="run-1",
+                runtime_model_name="default",
+                tool_executions=(_model_switch_execution("next-turn"),),
+            )
+        return CompletedAttempt(response_text="final", replayable_text="final", has_visible_content=True)
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(),
+            continuation=_continuation("original ask"),
+        ),
+    )
+
+    assert result == "final"
+    assert active_models == [None, "default"]
 
 
 def test_blocking_continuation_limit_returns_limit_message() -> None:

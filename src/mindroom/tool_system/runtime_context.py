@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
@@ -218,8 +218,34 @@ class WorkerProgressPump:
     shutdown: threading.Event
 
 
+class ToolRuntimeModelBinding:
+    """Bind attempt-local model identity into the ambient tool context."""
+
+    async def run_with_model(
+        self,
+        *,
+        active_model_name: str,
+        operation: Callable[[], Awaitable[_ToolContextReturn]],
+    ) -> _ToolContextReturn:
+        """Run one provider attempt with its model visible to tools."""
+        with _tool_runtime_model_context(active_model_name):
+            return await operation()
+
+    def stream_with_model[ChunkT](
+        self,
+        stream: AsyncIterator[ChunkT],
+        *,
+        active_model_name: str,
+    ) -> AsyncIterator[ChunkT]:
+        """Bind one attempt's model while its stream is created, pulled, or closed."""
+        return context_bound_async_stream(
+            context_factory=lambda: _tool_runtime_model_context(active_model_name),
+            stream_factory=lambda: stream,
+        )
+
+
 @dataclass
-class ToolRuntimeSupport:
+class ToolRuntimeSupport(ToolRuntimeModelBinding):
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
@@ -586,6 +612,15 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
         yield
     finally:
         _TOOL_RUNTIME_CONTEXT.reset(token)
+
+
+@contextmanager
+def _tool_runtime_model_context(active_model_name: str) -> Iterator[None]:
+    """Bind the model used by one provider attempt into the ambient tool context."""
+    context = get_tool_runtime_context()
+    resolved_context = replace(context, active_model_name=active_model_name) if context is not None else None
+    with tool_runtime_context(resolved_context):
+        yield
 
 
 @contextmanager

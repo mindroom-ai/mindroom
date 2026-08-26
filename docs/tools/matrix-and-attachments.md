@@ -19,7 +19,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
-- [`thread_model`] - Show, switch, or reset the model override for the current Matrix thread.
+- [`thread_model`] - List models or show, switch, and reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
 - [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
@@ -315,14 +315,18 @@ set_thread_summary(
 
 ## [`thread_model`]
 
-`thread_model` lets agents show, switch, or reset the model override for the current Matrix thread, mirroring the `!model` chat command.
+`thread_model` lets agents list configured models or show, switch, and reset the model override for the current Matrix thread, mirroring the `!model` chat command.
 
 ### What It Does
 
-`thread_model` exposes `get_thread_model()`, `switch_thread_model(model_name)`, and `reset_thread_model()`.
-All three functions require an active thread context and return an error outside a thread.
+`thread_model` exposes `list_models()`, `get_thread_model()`, `switch_thread_model(model_name, when)`, and `reset_thread_model()`.
+`list_models` returns every configured model alias with its provider and provider model ID and does not require an active thread.
+The other three functions require an active thread context and return an error outside a thread.
 `switch_thread_model` accepts a configured model name from the `models:` section of `config.yaml` and rejects unknown names with the available model list.
-The override applies to all agents and teams in the thread, persists across restarts, and takes effect from the next message; the current response keeps the model it started with.
+Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
+With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
+With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
+The override applies to all agents and teams in the thread and persists across restarts.
 `get_thread_model` returns the active override and the available model names.
 When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
 `reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
@@ -341,8 +345,9 @@ agents:
 ```
 
 ```python
+list_models()
 get_thread_model()
-switch_thread_model("opus")
+switch_thread_model("opus", when="after-toolcall")
 reset_thread_model()
 ```
 

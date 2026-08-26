@@ -210,6 +210,8 @@ class DynamicContinuationRunState:
     active_current_event_id: str | None
     active_run_id: str | None
     continuation_model_prompt_tail: str
+    active_model_name: str | None
+    apply_model_to_team_members: bool
 
     @classmethod
     def initial(
@@ -222,6 +224,8 @@ class DynamicContinuationRunState:
         current_event_id: str | None,
         run_id: str | None,
         continuation_model_prompt_tail: str,
+        active_model_name: str | None = None,
+        apply_model_to_team_members: bool = False,
     ) -> DynamicContinuationRunState:
         """Build the continuation state for one turn's first attempt."""
         return cls(
@@ -233,6 +237,8 @@ class DynamicContinuationRunState:
             active_current_event_id=current_event_id,
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
+            active_model_name=active_model_name,
+            apply_model_to_team_members=apply_model_to_team_members,
         )
 
     def advance(
@@ -240,6 +246,8 @@ class DynamicContinuationRunState:
         *,
         continuation_prompt: str,
         previous_run_id: str | None,
+        active_model_name: str | None,
+        apply_model_to_team_members: bool,
     ) -> DynamicContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
@@ -250,6 +258,8 @@ class DynamicContinuationRunState:
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
             active_run_id=ai_runtime.next_retry_run_id(previous_run_id),
+            active_model_name=active_model_name,
+            apply_model_to_team_members=apply_model_to_team_members,
         )
 
 
@@ -332,6 +342,7 @@ class CompletedAttempt:
     session_id: str | None = None
     run_id: str | None = None
     attempt_run_id: str | None = None
+    runtime_model_name: str | None = None
     output_tokens: int | None = None
     tool_executions: tuple[ToolExecution, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
@@ -728,6 +739,8 @@ def _advance_turn_continuation(
     continuation: DynamicContinuationRunState,
     *,
     next_prompt: str | None,
+    active_model_name: str | None,
+    apply_model_to_team_members: bool,
 ) -> DynamicContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
@@ -735,6 +748,8 @@ def _advance_turn_continuation(
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
         previous_run_id=resolution.attempt_run_id,
+        active_model_name=active_model_name,
+        apply_model_to_team_members=apply_model_to_team_members,
     )
     run.turn_state = _reset_turn_state_for_dynamic_continuation(
         turn_recorder=sinks.turn_recorder,
@@ -957,6 +972,14 @@ def _settle_completed_attempt(
                 resolution,
                 continuation,
                 next_prompt=decision.next_prompt,
+                active_model_name=(
+                    decision.model_switch_name
+                    if decision.model_switch_when == "after-toolcall"
+                    else resolution.runtime_model_name
+                    if decision.model_switch_when == "next-turn"
+                    else continuation.active_model_name
+                ),
+                apply_model_to_team_members=decision.model_switch_when == "after-toolcall",
             ),
             recorded_text="",
             recorded_tools=(),

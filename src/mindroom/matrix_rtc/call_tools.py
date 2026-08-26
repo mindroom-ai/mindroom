@@ -665,6 +665,7 @@ async def _run_authorized_call_agent(
                 turn_recorder=recorder,
                 eager_deferred_tools=True,
                 reusable_agent=agent,
+                attempt_model_runtime=tool_support,
             )
         finally:
             recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})

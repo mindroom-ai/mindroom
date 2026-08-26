@@ -520,12 +520,25 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
 def test_thread_model_tool_registered() -> None:
     """The thread_model tool should be available from the metadata registry."""
     config = _config_with_models(Path(tempfile.mkdtemp()))
+    toolkit = get_tool_by_name("thread_model", runtime_paths_for(config), worker_target=None)
 
     assert "thread_model" in TOOL_METADATA
-    assert isinstance(
-        get_tool_by_name("thread_model", runtime_paths_for(config), worker_target=None),
-        ThreadModelTools,
-    )
+    assert isinstance(toolkit, ThreadModelTools)
+    assert "list_models" in toolkit.async_functions
+    assert "list_models" in TOOL_METADATA["thread_model"].function_names
+
+
+def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:
+    """The continuation, not Agno's raw tool result, should own the final response."""
+    tool = ThreadModelTools()
+    function = tool.async_functions["switch_thread_model"]
+    function.process_entrypoint(strict=False)
+
+    assert function.stop_after_tool_call is True
+    assert function.show_result is False
+    assert function.parameters["properties"]["model_name"]["type"] == "string"
+    assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
+    assert function.parameters["required"] == ["model_name"]
 
 
 @pytest.mark.asyncio
@@ -536,6 +549,25 @@ async def test_thread_model_tool_requires_runtime_context() -> None:
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_model"
     assert "context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_lists_configured_models_without_thread() -> None:
+    """Removing explicit discovery would leave agents unable to choose a configured alias."""
+    context = _make_tool_context(thread_id=None)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadModelTools().list_models())
+
+    assert payload == {
+        "action": "list",
+        "models": [
+            {"model_id": "default-model", "name": "default", "provider": "openai"},
+            {"model_id": "large-model", "name": "large", "provider": "openai"},
+        ],
+        "status": "ok",
+        "tool": "thread_model",
+    }
 
 
 @pytest.mark.asyncio
@@ -566,6 +598,38 @@ async def test_thread_model_tool_switch_get_and_reset() -> None:
     assert get_payload["override"] == "large"
     assert reset_payload["status"] == "ok"
     assert reset_payload["cleared"] is True
+    assert _get_thread_model_override(context.runtime_paths, THREAD_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
+    """Ignoring the timing argument would leave the current response on the old model."""
+    context = _make_tool_context()
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["model"] == "large"
+    assert payload["when"] == "after-toolcall"
+    assert payload["note"] == "The current response will continue with the new model after this tool call."
+    assert _get_thread_model_override(context.runtime_paths, THREAD_ID) == "large"
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
+    """Accepting an unknown timing value could persist a change with undefined execution semantics."""
+    context = _make_tool_context()
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="later"),  # type: ignore[arg-type]
+        )
+
+    assert payload["status"] == "error"
+    assert payload["available_when"] == ["after-toolcall", "next-turn"]
     assert _get_thread_model_override(context.runtime_paths, THREAD_ID) is None
 
 

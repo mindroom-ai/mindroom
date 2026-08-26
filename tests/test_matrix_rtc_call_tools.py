@@ -39,7 +39,12 @@ from mindroom.matrix_rtc.call_tools import (
 )
 from mindroom.memory import MemoryPromptParts
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    ToolRuntimeModelBinding,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -1149,7 +1154,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     execution_identity = SimpleNamespace()
     persisted_interruptions: list[dict[str, object]] = []
 
-    class StrictToolSupport:
+    class StrictToolSupport(ToolRuntimeModelBinding):
         def build_context(
             self,
             target: MessageTarget,
