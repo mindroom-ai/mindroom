@@ -332,6 +332,7 @@ class TestConfigInit:
             "todo",
             "subagents",
             "matrix_message",
+            {"name": "thread_model", "defer": True},
             "thread_tags",
             "thread_summary",
         ]
@@ -339,6 +340,10 @@ class TestConfigInit:
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
         )
         assert config_manager_entry.defer is True
+        thread_model_entry = next(
+            entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "thread_model"
+        )
+        assert thread_model_entry.defer is True
         assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
