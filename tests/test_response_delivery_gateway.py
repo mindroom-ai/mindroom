@@ -19,6 +19,12 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import (
+    DURABLE_FINAL_OUTCOME_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+)
 from mindroom.delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
@@ -29,19 +35,27 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DepartureSource
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
-from mindroom.matrix_delivery import MatrixDeliveryWorker, RecoveryOutcome
+from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
+    _calculate_delivery_event_size,
+    _calculate_event_size,
+)
+from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER
+from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     FakeOutbox,
     bind_runtime_paths,
     ignore_delivered_projection,
     ignore_final_delivery_handoff,
     make_outbox_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -79,11 +93,21 @@ def _failed_delivery() -> MatrixDeliveryFailure:
     return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test delivery failure")
 
 
-def _identity(source_event_id: str = "$cause") -> ResponseIdentity:
+def _identity(
+    source_event_id: str = "$cause",
+    *,
+    source_kind: str = MESSAGE_SOURCE_KIND,
+) -> ResponseIdentity:
     """Return the identity of one visible response, caused by one event."""
     return ResponseIdentity(
         response_kind="agent",
-        response_envelope=SimpleNamespace(source_event_id=source_event_id),  # type: ignore[arg-type]
+        response_envelope=request_envelope(
+            room_id=_ROOM_ID,
+            reply_to_event_id=source_event_id,
+            prompt="Test response request",
+            agent_name="agent",
+            source_kind=source_kind,
+        ),
         correlation_id="c1",
     )
 
@@ -133,7 +157,10 @@ def _gateway(
     )
     client = AsyncMock()
     client.user_id = _AGENT_USER_ID
-
+    room = MagicMock()
+    room.encrypted = False
+    client.rooms = {_ROOM_ID: room}
+    client.olm = None
     client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
     return DeliveryGateway(
         DeliveryGatewayDeps(
@@ -186,17 +213,419 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
     @staticmethod
-    def _final_request(text: str) -> FinalDeliveryRequest:
+    def _final_request(
+        text: str,
+        *,
+        source_kind: str = MESSAGE_SOURCE_KIND,
+    ) -> FinalDeliveryRequest:
         """Return one final delivery for the turn caused by `$cause`."""
         target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
         return FinalDeliveryRequest(
             target=target,
             existing_event_id=None,
             response_text=text,
-            identity=_identity(),
+            identity=_identity(source_kind=source_kind),
             tool_trace=None,
             extra_content=None,
         )
+
+    @pytest.mark.parametrize(
+        "text",
+        ["", " \n\t", SILENT_SCHEDULE_NO_REPLY_TOKEN, f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n"],
+    )
+    async def test_silent_schedule_no_report_response_is_suppressed_after_hooks(
+        self,
+        tmp_path: Path,
+        text: str,
+    ) -> None:
+        """Silent whitespace settles as suppressed without creating a Matrix event."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outcome.failure_reason == "silent_no_report"
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    async def test_silent_schedule_writes_machine_readable_run_receipt(self, tmp_path: Path) -> None:
+        """Removing the workspace receipt must make an evidence-free silent completion fail this test."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        request = replace(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            identity=ResponseIdentity(
+                response_kind="agent",
+                response_envelope=request_envelope(
+                    room_id=_ROOM_ID,
+                    reply_to_event_id="$cause",
+                    prompt="Check the inbox",
+                    agent_name="agent",
+                    source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                ),
+                correlation_id="c1",
+            ),
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt_path = (
+            tmp_path
+            / "mindroom_data"
+            / "agents"
+            / "agent"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "d70fd85d0319a4c275c5df743feff6424bb8b85982e28a97e317285e7c441830.json"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt == {
+            "agent_name": "agent",
+            "completed_at": receipt["completed_at"],
+            "entity_name": "agent",
+            "prompt": "Check the inbox",
+            "result": "no_report",
+            "response_text": SILENT_SCHEDULE_NO_REPLY_TOKEN,
+            "room_id": _ROOM_ID,
+            "schema_version": 1,
+            "source_event_id": "$cause",
+            "started_at": receipt["started_at"],
+            "status": "completed",
+            "thread_id": None,
+        }
+        assert receipt["completed_at"].endswith("Z")
+        assert receipt["started_at"].endswith("Z")
+
+    async def test_silent_schedule_receipt_uses_original_envelope_after_hooks(self, tmp_path: Path) -> None:
+        """A hook may transform presentation fields but cannot redirect durable run identity."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        hook_service = self._hooks()
+
+        async def replace_envelope(**kwargs: object) -> object:
+            draft = await hook_service._apply_before_response(**kwargs)  # type: ignore[arg-type]
+            draft.envelope = replace(draft.envelope, source_event_id="$hook-replaced")
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_envelope)
+
+        outcome = await gateway.deliver_final(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+        )
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt_directory = (
+            tmp_path / "mindroom_data" / "agents" / "agent" / "workspace" / ".mindroom" / "scheduled_runs"
+        )
+        receipts = list(receipt_directory.glob("*.json"))
+        assert len(receipts) == 1
+        assert json.loads(receipts[0].read_text(encoding="utf-8"))["source_event_id"] == "$cause"
+
+    @pytest.mark.parametrize(
+        "invalid_update",
+        [None, {"result": []}, {"schema_version": True}],
+    )
+    async def test_silent_schedule_completion_repairs_malformed_receipt(
+        self,
+        tmp_path: Path,
+        invalid_update: dict[str, object] | None,
+    ) -> None:
+        """A damaged start receipt cannot prevent the final machine-readable record."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        receipt_path = (
+            tmp_path
+            / "mindroom_data"
+            / "agents"
+            / "agent"
+            / "workspace"
+            / ".mindroom"
+            / "scheduled_runs"
+            / "d70fd85d0319a4c275c5df743feff6424bb8b85982e28a97e317285e7c441830.json"
+        )
+        receipt_path.parent.mkdir(parents=True)
+        invalid_receipt: dict[str, object] = {
+            "agent_name": "agent",
+            "completed_at": "2026-08-24T12:01:00Z",
+            "entity_name": "agent",
+            "prompt": "Test response request",
+            "result": "reported",
+            "response_text": "stale",
+            "room_id": _ROOM_ID,
+            "schema_version": 1,
+            "source_event_id": "$cause",
+            "started_at": "2026-08-24T12:00:00Z",
+            "status": "completed",
+            "thread_id": None,
+        }
+        if invalid_update is None:
+            receipt_path.write_text("not json", encoding="utf-8")
+        else:
+            invalid_receipt.update(invalid_update)
+            receipt_path.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+
+        outcome = await gateway.deliver_final(
+            self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+        )
+
+        assert outcome.failure_reason == "silent_no_report"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["source_event_id"] == "$cause"
+        assert receipt["status"] == "completed"
+
+    async def test_silent_schedule_receipt_rejects_symlinked_metadata_directory(self, tmp_path: Path) -> None:
+        """Agent-controlled workspace symlinks cannot redirect a host receipt write."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        workspace = tmp_path / "mindroom_data" / "agents" / "agent" / "workspace"
+        outside = tmp_path / "outside"
+        workspace.mkdir(parents=True)
+        outside.mkdir()
+        (workspace / ".mindroom").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="workspace root"):
+            await gateway.deliver_final(
+                self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert list(outside.iterdir()) == []
+
+    async def test_silent_schedule_tool_trace_no_reply_is_suppressed(self, tmp_path: Path) -> None:
+        """Display-only tool markers must not turn a silent no-report result into a visible response."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
+        request = replace(
+            self._final_request(
+                f"🔧 `run_shell_command` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}",
+                source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+            ),
+            tool_trace=[
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="run_shell_command",
+                    args_preview="cmd=true",
+                    result_preview="done",
+                ),
+            ],
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outcome.failure_reason == "silent_no_report"
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(self, tmp_path: Path) -> None:
+        """Marker-shaped findings must not be stripped when they do not match the trace."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        text = f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}"
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+        request = replace(
+            self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            tool_trace=[
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="run_shell_command",
+                    args_preview="cmd=true",
+                    result_preview="done",
+                ),
+            ],
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.suppressed is False
+        assert outcome.event_id == "$sent"
+        send.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("text", "source_kind"),
+        [
+            ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
+            ("", MESSAGE_SOURCE_KIND),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
+        ],
+    )
+    async def test_silent_findings_and_ordinary_empty_responses_deliver_normally(
+        self,
+        tmp_path: Path,
+        text: str,
+        source_kind: str,
+    ) -> None:
+        """Automatic suppression never swallows findings or ordinary responses."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(self._final_request(text, source_kind=source_kind))
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$sent"
+        assert outcome.suppressed is False
+        send.assert_awaited_once()
+
+    @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
+    async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(
+        self,
+        tmp_path: Path,
+        generated_text: str,
+    ) -> None:
+        """A before-response hook can turn a silent completion into a visible finding."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def add_finding(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = "Finding from hook"
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_finding)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request(generated_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "completed"
+        assert outcome.event_id == "$sent"
+        assert send.await_args.args[2]["body"] == "Finding from hook"
+
+    async def test_silent_schedule_hook_can_replace_a_finding_with_no_reply(self, tmp_path: Path) -> None:
+        """The no-report acknowledgment is interpreted after before-response hooks."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def replace_with_no_reply(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = SILENT_SCHEDULE_NO_REPLY_TOKEN
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_with_no_reply)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request("Finding", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.event_id is None
+        assert outbox.rows == {}
+        send.assert_not_awaited()
+
+    async def test_explicit_hook_suppression_wins_for_silent_schedule_finding(self, tmp_path: Path) -> None:
+        """Explicit suppression remains authoritative even when a hook adds visible text."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        hooks = self._hooks()
+
+        async def add_suppressed_finding(**kwargs: object) -> ResponseDraft:
+            draft = await hooks._apply_before_response(**kwargs)
+            draft.response_text = "Finding from hook"
+            draft.suppress = True
+            return draft
+
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_suppressed_finding)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await gateway.deliver_final(
+                self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.terminal_status == "cancelled"
+        assert outcome.suppressed is True
+        assert outcome.failure_reason == "suppressed_by_hook"
+        send.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("with_placeholder", "edit_succeeds"),
+        [(False, True), (True, True), (True, False)],
+    )
+    @pytest.mark.parametrize("response_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
+    async def test_silent_schedule_before_hook_failure_is_durably_visible(
+        self,
+        tmp_path: Path,
+        with_placeholder: bool,
+        edit_succeeds: bool,
+        response_text: str,
+    ) -> None:
+        """A hook exception publishes one generic terminal error through the final outbox stage."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(
+            side_effect=RuntimeError("internal hook detail"),
+        )
+        send_text = AsyncMock(return_value="$failure")
+        edit_text = AsyncMock(return_value=edit_succeeds)
+        request = replace(
+            self._final_request(response_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            existing_event_id="$placeholder" if with_placeholder else None,
+            existing_event_is_placeholder=with_placeholder,
+        )
+
+        with (
+            patch.object(DeliveryGateway, "send_text", new=send_text),
+            patch.object(DeliveryGateway, "edit_text", new=edit_text),
+        ):
+            outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id == ("$placeholder" if with_placeholder else "$failure")
+        assert outcome.is_visible_response is True
+        if not with_placeholder or edit_succeeds:
+            assert outcome.final_visible_body == "Response failed. Please retry."
+            assert "internal hook detail" not in outcome.final_visible_body
+        else:
+            assert outcome.failure_reason == "delivery_failed"
+        gateway.deps.redact_message_event.assert_not_awaited()
+        durable_request = edit_text.await_args.args[-1] if with_placeholder else send_text.await_args.args[-1]
+        assert durable_request.delivery_turn_id == "$cause"
+        assert durable_request.retry_sync_recovery is True
+        assert durable_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+        if with_placeholder:
+            send_text.assert_not_awaited()
+        else:
+            edit_text.assert_not_awaited()
+
+    async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(self, tmp_path: Path) -> None:
+        """The silent-source repair must not change ordinary interactive delivery."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=RuntimeError("hook failed"))
+        send_text = AsyncMock(return_value="$unexpected")
+
+        with patch.object(DeliveryGateway, "send_text", new=send_text):
+            outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outcome.event_id is None
+        send_text.assert_not_awaited()
 
     async def test_a_final_answer_is_enqueued_before_it_is_sent(
         self,
@@ -670,15 +1099,242 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             )
 
-        frozen = outbox.rows["$cause", "final"].payload
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
         new_content = frozen["m.new_content"]
         prompt = new_content["io.mindroom.interactive"]
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
-        semantic = new_content["io.mindroom.final_delivery"]
+        assert new_content[DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
+        semantic = delivery.result
+        assert semantic is not None
         assert semantic["body"] == outcome.final_visible_body
         assert semantic["interactive"]["question_text"] == "Pick"
         assert semantic["interactive"]["option_map"] == {"1": "yes", "✅": "yes"}
+
+    async def test_large_deferred_final_edit_freezes_a_sendable_semantic_payload(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A recoverable final edit must not leave an impossible outbox retry."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/final-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        answer = "final answer " + ("x" * 100_000)
+
+        outcome = await gateway.deliver_final(
+            replace(
+                self._final_request(answer),
+                existing_event_id="$placeholder",
+                defer_source_handoff=True,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
+        assert delivery.result == {"body": answer, "interactive": None}
+        assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_delivery_identity_is_included_in_the_validated_event_size(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The exact persisted and sent event must fit after identity is attached."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/identity-sized-edit"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 20_500),
+            existing_event_id="$placeholder",
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.test_metadata": "m" * 10_500},
+        )
+
+        outcome = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Remote encryption state must shape the payload before the outbox freezes it."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+        client.room_get_state_event.return_value = MagicMock(spec=nio.RoomGetStateEventResponse)
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/encrypted-sidecar"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "preview"})
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
+            outcome = await gateway.deliver_final(self._final_request("x" * 50_000))
+
+        assert outcome.event_id == "$sent"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["msgtype"] == "m.file"
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+        client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
+
+    async def test_plaintext_durable_payload_is_fitted_for_a_later_encrypted_send(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Persistence must freeze bytes that remain valid if encryption is enabled."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/transition-sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(
+            replace(
+                self._final_request("x" * 100_000),
+                defer_source_handoff=True,
+            ),
+        )
+
+        assert outcome.terminal_status == "completed"
+        frozen = outbox.rows["$cause", "final"].payload
+        assert frozen["file"]["url"] == "mxc://localhost/transition-sidecar"
+        assert "url" not in frozen
+        assert (
+            _calculate_delivery_event_size(
+                frozen,
+                room_id=_ROOM_ID,
+                room_encrypted=True,
+                device_id="DEVICE",
+            )
+            <= _MATRIX_EVENT_HARD_LIMIT
+        )
+
+    async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An unknown encryption state must not leave an ambiguously sized outbox row."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        encryption_error = MagicMock(spec=nio.RoomGetStateEventError)
+        encryption_error.status_code = "M_FORBIDDEN"
+        client.room_get_state_event.return_value = encryption_error
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(self._final_request("answer"))
+
+        assert outcome.terminal_status == "error"
+        assert outbox.rows == {}
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
+
+    @pytest.mark.parametrize("existing_event_id", [None, "$placeholder"], ids=("send", "edit"))
+    async def test_an_unrepresentable_final_is_recorded_without_a_send(
+        self,
+        tmp_path: Path,
+        existing_event_id: str | None,
+    ) -> None:
+        """Irreducible metadata becomes durable terminal state without network I/O."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/impossible-edit"}),
+            None,
+        )
+        gateway.deps.runtime.client = client
+        request = replace(
+            self._final_request("x" * 70_000),
+            existing_event_id=existing_event_id,
+            defer_source_handoff=True,
+            extra_content={"io.mindroom.required_metadata": "m" * 70_000},
+        )
+
+        outcome = await gateway.deliver_final(request)
+        frozen = outbox.rows["$cause", "final"]
+        repeated = await gateway.deliver_final(request)
+
+        assert outcome.terminal_status == "error"
+        assert outcome.failure_reason == "delivery_failed"
+        assert repeated.terminal_status == "error"
+        failed = outbox.rows["$cause", "final"]
+        assert failed.permanently_failed
+        assert not failed.attempted
+        assert failed.edits_event_id == existing_event_id
+        assert failed == frozen
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
 
     async def test_a_regenerated_answer_cannot_go_out_under_a_frozen_edit(
         self,
@@ -840,6 +1496,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -901,6 +1558,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
         client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
         room = MagicMock()
         room.encrypted = False
@@ -937,6 +1595,53 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert delivered is not None
         assert client.upload.await_count == 1
         assert client.room_send.await_args.kwargs["content"] == frozen
+
+    async def test_a_definitive_oversized_refusal_stops_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The server's size refusal is inspectable and never replayed forever."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendError(
+            message="event too large",
+            status_code="M_TOO_LARGE",
+            room_id=_ROOM_ID,
+        )
+        gateway.deps.runtime.client = client
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+        )
+        assert terminal is not None
+        answer = "x" * 125_000
+        content = {
+            "msgtype": "m.text",
+            "body": answer,
+            "io.mindroom.stream_status": "completed",
+        }
+
+        first = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+        second = await terminal(client, _ROOM_ID, "$streamed", content, answer)
+
+        stored = outbox.rows["$cause", "final"]
+        assert first is None
+        assert second is None
+        assert stored.permanent_failure_reason is not None
+        assert client.room_send.await_count == 1
+        assert client.upload.await_count == 1
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,
@@ -2382,6 +3087,32 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert stored is not None
         assert stored.acknowledged_event_id == "$replacement"
 
+    async def test_permanent_refusal_is_not_returned_to_recovery(self, alice: PrincipalStore) -> None:
+        """A definitive refusal is terminal state, not another failed recovery pass."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "frozen"},
+        )
+        send = AsyncMock(side_effect=PermanentDeliveryError("matrix event exceeds the hard size limit"))
+        worker = MatrixDeliveryWorker(
+            store=alice,
+            send=send,
+            sending_device_id="DEVICE",
+        )
+
+        first = await worker.recover()
+        second = await worker.recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert first == RecoveryOutcome(recovered=0, failed=0)
+        assert second == RecoveryOutcome(recovered=0, failed=0)
+        send.assert_awaited_once()
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+
 
 class TestTurnDeliverySerialization:
     """The gateway shares one turn-scoped delivery order without leaking the lock."""
@@ -2546,8 +3277,10 @@ class TestTurnDeliverySerialization:
             room_id: str,
             thread_id: str | None,
             payload: Mapping[str, object],
+            result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
+            permanent_failure_reason: str | None = None,
         ) -> str | None:
             transaction_id = await original_enqueue(
                 delivery_id=delivery_id,
@@ -2556,8 +3289,10 @@ class TestTurnDeliverySerialization:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             )
             enqueue_committed.set()
             await return_from_enqueue.wait()

@@ -32,7 +32,7 @@ from mindroom.teams import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
-from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -256,11 +256,15 @@ async def test_team_response_stream_continues_after_streamed_member_dynamic_tool
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Loading the tool.")
-        yield AgentToolCallCompletedEvent(agent_name="GeneralAgent", tool=_load_tool_execution())
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Loading the tool.")
+        yield AgentToolCallCompletedEvent(
+            agent_id="general",
+            agent_name="GeneralAgent",
+            tool=_load_tool_execution(),
+        )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -307,10 +311,14 @@ async def test_team_response_stream_continues_from_hidden_member_dynamic_tool() 
     orchestrator, config = _make_orchestrator()
 
     async def first_stream() -> AsyncIterator[object]:
-        yield AgentToolCallCompletedEvent(agent_name="GeneralAgent", tool=_load_tool_execution())
+        yield AgentToolCallCompletedEvent(
+            agent_id="general",
+            agent_name="GeneralAgent",
+            tool=_load_tool_execution(),
+        )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Used the loaded tool.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Used the loaded tool.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])

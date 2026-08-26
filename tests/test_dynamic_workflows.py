@@ -38,6 +38,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import _matching_tool_approval_rule
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from tests.authorization_helpers import (
@@ -2079,6 +2080,20 @@ def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Pa
     assert run_config.tool_approval.default == "require_approval"
     assert run_config.tool_approval.rules == []
     assert context.config.tool_approval.default == "auto_approve"
+
+
+def test_dynamic_workflow_uses_shared_automation_approval_policy(tmp_path: Path) -> None:
+    """The extracted helper preserves the participant approval overlay exactly."""
+    context = _make_context(tmp_path)
+    shared = build_automation_approval_config(
+        context.config,
+        function_owners={"read_url": frozenset({"website"})},
+        preapproved_toolkits=frozenset({"website"}),
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+    )
+
+    assert shared.tool_approval.default == "require_approval"
+    assert [(rule.match, rule.action) for rule in shared.tool_approval.rules] == [("read_url", "auto_approve")]
 
 
 def test_non_resumable_participant_rejects_gated_functions(tmp_path: Path) -> None:

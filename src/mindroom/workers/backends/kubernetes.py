@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key_value
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    credentials_encryption_key_value,
+)
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (
     WorkerBackendError,
@@ -27,6 +31,7 @@ from mindroom.workers.models import (
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.worker_retirement import open_worker_state_root
 
 from . import kubernetes_resources as resources
 from .kubernetes_config import (
@@ -271,6 +276,21 @@ class KubernetesWorkerBackend:
 
     backend_name = "kubernetes"
 
+    def script_resource_profiles(self) -> dict[str, object]:
+        """Return the fixed profile names and exact configured quantities."""
+        return {
+            "default_profile": self.config.default_script_resource_profile,
+            "profiles": {
+                name: {
+                    "requests": dict(profile["requests"]),
+                    "limits": dict(profile["limits"]),
+                }
+                for name, profile in self.config.script_resource_profiles.items()
+            },
+        }
+
+    cleanup_locator: str | None = None
+
     def __init__(
         self,
         *,
@@ -438,6 +458,8 @@ class KubernetesWorkerBackend:
                         annotations=annotations,
                         replicas=1,
                         private_agent_names=spec.private_agent_names,
+                        state_scope_worker_key=spec.state_scope_worker_key,
+                        resource_profile=spec.resource_profile,
                     )
                     startup_triggered = should_restart or deployment_apply.recreated
                     destructive_failure_allowed = destructive_failure_allowed or startup_triggered
@@ -462,7 +484,10 @@ class KubernetesWorkerBackend:
                             status="starting",
                         )
                         self._resources.patch_deployment(worker_id, annotations=annotations)
-                    self._sync_shared_credentials(worker_key)
+                    self._sync_shared_credentials(
+                        worker_key,
+                        mirrored_credential_services=spec.mirrored_credential_services,
+                    )
                     self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
@@ -546,6 +571,51 @@ class KubernetesWorkerBackend:
         """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
         return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Remove one exact Kubernetes worker and all backend-owned state."""
+        with self._worker_lock(worker_key):
+            worker_id = self._worker_id(worker_key)
+            state_subpath = self._state_subpath(worker_key)
+            state_parts = tuple(part for part in state_subpath.split("/") if part)
+            if not state_parts:
+                msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
+                raise WorkerBackendError(msg)
+            deployment = self._resources.read_deployment(worker_id)
+            if deployment is not None:
+                annotations = dict(deployment.metadata.annotations or {})
+                if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
+                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_key}'."
+                    raise WorkerBackendError(msg)
+                if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
+                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_key}'."
+                    raise WorkerBackendError(msg)
+            try:
+                with open_worker_state_root(
+                    self.storage_root,
+                    workers_subpath=state_parts[:-1],
+                    worker_name=state_parts[-1],
+                    expected_worker_key=worker_key,
+                    identity_path=(".runtime", "startup_manifest.json"),
+                    identity_field_path=(
+                        "runtime_paths",
+                        "process_env",
+                        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+                    ),
+                ) as state:
+                    self._invalidate_ready_worker(worker_key)
+                    self._resources.delete_service(worker_id)
+                    self._resources.delete_deployment(
+                        worker_id,
+                        timeout_seconds=self.config.ready_timeout_seconds,
+                    )
+                    self._resources.delete_secret(worker_id)
+                    state.remove()
+            except WorkerBackendError:
+                raise
+            except (OSError, RecursionError, TypeError, ValueError) as exc:
+                msg = f"Failed to retire Kubernetes worker '{worker_key}': {exc}"
+                raise WorkerBackendError(msg) from exc
 
     def _cleanup_idle_deployments(
         self,
@@ -638,6 +708,8 @@ class KubernetesWorkerBackend:
             return False
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
+        state_scope_worker_key = resources.parse_state_scope_worker_key_annotation(annotations)
+        resource_profile = resources.parse_resource_profile_annotation(annotations)
         if private_agent_names is None and resolved_worker_key_scope(handle.worker_key) == "user_agent":
             # Deployments created before visibility persistence cannot be rebuilt
             # deterministically; the ensure-time hash check recreates them on next use.
@@ -653,6 +725,8 @@ class KubernetesWorkerBackend:
                 worker_id=handle.worker_id,
                 state_subpath=self._state_subpath(handle.worker_key),
                 private_agent_names=private_agent_names,
+                state_scope_worker_key=state_scope_worker_key,
+                resource_profile=resource_profile,
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", handle.worker_key, exc_info=True)
@@ -679,6 +753,8 @@ class KubernetesWorkerBackend:
                 annotations=annotations,
                 replicas=0,
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
+                state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
+                resource_profile=resources.parse_resource_profile_annotation(annotations),
             )
         except WorkerBackendError:
             logger.warning("Skipping pod-template reconciliation for worker %r", live_handle.worker_key, exc_info=True)
@@ -742,10 +818,19 @@ class KubernetesWorkerBackend:
             replicas_override=0,
         )
 
-    def _sync_shared_credentials(self, worker_key: str) -> None:
+    def _sync_shared_credentials(
+        self,
+        worker_key: str,
+        *,
+        mirrored_credential_services: frozenset[str] | None,
+    ) -> None:
         sync_shared_credentials_to_worker(
             worker_key,
-            allowed_services=self.worker_grantable_credentials,
+            allowed_services=(
+                self.worker_grantable_credentials
+                if mirrored_credential_services is None
+                else mirrored_credential_services
+            ),
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
@@ -757,7 +842,10 @@ class KubernetesWorkerBackend:
             handle = self._patch_cached_worker_usage(entry, now=now)
             if handle is None:
                 return None
-            self._sync_shared_credentials(spec.worker_key)
+            self._sync_shared_credentials(
+                spec.worker_key,
+                mirrored_credential_services=spec.mirrored_credential_services,
+            )
         except WorkerBackendError:
             self._invalidate_ready_worker(spec.worker_key)
             raise

@@ -21,7 +21,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
-from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -183,7 +183,7 @@ async def test_team_response_stream_collects_run_metadata_from_completed_event()
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamRunCompletedEvent(
             run_id="team-run-1",
             session_id="session-1",
@@ -227,7 +227,7 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamModelRequestCompletedEvent(
             model="test-model",
             model_provider="openai",

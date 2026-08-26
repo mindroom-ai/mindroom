@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
@@ -24,12 +26,20 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
-class _ValidCredentials:
-    valid = True
+def _valid_credentials() -> GoogleOAuthCredentials:
+    return GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1, tzinfo=UTC),
+    )
 
 
 class _FakeDocsRequest:
-    def __init__(self, response: dict[str, object], error: HttpError | None = None) -> None:
+    def __init__(self, response: dict[str, object], error: Exception | None = None) -> None:
         self._response = response
         self._error = error
 
@@ -44,7 +54,7 @@ class _FakeDocumentsResource:
         self.create_bodies: list[dict[str, object]] = []
         self.get_calls: list[dict[str, object]] = []
         self.batch_update_calls: list[dict[str, object]] = []
-        self.batch_update_error: HttpError | None = None
+        self.batch_update_error: Exception | None = None
 
     def create(self, *, body: dict[str, object]) -> _FakeDocsRequest:
         self.create_bodies.append(body)
@@ -133,7 +143,7 @@ def _connected_tool(tmp_path: Path) -> tuple[GoogleDocsTools, _FakeDocsService]:
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDocsService()
     tool.service = service
@@ -213,6 +223,21 @@ def test_google_docs_create_document_preserves_id_when_initial_text_fails(tmp_pa
     assert result["document"]["documentId"] == "created-doc"
     assert result["documentUrl"] == "https://docs.google.com/document/d/created-doc/edit"
     assert "400" in result["initialTextError"]
+
+
+def test_google_docs_create_document_preserves_id_after_initial_text_transport_failure(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+    sentinel = "provider-controlled-transport-secret"
+    service.documents_resource.batch_update_error = TimeoutError(sentinel)
+
+    result = json.loads(tool.google_docs_create_document("Launch plan", "First draft"))
+
+    assert result["document"]["documentId"] == "created-doc"
+    assert result["documentUrl"] == "https://docs.google.com/document/d/created-doc/edit"
+    assert result["initialTextError"] == "Google Docs initial text update failed"
+    assert result["partial_success"] is True
+    assert result["retry_safe"] is False
+    assert sentinel not in json.dumps(result)
 
 
 def test_google_docs_get_document_returns_tab_aware_structure(tmp_path: Path) -> None:
@@ -327,7 +352,7 @@ def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         create_document=False,
         read_document=True,
         edit_document=False,

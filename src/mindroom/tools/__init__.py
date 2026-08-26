@@ -100,6 +100,7 @@ from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
 from mindroom.tools.newspaper4k import newspaper4k_tools
 from mindroom.tools.notion import notion_tools
+from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
@@ -115,6 +116,7 @@ from mindroom.tools.replicate import replicate_tools
 from mindroom.tools.resend import resend_tools
 from mindroom.tools.scheduler import scheduler_tools
 from mindroom.tools.scrapegraph import scrapegraph_tools
+from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
@@ -233,6 +235,7 @@ __all__ = [
     "neo4j_tools",
     "newspaper4k_tools",
     "notion_tools",
+    "oauth_connections_tools",
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
@@ -249,6 +252,7 @@ __all__ = [
     "resend_tools",
     "scheduler_tools",
     "scrapegraph_tools",
+    "script_tools",
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",

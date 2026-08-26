@@ -89,7 +89,8 @@ For `streamable-http` servers, `url` is required.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Static `headers` are process-global and shared by every requester.
-Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need a different bearer token per requester.
+Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
+Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
 
 ## Per-Server Options
 
@@ -160,12 +161,19 @@ They are useful when one server exposes many tools but one agent should see only
 
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers load a token for the resolved worker scope at tool-call time and keep one session per worker key.
-Shared scope reuses one agent-scoped token and session; `user` and `user_agent` provide requester isolation.
+OAuth-backed remote MCP servers resolve credentials against the selected agent's effective execution scope at tool-call time.
+They keep one session per canonical credential target and server configuration generation.
+With `shared`, one connection belongs to the selected agent and is used by every authorized caller.
+With `user`, one connection belongs to the requester and is reused across that requester's agents.
+With `user_agent`, each requester and agent pair has its own connection, so one requester can connect different accounts for different agents.
+With no execution scope, one installation-level connection is used.
+Private agents derive this same ownership from `private.per`.
+Changing an agent's effective scope changes its OAuth credential owner, and MindRoom never copies a credential from another scope into the new target.
+If the new target has no credential, reconnect it explicitly.
 
 ## OAuth-Backed Remote MCP
 
-Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the configured worker scope.
+Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the selected agent's effective credential scope.
 OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
 
 ```yaml
@@ -207,12 +215,14 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 - `<prefix>_list_tools`
 - `<prefix>_call_tool`
 
-The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a worker-scoped tool catalog.
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a catalog for the active credential scope.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-Until the current worker scope connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+When token refresh fails without a terminal credential rejection, the bridge returns the standard `oauth_connection_required: true` payload with `reason: refresh_failed`, the provider, and a scoped `connect_url` instead of collapsing the failure into a bare error string.
+MindRoom retains the credential in that case, so callers should retry after a temporary provider failure before offering the link to reconnect.
+Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
-After MindRoom has a cached worker-scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that worker scope in addition to the bridge functions.
+After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
+After MindRoom has cached a scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that credential scope in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
@@ -410,10 +420,15 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 ## Error Handling
 
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
-If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
+If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning for every affected server.
 
 By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
-MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+For servers without OAuth, MindRoom keeps retrying transport and discovery failures in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+OAuth-backed servers retry discovery lazily on the next scoped call instead of scheduling a background refresh.
+Function-name collisions remain failed because retrying the same invalid catalog cannot recover; after fixing the remote catalog or configured prefixes, reload `config.yaml` or restart MindRoom to retry those servers.
+Collision invalidation is symmetric and atomic.
+If a scoped OAuth catalog collides with a shared non-OAuth catalog visible to the same agent, MindRoom marks both catalogs failed regardless of which catalog was published first.
+Because the non-OAuth catalog is shared, it remains unavailable to every agent until the collision is fixed and `config.yaml` is reloaded or MindRoom restarts.
 Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
@@ -435,7 +450,8 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
-- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the current worker scope.
+- OAuth-backed remote MCP credentials and sessions follow the selected agent's effective execution scope.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the active credential target.
+- Agent-initiated `reset_oauth_connection()` supports `user` and `user_agent` MCP credential scopes; reset shared or installation-level MCP connections from the authenticated dashboard.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import safe_replace
@@ -15,6 +17,35 @@ if TYPE_CHECKING:
 
 type OverrideRecord = dict[str, str]
 _override_load_cache: dict[Path, tuple[int, dict[str, OverrideRecord]]] = {}
+_MAX_DURABLE_DIRECTORY_IDENTITIES = 4096
+_DIRECTORY_FSYNC_SUPPORTED = os.name != "nt"
+_durable_directory_identities: OrderedDict[Path, tuple[int, int]] = OrderedDict()
+_durable_directory_identities_lock = Lock()
+
+
+def create_directory_durable(path: Path, *, mode: int) -> None:
+    """Create one directory and durably publish it when directory fsync is available."""
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    path.chmod(mode)
+    stat = path.stat()
+    identity = (stat.st_dev, stat.st_ino)
+    with _durable_directory_identities_lock:
+        if _durable_directory_identities.get(path) == identity:
+            _durable_directory_identities.move_to_end(path)
+            return
+    fsync_directory_durable(path)
+    fsync_directory_durable(path.parent)
+    with _durable_directory_identities_lock:
+        _durable_directory_identities[path] = identity
+        _durable_directory_identities.move_to_end(path)
+        if len(_durable_directory_identities) > _MAX_DURABLE_DIRECTORY_IDENTITIES:
+            _durable_directory_identities.popitem(last=False)
+
+
+def replace_file_durable(source: Path, target: Path) -> None:
+    """Atomically replace one file and durably publish it when directory fsync is available."""
+    source.replace(target)
+    fsync_directory_durable(target.parent)
 
 
 def write_json_file_durable(
@@ -49,10 +80,10 @@ def write_json_file_durable(
             temp_file.flush()
             os.fsync(temp_file.fileno())
         if strict_atomic_replace:
-            temp_path.replace(path)
+            replace_file_durable(temp_path, path)
         else:
             safe_replace(temp_path, path)
-        _fsync_directory(path.parent)
+            _fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
@@ -120,5 +151,16 @@ def _fsync_directory(directory: Path) -> None:
             os.fsync(directory_fd)
         except OSError:
             return
+    finally:
+        os.close(directory_fd)
+
+
+def fsync_directory_durable(directory: Path) -> None:
+    """Flush one supported directory update and propagate durability failures."""
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        return
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
     finally:
         os.close(directory_fd)

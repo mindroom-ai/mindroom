@@ -2,38 +2,216 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 import threading
-from contextvars import copy_context
+from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 from html import unescape
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from agno.tools import github as agno_github_module
 from agno.tools.github import GithubTools as AgnoGithubTools
+from agno.utils import log as agno_log_module
 from github import Auth, Github, GithubException
+from github.GithubRetry import GithubRetry
+from github.Requester import Requester
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.logging_config import get_logger
-from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, oauth_connection_required_payload
-from mindroom.oauth.service import (
-    build_oauth_connect_instruction,
-    oauth_connect_url,
+from mindroom.oauth.client import active_oauth_credential_context
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    OAuthCredentialUnreadableError,
+    load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
-    oauth_credentials_worker_target,
-    refresh_scoped_oauth_credentials,
+    refresh_oauth_credentials_blocking,
 )
-from mindroom.tool_system.worker_routing import active_tool_execution_identity
+from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    OAuthProviderError,
+    OAuthRefreshRejectedError,
+    oauth_connection_required_payload,
+)
+from mindroom.oauth.service import (
+    OAUTH_ACCESS_REJECTED_REASON,
+    OAUTH_REFRESH_REJECTED_REASON,
+    OAUTH_RESET_REQUIRED_REASON,
+    oauth_connection_required,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import TracebackType
+
+    from urllib3.connectionpool import ConnectionPool
+    from urllib3.response import HTTPResponse
+    from urllib3.util.retry import Retry
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
+_SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
+_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
+_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES = (
+    "Error getting actual open issues:",
+    "Error getting open PRs count:",
+    "Error processing individual PR:",
+    "Error getting recent open PRs:",
+    "Error calculating PR metrics:",
+    "Error getting contributors:",
+    "Error decoding file content:",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _GithubProviderFailure:
+    """Typed provider failure captured before Agno serializes the exception."""
+
+    status_code: int | None
+
+
+_github_provider_failure: ContextVar[_GithubProviderFailure | None] = ContextVar(
+    "github_provider_failure",
+    default=None,
+)
+
+
+def _github_exception_status_code(exc: GithubException) -> int | None:
+    status_code = exc.status
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        return status_code
+    return None
+
+
+def _record_github_provider_failure(exc: GithubException) -> None:
+    _github_provider_failure.set(_GithubProviderFailure(_github_exception_status_code(exc)))
+
+
+class _GithubProviderFailureRequester(Requester):
+    """Capture typed provider failures before Agno serializes them."""
+
+    @classmethod
+    def createException(  # noqa: N802
+        cls,
+        status: int,
+        headers: dict[str, Any],
+        output: dict[str, Any],
+    ) -> GithubException:
+        exception = super().createException(status, headers, output)
+        _record_github_provider_failure(exception)
+        return exception
+
+
+class _GithubProviderFailureRetry(GithubRetry):
+    """Capture provider failures raised directly by PyGithub retry handling."""
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: HTTPResponse | None = None,
+        error: Exception | None = None,
+        _pool: ConnectionPool | None = None,
+        _stacktrace: TracebackType | None = None,
+    ) -> Retry:
+        try:
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+        except GithubException as exc:
+            _record_github_provider_failure(exc)
+            raise
+
+
+def _github_provider_failure_retry(retry: GithubRetry) -> _GithubProviderFailureRetry:
+    return _GithubProviderFailureRetry(
+        secondary_rate_wait=retry.secondary_rate_wait,
+        total=retry.total,
+        connect=retry.connect,
+        read=retry.read,
+        redirect=retry.redirect,
+        status=retry.status,
+        other=retry.other,
+        allowed_methods=retry.allowed_methods,
+        status_forcelist=[status for status in retry.status_forcelist if status != 403],
+        backoff_factor=retry.backoff_factor,
+        backoff_max=retry.backoff_max,
+        retry_after_max=retry.retry_after_max,
+        raise_on_redirect=retry.raise_on_redirect,
+        raise_on_status=retry.raise_on_status,
+        history=retry.history,
+        remove_headers_on_redirect=retry.remove_headers_on_redirect,
+        respect_retry_after_header=retry.respect_retry_after_header,
+        backoff_jitter=retry.backoff_jitter,
+    )
+
+
+class _GithubRequesterOwner(Protocol):
+    _Github__requester: Requester
+
+
+def _install_github_provider_failure_capture(client: Github) -> Github:
+    requester_owner = cast(_GithubRequesterOwner, client)  # noqa: TC006
+    original_requester = requester_owner._Github__requester
+    requester_kwargs = original_requester.kwargs
+    retry = requester_kwargs["retry"]
+    if isinstance(retry, GithubRetry):
+        requester_kwargs["retry"] = _github_provider_failure_retry(retry)
+    requester_owner._Github__requester = _GithubProviderFailureRequester(**requester_kwargs)
+    original_requester.close()
+    return client
+
+
+class _SanitizeGithubProviderLogFilter(logging.Filter):
+    """Remove provider-controlled GitHub exception text before log rendering."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "github.GithubRetry":
+            record.msg = "GitHub provider retry detail suppressed"
+            record.args = ()
+        elif record.exc_info is not None:
+            _exception_type, exception, _traceback = record.exc_info
+            if isinstance(exception, GithubException):
+                status_code = _github_exception_status_code(exception)
+                _record_github_provider_failure(exception)
+                record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
+                record.args = (status_code if status_code is not None else "unknown",)
+                record.exc_info = None
+                record.exc_text = None
+                record.stack_info = None
+        elif isinstance(record.msg, str) and record.msg.startswith(_AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES):
+            record.msg = "GitHub provider detail suppressed"
+            record.args = ()
+        return True
+
+
+def _install_github_log_sanitizers() -> None:
+    upstream_loggers = {
+        agno_github_module.logger,
+        agno_log_module.logger,
+        agno_log_module.agent_logger,
+        agno_log_module.team_logger,
+        agno_log_module.workflow_logger,
+        logging.getLogger("github.GithubRetry"),
+    }
+    for upstream_logger in upstream_loggers:
+        if not any(isinstance(log_filter, _SanitizeGithubProviderLogFilter) for log_filter in upstream_logger.filters):
+            upstream_logger.addFilter(_SanitizeGithubProviderLogFilter())
+
+
+_install_github_log_sanitizers()
+
+
+class _GithubThreadState(threading.local):
+    """Credential and PyGithub client owned by one worker thread."""
+
+    def __init__(self) -> None:
+        self.access_token: str | None = None
+        self.client: Github | None = None
 
 
 class _ContentWriteResult(Protocol):
@@ -54,21 +232,54 @@ def _normalized_access_token(value: object) -> str | None:
     return normalized or None
 
 
-def _is_github_authentication_error(result: object) -> bool:
+def _sanitized_github_exception_result(exc: GithubException) -> str:
+    _record_github_provider_failure(exc)
+    return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
+
+
+def _is_serialized_github_error_result(result: object) -> bool:
     if not isinstance(result, str):
         return False
     try:
         payload = json.loads(result)
     except json.JSONDecodeError:
         return False
-    if not isinstance(payload, dict):
-        return False
-    error = payload.get("error")
-    return isinstance(error, str) and error.lstrip().startswith("401 ")
+    return isinstance(payload, dict) and set(payload) == {"error"} and isinstance(payload["error"], str)
 
 
 class GithubTools(AgnoGithubTools):
     """Agno GitHub tools authenticated by explicit or requester-scoped credentials."""
+
+    def _github_state(self) -> _GithubThreadState:
+        state = self.__dict__.setdefault("_github_thread_state", _GithubThreadState())
+        return cast("_GithubThreadState", state)
+
+    @property
+    def access_token(self) -> str | None:
+        """Return token installed for current worker thread."""
+        return self._github_state().access_token
+
+    @access_token.setter
+    def access_token(self, value: str | None) -> None:
+        state = self._github_state()
+        if state.access_token != value:
+            previous_client = state.client
+            state.client = None
+            if previous_client is not None:
+                previous_client.close()
+        state.access_token = value
+
+    @property
+    def g(self) -> Github:
+        """Return PyGithub client installed for current worker thread."""
+        client = self._github_state().client
+        if client is None:
+            raise self._connection_required()
+        return client
+
+    @g.setter
+    def g(self, value: Github | None) -> None:
+        self._github_state().client = value
 
     def __init__(
         self,
@@ -78,92 +289,59 @@ class GithubTools(AgnoGithubTools):
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager,
         worker_target: ResolvedWorkerTarget | None,
+        authorization: AuthorizationConfig | None = None,
         **kwargs: object,
     ) -> None:
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
+        self._authorization = authorization
         self._oauth_provider = github_oauth_provider()
         explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
             runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
         )
-        self._explicit_access_token = bool(explicit_access_token)
+        self._explicit_access_token = explicit_access_token
         initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
-        self._active_access_token = initial_access_token
         super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)
         self._wrap_oauth_function_entrypoints()
 
     def _stored_access_token(self) -> str | None:
-        worker_target = self._oauth_credentials_worker_target()
-        if self._oauth_provider.requester_scoped_credentials and worker_target is None:
+        context = self._oauth_credential_context()
+        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        credentials = load_scoped_credentials(
-            self._oauth_provider.credential_service,
-            credentials_manager=self._credentials_manager,
-            worker_target=worker_target,
-        )
+        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
+        if snapshot is None:
+            return None
+        credentials = snapshot.credentials
         if credentials is None:
             return None
         token = credentials.get("token") or credentials.get("access_token")
         return _normalized_access_token(token)
 
-    def _oauth_credentials_worker_target(self) -> ResolvedWorkerTarget | None:
-        execution_identity = active_tool_execution_identity(None)
-        if execution_identity is None and self._worker_target is not None:
-            execution_identity = self._worker_target.execution_identity
-        return oauth_credentials_worker_target(
-            self._oauth_provider,
-            self._worker_target,
-            execution_identity=execution_identity,
-        )
-
-    def _connection_required(self) -> OAuthConnectionRequired:
-        connect_url = oauth_connect_url(
+    def _oauth_credential_context(self) -> OAuthCredentialContext:
+        return active_oauth_credential_context(
             self._oauth_provider,
             self._runtime_paths,
-            worker_target=self._oauth_credentials_worker_target(),
+            self._credentials_manager,
+            self._worker_target,
+            authorization=self._authorization,
         )
-        return OAuthConnectionRequired(
-            build_oauth_connect_instruction(self._oauth_provider, connect_url),
-            provider_id=self._oauth_provider.id,
-            connect_url=connect_url,
-        )
+
+    def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:
+        return oauth_connection_required(self._oauth_credential_context(), reason=reason)
 
     def _refresh_oauth_credentials(self) -> dict[str, object] | None:
-        worker_target = self._oauth_credentials_worker_target()
-        if self._oauth_provider.requester_scoped_credentials and worker_target is None:
+        context = self._oauth_credential_context()
+        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
             return None
-        refresh = refresh_scoped_oauth_credentials(
-            self._oauth_provider,
-            self._runtime_paths,
-            credentials_manager=self._credentials_manager,
-            worker_target=worker_target,
-        )
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(refresh)
-
-        result: list[dict[str, object] | None] = []
-        errors: list[BaseException] = []
-        context = copy_context()
-
-        def run_refresh() -> None:
-            try:
-                refreshed = context.run(asyncio.run, refresh)
-                result.append(cast("dict[str, object] | None", refreshed))
-            except BaseException as exc:
-                errors.append(exc)
-
-        thread = threading.Thread(target=run_refresh, name="mindroom-github-oauth-refresh")
-        thread.start()
-        thread.join()
-        if errors:
-            raise errors[0]
-        return result[0]
+        return refresh_oauth_credentials_blocking(context)
 
     def _ensure_authenticated(self) -> None:
         if self._explicit_access_token:
+            token = self._explicit_access_token
+            if self.access_token != token or self._github_state().client is None:
+                self.access_token = token
+                self.g = self.authenticate()
             return
         try:
             credentials = self._refresh_oauth_credentials()
@@ -173,18 +351,26 @@ class GithubTools(AgnoGithubTools):
                 provider_id=self._oauth_provider.id,
                 error_type=type(exc).__name__,
             )
-            raise self._connection_required() from exc
+            if isinstance(exc, OAuthCredentialUnreadableError):
+                self.access_token = None
+                raise self._connection_required(reason=OAUTH_RESET_REQUIRED_REASON) from exc
+            if isinstance(exc, OAuthRefreshRejectedError):
+                self.access_token = None
+                raise self._connection_required(reason=OAUTH_REFRESH_REJECTED_REASON) from exc
+            raise OAuthProviderError(
+                _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE,
+                oauth_error=exc.oauth_error,
+            ) from None
         if not oauth_credentials_usable(self._oauth_provider, self._runtime_paths, credentials):
             raise self._connection_required()
-        token = _normalized_access_token(
+        stored_token = _normalized_access_token(
             (credentials or {}).get("token") or (credentials or {}).get("access_token"),
         )
-        if token is None:
+        if stored_token is None:
             raise self._connection_required()
-        if token == self._active_access_token:
+        if stored_token == self.access_token and self._github_state().client is not None:
             return
-        self.access_token = token
-        self._active_access_token = token
+        self.access_token = stored_token
         self.g = self.authenticate()
 
     def _wrap_oauth_function_entrypoints(self) -> None:
@@ -203,10 +389,29 @@ class GithubTools(AgnoGithubTools):
                     self._ensure_authenticated()
                 except OAuthConnectionRequired as exc:
                     return json.dumps(oauth_connection_required_payload(exc))
-                result = _entrypoint(*args, **kwargs)
-                if not self._explicit_access_token and _is_github_authentication_error(result):
-                    return json.dumps(oauth_connection_required_payload(self._connection_required()))
-                return result
+                failure_token = _github_provider_failure.set(None)
+                try:
+                    result = _entrypoint(*args, **kwargs)
+                    provider_failure = _github_provider_failure.get()
+                finally:
+                    _github_provider_failure.reset(failure_token)
+                if provider_failure is None or not _is_serialized_github_error_result(result):
+                    return result
+                status_code = provider_failure.status_code
+                logger.warning(
+                    "github_tool_call_failed",
+                    provider_id=self._oauth_provider.id,
+                    error_type="GithubException",
+                    status_code=status_code,
+                )
+                if not self._explicit_access_token and status_code == 401:
+                    self.access_token = None
+                    return json.dumps(
+                        oauth_connection_required_payload(
+                            self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
+                        ),
+                    )
+                return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)
@@ -240,8 +445,7 @@ class GithubTools(AgnoGithubTools):
                     branch=branch,
                 )
         except GithubException as exc:
-            logger.exception("github_file_update_failed", repo_name=repo_name, path=path)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
 
         content_result = cast(_ContentWriteResult, result["content"])  # noqa: TC006
         commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
@@ -276,8 +480,7 @@ class GithubTools(AgnoGithubTools):
             else:
                 result = repo.delete_file(path=path, message=message, sha=sha, branch=branch)
         except GithubException as exc:
-            logger.exception("github_file_delete_failed", repo_name=repo_name, path=path)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
 
         commit_result = cast(_CommitWriteResult, result["commit"])  # noqa: TC006
         return json.dumps(
@@ -314,8 +517,7 @@ class GithubTools(AgnoGithubTools):
             else:
                 issue.edit(title=title, body=body)
         except GithubException as exc:
-            logger.exception("github_issue_edit_failed", repo_name=repo_name, issue_number=issue_number)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
         return json.dumps({"message": f"Issue #{issue_number} updated."}, indent=2)
 
     @wraps(AgnoGithubTools.get_pull_request_count)
@@ -343,8 +545,7 @@ class GithubTools(AgnoGithubTools):
                 if count is None:
                     count = sum(1 for _pull in pulls)
         except GithubException as exc:
-            logger.exception("github_pull_request_count_failed", repo_name=repo_name)
-            return json.dumps({"error": str(exc)})
+            return _sanitized_github_exception_result(exc)
         return json.dumps({"count": count}, indent=2)
 
     @wraps(AgnoGithubTools.search_issues_and_prs)
@@ -381,5 +582,5 @@ class GithubTools(AgnoGithubTools):
             raise self._connection_required()
         auth = Auth.Token(self.access_token)
         if self.base_url:
-            return Github(base_url=self.base_url, auth=auth)
-        return Github(auth=auth)
+            return _install_github_provider_failure_capture(Github(base_url=self.base_url, auth=auth))
+        return _install_github_provider_failure_capture(Github(auth=auth))

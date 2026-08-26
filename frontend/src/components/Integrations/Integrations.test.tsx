@@ -558,6 +558,149 @@ describe("Integrations", () => {
     });
   });
 
+  it("offers a reset action when OAuth credentials are unreadable", async () => {
+    const refetch = vi.fn();
+    const disconnect = createDeferred();
+    mockGoogleDriveOnDisconnect.mockReturnValueOnce(disconnect.promise);
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "google_drive",
+          display_name: "Google Drive",
+          description: "Google Drive with a manual fallback",
+          icon: "Google Drive Icon",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: [
+            {
+              name: "credentials_json",
+              label: "Credentials JSON",
+              type: "password",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["credentials_json"],
+          manual_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch,
+      statusAuthoritative: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_reset_required: true,
+      helper_text:
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+    });
+
+    render(<Integrations />);
+
+    const resetButton = await screen.findByRole("button", {
+      name: "Reset connection",
+    });
+    expect(
+      screen.queryByRole("button", { name: "Connect with Google Drive" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit credentials json" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Remove credentials json" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(resetButton);
+
+    await waitFor(() => {
+      expect(mockGoogleDriveOnDisconnect).toHaveBeenCalledOnce();
+      const pendingResetButton = screen.getByRole("button", {
+        name: "Reset connection",
+      });
+      expect(pendingResetButton).toBeDisabled();
+      expect(pendingResetButton.querySelector(".animate-spin")).not.toBeNull();
+    });
+
+    await act(async () => disconnect.resolve());
+
+    await waitFor(() => {
+      expect(refetch).toHaveBeenCalledOnce();
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Connection reset",
+        description: "Google Drive OAuth has been reset.",
+      });
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("offers reset recovery when no fallback credential is configured", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "google_drive",
+          display_name: "Google Drive",
+          description: "Google Drive with an optional manual fallback",
+          icon: "Google Drive Icon",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: [
+            {
+              name: "credentials_json",
+              label: "Credentials JSON",
+              type: "password",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["credentials_json"],
+          manual_auth_configured: false,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_reset_required: true,
+      helper_text:
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+    });
+
+    render(<Integrations />);
+
+    expect(
+      await screen.findByRole("button", { name: "Reset connection" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Use credentials json" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("opens OAuth client config dialog when client config is missing", async () => {
     mockGoogleDriveLoadStatus.mockResolvedValueOnce({
       status: "not_connected",

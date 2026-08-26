@@ -12,6 +12,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
@@ -84,6 +85,17 @@ def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     function.process_entrypoint()
 
     assert set(function.parameters["required"]) == {"request", "new_thread"}
+    properties = function.parameters["properties"]
+    new_thread_description = properties["new_thread"]["description"].lower()
+    silent_description = properties["silent"]["description"].lower()
+    assert "silent" in new_thread_description
+    assert "room-level root" in new_thread_description
+    assert "hidden" in silent_description
+    assert "whitespace" in silent_description
+    assert SILENT_SCHEDULE_NO_REPLY_TOKEN.lower() in silent_description
+    assert "findings" in silent_description
+    assert "failures" in silent_description
+    assert "infer" in silent_description
 
 
 @pytest.mark.asyncio
@@ -102,7 +114,11 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
-        new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
+        new_thread_result = await tools.schedule(
+            "tomorrow at 4pm check deployment",
+            new_thread=True,
+            silent=True,
+        )
         limited_result = await tools.schedule("every 25 minutes poll the queue", new_thread=False, history_limit=0)
 
     assert result == "✅ Scheduled"
@@ -129,6 +145,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "full_text": "tomorrow at 3pm check deployment",
         "new_thread": False,
         "history_limit": None,
+        "silent": None,
     }
     assert second_call == {
         "runtime": expected_runtime,
@@ -138,6 +155,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "full_text": "tomorrow at 4pm check deployment",
         "new_thread": True,
         "history_limit": None,
+        "silent": True,
     }
     assert third_call == {
         "runtime": expected_runtime,
@@ -147,6 +165,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "full_text": "every 25 minutes poll the queue",
         "new_thread": False,
         "history_limit": 0,
+        "silent": None,
     }
 
 
@@ -215,10 +234,17 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
-        limited_result = await tools.edit_schedule("task123", "keep the same schedule", history_limit=5)
+        limited_result = await tools.edit_schedule(
+            "task123",
+            "keep the same schedule",
+            history_limit=5,
+            silent=True,
+        )
+        visible_result = await tools.edit_schedule("task123", "make it visible", silent=False)
 
     assert "Updated" in result
     assert "Updated" in limited_result
+    assert "Updated" in visible_result
     expected_runtime = SchedulingRuntime(
         client=context.client,
         config=context.config,
@@ -227,7 +253,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         conversation_reader=context.conversation_reader,
         agent_reply_memberships=context.agent_reply_memberships,
     )
-    assert mock_edit.await_count == 2
+    assert mock_edit.await_count == 3
     assert mock_edit.await_args_list[0].kwargs == {
         "runtime": expected_runtime,
         "room_id": context.room_id,
@@ -236,6 +262,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         "scheduled_by": context.requester_id,
         "thread_id": context.resolved_thread_id,
         "history_limit": None,
+        "silent": None,
     }
     assert mock_edit.await_args_list[1].kwargs == {
         "runtime": expected_runtime,
@@ -245,6 +272,17 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         "scheduled_by": context.requester_id,
         "thread_id": context.resolved_thread_id,
         "history_limit": 5,
+        "silent": True,
+    }
+    assert mock_edit.await_args_list[2].kwargs == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "make it visible",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": None,
+        "silent": False,
     }
 
 

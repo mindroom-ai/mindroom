@@ -31,6 +31,10 @@ from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
     include_knowledge_relative_path,
 )
+from mindroom.knowledge.github_app_auth import (
+    GitHubAppTokenProvider,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.redaction import (
     MAX_REDACTABLE_TOKEN_LENGTH,
     credential_free_repo_url,
@@ -42,6 +46,8 @@ from mindroom.knowledge.redaction import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -120,6 +126,8 @@ async def _terminate_git_process(
 def _http_credentials(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
+    *,
+    credentials: Mapping[str, object] | None = None,
 ) -> tuple[str, str] | None:
     """Return HTTP basic-auth userinfo for one credentials service, if any.
 
@@ -131,7 +139,8 @@ def _http_credentials(
     if not credentials_service:
         return None
 
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+    if credentials is None:
+        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")
@@ -162,6 +171,8 @@ def _git_auth_env(
     repo_url: str,
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
+    *,
+    credentials: Mapping[str, object] | None = None,
 ) -> dict[str, str] | None:
     """Return process-local Git config that injects credentials without persisting them.
 
@@ -190,7 +201,9 @@ def _git_auth_env(
         return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
 
     credentials_userinfo = (
-        _http_credentials(credentials_service, runtime_paths) if parsed_clean_url.scheme in {"http", "https"} else None
+        _http_credentials(credentials_service, runtime_paths, credentials=credentials)
+        if parsed_clean_url.scheme in {"http", "https"}
+        else None
     )
     if credentials_userinfo is not None:
         return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
@@ -209,6 +222,28 @@ def _git_auth_env(
         "GIT_CONFIG_KEY_0": f"url.{repo_url}.insteadOf",
         "GIT_CONFIG_VALUE_0": clean_url,
     }
+
+
+async def _resolved_git_auth_env(
+    repo_url: str,
+    credentials_service: str | None,
+    runtime_paths: RuntimePaths,
+    github_app_token_provider: GitHubAppTokenProvider,
+) -> dict[str, str] | None:
+    """Resolve refreshable App credentials or retain existing static Git auth."""
+    credentials: Mapping[str, object] = {}
+    if credentials_service:
+        credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+    if credentials.get("auth_type") == "github_app":
+        username, token = await github_app_token_provider.resolve(repo_url, credentials)
+        return _git_http_basic_auth_env(credential_free_repo_url(repo_url), username, token)
+
+    return _git_auth_env(
+        repo_url,
+        credentials_service,
+        runtime_paths,
+        credentials=credentials if credentials_service else None,
+    )
 
 
 #: scp-style SSH syntax (``git@github.com:org/repo.git``), which ``urlparse``
@@ -377,6 +412,11 @@ class GitKnowledgeSource:
     #: restart does not re-pull every object for an unchanged checkout.
     lfs_hydrated_head_path: Path
     _sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _github_app_token_provider: GitHubAppTokenProvider = field(
+        default_factory=get_runtime_github_app_token_provider,
+        init=False,
+        repr=False,
+    )
     _last_synced_head: str | None = field(default=None, init=False)
     _lfs_checked: bool = field(default=False, init=False)
     _lfs_repository_ready: bool = field(default=False, init=False)
@@ -627,9 +667,8 @@ class GitKnowledgeSource:
         await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
         self._lfs_repository_ready = True
 
-    def _lfs_skip_smudge_env(self, git_config: KnowledgeGitConfig) -> dict[str, str] | None:
-        if not git_config.lfs:
-            return None
+    def _lfs_skip_smudge_env(self) -> dict[str, str]:
+        """Prevent implicit LFS downloads; enabled repositories hydrate explicitly."""
         return {"GIT_LFS_SKIP_SMUDGE": "1"}
 
     def _lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
@@ -652,7 +691,12 @@ class GitKnowledgeSource:
         await self._run_git(
             self._lfs_pull_args(git_config),
             cwd=repo_root or self.source_path,
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
+            env=await _resolved_git_auth_env(
+                git_config.repo_url,
+                git_config.credentials_service,
+                self.runtime_paths,
+                self._github_app_token_provider,
+            ),
         )
         if resolved_head is None:
             resolved_head = await self._rev_parse("HEAD")
@@ -706,8 +750,13 @@ class GitKnowledgeSource:
             ],
             cwd=knowledge_root.parent,
             env=_merge_git_env(
-                _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
-                self._lfs_skip_smudge_env(git_config),
+                await _resolved_git_auth_env(
+                    git_config.repo_url,
+                    git_config.credentials_service,
+                    runtime_paths,
+                    self._github_app_token_provider,
+                ),
+                self._lfs_skip_smudge_env(),
             ),
         )
         await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
@@ -726,7 +775,12 @@ class GitKnowledgeSource:
         remote_ref = f"origin/{git_config.branch}"
         await self._run_git(
             ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
+            env=await _resolved_git_auth_env(
+                git_config.repo_url,
+                git_config.credentials_service,
+                self.runtime_paths,
+                self._github_app_token_provider,
+            ),
         )
         remote_head = await self._rev_parse(remote_ref)
         if remote_head is None:
@@ -741,11 +795,11 @@ class GitKnowledgeSource:
 
         await self._run_git(
             ["checkout", "--force", "-B", git_config.branch, remote_ref],
-            env=self._lfs_skip_smudge_env(git_config),
+            env=self._lfs_skip_smudge_env(),
         )
         # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
         # intentional way to realign it with the configured remote state.
-        await self._run_git(["reset", "--hard", remote_ref], env=self._lfs_skip_smudge_env(git_config))
+        await self._run_git(["reset", "--hard", remote_ref], env=self._lfs_skip_smudge_env())
         await self._hydrate_lfs_worktree(git_config, current_head=remote_head)
 
         after_files = await self._list_tracked_files()

@@ -123,7 +123,11 @@ class PostgresBackend:
                 SELECT table_name, column_name
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
-                  AND table_name IN ('approval_continuation_calls', 'interactive_questions')
+                  AND table_name IN (
+                      'approval_continuation_calls',
+                      'interactive_questions',
+                      'matrix_delivery_outbox'
+                  )
                 """,
             )
             existing_columns = cursor.fetchall()
@@ -135,9 +139,13 @@ class PostgresBackend:
             interactive_question_columns = frozenset(
                 str(row["column_name"]) for row in existing_columns if row["table_name"] == "interactive_questions"
             )
+            matrix_delivery_outbox_columns = frozenset(
+                str(row["column_name"]) for row in existing_columns if row["table_name"] == "matrix_delivery_outbox"
+            )
             for statement in pre_schema_migration_statements(
                 approval_continuation_call_columns=approval_continuation_call_columns,
                 interactive_question_columns=interactive_question_columns,
+                matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
             ):
                 cursor.execute(cast("LiteralString", statement))
             transaction = _PostgresTransaction(cursor)

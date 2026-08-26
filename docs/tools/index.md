@@ -68,7 +68,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](agent-orchestration.md) - OAuth connection recovery, subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](dynamic-tools.md) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
@@ -126,8 +126,8 @@ Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment det
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
-Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the selected agent's effective execution scope, while non-OAuth servers always call through the shared server session without requester credentials.
+For OAuth-backed MCP, `shared` belongs to the agent, `user` belongs to the requester across agents, `user_agent` belongs to one requester-agent pair, and unscoped belongs to the installation.
 
 ## Automatic Dependency Installation
 

@@ -233,12 +233,16 @@ _TABLES = (
         thread_id TEXT NOT NULL,
         transaction_id TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        -- Local semantic facts needed after acknowledgement. These are not
+        -- Matrix event content and are never sent by the delivery worker.
+        result_json TEXT,
         edits_event_id TEXT,
         -- A durable edit can be reserved before the INITIAL event ID exists.
         -- Its claim waits until INITIAL acknowledgement fills the target.
         edit_target_pending INTEGER NOT NULL DEFAULT 0,
         attempted INTEGER NOT NULL DEFAULT 0,
         retired INTEGER NOT NULL DEFAULT 0,
+        permanent_failure_reason TEXT,
         -- The device whose transaction ID the homeserver may already hold. A
         -- transaction ID deduplicates within one device, so a row attempted by
         -- a device this process is no longer logged in as carries an ID that
@@ -258,6 +262,19 @@ _TABLES = (
         tool_call_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
         PRIMARY KEY (principal_id, delivery_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS background_approval_calls (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, delivery_id),
+        UNIQUE (principal_id, run_id, call_id)
     )
     """,
     """

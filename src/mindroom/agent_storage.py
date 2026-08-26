@@ -15,10 +15,12 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine
 
+from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agno.agent import Agent
@@ -30,6 +32,8 @@ if TYPE_CHECKING:
 
 _BUSY_TIMEOUT_SECONDS = 30.0
 
+agno_session_persistence_patch.install_patch()
+
 __all__ = [
     "create_culture_storage",
     "create_session_storage",
@@ -37,7 +41,19 @@ __all__ = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "run_session_storage_operation",
 ]
+
+
+async def run_session_storage_operation[Result](
+    create_storage: Callable[[], BaseDb],
+    operation: Callable[[BaseDb], Result],
+) -> Result:
+    """Run one application-owned synchronous storage operation off-loop and in order."""
+    return await agno_session_persistence_patch.run_registered_storage_operation(
+        create_storage,
+        operation,
+    )
 
 
 def get_agent_runtime_state_dbs(agent: Agent) -> tuple[BaseDb | None, BaseDb | None]:
@@ -88,16 +104,23 @@ def _create_sqlite_state_storage(
     db_file = str(db_dir / f"{storage_name}.db")
     engine = _state_engine(db_file)
     if prompt_roles is not None:
-        return _PromptSanitizingSqliteDb(
+        database = _ConversationSqliteDb(
             prompt_roles=prompt_roles,
             session_table=session_table,
             db_file=db_file,
             db_engine=engine,
         )
-    # Both: the engine is what the database is reached through, and the path
-    # is what it reports itself as. Handing over an engine alone leaves
-    # ``db_file`` empty on a store that is very much file-backed.
-    return SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
+    else:
+        # Both: the engine is what the database is reached through, and the path
+        # is what it reports itself as. Handing over an engine alone leaves
+        # ``db_file`` empty on a store that is very much file-backed.
+        database = SqliteDb(session_table=session_table, db_file=db_file, db_engine=engine)
+    agno_session_persistence_patch._register_sync_session_storage(
+        database,
+        db_file=db_file,
+        session_table=session_table,
+    )
+    return database
 
 
 def create_session_storage(
@@ -142,8 +165,8 @@ def _create_agent_session_db(
     )
 
 
-class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that strips prompt messages before durable persistence."""
+class _ConversationSqliteDb(SqliteDb):
+    """SQLite session DB with conversation-specific persistence semantics."""
 
     def __init__(
         self,
@@ -155,6 +178,22 @@ class _PromptSanitizingSqliteDb(SqliteDb):
     ) -> None:
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
+
+    def get_session(
+        self,
+        session_id: str,
+        session_type: SessionType | None = None,
+        user_id: str | None = None,
+        deserialize: bool | None = True,
+    ) -> Session | dict[str, Any] | None:
+        """Read a canonical conversation session without treating its requester as its owner."""
+        _ = user_id
+        return super().get_session(
+            session_id=session_id,
+            session_type=session_type,
+            user_id=None,
+            deserialize=deserialize,
+        )
 
     def upsert_session(
         self,

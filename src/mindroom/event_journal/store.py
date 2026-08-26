@@ -17,18 +17,30 @@ from mindroom.history_recovery import (
     RoomHistoryRecovery,
 )
 
-from . import approval_continuations, approvals, interactive_questions, journal, outbox, reads, turn_records
+from . import (
+    approval_continuations,
+    approvals,
+    background_approvals,
+    interactive_questions,
+    journal,
+    outbox,
+    reads,
+    turn_records,
+)
+from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
+    ApprovalCardReservation,
+    RecordedApprovalDecision,
+)
 from .approval_continuations import (  # noqa: TC001 - runtime return and input types
     ApprovalCall,
     ApprovalContinuation,
     ApprovalContinuationState,
 )
 from .approvals import (  # noqa: TC001 - part of this module's runtime return types
-    ApprovalCardReservation,
-    RecordedApprovalDecision,
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
+from .background_approvals import BackgroundApprovalDecision  # noqa: TC001
 from .membership_state import claim_active_membership_epoch
 from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
 from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
@@ -572,9 +584,11 @@ class PrincipalStore:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent, or refuse it as an answer to a membership that ended.
 
@@ -601,8 +615,10 @@ class PrincipalStore:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=payload,
+                result=result,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
+                permanent_failure_reason=permanent_failure_reason,
             ),
         )
 
@@ -661,6 +677,24 @@ class PrincipalStore:
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
+            ),
+        )
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self._backend.write(
+            lambda transaction: outbox.record_permanent_failure(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                stage=stage,
+                reason=reason,
             ),
         )
 
@@ -850,6 +884,92 @@ class PrincipalStore:
             ),
         )
 
+    async def reserve_background_approval_card(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        run_id: str,
+        call_id: str,
+        expires_at_ns: int,
+        card: ApprovalCardReservation,
+    ) -> bool:
+        """Atomically reserve one exact background-call approval card."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.reserve_delivery(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                call_id=call_id,
+                expires_at_ns=expires_at_ns,
+                card=card,
+            ),
+        )
+
+    async def background_approval_decision(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None:
+        """Return one exact background call's terminal decision."""
+        return await self._backend.read(
+            lambda transaction: background_approvals.decision(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                call_id=call_id,
+            ),
+        )
+
+    async def resolve_background_approval_call(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        requested_status: Literal["denied", "expired"],
+        reason: str,
+    ) -> RecordedApprovalDecision:
+        """Resolve one exact background target through the shared card transaction."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.resolve_call(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                call_id=call_id,
+                requested_status=requested_status,
+                reason=reason,
+            ),
+        )
+
+    async def resolve_pending_background_approval_calls(
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int:
+        """Resolve every pending background target for one run atomically."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.resolve_pending_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+                reason=reason,
+            ),
+        )
+
+    async def prune_background_approvals(self, *, run_id: str) -> bool:
+        """Prune settled background targets after their cards have retired."""
+        return await self._backend.write(
+            lambda transaction: background_approvals.prune_calls(
+                transaction,
+                self._principal_id,
+                run_id=run_id,
+            ),
+        )
+
     async def resolve_continuation_approval_card(
         self,
         *,
@@ -860,7 +980,7 @@ class PrincipalStore:
     ) -> RecordedApprovalDecision:
         """Atomically record one native card and its exact-call decision."""
         return await self._backend.write(
-            lambda transaction: approvals.resolve_continuation(
+            lambda transaction: approvals.resolve_card(
                 transaction,
                 self._principal_id,
                 card_event_id=card_event_id,
@@ -877,7 +997,7 @@ class PrincipalStore:
     ) -> RecordedApprovalDecision:
         """Atomically expire a due call whose attempted card still lacks an event ID."""
         return await self._backend.write(
-            lambda transaction: approvals.resolve_continuation(
+            lambda transaction: approvals.resolve_card(
                 transaction,
                 self._principal_id,
                 card_event_id=None,
@@ -991,6 +1111,7 @@ class PrincipalStore:
         approval_id: str,
         *,
         runtime_generation: str,
+        legacy_show_tool_calls: bool | None = None,
     ) -> ApprovalContinuation | None:
         """Claim one ready paused run for exactly one response lifecycle."""
         return await self._backend.write(
@@ -999,6 +1120,7 @@ class PrincipalStore:
                 self._principal_id,
                 approval_id=approval_id,
                 runtime_generation=runtime_generation,
+                legacy_show_tool_calls=legacy_show_tool_calls,
             ),
         )
 
@@ -1010,6 +1132,9 @@ class PrincipalStore:
         run_id: str,
         session_id: str,
         calls: tuple[ApprovalCall, ...],
+        response_text: str | None = None,
+        response_tool_trace: tuple[dict[str, object], ...] | None = None,
+        response_presentation_state: dict[str, object] | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
         return await self._backend.write(
@@ -1021,6 +1146,9 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+                response_text=response_text,
+                response_tool_trace=response_tool_trace,
+                response_presentation_state=response_presentation_state,
             ),
         )
 
@@ -1063,7 +1191,7 @@ class PrincipalStore:
         )
 
     async def finish_approval_continuation(self, approval_id: str) -> bool:
-        """Settle one paused run only after its FINAL delivery is acknowledged."""
+        """Settle one paused run after its FINAL delivery reaches a terminal outcome."""
         return await self._backend.write(
             lambda transaction: approval_continuations.finish(
                 transaction,
@@ -1173,8 +1301,10 @@ def _enqueue_matrix_delivery(
     room_id: str,
     thread_id: str | None,
     payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
+    permanent_failure_reason: str | None,
 ) -> str | None:
     """Record delivery intent unless the membership that authorized it has ended.
 
@@ -1246,7 +1376,9 @@ def _enqueue_matrix_delivery(
         membership_epoch=membership_epoch,
         thread_id=thread_id,
         payload=payload,
+        result=result,
         edits_event_id=edits_event_id,
+        permanent_failure_reason=permanent_failure_reason,
     )
     if transaction_id is None:
         return None

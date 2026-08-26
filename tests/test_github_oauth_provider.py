@@ -10,10 +10,18 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+from authlib.common.errors import AuthlibBaseError
+
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    load_oauth_credentials_snapshot,
+    refresh_oauth_credentials,
+)
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.service import refresh_scoped_oauth_credentials
+from mindroom.oauth.providers import OAuthRefreshRejectedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -139,21 +147,67 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
         "token_type": "bearer",
     }
 
+    context = OAuthCredentialContext(
+        provider=_provider(),
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
     with patch(
         "mindroom.oauth.providers.AsyncOAuth2Client.refresh_token",
         new=AsyncMock(return_value=refresh_response),
     ):
-        refreshed = asyncio.run(
-            refresh_scoped_oauth_credentials(
-                _provider(),
-                runtime_paths,
-                credentials_manager=credentials_manager,
-                worker_target=None,
-            ),
-        )
+        refreshed = asyncio.run(refresh_oauth_credentials(context))
 
-    stored = credentials_manager.load_credentials("github_oauth")
+    stored = asyncio.run(load_oauth_credentials_snapshot(context)).credentials
     assert refreshed is not None
     assert refreshed["token"] == "rotated-access"  # noqa: S105
     assert refreshed["refresh_token"] == "rotated-refresh"  # noqa: S105
     assert stored == refreshed
+
+
+def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: Path) -> None:
+    """GitHub's structured terminal code must invalidate credentials without leaking its description."""
+    runtime_paths = _runtime_paths(tmp_path)
+    _save_client_config(runtime_paths)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials(
+        "github_oauth",
+        {
+            "token": "old-access",
+            "refresh_token": "old-refresh",
+            "client_id": "github-client-id",
+            "scopes": [],
+            "expires_at": 1.0,
+            "_source": "oauth",
+            "_oauth_provider": "github",
+        },
+    )
+    leaked_description = "provider-controlled account detail"
+
+    with (
+        patch(
+            "mindroom.oauth.providers.AsyncOAuth2Client.refresh_token",
+            new=AsyncMock(
+                side_effect=AuthlibBaseError(
+                    error="bad_refresh_token",
+                    description=leaked_description,
+                ),
+            ),
+        ),
+        pytest.raises(OAuthRefreshRejectedError) as exc_info,
+    ):
+        asyncio.run(
+            refresh_oauth_credentials(
+                OAuthCredentialContext(
+                    provider=_provider(),
+                    runtime_paths=runtime_paths,
+                    credentials_manager=credentials_manager,
+                    worker_target=None,
+                ),
+            ),
+        )
+
+    assert exc_info.value.oauth_error == "bad_refresh_token"
+    assert leaked_description not in str(exc_info.value)
+    assert credentials_manager.load_credentials("github_oauth") is None

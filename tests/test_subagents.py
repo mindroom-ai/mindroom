@@ -35,7 +35,12 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import (
+    delivered_matrix_side_effect,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+)
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -123,7 +128,7 @@ def _make_context(
             reply_to_event_id=None,
         ),
         requester_id=requester_id,
-        client=MagicMock(),
+        client=make_matrix_client_mock(),
         config=effective_config,
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),

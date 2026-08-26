@@ -1601,6 +1601,114 @@ async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
 
 
 @pytest.mark.asyncio
+async def test_delivery_recovery_drops_sync_request_context_before_transport(
+    tmp_path: Path,
+) -> None:
+    """A detached recovery worker must not retain its spawning sync generation."""
+    bot = _sliding_response_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://localhost",
+        "@code:localhost",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            store_sync_tokens=False,
+            backfill_limited_timelines=True,
+            backfill_persist_recovery=False,
+        ),
+    )
+    client.restore_login("@code:localhost", "DEVICEID", "token")
+    bot.client = client
+
+    recovery_started = asyncio.Event()
+    allow_recovery_request = asyncio.Event()
+    request_reached_transport = asyncio.Event()
+
+    async def request(*_args: object, **_kwargs: object) -> object:
+        request_reached_transport.set()
+        return object()
+
+    session = MagicMock()
+    session.request = AsyncMock(side_effect=request)
+    session.close = AsyncMock()
+    client.client_session = session
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        await allow_recovery_request.wait()
+        try:
+            await client.send("GET", "/_matrix/client/versions")
+        finally:
+            bot._sync_shutting_down = True
+            bot._delivery_recovery_wake.set()
+        return RecoveryOutcome(recovered=0, failed=0)
+
+    async def schedule_recovery_from_sync(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        bot._schedule_delivery_recovery()
+
+    room_id = "!room:localhost"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": "hello", "msgtype": "m.text"},
+            "event_id": "$message:localhost",
+            "origin_server_ts": 1,
+            "room_id": room_id,
+            "sender": "@alice:localhost",
+            "type": "m.room.message",
+        },
+    )
+    response = nio.SyncResponse(
+        next_batch="s_after",
+        rooms=nio.Rooms(
+            invite={},
+            join={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[event], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+            leave={},
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        account_data_events=[],
+    )
+
+    async def receive_sync_response(*_args: object, **_kwargs: object) -> nio.SyncResponse:
+        await client.receive_response(response)
+        return response
+
+    client.add_event_callback(schedule_recovery_from_sync, nio.RoomMessageText)
+    try:
+        with (
+            patch.object(client, "_send", new=receive_sync_response),
+            patch.object(
+                bot,
+                "_delivery_gateway",
+                new=SimpleNamespace(recover_deliveries=recover_deliveries),
+            ),
+        ):
+            await client.sync(timeout=0)
+            await asyncio.wait_for(recovery_started.wait(), timeout=1)
+            await client.reset_classic_sync_state()
+            allow_recovery_request.set()
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    finally:
+        bot._sync_shutting_down = True
+        allow_recovery_request.set()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        await client.close()
+
+    assert request_reached_transport.is_set()
+
+
+@pytest.mark.asyncio
 async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_response(
     tmp_path: Path,
 ) -> None:
@@ -2614,10 +2722,10 @@ async def test_startup_membership_publication_serializes_config_reload(
         if entity_name == ROUTER_AGENT_NAME:
             router_sync_started.set()
 
-    async def blocked_reload() -> bool:
+    async def blocked_config_load(*_args: object, **_kwargs: object) -> Config:
         reload_started.set()
         await reload_can_finish.wait()
-        return True
+        return orchestrator.config
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
@@ -2632,7 +2740,7 @@ async def test_startup_membership_publication_serializes_config_reload(
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
-        patch.object(orchestrator.config_reload, "_update_config", side_effect=blocked_reload),
+        patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
@@ -2652,7 +2760,7 @@ async def test_startup_membership_publication_serializes_config_reload(
             await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
             await asyncio.wait_for(reload_started.wait(), timeout=1.0)
-            assert orchestrator._response_admission_gate.closed
+            assert not orchestrator._response_admission_gate.closed
 
             reload_can_finish.set()
             await asyncio.wait_for(reload_task, timeout=1.0)
@@ -2676,7 +2784,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     """Hot reload during startup maintenance must not lose one-shot restart cleanup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = Config()
-    new_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
 
     plan = ConfigUpdatePlan(
         new_config=new_config,

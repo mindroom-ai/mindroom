@@ -19,9 +19,11 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
-from mindroom.config.calls import CallsConfig, RealtimeCallProfile
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
@@ -76,6 +78,26 @@ def _calls_for(
                 model=model,
                 credentials_service="openai",
                 voice=voice,
+            ),
+        },
+        agents={agent_name: "voice"},
+    )
+
+
+def _cascaded_calls_for(agent_name: str, *, model: str | None) -> CallsConfig:
+    speech_service = SpeechServiceConfig(
+        provider="openai_compatible",
+        model="local-speech",
+        host="http://127.0.0.1:9000",
+    )
+    return CallsConfig(
+        enabled=True,
+        profiles={
+            "voice": CascadedCallProfile(
+                backend="cascaded",
+                model=model,
+                stt=speech_service,
+                tts=speech_service,
             ),
         },
         agents={agent_name: "voice"},
@@ -708,6 +730,46 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
             await watcher_task
 
     assert reload_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication(tmp_path: Path) -> None:
+    """Command and watcher reloads share the fail-closed script boundary."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    order: list[str] = []
+
+    async def apply_update_plan(
+        _runtime: object,
+        plan: ConfigUpdatePlan,
+        *,
+        plugins_changed: bool = False,
+    ) -> None:
+        assert plan.new_config is config
+        assert plugins_changed is True
+        order.append("scripts")
+
+    async def complete_worker_replacement(_runtime: object) -> None:
+        order.append("complete")
+
+    def reload_current_plugins(_config: Config, _runtime_paths: object) -> PluginReloadResult:
+        order.append("plugins")
+        return PluginReloadResult(HookRegistry.empty(), (), 0)
+
+    with (
+        patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+        patch.object(
+            type(orchestrator.script_runtime),
+            "complete_worker_replacement",
+            new=complete_worker_replacement,
+        ),
+        patch("mindroom.orchestrator.reload_plugins", side_effect=reload_current_plugins),
+    ):
+        await orchestrator.reload_plugins_now(source="command")
+
+    assert order == ["scripts", "plugins", "complete"]
 
 
 def _plugin_watcher_race_runtime(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, Path, Path]:
@@ -1483,6 +1545,14 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
+    reloaded_config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1", tools=["mcp_demo"])},
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}},
+            defaults={"enable_streaming": False},
+        ),
+        tmp_path,
+    )
     apply_started = asyncio.Event()
     finish_apply = asyncio.Event()
 
@@ -1497,7 +1567,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
 
     reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
+        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=reloaded_config),
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
         patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
     ):
@@ -1579,11 +1649,18 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         )
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = config
     orchestrator.running = True
     orchestrator.agent_bots["agent1"] = bot
     # The orchestrator owns one shared gate that every managed bot admits through.
     bot.admission_gate = orchestrator.config_reload.response_admission_gate
-    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
+    reloaded_config = _runtime_bound_config(
+        config.model_copy(update={"defaults": config.defaults.model_copy(update={"enable_streaming": False})}),
+        tmp_path,
+    )
+    load_config_mock = MagicMock(return_value=reloaded_config)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
@@ -1602,13 +1679,14 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         assert task is not None
 
         await asyncio.sleep(0.05)
-        orchestrator.config_reload._update_config.assert_not_awaited()
+        load_config_mock.assert_called_once()
+        orchestrator.config_reload.apply_update_plan.assert_not_awaited()
 
         release_response.set()
         await asyncio.wait_for(response_task, timeout=1)
         await asyncio.wait_for(task, timeout=1)
 
-        orchestrator.config_reload._update_config.assert_awaited_once()
+        orchestrator.config_reload.apply_update_plan.assert_awaited_once()
     finally:
         release_response.set()
         await asyncio.gather(response_task, return_exceptions=True)
@@ -1935,7 +2013,7 @@ def test_config_update_plan_restarts_call_agent_when_profile_voice_changes() -> 
 
 
 def test_config_update_plan_restarts_call_agents_when_authorization_changes() -> None:
-    """Call managers restart so admission uses the current authorization rules."""
+    """Call tool contexts rebuild so authorization changes cannot leave stale policy."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -1966,7 +2044,7 @@ def test_config_update_plan_restarts_call_agents_when_authorization_changes() ->
 
 
 def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -> None:
-    """Call tool closures are rebuilt when any captured config policy changes."""
+    """Active call tool closures are rebuilt when their approval policy changes."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -1993,6 +2071,331 @@ def test_config_update_plan_restarts_call_agents_for_captured_policy_changes() -
     )
 
     assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_inherited_tools_change() -> None:
+    """An active call rebuilds when its effective default-provided tool surface changes."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=_calls_for("general"),
+            defaults={"tools": ["shell"]},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=_calls_for("general"),
+            defaults={"tools": []},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() -> None:
+    """An active call rebuilds when inherited worker routing changes for its tools."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=_calls_for("general"),
+            defaults={"tools": ["shell"], "worker_tools": ["shell"]},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            calls=_calls_for("general"),
+            defaults={"tools": ["shell"], "worker_tools": []},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_cascaded_call_agent_when_referenced_model_changes() -> None:
+    """An active cascaded call rebuilds when its named model definition changes."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "call": ModelConfig(provider="openai", id="old-model"),
+            },
+            calls=_cascaded_calls_for("general", model="call"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "call": ModelConfig(provider="openai", id="new-model"),
+            },
+            calls=_cascaded_calls_for("general", model="call"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_changes() -> None:
+    """Realtime call tooling rebuilds when the normal agent's model definition changes."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="old-model")},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="new-model")},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_model_changes() -> None:
+    """Implicit cascaded model selection rebuilds when configured room routing changes."""
+    models = {
+        "default": ModelConfig(provider="openai", id="default-model"),
+        "focused": ModelConfig(provider="openai", id="focused-model"),
+        "fast": ModelConfig(provider="openai", id="fast-model"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            models=models,
+            room_models={"lobby": "focused"},
+            calls=_cascaded_calls_for("general", model=None),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            models=models,
+            room_models={"lobby": "fast"},
+            calls=_cascaded_calls_for("general", model=None),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+@pytest.mark.parametrize(
+    "encryption_config",
+    [
+        {"matrix_room_access": {"encrypt_managed_rooms": True}},
+        {"rooms": {"lobby": {"encrypted": True}}},
+    ],
+)
+def test_config_update_plan_restarts_call_agents_when_room_encryption_policy_changes(
+    encryption_config: dict[str, object],
+) -> None:
+    """Call sessions must rebuild when their rooms switch to encrypted media."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+            **encryption_config,
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_knowledge_definition_changes() -> None:
+    """Active call tooling must not keep a captured stale knowledge definition."""
+    common = {
+        "agents": {
+            "general": AgentConfig(
+                display_name="General Agent",
+                knowledge_bases=["docs"],
+            ),
+        },
+        "calls": _calls_for("general"),
+        "router": RouterConfig(model="default"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            **common,
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./old-docs")},
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            **common,
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./new-docs")},
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+
+
+def test_config_update_plan_restarts_call_agent_when_its_rooms_change() -> None:
+    """Replacing a call agent must terminate sessions in rooms it leaves."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["project"])},
+            calls=_calls_for("general"),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general"}
+    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
+
+
+def test_config_update_plan_reconciles_agent_and_router_room_changes_without_restarts() -> None:
+    """Room-list edits should update memberships without replacing Matrix clients."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", rooms=["lobby"]),
+                "writer": AgentConfig(display_name="Writer Agent", rooms=["writers"]),
+            },
+            teams={
+                "editors": TeamConfig(
+                    display_name="Editors",
+                    role="Edit documents",
+                    agents=["writer"],
+                    rooms=["reviews"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", rooms=["project"]),
+                "writer": AgentConfig(display_name="Writer Agent", rooms=["writers"]),
+            },
+            teams={
+                "editors": TeamConfig(
+                    display_name="Editors",
+                    role="Edit documents",
+                    agents=["writer"],
+                    rooms=["published"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "general", "writer", "editors"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME, "general", "editors"}
+    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_stops_call_agents_when_calls_are_disabled() -> None:
@@ -3039,6 +3442,9 @@ async def test_shutdown_during_active_drain_cancels_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    current_config = _runtime_bound_config(Config(), tmp_path)
+    reloaded_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
+    orchestrator.config = current_config
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -3046,18 +3452,21 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.agent_bots["agent1"] = mock_bot
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
-    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
+    load_config_mock = MagicMock(return_value=reloaded_config)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task
     assert task is not None
 
     # Let the drain loop start polling
     await asyncio.sleep(0.05)
-    orchestrator.config_reload._update_config.assert_not_awaited()
+    load_config_mock.assert_called_once()
+    orchestrator.config_reload.apply_update_plan.assert_not_awaited()
 
     # Shutdown
     await orchestrator.stop()
 
     # The reload task should have been cancelled
     assert task.done()
-    orchestrator.config_reload._update_config.assert_not_awaited()
+    orchestrator.config_reload.apply_update_plan.assert_not_awaited()

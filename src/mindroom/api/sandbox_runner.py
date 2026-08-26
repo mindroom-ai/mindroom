@@ -69,8 +69,10 @@ from mindroom.tool_system.worker_routing import (
     build_worker_target_from_runtime_env,
     resolved_worker_key_scope,
     tool_execution_identity,
+    visible_state_roots_for_worker_key,
 )
 from mindroom.workers.backends.local import get_local_worker_manager
+from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -560,6 +562,48 @@ def app_runtime_config(app: FastAPI) -> Config:
     return _app_context(app).config
 
 
+def resolve_script_state_workspace(
+    app: FastAPI,
+    *,
+    state_scope_worker_key: str,
+    agent_name: str,
+    private_agent_names: frozenset[str],
+) -> Path:
+    """Resolve the canonical agent workspace projected into one script worker."""
+    runtime_paths = app_runtime_paths(app)
+    config = app_runtime_config(app)
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None:
+        msg = "Script state scope does not resolve an agent workspace."
+        raise ValueError(msg)
+    is_private = agent_config.private is not None
+    if (agent_name in private_agent_names) != is_private:
+        msg = "Script state scope does not match private-agent visibility."
+        raise ValueError(msg)
+    state_roots = visible_state_roots_for_worker_key(
+        sandbox_exec.runner_storage_root(runtime_paths),
+        state_scope_worker_key,
+        private_agent_names=private_agent_names,
+    )
+    if len(state_roots) != 1:
+        msg = "Script state scope does not resolve one agent workspace."
+        raise ValueError(msg)
+    state_root = state_roots[0].resolve()
+    resolved_workspace = resolve_agent_workspace_from_state_path(
+        agent_name,
+        config,
+        runtime_paths=runtime_paths,
+        state_storage_path=state_root,
+        use_state_storage_path=is_private,
+    )
+    workspace = (resolved_workspace.root if resolved_workspace is not None else state_root / "workspace").resolve()
+    if not workspace.is_relative_to(state_root):
+        msg = "Script workspace escapes its mounted state scope."
+        raise ValueError(msg)
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
 def _app_tool_metadata(app: FastAPI) -> dict[str, Any]:
     return _app_context(app).tool_metadata
 
@@ -575,10 +619,11 @@ def app_runner_token(app: FastAPI) -> str | None:
     return runner_token
 
 
-async def _validate_runner_token(
+async def validate_runner_token(
     request: Request,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> None:
+    """Reject requests that do not carry the configured runner token."""
     proxy_token = app_runner_token(request.app)
     if proxy_token is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
@@ -589,7 +634,7 @@ async def _validate_runner_token(
 router = APIRouter(
     prefix="/api/sandbox-runner",
     tags=["sandbox-runner"],
-    dependencies=[Depends(_validate_runner_token)],
+    dependencies=[Depends(validate_runner_token)],
 )
 
 
@@ -710,6 +755,7 @@ def _resolve_entrypoint(
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
+            authorization=config.authorization,
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,

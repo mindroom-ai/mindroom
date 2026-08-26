@@ -96,6 +96,27 @@ class _BoundHookMatrixAdmin:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
 
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+        response = await self.client.get_profile(user_id)
+        if isinstance(response, nio.ProfileGetResponse):
+            return response.avatar_url or None
+        return None
+
+    async def get_room_state_event(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return one state event while distinguishing missing from unreadable."""
+        response = await self.client.room_get_state_event(room_id, event_type, state_key)
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            return True, response.content
+        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+            return True, None
+        return False, None
+
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room under an existing Matrix Space."""
         server_name = extract_server_name_from_homeserver(

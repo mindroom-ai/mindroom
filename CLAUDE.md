@@ -120,6 +120,12 @@ Matrix sync callback
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval_response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
+| `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
+| `oauth/credential_store.py` | Per-scope SQLite OAuth credential storage, revisions, legacy adoption, and reset receipts |
+| `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
+| `oauth/reset_execution.py` | MCP retirement and durable reset execution |
+| `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
@@ -138,12 +144,14 @@ Matrix sync callback
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
-| `scheduling_executor.py` | Fire one scheduled task: hook emission, message build, Matrix delivery, failure notices |
+| `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
+| `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
+| `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |

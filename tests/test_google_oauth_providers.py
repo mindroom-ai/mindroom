@@ -26,13 +26,16 @@ from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    OAuthClientConfig,
     OAuthConnectionRequired,
     OAuthProviderError,
+    is_terminal_oauth_refresh_error_code,
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_reconnect_instruction
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -51,6 +54,21 @@ GOOGLE_NARROW_EXTRA_AUTH_PARAMS = {
     "access_type": "offline",
     "prompt": "consent",
 }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("invalid_grant", True),
+        (" Invalid_Refresh_Token ", True),
+        ("bad_refresh_token", True),
+        ("temporarily_unavailable", False),
+        (None, False),
+    ],
+)
+def test_terminal_oauth_refresh_error_classification(value: object, expected: bool) -> None:
+    """All refresh paths should share one normalized terminal-code policy."""
+    assert is_terminal_oauth_refresh_error_code(value) is expected
 
 
 @pytest.mark.parametrize(
@@ -219,6 +237,53 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
     assert provider.token_parser is _google_token_parser
 
 
+def test_google_token_parser_bounds_identity_certificate_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity verification must not outlive the credential transaction lock budget."""
+    captured_timeouts: list[object] = []
+
+    class _Request:
+        def __call__(
+            self,
+            _url: str,
+            *,
+            method: str = "GET",
+            timeout: float = 120.0,
+        ) -> object:
+            assert method == "GET"
+            captured_timeouts.append(timeout)
+            return object()
+
+    def verify_token(
+        _id_token: str,
+        request: Callable[..., object],
+        _audience: str,
+    ) -> dict[str, object]:
+        request("https://www.googleapis.com/oauth2/v1/certs", method="GET")
+        return {"sub": "subject-1", "email": "alice@example.com", "email_verified": True}
+
+    monkeypatch.setattr("mindroom.oauth.google.GoogleRequest", _Request)
+    monkeypatch.setattr("mindroom.oauth.google.google_id_token.verify_oauth2_token", verify_token)
+    provider = google_drive_oauth_provider()
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    result = _google_token_parser(
+        provider,
+        {"access_token": "access-token", "id_token": "identity-token"},
+        OAuthClientConfig(
+            client_id="client-id",
+            client_secret=PROVISIONED_CLIENT_SECRET,
+            redirect_uri="http://localhost:8765/api/oauth/google_drive/callback",
+        ),
+        runtime_paths,
+    )
+
+    assert result.claims["sub"] == "subject-1"
+    assert captured_timeouts == [20.0]
+
+
 def _install_provisioning_transport(
     monkeypatch: pytest.MonkeyPatch,
     provisioning_url: str = "https://provisioning.example",
@@ -357,7 +422,18 @@ def test_google_oauth_provider_keeps_cached_client_after_unpairing(tmp_path: Pat
     assert manager.load_credentials("google_oauth_client") == stale_credentials
 
 
-@pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "localhost",
+        "localhost.",
+        "app.localhost",
+        "127.0.0.1",
+        "127.0.0.2",
+        "[::1]",
+        "[::ffff:127.0.0.2]",
+    ],
+)
 def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -380,13 +456,17 @@ def test_google_oauth_provider_allows_http_provisioning_only_on_loopback(
     assert resolution is not None
 
 
-def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "hostname",
+    ["provisioning.example", "2130706433", "127.1", "0x7f000001", "1.1", "0x08080808"],
+)
+def test_google_oauth_provider_rejects_remote_http_provisioning(tmp_path: Path, hostname: str) -> None:
     """Pairing credentials must never be sent to a plaintext remote endpoint."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={
-            "MINDROOM_PROVISIONING_URL": "http://provisioning.example",
+            "MINDROOM_PROVISIONING_URL": f"http://{hostname}",
             "MINDROOM_LOCAL_CLIENT_ID": "local-client",
             "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
         },
@@ -541,6 +621,7 @@ def test_build_oauth_reconnect_instruction_explains_loopback_device_handoff() ->
         "Google Drive session for this agent expired or is no longer valid. "
         "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
         "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-        "link into that browser. After reconnecting, retry the request: "
+        "link into that browser. After reconnecting, retry the request. "
+        "This link is valid for 10 minutes; if it expires, rerun the original request for a fresh link: "
         f"{connect_url}"
     )

@@ -31,6 +31,7 @@ class EventKind(StrEnum):
 
     MESSAGE = "message"
     MEDIA = "media"
+    SCHEDULE_TRIGGER = "schedule_trigger"
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
@@ -47,7 +48,7 @@ class EventKind(StrEnum):
 # pending alone does not mean that. Thread membership is derived from content
 # for every kind alike, so a pending reaction, approval, or undecryptable
 # message can sit in a thread and be mistaken for an unanswered turn.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA})
+TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
 
 
 class SemanticConsumer(StrEnum):
@@ -335,6 +336,9 @@ class MatrixDelivery:
     # The scan key recovery pages on. Without it a pass that fails a whole page
     # re-reads the same page forever and never reaches what is behind it.
     created_at_ns: int
+    # Semantic facts retained locally for post-acknowledgement recovery. They
+    # are intentionally separate from ``payload``, which is Matrix wire data.
+    result: Mapping[str, object] | None = None
     event_type: str = "m.room.message"
     # Whether this row has already been offered to the homeserver. Together
     # with the device below it answers the only question a resend needs: can
@@ -344,11 +348,19 @@ class MatrixDelivery:
     # An obsolete delivery stays as an identity tombstone so late work cannot
     # cross into a newer membership, but recovery never sends it again.
     retired: bool = False
+    # A definitive refusal of this immutable payload. Unlike retirement, this
+    # records a delivery failure rather than an obsolete membership identity.
+    permanent_failure_reason: str | None = None
     # The device that offered it, or None when none is recorded. A Matrix
     # transaction ID deduplicates within one device, so a row attempted by a
     # device this process is no longer logged in as carries an ID the
     # homeserver would accept as new.
     sending_device_id: str | None = None
+
+    @property
+    def permanently_failed(self) -> bool:
+        """Return whether this immutable payload has a terminal refusal."""
+        return self.permanent_failure_reason is not None
 
     @property
     def has_interactive_prompt(self) -> bool:

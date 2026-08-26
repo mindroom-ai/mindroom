@@ -569,9 +569,12 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
 Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
+`get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
+`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
+Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 
 ### Transport objects
@@ -697,6 +700,8 @@ ToolAfterCallContext(
 
 For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
 This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
+Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
+Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
 
 ## Testing
 

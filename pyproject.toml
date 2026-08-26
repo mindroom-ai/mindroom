@@ -36,6 +36,7 @@ dependencies = [
   "groq>=0.31",
   "httpx>=0.27",
   "humanize>=4.12.3",
+  "idna>=3.13",
   "jinja2>=3.1",
   "json5>=0.13",
   "markdown-it-py>=4",
@@ -302,6 +303,7 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+oauth_connections = []
 openai = [
   "openai",
 ]
@@ -339,6 +341,7 @@ resend = [
   "resend",
 ]
 scheduler = []
+script = []
 scrapegraph = [
   "scrapegraph-py>=2.1",
 ]

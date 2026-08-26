@@ -82,6 +82,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
     ),
     dependencies=[

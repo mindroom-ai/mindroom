@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import nio
 from typing_extensions import TypeIs
 
+from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     AdmissionResult,
     DeliveryProjectionPendingError,
@@ -71,6 +72,11 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
 
 
+def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+    """Return whether one event is an internal silent schedule trigger."""
+    return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
+
+
 # Ordered: the first matching rule owns the event. Media is matched before the
 # general message rule because every media class subclasses `RoomMessage` and
 # would otherwise be swallowed by it, and both are matched before the approval
@@ -93,6 +99,7 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # `TEXTUAL_MESSAGE_EVENT_TYPE`'s. Generalizing here while `journal_dispatch`
     # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
+    (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
     (_is_tool_approval_response, EventKind.APPROVAL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
 )
@@ -329,6 +336,9 @@ class JournalIngress:
     # recognized as transport. Deliberately not the journal principal, which
     # prefixes the agent name and would therefore never match a sender.
     self_sender: str
+    # Custom schedule triggers are invisible transport, so only a managed
+    # automation sender may introduce one into the durable journal.
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
     on_admitted: Callable[[], None] = lambda: None
     # Room-membership events are only MindRoom's to act on once the router is
     # ready for them, which the timeline callback cannot decide for itself.
@@ -354,6 +364,8 @@ class JournalIngress:
     def _admission_kind(self, event: nio.Event) -> EventKind | None:
         """Return the kind this event is admitted as, or nothing."""
         kind = _event_kind(event)
+        if kind is EventKind.SCHEDULE_TRIGGER and not self.schedule_trigger_sender_is_managed(event.sender):
+            return None
         if (
             kind is None
             and isinstance(event, nio.RoomMemberEvent)

@@ -9,6 +9,7 @@ index metadata.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shlex
@@ -27,6 +28,7 @@ from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
+from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_url_credentials
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
@@ -47,6 +49,39 @@ from tests.knowledge_test_support import (
 )
 
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
+
+
+def _github_app_manager(tmp_path: Path, *, lfs: bool = False) -> tuple[KnowledgeManager, KnowledgeGitConfig]:
+    knowledge_path = tmp_path / "knowledge"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        branch="main",
+        credentials_service="github_app",
+        lfs=lfs,
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": knowledge_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "github_app",
+        {
+            "auth_type": "github_app",
+            "app_id": 12345,
+            "installation_id": 67890,
+            "private_key_file": "/run/secrets/github-app/private-key.pem",
+        },
+    )
+    return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths), git_config
+
+
+def _assert_github_app_auth_env(env: dict[str, str] | None) -> None:
+    assert env is not None
+    encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    assert base64.b64decode(encoded).decode() == "x-access-token:installation-token"
 
 
 def _git_manager(
@@ -483,6 +518,196 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
 
 
 @pytest.mark.asyncio
+async def test_git_clone_resolves_github_app_credentials_for_each_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial clone must mint App credentials immediately before Git runs."""
+    manager, git_config = _github_app_manager(tmp_path)
+    clone_envs: list[dict[str, str] | None] = []
+    resolved: list[tuple[str, dict[str, object]]] = []
+
+    async def _resolve(
+        _self: GitHubAppTokenProvider,
+        repo_url: str,
+        credentials: dict[str, object],
+    ) -> tuple[str, str]:
+        resolved.append((repo_url, credentials))
+        return "x-access-token", "installation-token"
+
+    async def _run_git(
+        _self: GitKnowledgeSource,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = cwd
+        if args[0] == "clone":
+            clone_envs.append(env)
+        return ""
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "resolve", _resolve)
+    monkeypatch.setattr(GitKnowledgeSource, "_run_git", _run_git)
+
+    assert await manager.git_source._ensure_repository(git_config) is True
+
+    assert len(resolved) == 1
+    assert resolved[0][0] == git_config.repo_url
+    assert resolved[0][1]["installation_id"] == 67890
+    _assert_github_app_auth_env(clone_envs[0])
+
+
+@pytest.mark.asyncio
+async def test_git_fetch_resolves_github_app_credentials_for_each_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every fetch must resolve App credentials so expired tokens can refresh."""
+    manager, git_config = _github_app_manager(tmp_path)
+    fetch_envs: list[dict[str, str] | None] = []
+    resolve_count = 0
+
+    async def _resolve(
+        _self: GitHubAppTokenProvider,
+        _repo_url: str,
+        _credentials: dict[str, object],
+    ) -> tuple[str, str]:
+        nonlocal resolve_count
+        resolve_count += 1
+        return "x-access-token", "installation-token"
+
+    async def _ensure_repository(_git_config: KnowledgeGitConfig) -> bool:
+        return False
+
+    async def _rev_parse(ref: str) -> str | None:
+        return "same-head" if ref in {"HEAD", "origin/main"} else None
+
+    async def _run_git(
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = cwd
+        if args[0] == "fetch":
+            fetch_envs.append(env)
+        return ""
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "resolve", _resolve)
+    monkeypatch.setattr(manager.git_source, "_ensure_repository", _ensure_repository)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+    monkeypatch.setattr(manager.git_source, "_run_git", _run_git)
+
+    changed, removed, updated = await manager.git_source._sync_once(git_config)
+
+    assert (changed, removed, updated) == (set(), set(), False)
+    assert resolve_count == 1
+    _assert_github_app_auth_env(fetch_envs[0])
+
+
+@pytest.mark.asyncio
+async def test_git_lfs_pull_resolves_github_app_credentials_for_each_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git LFS pulls must use the same refreshable App credential path."""
+    manager, git_config = _github_app_manager(tmp_path, lfs=True)
+    lfs_envs: list[dict[str, str] | None] = []
+    resolve_count = 0
+
+    async def _resolve(
+        _self: GitHubAppTokenProvider,
+        _repo_url: str,
+        _credentials: dict[str, object],
+    ) -> tuple[str, str]:
+        nonlocal resolve_count
+        resolve_count += 1
+        return "x-access-token", "installation-token"
+
+    async def _rev_parse(_ref: str) -> str | None:
+        return "head"
+
+    async def _run_git(
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = cwd
+        if args[:2] == ["lfs", "pull"]:
+            lfs_envs.append(env)
+        return ""
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "resolve", _resolve)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _rev_parse)
+    monkeypatch.setattr(manager.git_source, "_run_git", _run_git)
+
+    await manager.git_source._hydrate_lfs_worktree(git_config)
+
+    assert resolve_count == 1
+    _assert_github_app_auth_env(lfs_envs[0])
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "git@github.com:example/private.git",
+        "https://embedded-token@github.com/example/private.git",
+        "https://example.com/example/private.git",
+        "not-a-remote",
+    ],
+)
+@pytest.mark.asyncio
+async def test_github_app_credentials_fail_closed_for_noncanonical_remotes(
+    tmp_path: Path,
+    repo_url: str,
+) -> None:
+    """Selecting App auth must never fall back to ambient or embedded credentials."""
+    manager, _git_config = _github_app_manager(tmp_path)
+
+    with pytest.raises(ValueError, match=r"canonical https://github.com"):
+        await knowledge_git_source_module._resolved_git_auth_env(
+            repo_url,
+            "github_app",
+            manager.runtime_paths,
+            manager.git_source._github_app_token_provider,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolved_git_auth_loads_static_credentials_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspecting auth type must reuse the same static credential snapshot."""
+    manager, _git_config = _github_app_manager(tmp_path)
+    credentials_manager = get_runtime_shared_credentials_manager(manager.runtime_paths)
+    credentials_manager.save_credentials("github_app", {"token": "static-token"})
+    real_load_credentials = credentials_manager.load_credentials
+    load_count = 0
+
+    def _load_credentials(service: str) -> dict[str, object] | None:
+        nonlocal load_count
+        load_count += 1
+        return real_load_credentials(service)
+
+    monkeypatch.setattr(credentials_manager, "load_credentials", _load_credentials)
+
+    env = await knowledge_git_source_module._resolved_git_auth_env(
+        "https://github.com/example/private.git",
+        "github_app",
+        manager.runtime_paths,
+        manager.git_source._github_app_token_provider,
+    )
+
+    assert load_count == 1
+    assert env is not None
+    encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    assert base64.b64decode(encoded).decode() == "x-access-token:static-token"
+
+
+@pytest.mark.asyncio
 async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -595,7 +820,7 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
     serialized_clone_call = json.dumps({"args": clone_args, "env": clone_env}, sort_keys=True)
 
     assert result.index_published is True
-    assert clone_env is None
+    assert clone_env == {"GIT_LFS_SKIP_SMUDGE": "1"}
     assert clean_url in clone_args
     assert raw_url not in serialized_clone_call
     assert "secret-token" not in serialized_clone_call
@@ -1325,12 +1550,21 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
 
 
 @pytest.mark.asyncio
-async def test_sync_git_source_once_pulls_lfs_after_reset(
+@pytest.mark.parametrize(
+    ("lfs", "expects_lfs_pull"),
+    [
+        pytest.param(True, True, id="lfs-enabled"),
+        pytest.param(False, False, id="lfs-disabled"),
+    ],
+)
+async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lfs: bool,
+    expects_lfs_pull: bool,
 ) -> None:
-    """LFS-enabled repos should explicitly pull LFS objects after resetting to the remote branch."""
-    manager = _git_manager(tmp_path, lfs=True)
+    """Updates should suppress implicit smudging and hydrate only when LFS is enabled."""
+    manager = _git_manager(tmp_path, lfs=lfs)
     git_calls: list[list[str]] = []
     git_envs: list[tuple[list[str], dict[str, str] | None]] = []
 
@@ -1371,7 +1605,7 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
     assert updated is True
     assert changed_files == {"doc.md"}
     assert removed_files == set()
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
     assert (
         ["checkout", "--force", "-B", "main", "origin/main"],
         {"GIT_LFS_SKIP_SMUDGE": "1"},
@@ -1424,12 +1658,21 @@ async def test_ensure_git_lfs_available_raises_clear_runtime_error(
 
 
 @pytest.mark.asyncio
-async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
+@pytest.mark.parametrize(
+    ("lfs", "expects_lfs_pull"),
+    [
+        pytest.param(True, True, id="lfs-enabled"),
+        pytest.param(False, False, id="lfs-disabled"),
+    ],
+)
+async def test_ensure_git_repository_clones_with_explicit_lfs_hydration_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lfs: bool,
+    expects_lfs_pull: bool,
 ) -> None:
-    """Initial LFS clones should hydrate even if an old hydrated-head marker matches the cloned commit."""
-    manager = _git_manager(tmp_path, lfs=True)
+    """Clones should suppress implicit smudging and hydrate only when LFS is enabled."""
+    manager = _git_manager(tmp_path, lfs=lfs)
     clone_envs: list[dict[str, str] | None] = []
     git_calls: list[list[str]] = []
     manager.git_source.lfs_hydrated_head_path.write_text("same", encoding="utf-8")
@@ -1456,7 +1699,7 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
 
     assert cloned is True
     assert clone_envs == [{"GIT_LFS_SKIP_SMUDGE": "1"}]
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
 
 
 @pytest.mark.asyncio

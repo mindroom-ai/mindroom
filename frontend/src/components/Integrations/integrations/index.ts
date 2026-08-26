@@ -31,6 +31,7 @@ type OAuthStatus = {
   clientConfigService?: string;
   clientConfigRedirectUriSupported: boolean;
   toolConfigService?: string;
+  resetRequired: boolean;
   statusError?: string;
 };
 
@@ -90,9 +91,11 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     const integrationStatus: Partial<Integration> = {
       status: status.connected
         ? "connected"
-        : status.hasClientConfig
-          ? "available"
-          : "not_connected",
+        : status.resetRequired
+          ? "not_connected"
+          : status.hasClientConfig
+            ? "available"
+            : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
       oauth_custom_client_configured: status.hasCustomClientConfig,
@@ -100,8 +103,13 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       oauth_client_redirect_uri_supported:
         status.clientConfigRedirectUriSupported,
       oauth_service_account_configured: status.hasServiceAccountConfig,
+      oauth_reset_required: status.resetRequired,
       config_service: status.toolConfigService,
     };
+    if (status.resetRequired) {
+      integrationStatus.helper_text =
+        "Stored OAuth credentials cannot be read. Reset the OAuth connection to remove them.";
+    }
     if (status.statusError) {
       integrationStatus.helper_text = status.statusError;
       integrationStatus.status_error = status.statusError;
@@ -185,6 +193,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           hasCustomClientConfig: false,
           hasServiceAccountConfig: false,
           clientConfigRedirectUriSupported: false,
+          resetRequired: false,
           statusError: detail,
         };
       }
@@ -194,6 +203,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         hasClientConfig: data.has_client_config === true,
         hasCustomClientConfig: data.has_custom_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
+        resetRequired: data.reset_required === true,
         clientConfigRedirectUriSupported:
           data.client_config_redirect_uri_supported === true,
         clientConfigService:
@@ -213,6 +223,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         hasCustomClientConfig: false,
         hasServiceAccountConfig: false,
         clientConfigRedirectUriSupported: false,
+        resetRequired: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
       };
     }

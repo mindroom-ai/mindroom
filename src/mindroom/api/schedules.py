@@ -53,6 +53,7 @@ class ScheduledTaskResponse(BaseModel):
     history_limit: int | None = None
     thread_id: str | None = None
     new_thread: bool
+    silent: bool
     created_by: str | None = None
     created_at: datetime | None = None
 
@@ -73,6 +74,7 @@ class UpdateScheduleRequest(BaseModel):
     schedule_type: Literal["once", "cron"] | None = None
     execute_at: datetime | None = None
     cron_expression: str | None = None
+    silent: bool | None = None
 
 
 class CancelScheduleResponse(BaseModel):
@@ -188,6 +190,7 @@ async def update_schedule(
                 schedule_type=request.schedule_type,
                 execute_at=request.execute_at,
                 cron_expression=request.cron_expression,
+                silent=request.silent,
             )
             updated_task = await save_edited_scheduled_task(
                 client=client,

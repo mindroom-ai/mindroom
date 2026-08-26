@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import Context
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
@@ -714,6 +715,11 @@ class AgentBot:
                 turn_has_live_claim=self._turn_store.has_live_turn_claim,
             ),
             room_for_id=self._room_for_journal_event,
+            # Resolved late because ingress validation is built below this
+            # dispatcher; callbacks cannot run until bot initialization ends.
+            schedule_trigger_sender_is_managed=(
+                lambda sender: self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
+            ),
             on_persist_failure=self._record_dispatch_persist_failure,
             on_delivery_recovery_needed=self._schedule_delivery_recovery,
             room_lifecycle_admission_enabled=lambda: (
@@ -1683,6 +1689,8 @@ class AgentBot:
             self._run_scheduled_delivery_recovery(),
             name=f"delivery_recovery_{self.agent_name}",
             owner=self._runtime_view,
+            # Recovery outlives the sync request generation, so it must not inherit that context.
+            context=Context(),
         )
 
     async def _run_scheduled_delivery_recovery(self) -> None:

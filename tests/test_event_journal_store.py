@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 import pytest_asyncio
 
+from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.event_journal import (
     AdmissionResult,
     ApprovalCall,
@@ -110,6 +111,18 @@ CREATE TABLE matrix_delivery_outbox (
     edits_event_id TEXT, edit_target_pending INTEGER NOT NULL DEFAULT 0,
     attempted INTEGER NOT NULL DEFAULT 0, sending_device_id TEXT,
     acknowledged_event_id TEXT, created_at_ns BIGINT NOT NULL,
+    PRIMARY KEY (principal_id, delivery_id, stage)
+)
+"""
+_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL = """
+CREATE TABLE matrix_delivery_outbox (
+    principal_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+    stage TEXT NOT NULL, event_type TEXT NOT NULL, room_id TEXT NOT NULL,
+    membership_epoch BIGINT NOT NULL, thread_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+    edits_event_id TEXT, edit_target_pending INTEGER NOT NULL DEFAULT 0,
+    attempted INTEGER NOT NULL DEFAULT 0, retired INTEGER NOT NULL DEFAULT 0,
+    sending_device_id TEXT, acknowledged_event_id TEXT, created_at_ns BIGINT NOT NULL,
     PRIMARY KEY (principal_id, delivery_id, stage)
 )
 """
@@ -5557,8 +5570,61 @@ class TestOutbox:
         assert claimed is not None
         assert claimed.payload["body"] == "final"
 
-    async def test_claiming_freezes_the_payload(self, alice: PrincipalStore) -> None:
-        """Claiming freezes the payload.
+    async def test_an_unattempted_delivery_replaces_its_local_result(self, alice: PrincipalStore) -> None:
+        """Wire content and its local semantic result change atomically before claim."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("draft preview"),
+            result={"body": "draft full result"},
+        )
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("final preview"),
+            result={"body": "final full result"},
+        )
+
+        claimed = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert claimed is not None
+        assert claimed.payload["body"] == "final preview"
+        assert claimed.result == {"body": "final full result"}
+
+    @pytest.mark.parametrize("marker_version", [2, 3])
+    async def test_a_compatibility_marker_does_not_replace_the_local_result(
+        self,
+        alice: PrincipalStore,
+        marker_version: int,
+    ) -> None:
+        """Every version-only old-reader sentinel defers to the semantic result."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={
+                "msgtype": "m.text",
+                "body": "preview",
+                DURABLE_FINAL_OUTCOME_KEY: {"version": marker_version},
+            },
+            result={"body": "full result", "interactive": None},
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.result == {"body": "full result", "interactive": None}
+
+    async def test_claiming_freezes_the_payload_and_rejects_a_late_preflight_failure(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Claiming freezes the payload and its live delivery state.
 
         The case this closes: Matrix accepted the old text, and the regenerated
         text could never become visible under the same transaction ID.
@@ -5578,11 +5644,101 @@ class TestOutbox:
             room_id=ROOM,
             thread_id=None,
             payload=text("regenerated"),
+            permanent_failure_reason="regenerated payload cannot fit",
         )
 
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.payload["body"] == "sent"
+        assert not stored.permanently_failed
+
+    async def test_claiming_freezes_the_local_result_with_the_payload(self, alice: PrincipalStore) -> None:
+        """A regenerated turn cannot pair old wire bytes with new recovery facts."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent preview"),
+            result={"body": "sent full result"},
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated preview"),
+            result={"body": "regenerated full result"},
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.payload["body"] == "sent preview"
+        assert stored.result == {"body": "sent full result"}
+
+    async def test_legacy_inline_final_result_remains_recoverable(self, alice: PrincipalStore) -> None:
+        """Rows written before local result storage retain their semantic outcome."""
+        legacy_result = {"body": "legacy full result", "interactive": None}
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={
+                "msgtype": "m.text",
+                "body": "* legacy preview",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "legacy preview",
+                    DURABLE_FINAL_OUTCOME_KEY: legacy_result,
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+            },
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.result == legacy_result
+
+    async def test_a_legacy_reenqueue_replaces_a_new_writers_local_result(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The result read after a rolling-version rewrite belongs to its payload."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("new-writer preview"),
+            result={"body": "new-writer full result", "interactive": None},
+        )
+        legacy_result = {"body": "legacy-writer full result", "interactive": None}
+        legacy_payload = {
+            "msgtype": "m.text",
+            "body": "legacy-writer preview",
+            DURABLE_FINAL_OUTCOME_KEY: legacy_result,
+        }
+
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE matrix_delivery_outbox
+                SET payload_json = ?
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+                """,
+                (json.dumps(legacy_payload), "agent@alice", "turn-1", "final"),
+            ),
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.payload["body"] == "legacy-writer preview"
+        assert stored.result == legacy_result
 
     async def test_reclaiming_sends_the_identical_delivery(self, alice: PrincipalStore) -> None:
         """Everything that goes on the wire is frozen; the claim state is not.
@@ -5643,6 +5799,128 @@ class TestOutbox:
         )
 
         assert await alice.unacknowledged_matrix_deliveries() == ()
+
+    async def test_permanently_failed_matrix_delivery_is_not_replayable(self, alice: PrincipalStore) -> None:
+        """A deterministic refusal remains inspectable without becoming recovery work."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        acknowledged_event_id = await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert acknowledged_event_id is None
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+        assert await alice.unacknowledged_matrix_deliveries() == ()
+        assert await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL) is None
+
+    async def test_preflight_failure_atomically_hands_sources_to_terminal_state(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A locally impossible payload and its source ownership commit together."""
+        await admit(alice, "$turn")
+
+        transaction_id = await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("unrepresentable"),
+            settle_source_event_ids=("$turn",),
+            permanent_failure_reason="matrix event exceeds the hard size limit",
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert transaction_id is not None
+        assert stored is not None
+        assert stored.permanent_failure_reason == "matrix event exceeds the hard size limit"
+        assert not stored.attempted
+        assert not await alice.is_pending("$turn")
+        assert await alice.unacknowledged_matrix_deliveries() == ()
+        assert await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL) is None
+
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$turn",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("regenerated"),
+        )
+
+        retained = await alice.load_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+        assert retained is not None
+        assert retained.payload["body"] == "unrepresentable"
+        assert retained.permanent_failure_reason == "matrix event exceeds the hard size limit"
+
+    async def test_permanently_failed_initial_does_not_block_standalone_final(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A refused placeholder cannot strand a final that does not need it."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.INITIAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.INITIAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("finished"),
+        )
+
+        final = await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert final is not None
+        assert final.edits_event_id is None
+
+    async def test_acknowledgement_supersedes_a_concurrent_permanent_failure(self, alice: PrincipalStore) -> None:
+        """A visible event is stronger evidence than a racing refusal."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("sent"),
+        )
+        await alice.claim_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$sent",
+            delivered_projections=(),
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$sent"
+        assert stored.permanent_failure_reason is None
 
     async def test_acknowledgement_keeps_the_first_event_id(self, alice: PrincipalStore) -> None:
         """Acknowledgement keeps the first event id."""
@@ -5756,6 +6034,84 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
+    async def test_background_call_uses_shared_card_dispatch_and_retirement(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Both database backends preserve the extracted exact-call transaction."""
+        router = journal_store.principal("router@shared")
+        assert await router.reserve_background_approval_card(
+            room_id=ROOM,
+            thread_id="$thread",
+            run_id="background-run-1",
+            call_id="background-call-1",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+            card=ApprovalCardReservation(
+                delivery_id="background-card-1",
+                tool_call_id="background-call-1",
+                event_type="io.mindroom.tool_approval",
+                payload={
+                    "approval_target": "background_script",
+                    "background_run_id": "background-run-1",
+                    "background_call_id": "background-call-1",
+                    "status": "pending",
+                },
+            ),
+        )
+        assert await router.claim_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+        )
+        await router.record_matrix_delivery_device(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+            device_id=DEVICE,
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_id="$background-approval",
+            delivered_projections=(),
+        )
+
+        recorded = await router.resolve_continuation_approval_card(
+            card_event_id="$background-approval",
+            requested_status="approved",
+            reason=None,
+            resolution={"status": "approved", "resolved_by": ALICE},
+        )
+
+        assert recorded.recorded is True
+        assert recorded.continuation_ready is False
+        decision = await router.background_approval_decision(
+            run_id="background-run-1",
+            call_id="background-call-1",
+        )
+        assert decision is not None
+        assert decision.status == "approved"
+        assert await router.prune_background_approvals(run_id="background-run-1") is False
+
+        assert await router.claim_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+        )
+        await router.record_matrix_delivery_device(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+            device_id=DEVICE,
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id="background-card-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$background-terminal",
+            delivered_projections=(),
+        )
+        assert await router.retire_approval_card(
+            delivery_id="background-card-1",
+            card_event_id="$background-approval",
+        )
+        assert await router.prune_background_approvals(run_id="background-run-1") is True
+
     async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
         """A coalesced source cannot replay outside its one paused-run owner."""
         await self.admit_sources(alice)
@@ -5766,6 +6122,73 @@ class TestApprovalContinuations:
         assert created == continuation
         assert await alice.approval_continuation_for_source("$source-1") == continuation
         assert await alice.approval_continuation_for_source("$source-2") == continuation
+
+    async def test_continuation_round_trips_committed_presentation_and_visibility(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restart restores the exact pause presentation without consulting current config."""
+        await self.admit_sources(alice)
+        continuation = replace(
+            self.continuation(),
+            response_text="Before.\n\n🔧 `inspect` [1] ⏳",
+            response_tool_trace=(
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "inspect",
+                    "tool_call_id": "call-1",
+                },
+            ),
+            response_presentation_state={"kind": "team", "members": {"GeneralAgent": "Before."}},
+            show_tool_calls=False,
+        )
+
+        await alice.create_approval_continuation(continuation)
+        restored = await alice.approval_continuation("approval-1")
+
+        assert restored == continuation
+        assert restored is not None
+        assert restored.response_presentation_state == {
+            "kind": "team",
+            "members": {"GeneralAgent": "Before."},
+        }
+        assert restored.show_tool_calls is False
+
+    @pytest.mark.parametrize("current_policy", [False, True])
+    async def test_claim_freezes_current_visibility_for_a_legacy_continuation(
+        self,
+        alice: PrincipalStore,
+        current_policy: bool,
+    ) -> None:
+        """A pre-visibility row adopts policy once instead of defaulting visible forever."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        def remove_visibility(transaction: object) -> None:
+            row = transaction.fetchone(  # type: ignore[attr-defined]
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            )
+            context = json.loads(str(row["context_json"]))
+            context.pop("show_tool_calls")
+            transaction.execute(  # type: ignore[attr-defined]
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), "approval-1"),
+            )
+
+        await alice._backend.write(remove_visibility)
+
+        claimed = await alice.claim_approval_continuation(
+            "approval-1",
+            runtime_generation="runtime-a",
+            legacy_show_tool_calls=current_policy,
+        )
+        restored = await alice.approval_continuation("approval-1")
+
+        assert claimed is not None
+        assert claimed.show_tool_calls is current_policy
+        assert restored is not None
+        assert restored.show_tool_calls is current_policy
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
         """Only one response lifecycle may continue the exact persisted Agno run."""
@@ -5907,6 +6330,15 @@ class TestApprovalContinuations:
             run_id="run-2",
             session_id="session-1",
             calls=calls,
+            response_text="Before.\n\n🔧 `write_file` [2] ⏳",
+            response_tool_trace=(
+                {
+                    "type": "tool_call_started",
+                    "tool_name": "write_file",
+                    "tool_call_id": "call-2",
+                },
+            ),
+            response_presentation_state={"kind": "team", "consensus": "Before."},
         )
 
         assert stale is None
@@ -5916,6 +6348,49 @@ class TestApprovalContinuations:
         assert advanced.run_id == "run-2"
         assert advanced.runtime_generation == "runtime-a"
         assert advanced.calls == calls
+        assert advanced.response_text.endswith("🔧 `write_file` [2] ⏳")
+        assert advanced.response_tool_trace[-1]["tool_call_id"] == "call-2"
+        assert advanced.response_presentation_state == {"kind": "team", "consensus": "Before."}
+
+    async def test_automatically_decided_chained_generation_stays_fenced_until_activation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A restart cannot execute a chained generation before its presentation is acknowledged."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        calls = (
+            ApprovalCall(
+                tool_call_id="call-2",
+                tool_name="read_file",
+                invoking_agent="agent",
+                expires_at_ns=time.time_ns() + 60_000_000_000,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        )
+
+        publishing = await alice.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-2",
+            session_id="session-1",
+            calls=calls,
+        )
+
+        assert publishing is not None
+        assert publishing.state == "waiting"
+        assert publishing.runtime_generation == "runtime-a"
+        assert await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+
+        activated = await alice.activate_approval_continuation(
+            "approval-1",
+            expected_generation=publishing.generation,
+        )
+        assert activated is not None
+        assert activated.state == "ready"
+        assert activated.runtime_generation is None
 
     async def test_every_card_is_reserved_before_publication_activates(
         self,
@@ -6406,6 +6881,41 @@ class TestApprovalContinuations:
         retained = await alice.approval_continuation("approval-1")
         assert retained is not None
         assert retained.state == "claimed"
+
+    async def test_permanently_failed_final_can_settle_approval_ownership(self, alice: PrincipalStore) -> None:
+        """A definitive Matrix refusal is terminal for its paused-run owner too."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+        claimed = await alice.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload={"msgtype": "m.text", "body": "finished"},
+        )
+        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="$source-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        failing = await alice.request_approval_failure(
+            "approval-1",
+            "final Matrix delivery was permanently refused",
+            expected_state="claimed",
+            expected_generation=claimed.generation,
+            expected_runtime_generation="runtime-a",
+        )
+
+        assert failing is not None
+        assert failing.state == "failing"
+        assert await alice.finish_approval_continuation("approval-1")
+        assert await alice.approval_continuation("approval-1") is None
+        assert not await alice.is_pending("$source-1")
+        assert not await alice.is_pending("$source-2")
 
     async def test_card_decision_atomically_readies_the_exact_call(self, alice: PrincipalStore) -> None:
         """The card and final call decision become durable in one transaction."""
@@ -7312,12 +7822,12 @@ class TestApprovalContinuations:
             is None
         )
 
-    async def test_initial_acknowledgement_binds_a_precommitted_terminal_edit(
+    async def test_initial_acknowledgement_revives_a_target_dependent_final(
         self,
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """A decision committed during an unknown send outcome still edits that exact card."""
+        """A late visible card outranks its refusal and restores its terminal edit."""
         router = journal_store.principal("router@shared")
         await self.admit_sources(alice)
         await alice.create_approval_continuation(
@@ -7352,6 +7862,11 @@ class TestApprovalContinuations:
             stage=DeliveryStage.INITIAL,
             device_id=DEVICE,
         )
+        await router.record_permanent_matrix_delivery_failure(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            reason="matrix event exceeds the hard size limit",
+        )
 
         await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
 
@@ -7361,6 +7876,14 @@ class TestApprovalContinuations:
         )
         assert terminal is not None
         assert terminal.edits_event_id is None
+        assert terminal.permanently_failed
+        assert (
+            await router.claim_matrix_delivery(
+                delivery_id="approval-card-1",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
 
         await router.acknowledge_matrix_delivery(
             delivery_id="approval-card-1",
@@ -7375,6 +7898,11 @@ class TestApprovalContinuations:
         )
         assert bound is not None
         assert bound.edits_event_id == "$approval"
+        assert not bound.permanently_failed
+        assert await router.claim_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+        )
 
     async def test_router_departure_wakes_the_responder_continuation_to_fail_closed(
         self,
@@ -8042,6 +8570,48 @@ class TestConnectionSecretsStayOutOfLogs:
 
 class TestSchemaUpgrades:
     """Opening the journal preserves old rows and enables current writes."""
+
+    async def test_sqlite_adds_local_results_to_an_existing_delivery_outbox(self, tmp_path: Path) -> None:
+        """A shipped outbox gains local result storage without rebuilding its wire rows."""
+        database_path = tmp_path / "delivery-result-upgrade.db"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL)
+
+        store = EventJournalStore.open_sqlite(database_path)
+        await store.close()
+
+        with sqlite3.connect(database_path) as connection:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")}
+        assert "result_json" in columns
+        assert "permanent_failure_reason" in columns
+
+    async def test_postgres_adds_local_results_to_an_existing_delivery_outbox(
+        self,
+        postgres_journal_url: str,
+    ) -> None:
+        """PostgreSQL discovers and upgrades the same shipped outbox schema."""
+        import psycopg  # noqa: PLC0415 - optional backend exercised explicitly
+
+        database_url = postgres_journal_schema_url(postgres_journal_url)
+        with psycopg.connect(database_url) as connection:
+            connection.execute(_CURRENT_MATRIX_DELIVERY_OUTBOX_WITHOUT_RESULT_DDL)
+            connection.commit()
+
+        store = EventJournalStore.open_postgres(database_url)
+        await store.close()
+
+        with psycopg.connect(database_url) as connection:
+            rows = connection.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'matrix_delivery_outbox'
+                """,
+            ).fetchall()
+        columns = {str(row[0]) for row in rows}
+        assert "result_json" in columns
+        assert "permanent_failure_reason" in columns
 
     @staticmethod
     async def _assert_legacy_approval_call_provenance_is_unknown(backend: Backend) -> None:

@@ -109,6 +109,16 @@ _TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
 @pytest.mark.asyncio
 async def test_worker_proxy_executor_isolated_from_default_pool_and_preserves_context() -> None:
     """Worker proxy calls must not queue behind unrelated default-pool work."""
@@ -2508,7 +2518,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_url: str | None,
         proxy_token: str | None,
         storage_root: Path | None = None,
-        kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
         kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
@@ -2516,7 +2526,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
-        captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["dedicated_worker_validation_snapshot"] = dedicated_worker_validation_snapshot
         captured["kubernetes_config_snapshot"] = kubernetes_config_snapshot
         captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
@@ -2541,7 +2551,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
-    assert captured["kubernetes_tool_validation_snapshot"] is None
+    assert captured["dedicated_worker_validation_snapshot"] is None
     assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
@@ -3410,9 +3420,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             built_storage_paths.append(storage_path)
@@ -3493,11 +3504,57 @@ def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
-def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_release(
+def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A leased manager should survive replacement until the request-scoped lease is released."""
+    """Final shutdown rejects new builds until an explicit process reset establishes a new epoch."""
+    workers_runtime_module._reset_primary_worker_manager()
+
+    class _FakeWorkerManager:
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_primary_worker_backend_config_signature",
+        lambda *_args, **_kwargs: ("reset-generation",),
+    )
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "_build_primary_worker_manager",
+        lambda *_args, **_kwargs: _FakeWorkerManager(),
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+    try:
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+        with pytest.raises(WorkerBackendError, match="shut down"):
+            workers_runtime_module.get_primary_worker_manager(
+                runtime_paths,
+                proxy_url=None,
+                proxy_token=None,
+                storage_root=tmp_path,
+            )
+
+        workers_runtime_module._reset_primary_worker_manager()
+        manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=None,
+            storage_root=tmp_path,
+        )
+
+        assert isinstance(manager, _FakeWorkerManager)
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A superseded manager shuts down exactly once when its final borrower releases it."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3515,9 +3572,10 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3577,6 +3635,7 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
     assert first_manager.shutdown_calls == 1
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     workers_runtime_module._reset_primary_worker_manager()
+    assert first_manager.shutdown_calls == 1
     assert second_manager.shutdown_calls == 1
 
 
@@ -3600,9 +3659,10 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3672,9 +3732,10 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3737,11 +3798,11 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     assert first_manager.shutdown_calls == 1
 
 
-def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_would_raise(
+def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdown_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Retired-manager shutdown failures should not poison the replacement manager or later requests."""
+    """The final lease release disposes a superseded manager exactly once even on failure."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3757,9 +3818,10 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3860,9 +3922,10 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = runtime_paths, storage_path, worker_grantable_credentials
+            _ = runtime_paths, storage_path, tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             build_started.set()
             assert allow_build.wait(timeout=5.0)
@@ -3914,11 +3977,11 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retired_shutdown(
+def test_docker_worker_manager_replacement_disposes_unleased_generation_before_return(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A slow retired-manager shutdown must not block cache reads of the new active manager."""
+    """An unleased superseded manager is disposed before replacement acquisition returns."""
     workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -3937,9 +4000,10 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
             assert runtime_paths.storage_root == storage_path
@@ -3994,7 +4058,11 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
 
     replacement_thread = threading.Thread(target=_replace_manager)
     replacement_thread.start()
-    assert shutdown_started.wait(timeout=5.0)
+    assert shutdown_started.wait(timeout=1.0)
+    assert replacement_thread.is_alive()
+    allow_shutdown.set()
+    replacement_thread.join(timeout=5.0)
+    assert not replacement_thread.is_alive()
 
     second_manager = workers_runtime_module.get_primary_worker_manager(
         second_runtime_paths,
@@ -4002,9 +4070,6 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=second_storage_path,
     )
-
-    allow_shutdown.set()
-    replacement_thread.join(timeout=5.0)
 
     assert thread_result["manager"] is second_manager
     workers_runtime_module._reset_primary_worker_manager()
@@ -4032,9 +4097,10 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
@@ -4105,9 +4171,10 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
+            tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
             worker_grantable_credentials: frozenset[str] = frozenset(),
         ) -> _FakeDockerBackend:
-            _ = worker_grantable_credentials
+            _ = tool_validation_snapshot, worker_grantable_credentials
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
@@ -4234,7 +4301,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=first_snapshot,
+        dedicated_worker_validation_snapshot=first_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4242,7 +4309,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     third_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4250,7 +4317,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=second_snapshot,
+        dedicated_worker_validation_snapshot=second_snapshot,
         kubernetes_config_snapshot=second_config_snapshot,
     )
 
@@ -4299,7 +4366,7 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
             storage_root=tmp_path,
-            kubernetes_tool_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
+            dedicated_worker_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
         )
 
 
@@ -4378,7 +4445,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
@@ -4387,7 +4454,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
-        kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=tool_validation_snapshot,
         kubernetes_config_snapshot=config_snapshot,
     )
 
@@ -4434,10 +4501,53 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
     with tool_runtime_context(runtime_context):
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["kubernetes_config_snapshot"] == (
         workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
     )
+
+
+def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker worker routing should receive the committed tool-validation snapshot."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    runtime_context = make_test_tool_runtime_context(
+        agent_name="code",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+
+    with tool_runtime_context(runtime_context):
+        sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
+
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] is None
 
 
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
@@ -4464,7 +4574,7 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
         return {"fake": ToolValidationInfo(name="fake")}
 
     def fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> object:
-        captured_snapshots.append(kwargs["kubernetes_tool_validation_snapshot"])
+        captured_snapshots.append(kwargs["dedicated_worker_validation_snapshot"])
         return object()
 
     runtime_context = make_test_tool_runtime_context(
@@ -4595,7 +4705,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     assert result == "proxied"
     assert captured_kwargs["storage_root"] == request_storage_path
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})
 
 
@@ -5764,6 +5874,7 @@ class TestWorkerToolsOverride:
             "google_sheets",
             "homeassistant",
             "invite_router",
+            "oauth_connections",
             "todo",
             "usage_stats",
         ],

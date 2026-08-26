@@ -166,7 +166,7 @@ agents:
 - **agent_name**: The configured identifier used for agent config and aliases; provisioning may propose a `mindroom_<agent_name>` username when an account is missing, but runtime identity always comes from persisted Matrix account state.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
-- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))
+- **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides, including `script` controls such as `allowed_tools`, concurrency, call-rate, and runtime limits (see Available Tools below, [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration), and [Background Python Scripts](../tools/background-scripts.md))
 - **include_default_tools**: Whether to merge `defaults.tools` into this agent's `tools` (default: true)
 - **skills**: Skill names the agent can use
 - **instructions**: Specific guidelines for the agent's behavior

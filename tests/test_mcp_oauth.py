@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
@@ -12,14 +13,20 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY, credential_service_policy
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    credential_service_policy,
+)
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials, scoped_credentials_path
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import (
+    _mcp_oauth_provider_is_configured,
     _oauth_discovery_config,
     mcp_oauth_provider,
     mcp_oauth_provider_id,
 )
+from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot, resolve_oauth_credential_context
 from mindroom.oauth.discovery import (
     _DISCOVERY_CACHE,
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
@@ -27,7 +34,7 @@ from mindroom.oauth.discovery import (
 )
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -77,6 +84,20 @@ def test_mcp_oauth_helpers_reject_non_oauth_server_consistently() -> None:
         _oauth_discovery_config(server_config)
     with pytest.raises(ValueError, match="not OAuth-backed"):
         mcp_oauth_provider("example", server_config)
+
+
+def test_mcp_oauth_provider_lookup_ignores_disabled_shadow_server() -> None:
+    """Reset retirement must select the enabled server that owns the live OAuth session."""
+    base = _oauth_mcp_server_config()
+    assert base.auth is not None
+    auth = base.auth.model_copy(update={"provider_id": "shared-provider"})
+    disabled = base.model_copy(update={"enabled": False, "auth": auth})
+    enabled = base.model_copy(update={"auth": auth})
+
+    assert _mcp_oauth_provider_is_configured(
+        {"disabled": disabled, "enabled": enabled},
+        "shared-provider",
+    )
 
 
 def _oauth_mcp_server_config() -> MCPServerConfig:
@@ -176,6 +197,7 @@ class _FakeDiscoveryClient:
             {
                 "client_id": "registered-client-id",
                 "client_id_issued_at": 123,
+                "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                 "registration_client_uri": "https://auth.example.test/register/registered-client-id",
                 "registration_access_token": "registration-token",
                 "token_endpoint_auth_method": "none",
@@ -194,7 +216,7 @@ class _InvalidJsonDiscoveryResponse(_FakeDiscoveryResponse):
 
 
 def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
-    """Generated MCP OAuth providers use deterministic services and public-client defaults."""
+    """Generated MCP OAuth providers use deterministic services and follow the agent credential scope."""
     provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
 
     assert provider.id == "mcp_demo"
@@ -209,6 +231,7 @@ def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.extra_auth_params == {"audience": "example"}
     assert provider.extra_token_params == {"resource": "https://mcp.example.test/mcp"}
+    assert provider.requester_scoped_credentials is False
 
 
 def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_scoped() -> None:
@@ -295,6 +318,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     assert stored_client == {
         "client_id": "registered-client-id",
         "redirect_uri": "http://localhost:8765/api/oauth/mcp_demo/callback",
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: "http://localhost:8765/api/oauth/mcp_demo/callback",
         "client_id_issued_at": 123,
         "registration_client_uri": "https://auth.example.test/register/registered-client-id",
         "registration_access_token": "registration-token",
@@ -395,6 +419,7 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
                 {
                     "client_id": "registered-client-id",
                     "client_id_issued_at": 123,
+                    "redirect_uris": ["http://localhost:8765/api/oauth/mcp_demo/callback"],
                     "token_endpoint_auth_method": "none",
                 },
                 status_code=201,
@@ -557,3 +582,63 @@ def test_mcp_oauth_credentials_are_primary_runtime_scoped_for_user_agents(tmp_pa
 
     assert manager.load_credentials("mcp_demo_oauth") is None
     assert manager.for_worker(worker_target.worker_key).load_credentials("mcp_demo_oauth") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+async def test_mcp_oauth_scope_policy_recovers_legacy_credentials_after_empty_requester_store(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """Correct-scope legacy credentials remain adoptable after a requester store was created."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.test",
+        room_id="!room:example.test",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=None,
+        tenant_id="tenant",
+        account_id=None,
+    )
+    worker_target = resolve_worker_target(worker_scope, "code", identity)
+    provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
+    legacy_credentials = {
+        "token": "legacy-token",
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+    save_scoped_credentials(
+        provider.credential_service,
+        legacy_credentials,
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+    legacy_path = scoped_credentials_path(
+        provider.credential_service,
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+
+    requester_only_context = resolve_oauth_credential_context(
+        replace(provider, requester_scoped_credentials=True),
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+    assert (await load_oauth_credentials_snapshot(requester_only_context)).credentials is None
+
+    scope_context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+    snapshot = await load_oauth_credentials_snapshot(scope_context)
+
+    assert scope_context.worker_target == worker_target
+    assert snapshot.credentials == legacy_credentials
+    assert not legacy_path.exists()

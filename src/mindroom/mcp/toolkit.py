@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
+from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.function_surface import local_mcp_function_name_collisions
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 
 if TYPE_CHECKING:
@@ -44,6 +47,41 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
         return normalized or None
     normalized = [part.strip() for part in value if part.strip()]
     return normalized or None
+
+
+def hide_mcp_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
+    """Hide MCP functions colliding in this exact runtime projection."""
+    local_function_names = {
+        function_name
+        for toolkit in toolkits
+        if not isinstance(toolkit, MindRoomMCPToolkit)
+        for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
+    }
+    mcp_toolkit_function_names = [
+        (toolkit, {*toolkit.get_functions(), *toolkit.get_async_functions()})
+        for toolkit in toolkits
+        if isinstance(toolkit, MindRoomMCPToolkit)
+    ]
+    mcp_function_name_counts = Counter(
+        function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
+    )
+    hidden_by_server: dict[str, tuple[str, ...]] = {}
+    for toolkit, function_names in mcp_toolkit_function_names:
+        hidden = tuple(
+            sorted(
+                local_mcp_function_name_collisions(local_function_names, function_names)
+                | {name for name in function_names if mcp_function_name_counts[name] > 1},
+            ),
+        )
+        if not hidden:
+            continue
+        for function_name in hidden:
+            toolkit.functions.pop(function_name, None)
+            toolkit.async_functions.pop(function_name, None)
+        hidden_by_server[toolkit.server_id] = tuple(
+            sorted(set(hidden_by_server.get(toolkit.server_id, ())) | set(hidden)),
+        )
+    return hidden_by_server
 
 
 class MindRoomMCPToolkit(Toolkit):
@@ -127,27 +165,27 @@ class MindRoomMCPToolkit(Toolkit):
         if self.server_config is None:
             return
         tool_prefix = resolved_mcp_tool_prefix(self.server_id, self.server_config)
-        # Before the requester signs in, these bridge functions are the only
+        # Before the credential scope is connected, these bridge functions are the only
         # model-visible surface for the server, so the configured description
         # is the model's only hint about what connecting would unlock.
         suffix = f" {self.server_config.description}" if self.server_config.description else ""
         self.async_functions[f"{tool_prefix}_connection_status"] = Function(
             name=f"{tool_prefix}_connection_status",
-            description=f"Check whether MCP server '{self.server_id}' is connected for the current worker scope.{suffix}",
+            description=f"Check whether MCP server '{self.server_id}' is connected for this agent's credential scope.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_connection_status,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_list_tools"] = Function(
             name=f"{tool_prefix}_list_tools",
-            description=f"List remote tools exposed by MCP server '{self.server_id}' for the current worker scope.{suffix}",
+            description=f"List remote tools exposed by MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
             parameters={"type": "object", "properties": {}},
             entrypoint=self._oauth_list_tools,
             skip_entrypoint_processing=True,
         )
         self.async_functions[f"{tool_prefix}_call_tool"] = Function(
             name=f"{tool_prefix}_call_tool",
-            description=f"Call one remote tool on MCP server '{self.server_id}' for the current worker scope.{suffix}",
+            description=f"Call one remote tool on MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
             parameters={
                 "type": "object",
                 "properties": {
@@ -216,19 +254,14 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(self._catalog_payload(catalog))
 
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolResult | str:
-        try:
-            catalog = await self._oauth_request_catalog()
-        except OAuthConnectionRequired as exc:
-            return self._oauth_payload(exc)
+        return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
 
-        tools_by_name = {tool.remote_name: tool for tool in self._filtered_catalog_tools(catalog)}
-        if tool_name not in tools_by_name:
-            return json.dumps(
-                {
-                    "error": f"MCP tool '{tool_name}' is not available for server '{self.server_id}'",
-                    "available_tools": sorted(tools_by_name),
-                },
-            )
+    async def _call_tool_with_error_payload(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> ToolResult | str:
+        """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -236,25 +269,26 @@ class MindRoomMCPToolkit(Toolkit):
             return await self.manager.call_tool(
                 self.server_id,
                 tool_name,
-                dict(arguments or {}),
+                arguments,
                 timeout_seconds=self.call_timeout_seconds,
                 credentials_manager=self.credentials_manager,
                 worker_target=self.worker_target,
+                include_tools=self.include_tools,
+                exclude_tools=self.exclude_tools,
             )
         except OAuthConnectionRequired as exc:
             return self._oauth_payload(exc)
+        except MCPToolUnavailableError as exc:
+            return json.dumps(
+                {
+                    "error": str(exc),
+                    "available_tools": list(exc.available_tools),
+                },
+            )
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
-        async def _call_tool(**kwargs: object) -> ToolResult:
-            assert self.manager is not None
-            return await self.manager.call_tool(
-                self.server_id,
-                tool.remote_name,
-                dict(kwargs),
-                timeout_seconds=self.call_timeout_seconds,
-                credentials_manager=self.credentials_manager,
-                worker_target=self.worker_target,
-            )
+        async def _call_tool(**kwargs: object) -> ToolResult | str:
+            return await self._call_tool_with_error_payload(tool.remote_name, dict(kwargs))
 
         return Function(
             name=tool.function_name,

@@ -49,6 +49,8 @@ _LOCAL_ONLY_TOOL_NAMES = frozenset(
         "google_sheets",
         "homeassistant",
         "invite_router",
+        "oauth_connections",
+        "script",
         "todo",
         "usage_stats",
     },

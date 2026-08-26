@@ -48,8 +48,8 @@ from mindroom.workers.runtime import (
     primary_worker_backend_available,
     primary_worker_backend_is_dedicated,
     primary_worker_backend_name,
+    serialized_dedicated_worker_validation_snapshot,
     serialized_kubernetes_worker_config_snapshot,
-    serialized_kubernetes_worker_validation_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -164,7 +164,7 @@ class _PrimaryWorkerManagerContext:
     """Runtime-context-derived parameters for resolving the primary worker manager."""
 
     storage_root: Path
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
 
@@ -420,17 +420,18 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
     storage_root = (
         context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
     )
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None
     kubernetes_config_snapshot: dict[str, object] | None = None
-    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+    if context is not None and primary_worker_backend_name(runtime_paths) in {"docker", "kubernetes"}:
+        dedicated_worker_validation_snapshot = serialized_dedicated_worker_validation_snapshot(
             runtime_paths,
             runtime_config=context.config,
         )
+    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(context.config)
     return _PrimaryWorkerManagerContext(
         storage_root=storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=(
             context.config.get_worker_grantable_credentials() if context is not None else None
@@ -448,7 +449,7 @@ def _get_worker_manager(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     )
@@ -563,7 +564,7 @@ def save_attachment_to_worker(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     ) as worker_manager:
@@ -798,7 +799,7 @@ def _call_proxy_sync(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     ) as worker_manager:

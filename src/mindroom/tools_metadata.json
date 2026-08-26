@@ -5802,6 +5802,89 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": [],
+          "description": "Optional toolkit names allowed through the governed SDK only; this does not restrict Python, OS, filesystem, environment, or network access. An empty list grants the full background-eligible SDK surface but preapproves none of it.",
+          "label": "Allowed Tools",
+          "name": "allowed_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 3,
+          "description": null,
+          "label": "Maximum Concurrent Runs",
+          "name": "max_concurrent_runs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 1
+          }
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Maximum Tool Calls Per Minute",
+          "name": "max_tool_calls_per_minute",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 1
+          }
+        },
+        {
+          "authored_override": true,
+          "default": 24,
+          "description": null,
+          "label": "Maximum Runtime Hours",
+          "name": "max_runtime_hours",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 0.01
+          }
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Run trusted arbitrary Python code with scoped worker filesystem and environment access plus deployment-policy network access",
+      "display_name": "Background Scripts",
+      "docs_url": null,
+      "function_names": [
+        "start_script",
+        "get_script_resource_profiles",
+        "get_script",
+        "cancel_script",
+        "list_scripts"
+      ],
+      "helper_text": null,
+      "icon": "FileCode2",
+      "icon_color": "text-cyan-500",
+      "name": "script",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
@@ -7331,6 +7414,30 @@
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Reset the current requester's OAuth connections for the current agent",
+      "display_name": "OAuth Connections",
+      "docs_url": null,
+      "function_names": [
+        "reset_oauth_connection"
+      ],
+      "helper_text": null,
+      "icon": "Unplug",
+      "icon_color": "text-amber-500",
+      "name": "oauth_connections",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -9909,7 +10016,7 @@
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [
-        "browser"
+        "browser_control"
       ],
       "helper_text": null,
       "icon": "FaChrome",

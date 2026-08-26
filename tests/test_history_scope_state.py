@@ -54,6 +54,26 @@ from tests.history_helpers import (  # noqa: F401
 )
 
 
+def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
+    if is_team:
+        return TeamSession(
+            session_id="session-1",
+            team_id="test_agent",
+            user_id="@history-owner:localhost",
+            runs=[],
+            created_at=1,
+            updated_at=1,
+        )
+    return AgentSession(
+        session_id="session-1",
+        agent_id="test_agent",
+        user_id="@history-owner:localhost",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
+
+
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="team-123")
@@ -186,11 +206,11 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
 @pytest.mark.asyncio
-async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
+async def test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes(
     tmp_path: Path,
     is_team: bool,
 ) -> None:
-    """A fresh Agno runtime must see the persisted system prompt only while continuing a pause."""
+    """A fresh runtime must resume a paused run in a session shared by multiple requesters."""
     config, runtime_paths = _make_config(tmp_path)
     executed: list[list[str]] = []
 
@@ -224,11 +244,13 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
         return entity, model
 
     first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    assert first_storage.upsert_session(_shared_session(is_team=is_team)) is not None
+
     first, _first_model = runtime(first_storage)
     paused = await first.arun(
         "exercise the tool",
         session_id="session-1",
-        user_id="@user:localhost",
+        user_id="@requester:localhost",
         stream=False,
     )
     assert paused.status is RunStatus.paused
@@ -240,11 +262,14 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
     try:
         session = await resumed.aget_session(
             session_id="session-1",
-            user_id="@user:localhost",
+            user_id="@requester:localhost",
         )
+        assert session is not None
+        assert session.user_id == "@history-owner:localhost"
         persisted = session.get_run(paused.run_id)
         assert persisted is not None
         assert persisted.status == RunStatus.paused
+        assert persisted.user_id == "@requester:localhost"
         assert [message.role for message in persisted.messages or ()][:2] == ["system", "user"]
         requirements = deepcopy(persisted.requirements or [])
         assert len(requirements) == 1
@@ -256,7 +281,7 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
                     run_response=persisted,
                     requirements=requirements,
                     session_id="session-1",
-                    user_id="@user:localhost",
+                    user_id="@requester:localhost",
                     stream=False,
                 )
             else:
@@ -264,7 +289,7 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
                     run_id=paused.run_id,
                     requirements=requirements,
                     session_id="session-1",
-                    user_id="@user:localhost",
+                    user_id="@requester:localhost",
                     stream=False,
                 )
 
@@ -276,10 +301,13 @@ async def test_paused_run_preserves_prompt_roles_until_continuation_completes(
 
         completed_session = await resumed.aget_session(
             session_id="session-1",
-            user_id="@user:localhost",
+            user_id="@requester:localhost",
         )
+        assert completed_session is not None
+        assert completed_session.user_id == "@history-owner:localhost"
         completed_run = completed_session.get_run(paused.run_id)
         assert completed_run is not None
+        assert completed_run.user_id == "@requester:localhost"
         assert all(message.role not in {"system", "developer"} for message in completed_run.messages or ())
     finally:
         resumed_storage.close()

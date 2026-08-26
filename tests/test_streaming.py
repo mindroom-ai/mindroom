@@ -44,7 +44,7 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
+from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -163,6 +163,76 @@ async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Co
         await _run_stream(config, suspended_stream())
 
     assert raised.value is suspension
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_lifecycle_suspension_captures_last_committed_presentation(config: Config) -> None:
+    """Approval handoff retains exactly the ordered body and trace that reached Matrix."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content="I checked the input.")
+        await gateway.wait_for_ops(1)
+        yield ToolCallStartedEvent(
+            tool=ToolExecution(
+                tool_call_id="call-1",
+                tool_name="inspect",
+                tool_args={"path": "report.txt"},
+            ),
+        )
+        await gateway.wait_for_ops(2)
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_stream(config, suspended_stream())
+
+    assert raised.value is suspension
+    assert raised.value.presentation is not None
+    assert raised.value.presentation.response_text == "I checked the input.\n\n🔧 `inspect` [1] ⏳"
+    assert len(raised.value.presentation.tool_trace) == 1
+    trace = raised.value.presentation.tool_trace[0]
+    assert trace.type == "tool_call_started"
+    assert trace.tool_name == "inspect"
+    assert trace.args_preview == "path=report.txt"
+    assert trace.tool_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_lifecycle_suspension_captures_committed_structured_state(config: Config) -> None:
+    """Team continuation state is committed atomically with the body it can reproduce."""
+    suspension = StreamingLifecycleSuspensionError("paused")
+    gateway = _FakeGateway()
+    state = {
+        "kind": "team",
+        "display_names": ["GeneralAgent"],
+        "members": {"GeneralAgent": "Before."},
+        "consensus": "",
+    }
+
+    async def suspended_stream() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(
+            content="🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Before.",
+            presentation_state=state,
+        )
+        await gateway.wait_for_ops(1)
+        raise suspension
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingLifecycleSuspensionError) as raised,
+    ):
+        await _run_stream(config, suspended_stream())
+
+    assert raised.value.presentation is not None
+    assert raised.value.presentation.state == state
 
 
 @pytest.mark.asyncio

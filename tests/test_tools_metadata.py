@@ -162,6 +162,11 @@ def test_export_tools_metadata_json() -> None:
         assert "managed_init_args" not in first_tool
 
 
+def test_oauth_connections_requires_live_room_context() -> None:
+    """OAuth reset must not be advertised without a requester-bound live context."""
+    assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+
+
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     """Export should ignore temporary registry contamination from earlier tests."""
     tool_name = "test_leaked_tool"
@@ -510,6 +515,7 @@ def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.AUTHORIZATION,
     )
     assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
 
@@ -898,6 +904,28 @@ def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path
     )
 
     assert tool.exclude_patterns == []
+
+
+def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -> None:
+    """JSON number fields such as 3.0 must satisfy integer-valued script limits."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "script",
+        runtime_paths,
+        tool_config_overrides={
+            "max_concurrent_runs": 3.0,
+            "max_tool_calls_per_minute": 30.0,
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.limits.max_concurrent_runs == 3
+    assert tool.limits.max_tool_calls_per_minute == 30
 
 
 def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:

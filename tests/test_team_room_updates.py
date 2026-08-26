@@ -9,18 +9,37 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import orchestrator_runtime_paths
+
+
+def _mock_running_bot(entity_name: str, agent_user: object, config: Config) -> MagicMock:
+    """Return one distinct running bot double with its configured rooms."""
+    bot = MagicMock()
+    bot.agent_name = entity_name
+    bot.agent_user = agent_user
+    bot.config = config
+    bot.rooms = get_rooms_for_entity(entity_name, config)
+    bot.running = True
+    bot.start = AsyncMock()
+    bot.stop = AsyncMock()
+    bot.sync_forever = AsyncMock()
+    bot.try_start = AsyncMock(return_value=True)
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot._set_presence_with_model_info = AsyncMock()
+    bot.mark_sync_loop_started = MagicMock()
+    bot.reset_watchdog_clock = MagicMock()
+    return bot
 
 
 class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
-    @pytest.mark.requires_matrix  # Requires real Matrix server for team room management
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    async def test_team_room_change_triggers_restart(self, tmp_path: Path) -> None:
-        """Test that changing a team's room configuration triggers a restart."""
+    async def test_team_room_change_reconciles_live_bot(self, tmp_path: Path) -> None:
+        """Changing a team's rooms should preserve bots and reconcile memberships live."""
         # Create initial config
         initial_config_data: dict[str, Any] = {
             "agents": {
@@ -74,28 +93,44 @@ class TestTeamRoomUpdates:
                     patch("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.matrix.rooms.generate_room_topic_ai", mock_generate_room_topic_ai),
                     patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+                    patch("mindroom.orchestrator._MultiAgentOrchestrator._validate_entity_accounts"),
                     patch(
                         "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
                         new=AsyncMock(),
-                    ),
+                    ) as setup_rooms,
                 ):
                     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
                     with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
-                        mock_bot = MagicMock()
-                        mock_bot.start = AsyncMock()
-                        mock_bot.stop = AsyncMock()
-                        mock_bot.sync_forever = AsyncMock()
-                        mock_bot.try_start = AsyncMock(return_value=True)
-                        mock_bot.prepare_for_sync_shutdown = AsyncMock()
-                        mock_bot._set_presence_with_model_info = AsyncMock()
-                        mock_bot.mark_sync_loop_started = MagicMock()
-                        mock_bot.reset_watchdog_clock = MagicMock()
-                        mock_create_bot.return_value = mock_bot
+                        created_bots: dict[str, MagicMock] = {}
+
+                        def create_mock_bot(
+                            entity_name: str,
+                            agent_user: object,
+                            config: Config,
+                            *_args: object,
+                            **_kwargs: object,
+                        ) -> MagicMock:
+                            bot = _mock_running_bot(entity_name, agent_user, config)
+                            created_bots[entity_name] = bot
+                            return bot
+
+                        mock_create_bot.side_effect = create_mock_bot
 
                         try:
                             await orchestrator.initialize()
                             orchestrator.running = True
+                            original_bots = dict(orchestrator.agent_bots)
+
+                            async def reconcile_rooms(bots: list[MagicMock]) -> None:
+                                active_config = orchestrator._require_config()
+                                for bot in bots:
+                                    bot.rooms = get_rooms_for_entity(bot.agent_name, active_config)
+
+                            setup_rooms.side_effect = reconcile_rooms
+                            setup_rooms.reset_mock()
+                            for bot in created_bots.values():
+                                bot.stop.reset_mock()
 
                             # Update config with different rooms for the team
                             updated_config_data = initial_config_data.copy()
@@ -106,13 +141,23 @@ class TestTeamRoomUpdates:
                             # Update config
                             updated = await orchestrator.config_reload._update_config()
 
-                            # Verify the team was restarted
+                            # Verify the existing team and router bots were reconciled in place.
                             assert updated is True
-                            assert mock_bot.stop.called
-
-                            # Should create: agent1 + team1 + router on init, team1 + router on update
-                            # (router gets recreated when teams change)
-                            assert mock_create_bot.call_count == 5
+                            assert orchestrator.agent_bots == original_bots
+                            assert orchestrator.agent_bots["agent1"].rooms == ["room1"]
+                            assert orchestrator.agent_bots["team1"].rooms == ["room2", "room3", "room4"]
+                            assert set(orchestrator.agent_bots["router"].rooms) == {
+                                "room1",
+                                "room2",
+                                "room3",
+                                "room4",
+                            }
+                            for bot in created_bots.values():
+                                bot.stop.assert_not_awaited()
+                            assert mock_create_bot.call_count == 3
+                            setup_rooms.assert_awaited_once()
+                            reconciled_bots = setup_rooms.await_args.args[0]
+                            assert {bot.agent_name for bot in reconciled_bots} == {"router", "team1"}
                         finally:
                             await orchestrator.stop()
 

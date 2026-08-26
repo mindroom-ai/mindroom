@@ -6,6 +6,8 @@ import asyncio
 import contextvars
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 
@@ -36,17 +38,39 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
     )
 
 
-def _close_unreturned_agent(
+def prewarm_agent_model_client(agent: Agent, shared_scope_storage: BaseDb | None) -> None:
+    """Prewarm one built agent or reclaim its runtime state on failure."""
+    try:
+        prewarm_anthropic_async_client(agent.model)
+    except Exception:
+        close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
+        raise
+
+
+async def close_unreturned_agent(
     agent: Agent,
     shared_scope_storage: BaseDb | None,
     caller_owned_agent: Agent | None,
 ) -> None:
+    """Close every resource owned by an agent that preparation cannot return."""
     if agent is caller_owned_agent:
         return
-    try:
-        close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
-    except Exception:
-        logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
+
+    async def close_resources() -> None:
+        try:
+            await asyncio.to_thread(
+                close_agent_runtime_state_dbs,
+                agent,
+                shared_scope_storage=shared_scope_storage,
+            )
+        except Exception:
+            logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
+        try:
+            await aclose_anthropic_async_client(agent.model)
+        except Exception:
+            logger.exception("Failed to close unreturned agent model client", agent=agent.id)
+
+    await run_coroutine_until_complete(close_resources())
 
 
 async def _drain_unreturned_agent_build(
@@ -71,10 +95,10 @@ async def _drain_unreturned_agent_build(
     except Exception as error:
         _log_secondary_agent_error(agent_name, error)
     else:
-        _close_unreturned_agent(unreturned_agent, shared_scope_storage, caller_owned_agent)
+        await close_unreturned_agent(unreturned_agent, shared_scope_storage, caller_owned_agent)
 
 
-def _discard_unreturned_agent_result(
+async def _discard_unreturned_agent_result(
     result: tuple[ResolvedRuntimeModel, Agent] | Exception,
     *,
     agent_name: str,
@@ -85,7 +109,29 @@ def _discard_unreturned_agent_result(
     if isinstance(result, Exception):
         _log_secondary_agent_error(agent_name, result)
     else:
-        _close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
+        await close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
+
+
+async def build_agent_off_loop(
+    build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
+    *,
+    agent_name: str,
+    shared_scope_storage: BaseDb | None,
+    caller_owned_agent: Agent | None = None,
+) -> tuple[ResolvedRuntimeModel, Agent]:
+    """Build one agent off-loop and reclaim a completed result after cancellation."""
+    context = contextvars.copy_context()
+    build_future = asyncio.get_running_loop().run_in_executor(None, context.run, build_agent)
+    try:
+        return await asyncio.shield(build_future)
+    except asyncio.CancelledError:
+        await _drain_unreturned_agent_build(
+            build_future,
+            agent_name=agent_name,
+            shared_scope_storage=shared_scope_storage,
+            caller_owned_agent=caller_owned_agent,
+        )
+        raise
 
 
 async def prepare_prompt_branches(
@@ -144,7 +190,7 @@ async def prepare_prompt_branches(
     try:
         memory_result = memory_task.result()
     except BaseException:
-        _discard_unreturned_agent_result(
+        await _discard_unreturned_agent_result(
             agent_result,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,
@@ -152,7 +198,7 @@ async def prepare_prompt_branches(
         )
         raise
     if isinstance(memory_result, Exception):
-        _discard_unreturned_agent_result(
+        await _discard_unreturned_agent_result(
             agent_result,
             agent_name=agent_name,
             shared_scope_storage=shared_scope_storage,

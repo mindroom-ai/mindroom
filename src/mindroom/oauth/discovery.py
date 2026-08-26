@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 import httpx
 
-from mindroom.credential_policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
+from mindroom.credential_policy import (
+    OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
+    OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+)
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 from mindroom.server_fetch_url import (
@@ -20,14 +26,14 @@ from mindroom.server_fetch_url import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
 
 _DISCOVERY_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_CACHE_TTL_SECONDS = 3600.0
+_CROSS_LOOP_LOCK_RETRY_SECONDS = 0.01
 _JSON_CONTENT_TYPE = "application/json"
-_DYNAMIC_CLIENT_SOURCE = "oauth_dynamic_client_registration"
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 
@@ -65,11 +71,25 @@ class _CachedDiscovery:
 
 
 _DISCOVERY_CACHE: dict[tuple[object, ...], _CachedDiscovery] = {}
-_DYNAMIC_CLIENT_REGISTRATION_LOCKS: dict[str, asyncio.Lock] = {}
+_DYNAMIC_CLIENT_REGISTRATION_LOCKS: dict[str, threading.Lock] = {}
+_DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD = threading.Lock()
 
 
 class _MetadataCandidateError(OAuthProviderError):
     """One metadata candidate existed but could not be read."""
+
+
+@asynccontextmanager
+async def _cross_loop_lock(lock: threading.Lock) -> AsyncIterator[None]:
+    """Acquire one loop-neutral lock without occupying an executor worker while waiting."""
+    # A threading.Lock has no cross-loop notification primitive, so bounded polling
+    # is the only wait that neither binds to one loop nor consumes an executor worker.
+    while not lock.acquire(blocking=False):  # noqa: ASYNC110
+        await asyncio.sleep(_CROSS_LOOP_LOCK_RETRY_SECONDS)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _configured_endpoint(value: str | None) -> str:
@@ -330,10 +350,16 @@ def _stored_registration(
     ):
         msg = f"{provider.display_name} OAuth dynamic client registration did not return client_secret"
         raise OAuthProviderError(msg)
+    redirect_uri = provider.default_redirect_uri(runtime_paths)
+    registered_redirect_uris = registration.get("redirect_uris")
+    if not isinstance(registered_redirect_uris, list) or redirect_uri not in registered_redirect_uris:
+        msg = f"{provider.display_name} OAuth dynamic client registration did not confirm redirect_uri"
+        raise OAuthProviderError(msg)
     stored: dict[str, Any] = {
         "client_id": client_id.strip(),
-        "redirect_uri": provider.default_redirect_uri(runtime_paths),
-        "_source": _DYNAMIC_CLIENT_SOURCE,
+        "redirect_uri": redirect_uri,
+        OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+        "_source": OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
         "_oauth_provider": provider.id,
         RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
     }
@@ -360,8 +386,9 @@ async def _register_client(
 ) -> None:
     if not config.dynamic_client_registration or metadata.registration_url is None:
         return
-    lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, asyncio.Lock())
-    async with lock:
+    with _DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD:
+        lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
+    async with _cross_loop_lock(lock):
         if provider.client_config_resolution(runtime_paths) is not None:
             return
         if not provider.client_config_services:

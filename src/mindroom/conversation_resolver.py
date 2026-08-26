@@ -12,6 +12,7 @@ from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, Pr
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     content_owns_per_fire_thread_root,
     per_fire_thread_root_event_id_from_content,
@@ -358,6 +359,22 @@ class ConversationResolver:
             return event_info.thread_id
         return fallback_root_event_id if event_info.can_be_thread_root else None
 
+    def _is_trusted_room_level_silent_schedule(
+        self,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+        *,
+        thread_id: str | None,
+    ) -> bool:
+        """Return whether a hidden schedule trigger must stay at room level."""
+        if thread_id is not None or event_info.thread_id is not None:
+            return False
+        content = event_source.get("content")
+        if not isinstance(content, dict) or source_kind_from_content(content) != SILENT_SCHEDULE_SOURCE_KIND:
+            return False
+        sender = event_source.get("sender")
+        return isinstance(sender, str) and self._sender_is_managed_entity(sender)
+
     def build_message_target(
         self,
         *,
@@ -376,9 +393,15 @@ class ConversationResolver:
         )
         thread_start_root_event_id = None
         automation_fire_root = False
+        room_level_silent_schedule = False
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
-            if event_info.can_be_thread_root and reply_to_event_id is not None:
+            room_level_silent_schedule = self._is_trusted_room_level_silent_schedule(
+                event_source,
+                event_info,
+                thread_id=thread_id,
+            )
+            if event_info.can_be_thread_root and reply_to_event_id is not None and not room_level_silent_schedule:
                 thread_start_root_event_id = reply_to_event_id
             automation_root_event_id = self._trusted_automation_fire_root_event_id(
                 event_source,
@@ -391,9 +414,9 @@ class ConversationResolver:
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
+            reply_to_event_id=None if room_level_silent_schedule else reply_to_event_id,
             thread_start_root_event_id=thread_start_root_event_id,
-            room_mode=effective_thread_mode == "room" and not automation_fire_root,
+            room_mode=room_level_silent_schedule or (effective_thread_mode == "room" and not automation_fire_root),
         )
 
     def build_message_envelope(

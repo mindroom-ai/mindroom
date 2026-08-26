@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
 - **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, and more, plus native Matrix tools and a per-thread `todo` planner, with sandboxed execution and per-tool approval rules.
 - **Knowledge bases (RAG)** — point an agent at a folder of files; MindRoom indexes it and can watch it for changes.
-- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), background work with human escalation.
+- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](docs/tools/background-scripts.md) that can call governed agent tools and wake the agent only when something changes.
 - **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
 - **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.

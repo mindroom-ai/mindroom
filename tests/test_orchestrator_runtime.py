@@ -6,7 +6,10 @@ import asyncio
 import os
 import signal
 import sys
+import threading
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -18,6 +21,7 @@ import uvicorn
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.plugin_imports as plugin_module
+import mindroom.workers.runtime as workers_runtime_module
 from mindroom.approval_manager import (
     _ApprovalStartupSweep,
     get_approval_store,
@@ -123,7 +127,16 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
-    from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
+    """Reopen the process-global worker runtime around final-shutdown tests."""
+    workers_runtime_module._reset_primary_worker_manager()
+    try:
+        yield
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
 
 
 def _retry_tasks() -> list[asyncio.Task[Any]]:
@@ -254,6 +267,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
@@ -301,9 +315,15 @@ class TestAgentBot(AgentBotTestBase):
             del receive
             del send
 
+        started: list[tuple[str, int]] = []
+
+        async def record_started(host: str, port: int) -> None:
+            started.append((host, port))
+
         server = _SignalAwareUvicornServer(
             uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off", ws="websockets-sansio"),  # noqa: S104
             asyncio.Event(),
+            on_started=record_started,
         )
         server.config.load()
         server.lifespan = server.config.lifespan_class(server.config)
@@ -321,6 +341,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             bound_port = bound_address[1]
             assert address.base_url == f"http://127.0.0.1:{bound_port}"
+            assert started == [(bound_address[0], bound_port)]
         finally:
             await server.shutdown()
             reset_runtime_state()
@@ -333,8 +354,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = False
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
@@ -367,6 +394,242 @@ class TestAgentBot(AgentBotTestBase):
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
+    async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
+        """The API gateway must receive the lifecycle-owned broker without replacing it."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                self.on_started = on_started
+
+            async def serve(self) -> None:
+                set_api_server_address("127.0.0.1", 8765)
+                assert callable(self.on_started)
+                await self.on_started("127.0.0.1", 43210)
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        script_runtime = SimpleNamespace(
+            broker=MagicMock(),
+            bind_api=MagicMock(),
+            unbind_api=AsyncMock(),
+            touch_live_workers=MagicMock(),
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
+            patch("mindroom.api.main.unbind_script_runtime") as unbind_script_runtime,
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                self._runtime_paths(tmp_path),
+                script_runtime=script_runtime,
+                shutdown_requested=shutdown_requested,
+            )
+
+        bind_script_runtime.assert_called_once_with(
+            ANY,
+            broker=script_runtime.broker,
+            touch_live_workers=script_runtime.touch_live_workers,
+        )
+        script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
+        script_runtime.unbind_api.assert_awaited_once_with()
+        unbind_script_runtime.assert_called_once_with(ANY)
+
+    @pytest.mark.asyncio
+    async def test_run_api_server_starts_without_optional_worker_script_gateway(self, tmp_path: Path) -> None:
+        """An unused worker-script callback must not make the whole API unavailable."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                self.on_started = on_started
+
+            async def serve(self) -> None:
+                assert callable(self.on_started)
+                await self.on_started("127.0.0.1", 43210)
+
+        runtime_paths = RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path / "storage",
+            control_state_root=tmp_path / "control",
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+                "MINDROOM_WORKER_BACKEND": "static_runner",
+                "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            },
+        )
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        script_runtime = SimpleNamespace(
+            broker=MagicMock(),
+            bind_api=MagicMock(),
+            unbind_api=AsyncMock(),
+            touch_live_workers=MagicMock(),
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime"),
+            patch("mindroom.api.main.unbind_script_runtime"),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                script_runtime=script_runtime,
+                shutdown_requested=shutdown_requested,
+            )
+
+        script_runtime.bind_api.assert_called_once_with("")
+        script_runtime.unbind_api.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_run_api_server_disables_scripts_for_invalid_implicit_public_gateway(self, tmp_path: Path) -> None:
+        """An unrelated public origin must not make the whole API unavailable."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                self.on_started = on_started
+
+            async def serve(self) -> None:
+                assert callable(self.on_started)
+                await self.on_started("127.0.0.1", 43210)
+
+        runtime_paths = RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path / "storage",
+            control_state_root=tmp_path / "control",
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+                "MINDROOM_WORKER_BACKEND": "static_runner",
+                "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+                "MINDROOM_PUBLIC_URL": "not-a-url",
+            },
+        )
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        script_runtime = SimpleNamespace(
+            broker=MagicMock(),
+            bind_api=MagicMock(),
+            unbind_api=AsyncMock(),
+            touch_live_workers=MagicMock(),
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime"),
+            patch("mindroom.api.main.unbind_script_runtime"),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                script_runtime=script_runtime,
+                shutdown_requested=shutdown_requested,
+            )
+
+        script_runtime.bind_api.assert_called_once_with("")
+        script_runtime.unbind_api.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_run_api_server_rejects_invalid_explicit_script_gateway(self, tmp_path: Path) -> None:
+        """An invalid explicit script gateway remains a startup configuration error."""
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                self.on_started = on_started
+
+            async def serve(self) -> None:
+                assert callable(self.on_started)
+                await self.on_started("127.0.0.1", 43210)
+
+        runtime_paths = RuntimePaths(
+            config_path=tmp_path / "config.yaml",
+            config_dir=tmp_path,
+            env_path=tmp_path / ".env",
+            storage_root=tmp_path / "storage",
+            control_state_root=tmp_path / "control",
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+                "MINDROOM_WORKER_BACKEND": "static_runner",
+                "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+                "MINDROOM_SCRIPT_GATEWAY_URL": "not-a-url",
+            },
+        )
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime"),
+            patch("mindroom.api.main.unbind_script_runtime"),
+            pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                script_runtime=SimpleNamespace(
+                    broker=MagicMock(),
+                    bind_api=MagicMock(),
+                    unbind_api=AsyncMock(),
+                    touch_live_workers=MagicMock(),
+                ),
+                shutdown_requested=asyncio.Event(),
+            )
+
+    @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
         """server.serve() returning after an intentional shutdown should not be fatal."""
 
@@ -374,8 +637,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = True
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: object | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
@@ -409,8 +678,14 @@ class TestAgentBot(AgentBotTestBase):
             should_exit = False
             force_exit = False
 
-            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
-                pass
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: object | None = None,
+            ) -> None:
+                del on_started
 
             async def serve(self) -> None:
                 raise SystemExit(1)
@@ -555,6 +830,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -577,6 +853,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
@@ -629,6 +906,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -694,6 +972,7 @@ class TestAgentBot(AgentBotTestBase):
             _log_level: str,
             _runtime_paths: RuntimePaths,
             _knowledge_refresh_scheduler: object,
+            _script_runtime: object,
             shutdown_requested: asyncio.Event | None,
         ) -> None:
             assert shutdown_requested is not None
@@ -891,6 +1170,102 @@ class TestAgentBot(AgentBotTestBase):
         assert observed_credentials_root == runtime_storage.resolve()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_offloads_initial_credential_and_storage_setup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Credential sync and initial storage creation must not block the event loop."""
+        runtime_paths = self._runtime_paths(tmp_path)
+        storage_path = runtime_paths.storage_root
+        event_loop_thread_id = threading.get_ident()
+        setup_thread_ids: list[int] = []
+        events: list[str] = []
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after setup"))
+        mock_orchestrator.stop = AsyncMock()
+        stall_detector = MagicMock()
+        original_mkdir = Path.mkdir
+
+        def _record_storage_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+            if path == storage_path:
+                setup_thread_ids.append(threading.get_ident())
+                events.append("storage")
+            original_mkdir(path, *args, **kwargs)
+
+        def _sync_credentials(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            setup_thread_ids.append(threading.get_ident())
+            events.append("credentials")
+
+        def _construct_orchestrator(*_args: object, **_kwargs: object) -> MagicMock:
+            assert storage_path.is_dir()
+            events.append("orchestrator")
+            return mock_orchestrator
+
+        monkeypatch.setattr(Path, "mkdir", _record_storage_mkdir)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch(
+                "mindroom.orchestrator.start_event_loop_stall_detector",
+                return_value=stall_detector,
+            ) as start_detector,
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_sync_credentials),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_construct_orchestrator),
+            pytest.raises(RuntimeError, match="stop after setup"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        start_detector.assert_called_once_with(runtime_paths)
+        assert events == ["credentials", "storage", "orchestrator"]
+        assert len(setup_thread_ids) == 2
+        assert setup_thread_ids[0] == setup_thread_ids[1]
+        assert setup_thread_ids[0] != event_loop_thread_id
+        stall_detector.stop.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_drains_cancelled_initial_setup_before_cleanup(self, tmp_path: Path) -> None:
+        """Cancellation must not let teardown overtake the active setup worker."""
+        reset_runtime_state()
+        setup_started = threading.Event()
+        release_setup = threading.Event()
+        events: list[str] = []
+        runtime_paths = self._runtime_paths(tmp_path)
+
+        def _blocked_credential_sync(*, runtime_paths: RuntimePaths) -> None:
+            assert runtime_paths is not None
+            events.append("setup_started")
+            setup_started.set()
+            assert release_setup.wait(2.0)
+            events.append("setup_finished")
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager"),
+            patch("mindroom.orchestrator.start_event_loop_stall_detector", return_value=MagicMock()),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_blocked_credential_sync),
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda: events.append("cleanup"),
+            ),
+        ):
+            main_task = asyncio.create_task(main(log_level="INFO", runtime_paths=runtime_paths, api=False))
+            try:
+                assert await asyncio.to_thread(setup_started.wait, 2.0)
+                main_task.cancel()
+                await asyncio.sleep(0)
+                assert not main_task.done()
+                assert events == ["setup_started"]
+            finally:
+                release_setup.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await main_task
+
+        assert events == ["setup_started", "setup_finished", "cleanup"]
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
         """The orchestrator should clear stale workers before startup and shut them down on exit."""
         reset_runtime_state()
@@ -907,6 +1282,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
@@ -916,7 +1292,8 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -932,6 +1309,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator") as mock_orchestrator_cls,
             patch(
                 "mindroom.orchestrator.shutdown_primary_worker_manager",
@@ -945,7 +1323,8 @@ class TestAgentBot(AgentBotTestBase):
                 api=False,
             )
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator_cls.assert_not_called()
 
     @pytest.mark.asyncio
@@ -965,6 +1344,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
@@ -975,7 +1355,8 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_reset_worker_manager.assert_called_once_with()
+        assert shutdown_calls == [{}]
         mock_orchestrator.stop.assert_awaited_once()
 
 
@@ -1438,6 +1819,77 @@ class TestMultiAgentOrchestrator:
 
         ensure_rooms.assert_awaited_once_with()
         ensure_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
+
+    @pytest.mark.asyncio
+    async def test_reconcile_post_update_rooms_sets_up_live_room_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Room-only edits should reconcile the affected live bots without replacement."""
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        router_bot = MagicMock(running=True)
+        general_bot = MagicMock(running=True)
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "general": general_bot,
+        }
+        plan = ConfigUpdatePlan(
+            new_config=config,
+            changed_mcp_servers=set(),
+            configured_entities={ROUTER_AGENT_NAME, "general"},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+            entities_to_reconcile_rooms={ROUTER_AGENT_NAME, "general"},
+        )
+
+        with patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as setup_rooms:
+            await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+        setup_rooms.assert_awaited_once()
+        assert set(setup_rooms.await_args.args[0]) == {router_bot, general_bot}
+
+    @pytest.mark.asyncio
+    async def test_reconcile_post_update_rooms_preserves_router_grants_before_sliding_restart(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Room-only edits must preserve refreshed router grants across subscription restart."""
+        config = _runtime_bound_config(Config(matrix_sync={"mode": "sliding"}), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, config=config, running=True)
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+        plan = ConfigUpdatePlan(
+            new_config=config,
+            changed_mcp_servers=set(),
+            configured_entities={ROUTER_AGENT_NAME},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+            entities_to_reconcile_rooms={ROUTER_AGENT_NAME},
+        )
+
+        with (
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch("mindroom.orchestrator.cancel_sync_task", new=AsyncMock()) as cancel_sync,
+            patch.object(orchestrator, "_start_sync_task") as start_sync,
+        ):
+            await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+        cancel_sync.assert_awaited_once_with(ROUTER_AGENT_NAME, orchestrator._sync_tasks)
+        router_bot.preserve_reply_memberships_on_next_sync_start.assert_called_once_with()
+        start_sync.assert_called_once_with(ROUTER_AGENT_NAME, router_bot)
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
@@ -2902,10 +3354,20 @@ class TestMultiAgentOrchestrator:
             msg = "mcp shutdown failed"
             raise RuntimeError(msg)
 
+        async def _shutdown_scripts() -> None:
+            calls.append("scripts")
+            msg = "script shutdown failed"
+            raise RuntimeError(msg)
+
         orchestrator._knowledge_refresh_scheduler = MagicMock()
         orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
 
         with (
+            patch.object(
+                type(orchestrator._script_runtime),
+                "shutdown",
+                new=AsyncMock(side_effect=_shutdown_scripts),
+            ),
             patch(
                 "mindroom.orchestrator.shutdown_approval_runtime",
                 new=AsyncMock(side_effect=_shutdown_approvals),
@@ -2925,8 +3387,238 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
-        assert calls == ["transport", "approvals", "mcp"]
+        assert calls == ["scripts", "transport", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_config_update_forwards_plan_to_stable_script_runtime_before_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reload policy reaches the process-local runtime before any bot is replaced."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        apply_update_plan = AsyncMock(side_effect=RuntimeError("script reload boundary"))
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(runtime), "apply_update_plan", new=apply_update_plan),
+            pytest.raises(RuntimeError, match="script reload boundary"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=False)
+        assert orchestrator.script_runtime is runtime
+        assert orchestrator.config is current_config
+
+    @pytest.mark.asyncio
+    async def test_plugin_reload_interrupts_scripts_before_replacing_plugin_code(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin changes cross the script interruption boundary before code is swapped."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        apply_update_plan = AsyncMock(side_effect=RuntimeError("script plugin boundary"))
+        replace_plugins = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
+            patch.object(orchestrator, "_apply_plugin_changes_for_config_update", new=replace_plugins),
+            pytest.raises(RuntimeError, match="script plugin boundary"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ("plugins/example.py",))
+
+        apply_update_plan.assert_awaited_once_with(plan, plugins_changed=True)
+        replace_plugins.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_config_update_reopens_worker_admission_when_apply_boundary_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failed prepare keeps the old backend authoritative and reopens admission."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        old_backend = MagicMock()
+
+        class _Lease:
+            manager = old_backend
+            generation_id = "old"
+
+            def release(self) -> None:
+                msg = "failed prepare must not release the old lease"
+                raise AssertionError(msg)
+
+        lease = _Lease()
+        runtime._current_worker_lease = lease
+        runtime.manager.worker_backend = old_backend
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch(
+                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+                side_effect=lambda _paths, config: "new" if config is new_config else "old",
+            ),
+            patch.object(
+                type(runtime),
+                "_apply_update_pass",
+                new=AsyncMock(side_effect=RuntimeError("script reload boundary")),
+            ),
+            pytest.raises(RuntimeError, match="script reload boundary"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert orchestrator.config is current_config
+        assert runtime._worker_replacement_pending is False
+        assert runtime.manager.worker_backend is old_backend
+        assert runtime._current_worker_lease is lease
+
+    @pytest.mark.asyncio
+    async def test_config_update_aborts_the_worker_handoff_when_startup_maintenance_cancellation_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A post-boundary reload failure must reopen worker admission before it escapes."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        completed_configs: list[Config] = []
+
+        async def complete_worker_replacement(_runtime: object) -> None:
+            completed_configs.append(orchestrator.config)
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch(
+                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
+                side_effect=lambda _paths, config: "new" if config is new_config else "current",
+            ),
+            patch.object(
+                orchestrator._startup_maintenance,
+                "cancel",
+                new=AsyncMock(side_effect=RuntimeError("maintenance cancellation failed")),
+            ),
+            patch.object(
+                type(runtime),
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
+                create=True,
+            ),
+            pytest.raises(RuntimeError, match="maintenance cancellation failed"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert completed_configs == [current_config]
+
+    @pytest.mark.asyncio
+    async def test_config_update_completes_the_worker_handoff_with_new_config_after_commit_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failure after commit must never reopen worker admission against the old config."""
+        current_config = _runtime_bound_config(Config(), tmp_path)
+        new_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
+        orchestrator.config = current_config
+        plan = ConfigUpdatePlan(
+            new_config=new_config,
+            changed_mcp_servers=set(),
+            configured_entities=set(),
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+        )
+        runtime = orchestrator.script_runtime
+        completed_configs: list[Config] = []
+
+        async def complete_worker_replacement(_runtime: object) -> None:
+            completed_configs.append(orchestrator.config)
+
+        with (
+            patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
+            patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
+            patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(
+                type(runtime),
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
+                create=True,
+            ),
+            patch.object(
+                orchestrator,
+                "_sync_mcp_manager",
+                new=AsyncMock(side_effect=RuntimeError("post-commit failure")),
+            ),
+            pytest.raises(RuntimeError, match="post-commit failure"),
+        ):
+            await orchestrator._apply_config_update_plan(current_config, plan, ())
+
+        assert completed_configs == [new_config, new_config]
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
@@ -3168,31 +3860,19 @@ class TestMultiAgentOrchestrator:
     async def test_update_config_syncs_runtime_services_when_running(self, tmp_path: Path) -> None:
         """Hot reload should sync runtime services without global knowledge refresh work."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-
-        config = MagicMock()
-        config.agents = {}
-        config.teams = {}
-        config.mindroom_user = None
-        config.matrix_room_access = MagicMock()
-        config.authorization = MagicMock()
-        config.event_journal = MagicMock()
-        config.defaults.enable_streaming = True
-
-        orchestrator.config = config
+        current_config = _runtime_bound_config(Config(defaults={"enable_streaming": True}), tmp_path)
+        new_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
+        orchestrator.config = current_config
         orchestrator.running = True
         router_bot = MagicMock()
-        router_bot.config = config
+        router_bot.config = current_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=config),
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
-            patch(
-                "mindroom.orchestration.config_updates._identify_entities_to_restart",
-                return_value=set(),
-            ),
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
@@ -3200,9 +3880,9 @@ class TestMultiAgentOrchestrator:
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(
-            config,
+            new_config,
             start_watcher=True,
-            previous_config=config,
+            previous_config=current_config,
         )
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
@@ -3273,6 +3953,11 @@ class TestMultiAgentOrchestrator:
             removed_entities=set(),
             only_support_service_changes=True,
         )
+        generation_refreshes: list[Config] = []
+
+        async def complete_worker_replacement(_runtime: object) -> None:
+            assert orchestrator.config is new_config
+            generation_refreshes.append(new_config)
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
@@ -3283,6 +3968,12 @@ class TestMultiAgentOrchestrator:
             ) as mock_build_plan,
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
+            patch.object(
+                type(orchestrator.script_runtime),
+                "complete_worker_replacement",
+                new=complete_worker_replacement,
+                create=True,
+            ),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -3294,6 +3985,7 @@ class TestMultiAgentOrchestrator:
         # without the planner or the support sync ever being reached.
         mock_build_plan.assert_called_once()
         mock_sync_support.assert_awaited_once()
+        assert generation_refreshes == [new_config, new_config]
 
     @pytest.mark.asyncio
     async def test_update_config_adopts_a_journal_edit_and_warns_that_it_waits_for_a_restart(

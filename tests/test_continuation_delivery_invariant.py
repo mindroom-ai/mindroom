@@ -40,7 +40,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_team_media_fallback import _make_test_agent, _make_test_team
+from tests.test_team_response import _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -108,8 +108,10 @@ class _WatchedOutbox:
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
         self.timeline.append(f"enqueue:{stage.value}")
@@ -120,8 +122,10 @@ class _WatchedOutbox:
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def claim_matrix_delivery(
@@ -163,6 +167,20 @@ class _WatchedOutbox:
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
 
     async def retire_matrix_delivery(
         self,

@@ -47,7 +47,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
-from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
@@ -2233,91 +2232,3 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(t
     ctx = seen_ctx[-1]
     assert ctx.reply_to_event_id == "$original"
     assert ctx.correlation_id == "$edit"
-
-
-@pytest.mark.asyncio
-async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) -> None:
-    """Retry runs should keep the model-facing prompt that Agno persisted."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    config.agents["general"].show_tool_calls = False
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    storage = _SessionStorage()
-    seen_run_ids: list[str | None] = []
-
-    async def fake_prepare_agent_and_prompt(
-        _ctx: object,
-        *_args: object,
-        prompt: str,
-        model_prompt: str | None = None,
-        **_kwargs: object,
-    ) -> _PreparedAgentRun:
-        model_facing_prompt = model_prompt if model_prompt is not None else prompt
-        return _prepared_prompt_result(MagicMock(), prompt=model_facing_prompt)
-
-    async def fake_cached_agent_run(
-        _agent: object,
-        run_input: tuple[Message, ...],
-        session_id: str,
-        **kwargs: object,
-    ) -> RunOutput:
-        run_id = cast("str | None", kwargs.get("run_id"))
-        seen_run_ids.append(run_id)
-        if len(seen_run_ids) == 1:
-            error_message = "audio input is not supported"
-            raise ValueError(error_message)
-        run = RunOutput(
-            run_id=run_id,
-            content="Hello",
-            status=RunStatus.completed,
-            messages=[*run_input, Message(role="assistant", content="Hello")],
-        )
-        storage.session = AgentSession(
-            session_id=session_id,
-            agent_id="general",
-            created_at=1,
-            updated_at=1,
-            runs=[run],
-        )
-        return run
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare_agent_and_prompt)),
-        patch("mindroom.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_agent_run)),
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            history_storage=storage,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-        coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
-
-        await coordinator.generate_response(
-            replace(
-                _response_request(
-                    prompt="Describe this image",
-                    user_id="@alice:localhost",
-                    thread_id="$thread-root",
-                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
-                ),
-                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
-            ),
-        )
-
-    persisted_session = cast("AgentSession", storage.session)
-    assert persisted_session.runs is not None
-    persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert len(seen_run_ids) == 2
-    assert seen_run_ids[0] is not None
-    assert seen_run_ids[1] is not None
-    assert seen_run_ids[1] != seen_run_ids[0]
-    assert persisted_run.run_id == seen_run_ids[1]
-    assert persisted_run.messages is not None
-    assert "Describe this image" in cast("str", persisted_run.messages[0].content)
-    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[0].content)

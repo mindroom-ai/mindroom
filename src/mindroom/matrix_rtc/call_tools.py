@@ -34,6 +34,15 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
+from mindroom.background_tasks import (
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+    wait_for_future_until_complete,
+)
+from mindroom.claude_prompt_cache import (
+    aclose_anthropic_async_client,
+    arefresh_session_backed_bedrock_async_client,
+)
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.runtime import (
     close_agent_runtime_state_dbs,
@@ -46,6 +55,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.pre_model_preparation import prewarm_agent_model_client
 from mindroom.session_ids import create_session_id
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.declarations import (
@@ -235,12 +245,31 @@ class _CallAgentCache:
     ) -> str:
         """Run one turn, rebuilding only when call dependencies change identity."""
         async with self.lock:
+            reusing_agent = self._can_reuse_agent(
+                knowledge_identity=knowledge_identity,
+                refresh_scheduler=refresh_scheduler,
+            )
             agent = await self._get_agent(
                 knowledge=knowledge,
                 knowledge_identity=knowledge_identity,
                 refresh_scheduler=refresh_scheduler,
             )
+            if reusing_agent:
+                await arefresh_session_backed_bedrock_async_client(agent.model)
             return await operation(agent)
+
+    def _can_reuse_agent(
+        self,
+        *,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+    ) -> bool:
+        """Return whether the cached agent matches this turn's dependencies."""
+        return (
+            self.agent is not None
+            and self.knowledge_identity == knowledge_identity
+            and self.refresh_scheduler is refresh_scheduler
+        )
 
     async def aclose(self) -> None:
         """Close the cached agent's caller-owned runtime state."""
@@ -249,7 +278,19 @@ class _CallAgentCache:
             self.knowledge_identity = ()
             self.refresh_scheduler = None
             if agent is not None:
-                await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
+                await self._close_agent(agent)
+
+    @staticmethod
+    async def _close_agent(agent: AgnoAgent) -> None:
+        """Release one cached agent's async client and runtime databases."""
+
+        async def release() -> None:
+            try:
+                await aclose_anthropic_async_client(agent.model)
+            finally:
+                await run_blocking_until_complete(close_agent_runtime_state_dbs, agent)
+
+        await run_coroutine_until_complete(release())
 
     async def _get_agent(
         self,
@@ -258,20 +299,30 @@ class _CallAgentCache:
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgnoAgent:
-        if (
-            self.agent is not None
-            and self.knowledge_identity == knowledge_identity
-            and self.refresh_scheduler is refresh_scheduler
+        if self._can_reuse_agent(
+            knowledge_identity=knowledge_identity,
+            refresh_scheduler=refresh_scheduler,
         ):
+            assert self.agent is not None
             return self.agent
         if self.agent is not None:
-            await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
-            self.agent = None
-        agent = await asyncio.to_thread(
-            self._build_agent,
-            knowledge=knowledge,
-            refresh_scheduler=refresh_scheduler,
+            agent, self.agent = self.agent, None
+            self.knowledge_identity = ()
+            self.refresh_scheduler = None
+            await self._close_agent(agent)
+        build_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._build_agent,
+                knowledge=knowledge,
+                refresh_scheduler=refresh_scheduler,
+            ),
         )
+        try:
+            agent = await wait_for_future_until_complete(build_task)
+        except asyncio.CancelledError:
+            if not build_task.cancelled() and build_task.exception() is None:
+                await self._close_agent(build_task.result())
+            raise
         self.agent = agent
         self.knowledge_identity = knowledge_identity
         self.refresh_scheduler = refresh_scheduler
@@ -291,8 +342,9 @@ class _CallAgentCache:
             runtime_paths=self.runtime_paths,
             execution_identity=self.execution_identity,
         )
+        agent: AgnoAgent | None = None
         try:
-            return create_agent(
+            agent = create_agent(
                 self.agent_name,
                 self.config,
                 self.runtime_paths,
@@ -308,9 +360,12 @@ class _CallAgentCache:
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
             )
+            prewarm_agent_model_client(agent, history_storage)
         except Exception:
             history_storage.close()
             raise
+        else:
+            return agent
 
 
 async def build_call_tools(

@@ -8,13 +8,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from contextlib import AsyncExitStack
+    from collections.abc import AsyncIterator, Callable
 
     from mcp import ClientSession
 
+    from mindroom.config.auth import AuthorizationConfig
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.errors import MCPError
+    from mindroom.tool_system.worker_routing import ResolvedWorkerKeyScope
 
 
 class _AsyncReadWriteLock:
@@ -52,6 +53,8 @@ class _AsyncReadWriteLock:
                 self._writer_active = True
             finally:
                 self._waiting_writers -= 1
+                if not self._writer_active and self._waiting_writers == 0:
+                    self._condition.notify_all()
         try:
             yield
         finally:
@@ -84,17 +87,38 @@ class MCPServerCatalog:
     catalog_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class MCPOAuthLeaseVersion:
+    """Immutable identity of one authoritative OAuth credential version."""
+
+    token_hash: str
+    credential_generation: str
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class MCPOAuthCredentialScope:
+    """Lossless identity of one OAuth credential store used by MCP."""
+
+    worker_scope: ResolvedWorkerKeyScope
+    worker_key: str
+    requester_id: str | None = None
+    routing_agent_name: str | None = None
+
+
 @dataclass
 class MCPServerState:
     """Live connection state for one configured server."""
 
     server_id: str
     config: MCPServerConfig
+    config_generation: int = 0
+    oauth_provider_id: str | None = None
+    oauth_authorization: AuthorizationConfig | None = None
+    oauth_credential_scope: MCPOAuthCredentialScope | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None
     session: ClientSession | None = None
-    exit_stack: AsyncExitStack | None = None
     session_owner_task: asyncio.Task[None] | None = None
     session_close_event: asyncio.Event | None = None
     semaphore: asyncio.Semaphore = field(init=False)
@@ -104,7 +128,11 @@ class MCPServerState:
     consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
-    oauth_access_token_hash: str | None = None
+    oauth_lease_version: MCPOAuthLeaseVersion | None = None
+    oauth_session_lease_version: MCPOAuthLeaseVersion | None = None
+    oauth_transport_authorization_rejected: Callable[[], bool] | None = None
+    function_validation_error: bool = False
+    retired: bool = False
 
     def __post_init__(self) -> None:
         """Initialize the per-server concurrency limiter."""

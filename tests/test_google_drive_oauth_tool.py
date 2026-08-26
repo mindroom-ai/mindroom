@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from agno.agent._tools import parse_tools
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.tools.function import Function
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -122,8 +124,16 @@ class _FakeDriveService:
         return self.files_resource
 
 
-class _ValidCredentials:
-    valid = True
+def _valid_credentials() -> GoogleOAuthCredentials:
+    return GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
 
 
 class _FakeMediaIoBaseDownload:
@@ -155,7 +165,7 @@ def _google_drive_download_tool(
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=download_dir or tmp_path,
     )
@@ -174,7 +184,7 @@ def _google_drive_write_tool(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
     )
     service = _FakeDriveService()
@@ -368,7 +378,7 @@ def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file="true",
         tool_output_workspace_root=tmp_path,
     )
@@ -418,7 +428,7 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
     )
     expires_at = datetime(2030, 1, 1, tzinfo=UTC).timestamp()
 
-    creds = tool._credentials_from_token_data(
+    creds = tool._raw_credentials_from_token_data(
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -575,6 +585,35 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
     assert all(json.loads(result)["reason"] == "missing_write_scope" for result in results)
     assert service.files_resource.create_kwargs is None
     assert service.files_resource.update_kwargs is None
+
+
+def test_google_drive_async_write_scope_check_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+    )
+    event_loop_thread = threading.get_ident()
+    scope_check_threads: list[int] = []
+    expected_result = json.dumps({"reason": "missing_write_scope"})
+
+    def scope_upgrade_result() -> str:
+        scope_check_threads.append(threading.get_ident())
+        return expected_result
+
+    monkeypatch.setattr(tool, "_write_scope_upgrade_result", scope_upgrade_result)
+    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
+    assert entrypoint is not None
+
+    result = asyncio.run(entrypoint("unused"))
+
+    assert result == expected_result
+    assert scope_check_threads
+    assert event_loop_thread not in scope_check_threads
 
 
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:
@@ -757,7 +796,7 @@ def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) ->
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -854,7 +893,7 @@ def test_google_drive_upload_requires_workspace(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=None,
     )
     service = _FakeDriveService()
@@ -932,7 +971,7 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -952,7 +991,7 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     service.files_resource.file_metadata = {
@@ -979,7 +1018,7 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         max_read_size=4,
     )
     service = _FakeDriveService()

@@ -498,6 +498,76 @@ def test_blocking_completion_records_and_updates_collector() -> None:
     assert log.closed == 1
 
 
+@pytest.mark.parametrize(
+    ("presentation", "allow_no_report_response", "expected_response"),
+    [
+        pytest.param("Tool: matrix alert sent", True, "", id="silent-agent"),
+        pytest.param("Team Response: no team prose", True, "", id="silent-team"),
+        pytest.param(
+            "Tool: matrix alert sent",
+            False,
+            "Tool: matrix alert sent",
+            id="ordinary-agent",
+        ),
+        pytest.param(
+            "Team Response: no team prose",
+            False,
+            "Team Response: no team prose",
+            id="ordinary-team",
+        ),
+    ],
+)
+def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
+    presentation: str,
+    allow_no_report_response: bool,
+    expected_response: str,
+) -> None:
+    """Tool presentation is not semantic prose, while tool effects and records survive."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    collector: dict[str, Any] = {}
+    independent_alerts: list[str] = []
+    trace = _trace("matrix_alert")
+    tool = ToolExecution(
+        tool_call_id="call-alert",
+        tool_name="matrix_alert",
+        tool_args={"message": "check completed"},
+        result="sent",
+    )
+
+    async def _attempt(run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        independent_alerts.append("$alert")
+        run.run_metadata = {"tool_count": 1}
+        return CompletedAttempt(
+            response_text=presentation,
+            replayable_text="",
+            has_visible_content=False,
+            tool_executions=(tool,),
+            completed_tools=(trace,),
+            metadata_content={"ai_run": {"tools": 1}},
+        )
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_no_report_response=allow_no_report_response),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder), run_metadata_collector=collector),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == expected_response
+    assert independent_alerts == ["$alert"]
+    assert collector == {"ai_run": {"tools": 1}}
+    assert recorder.completed_calls == [
+        {
+            "run_metadata": {"tool_count": 1},
+            "assistant_text": "",
+            "completed_tools": [trace],
+        },
+    ]
+
+
 def test_blocking_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
@@ -778,6 +848,35 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
     assert attempts == 2
     assert [discard.run_id for discard in log.discards] == ["run-1"]
     assert log.released == 1
+    assert recorder.completed_calls == [
+        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
+    ]
+
+
+def test_blocking_no_report_empty_run_completes_without_retry_or_notice() -> None:
+    """An allowed empty completion is a successful first-attempt outcome."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+
+    async def _attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(is_empty=True, session_id="session-live", run_id="run-empty")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_no_report_response=True),
+            _blocking_adapter(log, _attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+
+    assert result == ""
+    assert attempts == 1
+    assert log.discards == []
+    assert log.released == 0
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
     ]
@@ -1166,6 +1265,40 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
     assert [discard.run_id for discard in log.discards] == ["run-1"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
+
+
+def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> None:
+    """An allowed streamed empty completion records success without yielding a notice."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+
+    async def _attempt(
+        _run: TurnRunState,
+        _c: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        yield AttemptResolved(CompletedAttempt(is_empty=True, run_id="run-empty"))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(allow_no_report_response=True),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(turn_recorder=cast("Any", recorder)),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == []
+    assert attempts == 1
+    assert log.discards == []
+    assert log.released == 0
+    assert recorder.completed_calls == [
+        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
+    ]
 
 
 def test_streaming_continuation_advances_then_finishes() -> None:

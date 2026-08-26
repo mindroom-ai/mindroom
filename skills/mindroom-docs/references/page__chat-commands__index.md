@@ -118,6 +118,15 @@ Add a phrase such as `with only the last 5 messages of context` to cap each sche
 !schedule Daily at 9am, @research summarize AI news with only the last 5 messages
 ```
 
+Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools.
+
+```
+!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
+```
+
+Silent schedules hide their trigger and omit a successful final response that is empty or contains only `NO_REPLY`.
+Schedules remain visible by default.
+
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
 See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
@@ -148,8 +157,9 @@ Use `!list_schedules` to find task IDs.
 ### `!edit_schedule`
 
 Replace an existing scheduled task with new timing and content.
-Omitted fields stay unchanged, including any existing history limit.
+Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
 Use `restore full history` or `use unlimited history` to remove a history limit.
+Use `make this schedule silent` or `make this schedule visible` to change its delivery mode.
 
 ```
 !edit_schedule <task-id> <new-task-description>
@@ -162,6 +172,7 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ```
 !edit_schedule task42 keep the same schedule but restore full history
 !edit_schedule task42 every weekday at 8am check build status with no history
+!edit_schedule task42 keep the same schedule but make it silent
 ```
 
 **Aliases:** `!editschedule`, `!edit-schedule`

@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -37,6 +38,20 @@ def _normalize_document_id(value: str) -> str:
     return match.group(1) if match else document_id
 
 
+def _google_docs_http_error_result(operation: str, exc: HttpError) -> str:
+    status = exc.resp.status
+    logger.warning(
+        "google_docs_request_failed",
+        operation=operation,
+        error_type=type(exc).__name__,
+        status=status,
+    )
+    message = "Google Docs request failed"
+    if not isinstance(status, bool) and isinstance(status, int):
+        message = f"{message} (HTTP {status})"
+    return json.dumps({"error": message})
+
+
 class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Toolkit):
     """Create, inspect, and edit Google Docs with scoped Google credentials."""
 
@@ -49,6 +64,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        authorization: AuthorizationConfig | None = None,
         create_document: bool = True,
         read_document: bool = True,
         edit_document: bool = True,
@@ -71,6 +87,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
 
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
+            authorization=authorization,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
@@ -115,7 +132,12 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         """Return the per-thread authenticated Google Docs service."""
         self._auth()
         if self.service is None:
-            self.service = build("docs", "v1", credentials=self.creds, cache_discovery=False)
+            self.service = build(
+                "docs",
+                "v1",
+                http=self._google_authorized_http(self.creds),
+                cache_discovery=False,
+            )
         return self.service
 
     def _batch_update(self, document_id: str, requests: list[dict[str, object]]) -> dict[str, object]:
@@ -162,11 +184,26 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                             },
                         ],
                     )
-                except HttpError as exc:
-                    result["initialTextError"] = f"Google Docs API error: {exc}"
+                except Exception as exc:
+                    status = exc.resp.status if isinstance(exc, HttpError) else None
+                    logger.warning(
+                        "google_docs_initial_text_update_failed",
+                        error_type=type(exc).__name__,
+                        status=status,
+                    )
+                    initial_text_error = "Google Docs initial text update failed"
+                    if not isinstance(status, bool) and isinstance(status, int):
+                        initial_text_error = f"{initial_text_error} (HTTP {status})"
+                    result.update(
+                        {
+                            "initialTextError": initial_text_error,
+                            "partial_success": True,
+                            "retry_safe": False,
+                        },
+                    )
             return json.dumps(result)
         except HttpError as exc:
-            return json.dumps({"error": f"Google Docs API error: {exc}"})
+            return _google_docs_http_error_result("create_document", exc)
 
     def google_docs_get_document(self, document_id: str) -> str:
         """Read a Google Doc's full tab-aware structure and content.
@@ -194,7 +231,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return json.dumps({"error": f"Google Docs API error: {exc}"})
+            return _google_docs_http_error_result("get_document", exc)
 
     def google_docs_insert_text(
         self,
@@ -244,7 +281,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return json.dumps({"error": f"Google Docs API error: {exc}"})
+            return _google_docs_http_error_result("insert_text", exc)
 
     def google_docs_replace_text(
         self,
@@ -293,4 +330,4 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
                 },
             )
         except HttpError as exc:
-            return json.dumps({"error": f"Google Docs API error: {exc}"})
+            return _google_docs_http_error_result("replace_text", exc)

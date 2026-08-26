@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -114,6 +115,7 @@ class _MindroomAppState:
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

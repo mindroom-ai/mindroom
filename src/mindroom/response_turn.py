@@ -1,11 +1,11 @@
 """Shared response-turn drivers for the agent and team envelopes.
 
 One inbound response turn has the same lifecycle regardless of which entity
-answers it: open the scope session, run prepared attempts (each attempt owns
-its own media-fallback retries), decide whether the turn continues after a
-dynamic-tool call or a discarded empty run, record the outcome on the turn
-recorder, and persist an interrupted replay when the turn is cancelled without
-a recorder. This module owns that lifecycle exactly once; ``mindroom.ai`` and
+answers it: open the scope session, run prepared attempts, decide whether the
+turn continues after a dynamic-tool call or a discarded empty run, record the
+outcome on the turn recorder, and persist an interrupted replay when the turn
+is cancelled without a recorder.
+This module owns that lifecycle exactly once; ``mindroom.ai`` and
 ``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
 bodies as injected callables.
 
@@ -38,7 +38,7 @@ from mindroom.constants import (
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
-from mindroom.streaming import StreamingLifecycleSuspensionError
+from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -276,6 +276,7 @@ class ResponseTurnContext:
     active_event_ids: frozenset[str] = frozenset()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
+    allow_no_report_response: bool = False
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -362,6 +363,10 @@ class PausedAttempt:
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
+    response_text: str = ""
+    acknowledged_response_text: str | None = None
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
+    response_presentation_state: dict[str, object] = field(default_factory=dict)
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -370,6 +375,20 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
     def __init__(self, paused: PausedAttempt) -> None:
         super().__init__(f"Run {paused.run_id} is waiting for tool approval")
         self.paused = paused
+
+    def capture_collected_presentation(
+        self,
+        *,
+        response_text: str,
+        tool_trace: Sequence[ToolTraceEntry],
+    ) -> None:
+        """Attach an ordered in-memory presentation from a non-Matrix collector."""
+        self.capture_presentation(
+            StreamingPresentation(
+                response_text=response_text,
+                tool_trace=tuple(deepcopy(tool_trace)),
+            ),
+        )
 
 
 def paused_attempt_from_response(
@@ -889,6 +908,14 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
+    if resolution.is_empty and ctx.allow_no_report_response:
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text="",
+            recorded_tools=(),
+            response_text="",
+        )
     if resolution.is_empty:
         retry_granted = _settle_empty_run(
             ctx,
@@ -949,6 +976,11 @@ def _settle_completed_attempt(
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
+    elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
+        # Tool presentation and team fallback chrome are not semantic prose.
+        # The tool records remain part of the completed turn, but quiet
+        # delivery has no final assistant body to publish.
+        response_text = ""
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,

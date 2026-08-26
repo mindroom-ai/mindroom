@@ -311,6 +311,12 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent/team w
 - `!schedule Every hour, @ops check deployment health with no history`
 - `!schedule Daily at 9am, @research summarize AI news with only the last 5 messages`
 
+**Silent Delivery:**
+- Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools
+- `!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives`
+- Silent schedules hide their trigger and omit successful final responses that are empty or contain only `NO_REPLY`
+- Schedules remain visible by default
+
 How it works:
 - **Time-based**: Executes at specific times or intervals
 - **Event-based**: Requires an explicit recurring polling cadence (e.g., "every 5 minutes")
@@ -366,9 +372,11 @@ Examples:
 - `!edit_schedule task42 every weekday at 8am check build status`
 - `!edit_schedule task42 keep the same schedule but restore full history`
 - `!edit_schedule task42 every weekday at 8am check build status with no history`
+- `!edit_schedule task42 keep the same schedule but make this schedule silent`
 
-Omitted fields stay unchanged, including any existing history limit.
+Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
 Use "restore full history" or "use unlimited history" to remove a history limit.
+Use "make this schedule silent" or "make this schedule visible" to change its delivery mode.
 Use `!list_schedules` to find task IDs before editing."""
 
     if topic == "config":

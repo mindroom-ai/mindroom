@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,6 +31,7 @@ async def test_prepare_prompt_branches_propagates_failure_directly(
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
     test_logger = MagicMock()
 
     async def memory_branch() -> MemoryPromptParts:
@@ -46,6 +47,12 @@ async def test_prepare_prompt_branches_propagates_failure_directly(
         return runtime_model, built_agent
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
     monkeypatch.setattr(pre_model_preparation_module, "logger", test_logger)
 
     expected_error_type = asyncio.CancelledError if failing_branch == "memory_cancelled" else RuntimeError
@@ -62,8 +69,10 @@ async def test_prepare_prompt_branches_propagates_failure_directly(
     assert raised.value is expected_error
     if failing_branch in {"memory", "memory_cancelled"}:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+        close_client.assert_awaited_once_with(built_agent.model)
     else:
         close_unreturned.assert_not_called()
+        close_client.assert_not_awaited()
     if failing_branch == "both":
         test_logger.error.assert_called_once()
     else:
@@ -83,6 +92,7 @@ async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     built_agent = MagicMock()
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
 
     async def failed_memory() -> MemoryPromptParts:
         assert await asyncio.to_thread(agent_started.wait, 5.0)
@@ -98,6 +108,12 @@ async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
         return runtime_model, built_agent
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
 
     prepare_task = asyncio.create_task(
         prepare_prompt_branches(
@@ -121,6 +137,7 @@ async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
     assert raised.value is memory_error
     assert agent_finished.is_set()
     close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+    close_client.assert_awaited_once_with(built_agent.model)
 
 
 @pytest.mark.asyncio
@@ -131,6 +148,7 @@ async def test_prepare_prompt_branches_preserves_caller_owned_agent_on_memory_fa
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
 
     async def memory_branch() -> MemoryPromptParts:
         await asyncio.sleep(0)
@@ -138,6 +156,12 @@ async def test_prepare_prompt_branches_preserves_caller_owned_agent_on_memory_fa
         raise RuntimeError(msg)
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="memory failed"):
         await prepare_prompt_branches(
@@ -150,6 +174,7 @@ async def test_prepare_prompt_branches_preserves_caller_owned_agent_on_memory_fa
         )
 
     close_unreturned.assert_not_called()
+    close_client.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -177,6 +202,7 @@ async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa
     built_agent = MagicMock()
     runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
     close_unreturned = MagicMock()
+    close_client = AsyncMock()
     test_logger = MagicMock()
 
     async def blocked_memory() -> MemoryPromptParts:
@@ -203,6 +229,12 @@ async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa
         return runtime_model, built_agent
 
     monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+    monkeypatch.setattr(
+        pre_model_preparation_module,
+        "aclose_anthropic_async_client",
+        close_client,
+        raising=False,
+    )
     monkeypatch.setattr(pre_model_preparation_module, "logger", test_logger)
 
     baseline_tasks = set(asyncio.all_tasks())
@@ -240,8 +272,10 @@ async def test_prepare_prompt_branches_cancellation_settles_agent_build(  # noqa
     assert agent_finished.is_set()
     if agent_outcome in {"fails", "cancelled"} or caller_owned:
         close_unreturned.assert_not_called()
+        close_client.assert_not_awaited()
     else:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
+        close_client.assert_awaited_once_with(built_agent.model)
     if agent_outcome == "fails":
         test_logger.error.assert_called_once()
     else:

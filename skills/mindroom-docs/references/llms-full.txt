@@ -713,8 +713,8 @@ Configure shared culture rules that apply across agents:
 
 View and manage scheduled tasks across rooms:
 
-- **List all schedules** with room, status, schedule type, and next run time
-- **Edit schedule timing** and description
+- **List all schedules** with room, status, schedule type, delivery mode, and next run time
+- **Edit schedule timing**, description, and visible or silent delivery
 - **Cancel schedules** by task ID
 
 ### Skills
@@ -840,8 +840,8 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks (filterable by room) |
-| PUT | `/api/schedules/{task_id}` | Edit a scheduled task |
+| GET | `/api/schedules` | List scheduled tasks, including each task's `silent` delivery flag (filterable by room) |
+| PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including the optional `silent` delivery flag |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
 ### Workers
@@ -1099,6 +1099,11 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
+| `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
+| `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
+| `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
+| `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining exact CPU and memory requests and limits for the fixed `small`, `standard`, and `large` background-script profiles | Built-in bounded profiles |
+| `MINDROOM_SCRIPT_RETENTION_SECONDS` | Finite positive seconds to retain terminal background-script runs, tool-call receipts, approval rows, and durable approval records before lifecycle pruning | `2592000` (30 days) |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
 The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.
@@ -1530,6 +1535,8 @@ Demote stale Space admins manually in a Matrix client when needed.
 MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
 Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
 Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+OAuth token services whose names end with `_oauth` cannot use credential seeds; connect them through the OAuth lifecycle instead.
+OAuth client configuration services whose names end with `_oauth_client` remain seedable.
 
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
 Relative file paths resolve from the config directory.
@@ -1566,8 +1573,11 @@ PY
 ```
 
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
-Encrypted mode refuses plaintext credential JSON files.
-No plaintext-to-encrypted migration is performed automatically, so configure the key before saving credentials that must be encrypted.
+Encrypted mode refuses plaintext credential JSON files for every credential service.
+Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
+Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
+No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
+If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
 
 ## Debug Logging
 
@@ -2057,7 +2067,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -2066,10 +2076,10 @@ A filtered public startup-runtime env payload can still propagate from exported 
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify` and `homeassistant`.
-Configured `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the configured scope, while non-OAuth servers use the shared MCP session without requester credentials.
-Use `worker_scope: user` or `worker_scope: user_agent` when OAuth-backed remote MCP state must be requester-isolated.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
+For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -3286,7 +3296,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -3344,8 +3354,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
 The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow that scope, while non-OAuth servers always call through the shared server session without requester credentials.
-Use `user` or `user_agent` when OAuth state must be requester-isolated; `shared` reuses agent-scoped OAuth state.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the selected agent's effective execution scope, while non-OAuth servers always call through the shared server session without requester credentials.
+For OAuth-backed MCP, `shared` belongs to the agent, `user` belongs to the requester across agents, `user_agent` belongs to one requester-agent pair, and unscoped belongs to the installation.
 
 ## Automatic Dependency Installation
 
@@ -9380,6 +9390,8 @@ It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, 
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
+Pass `silent=True` to hide the scheduled trigger and omit successful final responses that are empty or contain only `NO_REPLY`.
+Findings, failures, and messages explicitly sent by tools remain visible for silent schedules.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
 The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
@@ -9401,8 +9413,9 @@ agents:
 schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
 schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
+schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
 cancel_schedule("a1b2c3d4")
 ```
 
@@ -9411,7 +9424,10 @@ cancel_schedule("a1b2c3d4")
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
 - Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
+- Editing preserves the current silent-delivery mode unless the natural-language request or `silent` argument changes it.
 - Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
+- A silent schedule with `new_thread=True` posts any finding or failure as a room-level root because its hidden trigger cannot serve as a visible thread root.
+- Silent delivery controls room presentation only; the task body still travels through Matrix and remains subject to homeserver retention and MindRoom's durable recovery journal.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
 - Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
@@ -9623,15 +9639,16 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to recover requester-scoped OAuth connections, coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
+Use these tools when you need requester-scoped OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
 
 ## Tools On This Page
 
+- [`oauth_connections`] - Issue a browser-confirmed reset for one requester-scoped OAuth connection.
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
@@ -9644,7 +9661,8 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 
 ## Common Setup Notes
 
-All nine entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All ten entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+[`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -9656,6 +9674,58 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
+
+## [`oauth_connections`]
+
+`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
+
+### What It Does
+
+The toolkit exposes only `reset_oauth_connection(provider_id)`.
+The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
+The call returns a time-limited, retryable, requester-bound browser link and does not change credentials itself.
+The authenticated browser confirmation retires the matching MCP OAuth session for that credential scope when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
+The reset does not revoke the grant at the external provider.
+Opening the link without confirming is non-destructive.
+Confirming when no local credential exists is safe and still continues to provider authorization.
+
+### Configuration
+
+Enable the tool alongside the OAuth-backed tools the agent may recover.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Work with connected documents and recover revoked connections
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - oauth_connections
+      - google_drive
+```
+
+### Browser Confirmation And Requester Scope
+
+The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
+Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
+The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
+The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
+Only the original authenticated human requester can open and confirm the link.
+Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
+The resolved credential scope must be `user` or `user_agent`; shared and unscoped credentials are refused.
+Use the authenticated dashboard connection controls to disconnect and reconnect shared or installation-level credentials.
+A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
+Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
+
+### Notes
+
+- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
+- Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
+- Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
+- If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
+- Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
+- The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
 
 ## [`usage_stats`]
 
@@ -10327,6 +10397,277 @@ claude_end_session(session_label="bugfix")
 - [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/)
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
 
+# Background Python Scripts
+
+The `script` tool lets an agent launch and supervise a Python program after the initiating chat turn has ended.
+The program keeps a requester-and-agent-scoped execution identity and can call a bounded subset of the agent's registered tools through MindRoom's normal hooks, approval rules, worker routing, and audit path.
+Use it for watchers, polling loops, and other small automations that should wake an agent only when something changes.
+
+## Enable The Tool
+
+Configure the `script` tool on the agent that will own the process.
+The following complete agent example lets a watcher read a URL and send one intentional Matrix self-trigger when the value changes.
+
+```yaml
+models:
+  default:
+    provider: anthropic
+    id: claude-sonnet-5
+
+agents:
+  watcher:
+    display_name: Watcher
+    role: Watch configured values and investigate meaningful changes.
+    model: default
+    rooms: [operations]
+    tools:
+      - script:
+          allowed_tools: [website, matrix_message]
+          max_concurrent_runs: 3
+          max_tool_calls_per_minute: 30
+          max_runtime_hours: 24
+      - website
+      - matrix_message
+    instructions:
+      - Use background scripts only for bounded, observable automation.
+      - Cancel watchers that are no longer needed.
+
+defaults:
+  tools: []
+```
+
+`allowed_tools` contains toolkit names, not function names.
+Unknown or ineligible toolkit names, including `*`, reject the launch with a clear error.
+It limits calls made through `MindRoomTools`; it does not restrict Python imports, filesystem access, operating-system calls, subprocesses, or direct network clients in the script source.
+Treat `script` as trusted arbitrary code with authority comparable to `python` or `shell` inside its selected execution runtime.
+MindRoom captures the configured `allowed_tools` value when the script launches.
+A non-empty launch-time list restricts the run's grant to those toolkits and makes their unambiguous functions eligible for unattended approval.
+An empty launch-time list captures the agent's full background-eligible callable surface but preapproves none of it for background use.
+A later `allowed_tools` expansion cannot widen a running script's unattended approval authority; operator-authored `tool_approval` rules always apply live.
+The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
+Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
+Functions that declare their own confirmation requirement still require Matrix approval.
+The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
+
+The limits are captured with each run.
+`max_concurrent_runs` defaults to `3` for one requester and agent.
+`max_tool_calls_per_minute` defaults to `30` and counts newly claimed logical calls rather than receipt polling or an identical retry.
+`max_runtime_hours` defaults to `24`, must be positive and finite, and is enforced by lifecycle reconciliation.
+
+## Control Functions
+
+The agent receives five control functions.
+
+```text
+start_script(
+    source: str | None = None,
+    path: str | None = None,
+    name: str | None = None,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
+)
+get_script_resource_profiles()
+get_script(run_id: str)
+cancel_script(run_id: str, force: bool = False)
+list_scripts(include_finished: bool = True)
+```
+
+`start_script` requires exactly one of `source` or `path`.
+`source` accepts inline Python source.
+`path` must be relative to the agent workspace, and MindRoom snapshots the file before launch so later edits do not change the running program.
+Source is limited to 128 KiB.
+`name` is an optional short label shown in status and list results.
+On Kubernetes, `resource_profile` selects one of three administrator-bounded profiles.
+Omitting it uses the configured default.
+Call `get_script_resource_profiles` first to see the live default and exact CPU and memory requests and limits.
+The selected profile and its exact quantities are also returned by start, status, and list operations.
+An explicit profile fails when the active worker backend cannot enforce resource profiles.
+
+`get_script` returns durable run state plus the supervisor's recent process output when it is available.
+`list_scripts` returns only runs owned by the current requester and agent.
+`cancel_script` revokes the tool capability before it signals the process.
+Normal cancellation requests graceful termination, waits for a short bounded grace period, escalates to a force kill when needed, and publishes `cancelled` only after process exit is confirmed.
+`cancel_script(..., force=True)` skips the graceful signal, but it still confirms the process outcome before claiming cancellation completed.
+If signalling or confirmation is temporarily unavailable, the cancellation intent remains durable and later status or reconciliation passes retry it.
+
+Control responses never expose the capability token or its hash.
+
+## Calling Agent Tools From A Script
+
+The worker environment includes the `mindroom.script_sdk` client, whose implementation uses no third-party imports of its own.
+Create one `MindRoomTools` instance and call tools by toolkit name, function name, and JSON-compatible keyword arguments.
+
+```python
+from mindroom.script_sdk import MindRoomTools
+
+tools = MindRoomTools()
+result = tools.call("website", "read_url", url="https://example.org/status.txt")
+print(result, flush=True)
+```
+
+`MindRoomTools.call(toolkit_name, function_name, **arguments)` is blocking.
+It submits one logical call with a stable generated call ID and argument digest, then polls only that receipt until it is terminal.
+Transport retries never submit the same side effect a second time.
+Arguments must have an unambiguous strict-JSON representation.
+Successful results are returned as JSON-compatible Python values and are bounded before they cross the gateway.
+
+Framework and terminal tool failures raise `MindRoomToolCallError`.
+Operator approval denial raises a non-retryable `MindRoomToolCallError` with kind `approval_denied`.
+The exception exposes `kind`, `retryable`, and `call_id` fields so a script can log or stop predictably.
+An `indeterminate` call means MindRoom accepted the call but cannot prove whether the side effect completed, so the script must not automatically repeat it.
+
+The launcher injects the run ID, gateway URL, and a path to a short-lived capability file.
+Use the SDK instead of reading or forwarding those values directly.
+MindRoom stores only a hash of the capability in durable state and removes the raw file during terminal cleanup.
+
+## Complete Watcher Example
+
+This watcher polls a controlled text endpoint and wakes the same Matrix agent once per observed value change.
+Replace the URL and full Matrix user ID with values for your deployment.
+
+```python
+from __future__ import annotations
+
+import time
+
+from mindroom.script_sdk import MindRoomTools
+
+
+STATUS_URL = "https://example.org/controlled-status.txt"
+AGENT_MATRIX_ID = "@mindroom_watcher:example.org"
+POLL_SECONDS = 15
+
+
+def main() -> None:
+    tools = MindRoomTools()
+    previous = tools.call("website", "read_url", url=STATUS_URL)
+
+    while True:
+        time.sleep(POLL_SECONDS)
+        current = tools.call("website", "read_url", url=STATUS_URL)
+        if current == previous:
+            continue
+
+        previous = current
+        tools.call(
+            "matrix_message",
+            "matrix_message",
+            action="send",
+            message=f"{AGENT_MATRIX_ID} the watched value changed; inspect {STATUS_URL} now.",
+            ignore_mentions=False,
+        )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+`matrix_message` defaults to `ignore_mentions=True` to prevent accidental agent loops.
+Set `ignore_mentions=False` only for an intentional handoff or self-trigger like the example above.
+The message must mention the actual agent Matrix ID if it is meant to start a new agent turn.
+Make the watcher edge-triggered, persist or update its observed value before sending, and avoid reacting to its own unchanged output.
+
+The script inherits the original room, thread, requester, and agent execution identity, so omitting `room_id` sends through that authorized conversation context.
+Normal Matrix authorization is still enforced when a script supplies another room.
+
+## Grants, Approval, And Revocation
+
+MindRoom captures the run's permitted toolkit-and-function pairs and unattended approval authority at launch.
+Every call intersects that launch grant with the agent's current live tool surface, so removing a tool or function revokes it without restarting the script.
+Every call also rechecks the requester's current room access and agent reply authorization, including joined-room membership grants.
+Adding toolkits or functions to the live surface, including through a later `allowed_tools` expansion, does not grant a running script new unattended authority.
+Authorization changes, agent removal, `script` tool removal, and requester-isolation changes durably revoke affected runs before process reconciliation.
+
+Background calls use the same tool hooks, approval scripts, function-authored confirmation, execution identity, worker routing, result normalization, and audit events as an ordinary agent tool call.
+An approval card is tied to the exact run, call ID, function, arguments, requester, room, and thread.
+Only the original requester can decide it.
+Cancellation, expiry, agent removal, and orphan recovery settle pending cards without authorizing the call.
+
+## Worker And Network Requirements
+
+The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured worker-state root.
+The worker must also reach the primary script gateway over an authenticated network path.
+Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
+They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
+Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
+When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
+Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
+Direct network clients started by the script process do not receive Agent Vault credential injection.
+
+Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
+For Docker only, `MINDROOM_PUBLIC_URL` can instead name the reachable MindRoom origin and MindRoom appends `/api/script-gateway`.
+Kubernetes always requires an explicit `MINDROOM_SCRIPT_GATEWAY_URL` naming its gateway-only listener.
+Worker mode rejects missing, malformed, credential-bearing, unresolved, unspecified, or loopback gateway addresses.
+A query string or fragment is also rejected because the SDK appends receipt endpoint paths to this base.
+
+```bash
+export MINDROOM_WORKER_BACKEND=docker
+export MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+export MINDROOM_SANDBOX_PROXY_TOKEN=replace-with-a-long-random-token
+export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gateway
+```
+
+For Kubernetes, configure the dedicated backend and isolated gateway attestation instead:
+
+```bash
+export MINDROOM_WORKER_BACKEND=kubernetes
+export MINDROOM_SCRIPT_GATEWAY_URL=https://script-gateway.example.org/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
+```
+
+Build the worker image from the same source checkout when testing unreleased code.
+
+```bash
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
+```
+
+Every non-local script run receives its own dedicated worker process and worker filesystem root, even when another run belongs to the same requester and agent.
+The run-specific worker key extends the canonical requester-and-agent key while keeping the agent name as its final component.
+Private agents are supported in worker mode when they use `private.per: user_agent`; broader requester-wide private scopes remain unavailable to background-script workers.
+The worker receives its run snapshot plus the canonical requester-and-agent scoped workspace and state projections used by that worker scope.
+The script can read and modify files visible through that scoped worker filesystem and can read operator-authored worker environment values, including backend `extra_env` and workspace environment overlays.
+MindRoom does not automatically mirror global worker-grantable credentials into a script-specific worker; governed SDK calls obtain their normal authority through the primary gateway.
+This credential rule is not a general secret boundary because operators can deliberately expose values through worker storage or environment configuration.
+Worker mode is process and filesystem isolation, not an independent network sandbox.
+Direct network access follows the Docker, host, and configured egress policy of the worker, and `allowed_tools` does not govern that traffic.
+Sibling run-specific worker roots and snapshots are not mounted into the script worker.
+Brokered tool calls still use the durable requester-and-agent execution identity and each tool's current primary-or-worker execution target rather than the arbitrary script process's run-specific worker.
+
+Setting `MINDROOM_SANDBOX_EXECUTION_MODE` to `off`, `local`, or `disabled` permits local execution instead of a worker.
+Local execution is marked unsafe, runs under the primary host account, inherits the primary process environment, and makes no secret-isolation claim.
+Background scripts require Linux process-group containment and return an error on unsupported platforms.
+Use local execution only for trusted development scripts.
+
+## Lifecycle And Failure Semantics
+
+Run states are `starting`, `running`, `exited`, `failed`, `cancelled`, and `interrupted`.
+`exited` means the process returned exit code zero.
+`failed` means launch failed or the process returned a nonzero exit code.
+`cancelled` means cancellation was requested and process exit was confirmed.
+`interrupted` means MindRoom lost a required runtime fact, such as the worker supervisor handle, or an isolation-changing reload intentionally stopped the run.
+Authorization loss, owning-agent removal, and removal of the `script` tool are also recorded as interruptions.
+
+Call states are `pending`, `completed`, `failed`, and `indeterminate`.
+Call receipts are durable so a script can poll one accepted call without replaying it.
+Calls are serialized within one run to keep approval and side-effect order predictable.
+
+MindRoom never adopts, resumes, or automatically relaunches Python source after a primary-runtime restart, upgrade, worker loss, or worker replacement.
+Startup fences new launches, durably revokes every inherited nonterminal run, terminates processes reachable through the exact currently configured backend, removes private snapshots, and retires exact dedicated workers before reopening.
+Routine Docker launch changes such as an image or worker-token rotation retain cleanup ownership of existing workers.
+If the Docker daemon, worker storage root, or worker name prefix changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior ownership configuration, restart once to retire the run, then apply the new configuration.
+MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
+If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
+Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
+
+Terminal process output is retained durably with a 64 KiB bound and remains available from `get_script(run_id)` after maintenance observes the exit.
+Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.
+When execution crossed that boundary and the result cannot be proven, the call is `indeterminate` rather than falsely reported as cancelled or failed.
+
+Terminal runs are retained for 30 days by default.
+Private source and capability snapshots and exact dedicated workers are removed before terminal state is published.
+After the retention window, lifecycle maintenance removes background approval rows, durable tool-call receipts, and the terminal run row without selecting a worker backend.
+Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to a finite positive number of seconds to change the window; zero, negative, nonnumeric, and non-finite values are rejected at startup.
+
 # Automation & Platforms
 
 Use these tools to manage AWS-backed automation, edit Airflow DAG files, run code in hosted sandboxes, call arbitrary HTTP APIs, and bridge into broader integration platforms.
@@ -10958,7 +11299,7 @@ The tool names in this table are representative highlights rather than an exhaus
 | **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
-| **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Agent Orchestration** | oauth_connections, subagents, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 | **Runtime Awareness** | update_awareness | [→ tools overview](https://docs.mindroom.chat/tools/#mindroom-update-awareness) |
@@ -11056,7 +11397,8 @@ For `streamable-http` servers, `url` is required.
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
 Static `headers` are process-global and shared by every requester.
-Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need a different bearer token per requester.
+Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
+Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
 
 ## Per-Server Options
 
@@ -11127,12 +11469,19 @@ They are useful when one server exposes many tools but one agent should see only
 
 MCP tools are available on every worker scope, including private per-user agents.
 Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers load a token for the resolved worker scope at tool-call time and keep one session per worker key.
-Shared scope reuses one agent-scoped token and session; `user` and `user_agent` provide requester isolation.
+OAuth-backed remote MCP servers resolve credentials against the selected agent's effective execution scope at tool-call time.
+They keep one session per canonical credential target and server configuration generation.
+With `shared`, one connection belongs to the selected agent and is used by every authorized caller.
+With `user`, one connection belongs to the requester and is reused across that requester's agents.
+With `user_agent`, each requester and agent pair has its own connection, so one requester can connect different accounts for different agents.
+With no execution scope, one installation-level connection is used.
+Private agents derive this same ownership from `private.per`.
+Changing an agent's effective scope changes its OAuth credential owner, and MindRoom never copies a credential from another scope into the new target.
+If the new target has no credential, reconnect it explicitly.
 
 ## OAuth-Backed Remote MCP
 
-Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the configured worker scope.
+Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the selected agent's effective credential scope.
 OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
 
 ```yaml
@@ -11174,12 +11523,14 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 - `<prefix>_list_tools`
 - `<prefix>_call_tool`
 
-The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a worker-scoped tool catalog.
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a catalog for the active credential scope.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-Until the current worker scope connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+When token refresh fails without a terminal credential rejection, the bridge returns the standard `oauth_connection_required: true` payload with `reason: refresh_failed`, the provider, and a scoped `connect_url` instead of collapsing the failure into a bare error string.
+MindRoom retains the credential in that case, so callers should retry after a temporary provider failure before offering the link to reconnect.
+Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the user connects, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for that worker scope to the MCP server.
-After MindRoom has a cached worker-scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that worker scope in addition to the bridge functions.
+After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
+After MindRoom has cached a scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that credential scope in addition to the bridge functions.
 
 `discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
 MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
@@ -11377,10 +11728,15 @@ The palace enforces deduplication at a 0.9 similarity threshold.
 ## Error Handling
 
 MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
-If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning.
+If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning for every affected server.
 
 By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
-MindRoom keeps retrying failed MCP discovery in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+For servers without OAuth, MindRoom keeps retrying transport and discovery failures in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
+OAuth-backed servers retry discovery lazily on the next scoped call instead of scheduling a background refresh.
+Function-name collisions remain failed because retrying the same invalid catalog cannot recover; after fixing the remote catalog or configured prefixes, reload `config.yaml` or restart MindRoom to retry those servers.
+Collision invalidation is symmetric and atomic.
+If a scoped OAuth catalog collides with a shared non-OAuth catalog visible to the same agent, MindRoom marks both catalogs failed regardless of which catalog was published first.
+Because the non-OAuth catalog is shared, it remains unavailable to every agent until the collision is fixed and `config.yaml` is reloaded or MindRoom restarts.
 Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
@@ -11402,8 +11758,9 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP credentials and sessions follow the configured worker scope; use `user` or `user_agent` for requester isolation.
-- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the current worker scope.
+- OAuth-backed remote MCP credentials and sessions follow the selected agent's effective execution scope.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the active credential target.
+- Agent-initiated `reset_oauth_connection()` supports `user` and `user_agent` MCP credential scopes; reset shared or installation-level MCP connections from the authenticated dashboard.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 
@@ -11938,12 +12295,13 @@ def register_oauth_providers(settings, runtime_paths):
     ]
 ```
 
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
 Dashboard flows normally call `connect` and use the returned provider authorization URL.
 Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
 Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
 The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
 The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
+Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
 If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
 Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
 MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
@@ -12976,9 +13334,12 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
 Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
+`get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
+`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
+Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 
 ### Transport objects
@@ -13104,6 +13465,8 @@ ToolAfterCallContext(
 
 For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
 This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
+Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
+Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
 
 ## Testing
 
@@ -13238,7 +13601,9 @@ To adopt hooks:
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
 Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
+When a scoped token exists but cannot be decoded, status returns `reset_required: true`, and the dashboard offers the decode-free scoped disconnect path before reconnecting.
+Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to match the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
@@ -13262,7 +13627,11 @@ Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to re
 Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
-OAuth token writes always go through the provider's credential-target resolver and `save_scoped_credentials()`.
+OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
+On first access, MindRoom adopts a scope's legacy `<credential_service>_credentials.json` token document into a sibling `<credential_service>_credentials.sqlite3` store and removes the legacy file only after its bytes are durably represented or an explicit reset or replacement commits.
+If enabling credential encryption leaves a plaintext legacy token unadopted, disabling encryption before reset or replacement lets MindRoom re-adopt that retained token into the unencrypted store.
+Back up both files during an upgrade if an immediate rollback may be necessary.
+Versions that predate the SQLite lifecycle ignore the new store, so downgrading can expose stale legacy state or require the user to reconnect rather than preserving changes made after adoption.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
 For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
@@ -13273,6 +13642,7 @@ Storage, API routing, OAuth provider loading, and worker identity derivation sta
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.
+Every provider token `credential_service` must end with `_oauth` so placement and worker-grant policy recognize it without loading provider code.
 The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared.
 OAuth app client config is stored separately from both of those services.
 Providers declare `client_config_services` in lookup order, and MindRoom reads `client_id`, `client_secret`, and optional `redirect_uri` from those services.
@@ -13307,11 +13677,14 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current resolved worker scope before opening the remote MCP transport.
-Use `worker_scope: user` or `worker_scope: user_agent` when different requesters must receive distinct OAuth tokens and MCP sessions; shared scope deliberately reuses one agent-scoped identity.
+The matching MCP toolkit loads the token from the selected agent's effective credential scope before opening the remote MCP transport.
+Generated MCP OAuth credentials and sessions follow the same `shared`, `user`, `user_agent`, or unscoped ownership policy as other OAuth providers that do not declare requester-only credentials.
+Private agents derive the corresponding credential scope from `private.per`.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
+Hosted OAuth entrypoints accept that dynamically registered client only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` produces an exact, unambiguous HTTPS callback without a query or fragment on the same non-special-use fully qualified ASCII DNS hostname as the initiating request and the authorization server confirms that callback in its registration response.
+Missing, replaced, insecure, local-only, IP-literal, cross-host, non-ASCII, or ambiguous callback metadata keeps the provisioned client restricted to localhost, and MindRoom rejects a new registration before persistence when the response does not confirm the requested callback.
 
 # Knowledge Bases
 
@@ -13633,7 +14006,8 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
-- When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
+- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
 - Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
@@ -13716,6 +14090,26 @@ Accepted credential fields:
 | `username` + `token` | Standard GitHub/GitLab access token auth |
 | `username` + `password` | Basic HTTP auth |
 | `api_key` | Uses `x-access-token` as username automatically |
+
+For unattended GitHub repositories, a GitHub App installation can replace a personal access token:
+
+```json
+{
+  "auth_type": "github_app",
+  "app_id": 12345,
+  "installation_id": 67890,
+  "private_key_file": "/var/run/secrets/github-app/private-key.pem"
+}
+```
+
+Store this object under the service named by `credentials_service`.
+`private_key_file` must be an absolute path to a read-only secret mount; do not put the PEM contents in the credential object.
+The remote must use the canonical `https://github.com/<owner>/<repository>` form.
+MindRoom reads the key when needed and mints a repository-scoped installation token with read-only Contents permission.
+The control-plane runtime caches that token until shortly before GitHub's reported expiry.
+Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
+The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
+MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 
@@ -14699,7 +15093,9 @@ Agents can still reference the files via attachment IDs and tools.
 This fallback is transparent — no user action is required.
 Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
 Provider safeguard refusals are returned as refusals and are not retried without media.
-When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+Failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
+Fallback retries are eligible only before provider output reaches the caller; streams are never replayed after partial output.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
@@ -14762,14 +15158,15 @@ Attachments sent with the current message (use tool calls to inspect or process 
 - att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
 
-Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+Current-turn attachments are offered to the model as inline media.
+Earlier attachments stay in chronological position through inline annotations, but their media bytes are not replayed to the provider:
 
-```
+```text
 @user:example.org: check this out
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
+Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -14951,6 +15348,15 @@ Add a phrase such as `with only the last 5 messages of context` to cap each sche
 !schedule Daily at 9am, @research summarize AI news with only the last 5 messages
 ```
 
+Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools.
+
+```
+!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
+```
+
+Silent schedules hide their trigger and omit a successful final response that is empty or contains only `NO_REPLY`.
+Schedules remain visible by default.
+
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
 See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
@@ -14981,8 +15387,9 @@ Use `!list_schedules` to find task IDs.
 ### `!edit_schedule`
 
 Replace an existing scheduled task with new timing and content.
-Omitted fields stay unchanged, including any existing history limit.
+Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
 Use `restore full history` or `use unlimited history` to remove a history limit.
+Use `make this schedule silent` or `make this schedule visible` to change its delivery mode.
 
 ```
 !edit_schedule <task-id> <new-task-description>
@@ -14995,6 +15402,7 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ```
 !edit_schedule task42 keep the same schedule but restore full history
 !edit_schedule task42 every weekday at 8am check build status with no history
+!edit_schedule task42 keep the same schedule but make it silent
 ```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
@@ -15536,6 +15944,36 @@ The task description is re-parsed to update timing and content.
 Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
 
 Use `!help schedule` for detailed inline help on scheduling commands.
+
+## Silent Delivery
+
+Schedules are visible by default.
+Add `silently` or `quietly` to a natural-language request when the trigger and routine no-report result should stay out of the room timeline.
+
+```
+!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
+!schedule Daily at 9am, silently check whether the backup failed and report failures
+```
+
+A silent schedule does not post its trigger as a visible room message.
+MindRoom sends no final message when a successful run returns only whitespace or the standalone marker `NO_REPLY`, matched case-insensitively after trimming.
+Findings, failures, and messages explicitly sent by tools remain visible.
+Silent runs also omit typing indicators, progress placeholders, stop controls, streaming updates, and tool-only final presentation.
+
+Schedule confirmations and `!list_schedules` label each task as `Silent` or `Visible`.
+An edit preserves the current mode when visibility is omitted.
+Say `make this schedule silent` or `make this schedule visible` to change the mode through `!edit_schedule`.
+
+Silent delivery controls room presentation, not storage or transport.
+The task body still travels through Matrix as a custom timeline event and remains subject to homeserver retention, encrypted transport where enabled, and MindRoom's local durable recovery journal.
+Every admitted silent run also writes a versioned JSON receipt to `<agent-workspace>/.mindroom/scheduled_runs/<sha256(source-event-id)>.json`.
+The receipt starts with `status: "started"` before generation and is atomically replaced with `status: "completed"`, a `result` of `reported`, `no_report`, or `suppressed`, and the final response text after response hooks.
+A receipt left in `started` shows that the run began but did not reach a final response decision.
+Version 1 always includes `schema_version`, `source_event_id`, `entity_name`, `agent_name`, `room_id`, `thread_id`, `prompt`, `status`, `result`, `response_text`, `started_at`, and `completed_at`, with `result`, `response_text`, `thread_id`, and `completed_at` set to `null` until applicable.
+Timestamps use UTC RFC 3339 strings ending in `Z`.
+Replaying the same source event rewrites the same file and preserves a valid original `started_at` value.
+Team runs write one receipt to each member agent's workspace, and private agents write inside the matching requester-scoped workspace.
+The hidden `.mindroom` directory keeps receipts out of default workspace knowledge indexing.
 
 ## Agent and Team Mentions
 
@@ -16464,7 +16902,7 @@ MindRoom's architecture consists of several key components working together.
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
@@ -16501,7 +16939,7 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
@@ -16614,6 +17052,9 @@ Classic Sync classifies initial timelines and `/messages` recovery as history, w
 This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
 `matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
+Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
+Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
+Journal dispatch validates and normalizes a live or recovered trigger into the existing formatted-message turn path, while an intentional no-report result records the turn and settles the trigger without a visible response.
 Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
 Every derived conversation row, pending turn, and delivery outbox entry is tied to that membership epoch.
 A departure advances the epoch, removes old projected history, retires unsent old-membership delivery work, and prevents an in-flight response admitted before departure from being sent after rejoin.
@@ -16880,13 +17321,13 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
 2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
    The dependent-entity check runs again under the config update lock immediately before replacement.
-3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
+3. Config reloads and MCP catalog replacements serialize behind one global admission owner; MCP replacements enter through `ConfigReloadLifecycle.apply_with_response_admission()`.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
    The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
    Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
    The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
-   The gate stays closed, but is not held, across config loading and plan application.
-   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
+   Config loading keeps response admission open; after current responses drain, the gate closes for diff planning and publication.
+   Holding the gate while loading would block responses for validation work that cannot affect the live runtime.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
@@ -16896,8 +17337,9 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
-8. For config reloads, `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`.
-9. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted.
+8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
+9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place while restarting only sliding receive loops to refresh their subscriptions.
+   Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
 10. Removed entities run `cleanup()` to leave rooms and stop the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
@@ -16922,7 +17364,8 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
 - **`src/mindroom/agent_policy.py`** — Resolves canonical execution policies and private-team eligibility derived from authored agent config.
 - **`src/mindroom/model_loading.py`** — Owns `get_model_instance()` and provider-specific model loader selection.
-- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying, queued-notice hooks, and inline-media fallback helpers used during execution.
+- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying and queued-notice hooks used during execution.
+- **`src/mindroom/provider_media_fallback.py`** — Owns provider-boundary inline-media retry and process-local capability learning per model route.
 - **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
@@ -18521,7 +18964,7 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
@@ -18531,7 +18974,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, and `oauth_connections`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 

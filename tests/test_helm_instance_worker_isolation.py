@@ -79,6 +79,28 @@ def _render_runtime_chart() -> list[dict[str, Any]]:
     )
 
 
+def test_runtime_chart_exposes_exact_script_resource_profiles_to_primary() -> None:
+    """The primary receives the same three bounded quantities configured in Helm values."""
+    deployment = _resource(_render_runtime_chart(), "Deployment", "mindroom-runtime")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert env["MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE"]["value"] == "small"
+    assert json.loads(env["MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON"]["value"]) == {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "1Gi"},
+        },
+        "standard": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
+
+
 def _render_runtime_chart_with_separate_worker_namespace() -> list[dict[str, Any]]:
     return _render_chart(
         Path("cluster/k8s/runtime"),

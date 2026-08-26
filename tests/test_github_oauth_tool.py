@@ -5,29 +5,45 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import inspect
+import io
 import json
+import logging
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
 
 import pytest
-from github import BadCredentialsException, Github
+from agno.tools import github as agno_github_module
+from agno.utils import log as agno_log_module
+from github import BadCredentialsException, Github, GithubException
+from github.Requester import Requester
+from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
-    load_scoped_credentials,
     save_scoped_credentials,
+    scoped_credentials_path,
 )
+from mindroom.custom_tools import github as mindroom_github_module
 from mindroom.custom_tools.github import GithubTools
-from mindroom.oauth.providers import OAuthRefreshRejectedError
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
+from mindroom.oauth.credential_store import oauth_credential_transaction
+from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from urllib3.util.retry import Retry
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
@@ -36,6 +52,27 @@ MANUAL_ACCESS_TOKEN = "manual-access"  # noqa: S105
 OLD_REFRESH_TOKEN = "old-refresh"  # noqa: S105
 ROTATED_REFRESH_TOKEN = "rotated-refresh"  # noqa: S105
 ENV_ACCESS_TOKEN = "environment-access"  # noqa: S105
+
+
+def test_agno_github_log_redaction_prefixes_match_pinned_upstream() -> None:
+    """An Agno wording change must fail tests before it can reopen provider-detail logs."""
+    upstream_source = inspect.getsource(agno_github_module.GithubTools)
+
+    assert all(prefix in upstream_source for prefix in mindroom_github_module._AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES)
+
+
+def _publish_oauth_credentials(
+    context: OAuthCredentialContext,
+    credentials: dict[str, object],
+) -> None:
+    """Publish test credentials through the SQLite transaction owner."""
+
+    async def publish() -> None:
+        async with oauth_credential_transaction(context) as transaction:
+            transaction.publish(credentials, advance_connection_generation=True)
+            await transaction.commit()
+
+    asyncio.run(publish())
 
 
 @dataclass(frozen=True)
@@ -49,8 +86,23 @@ class _FakeUser:
 
 
 class _FakeGithub:
+    def __init__(self) -> None:
+        self.closed = False
+
     def get_user(self) -> _FakeUser:
         return _FakeUser()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class _TokenGithub:
+    token: str
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeIssueSearchResults:
@@ -135,6 +187,52 @@ class _StatsGithub:
     def get_repo(self, repo_name: str) -> _FakeRepositoryStats:
         assert repo_name == "example/project"
         return _FakeRepositoryStats()
+
+
+class _NestedProviderFailureRepository(_FakeRepositoryStats):
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+
+    def get_issues(self, *, state: str) -> list[object]:
+        assert state == "open"
+        raise GithubException(500, {"message": self.sentinel})
+
+
+class _NestedProviderFailureGithub:
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+
+    def get_repo(self, repo_name: str) -> _NestedProviderFailureRepository:
+        assert repo_name == "example/project"
+        return _NestedProviderFailureRepository(self.sentinel)
+
+
+class _CapturedNestedProviderFailureRepository(_FakeRepositoryStats):
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+
+    def get_issues(self, *, state: str) -> list[object]:
+        assert state == "open"
+        raise mindroom_github_module._GithubProviderFailureRequester.createException(
+            self.status_code,
+            {},
+            {"message": self.sentinel},
+        )
+
+
+class _CapturedNestedProviderFailureGithub:
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+        self.closed = False
+
+    def get_repo(self, repo_name: str) -> _CapturedNestedProviderFailureRepository:
+        assert repo_name == "example/project"
+        return _CapturedNestedProviderFailureRepository(self.status_code, self.sentinel)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass(frozen=True)
@@ -236,16 +334,83 @@ class _IssueAndPullGithub:
 
 
 class _RevokedTokenGithub:
+    def __init__(self) -> None:
+        self.closed = False
+
     def get_user(self) -> _FakeUser:
         raise BadCredentialsException(401, {"message": "Bad credentials"})
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ProviderControlledFailureGithub:
+    def __init__(self, status_code: int, sentinel: str) -> None:
+        self.status_code = status_code
+        self.sentinel = sentinel
+        self.closed = False
+
+    def _raise_provider_error(self) -> Never:
+        raise GithubException(
+            self.status_code,
+            {"message": self.sentinel},
+            message=self.sentinel,
+        )
+
+    def get_user(self) -> _FakeUser:
+        self._raise_provider_error()
+
+    def get_repo(self, _repo_name: str) -> _ProviderControlledFailureGithub:
+        return self
+
+    def update_file(self, **_kwargs: object) -> dict[str, object]:
+        self._raise_provider_error()
+
+    def delete_file(self, **_kwargs: object) -> dict[str, object]:
+        self._raise_provider_error()
+
+    def get_issue(self, *, number: int) -> _FakeEditableIssue:
+        _ = number
+        self._raise_provider_error()
+
+    def get_pulls(self, **_kwargs: object) -> _FakePullsWithoutTotal:
+        self._raise_provider_error()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RetryProviderFailureGithub:
+    def __init__(self, retry: Retry, sentinel: str) -> None:
+        self.retry = retry
+        self.sentinel = sentinel
+        self.closed = False
+
+    def get_user(self) -> Never:
+        response = HTTPResponse(
+            body=json.dumps({"message": self.sentinel}).encode(),
+            status=403,
+            headers={},
+            reason=self.sentinel,
+            preload_content=False,
+        )
+        self.retry.increment(method="GET", url="/user/repos", response=response)
+        raise AssertionError
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _CapturingLogger:
     def __init__(self) -> None:
         self.warning_calls: list[tuple[str, dict[str, object]]] = []
+        self.exception_calls: list[tuple[str, dict[str, object], str]] = []
 
     def warning(self, event: str, **kwargs: object) -> None:
         self.warning_calls.append((event, kwargs))
+
+    def exception(self, event: str, **kwargs: object) -> None:
+        self.exception_calls.append((event, kwargs, repr(sys.exception())))
 
 
 def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -350,6 +515,45 @@ def test_missing_credentials_return_requester_bound_connection_links(tmp_path: P
     assert "@bob:example.test" not in json.dumps(bob_result)
 
 
+@pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
+def test_unreadable_credentials_return_reset_required_payload(tmp_path: Path, unreadable_kind: str) -> None:
+    active_key = base64.urlsafe_b64encode(b"a" * 32).decode()
+    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": active_key})
+    manager = _save_client_config(runtime_paths)
+    oauth_target = _oauth_target("@alice:example.test")
+    if unreadable_kind == "wrong_key":
+        wrong_key_manager = CredentialsManager(
+            manager.base_path,
+            shared_base_path=manager.shared_base_path,
+            encryption_key=wrong_key,
+        )
+        save_scoped_credentials(
+            "github_oauth",
+            _oauth_credentials("unreadable-access"),
+            credentials_manager=wrong_key_manager,
+            worker_target=oauth_target,
+        )
+    else:
+        credential_path = scoped_credentials_path(
+            "github_oauth",
+            credentials_manager=manager,
+            worker_target=oauth_target,
+        )
+        credential_path.write_bytes(b"corrupt-plaintext-secret")
+    tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+
+    payload = json.loads(tool.list_repositories())
+
+    assert payload["oauth_connection_required"] is True
+    assert payload["provider"] == "github"
+    assert payload["reason"] == "reset_required"
+    assert payload["reset_required"] is True
+    assert payload["connect_url"] is None
+    assert "authenticated MindRoom dashboard" in payload["error"]
+    assert "reset_oauth_connection" not in payload["error"]
+
+
 def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
@@ -367,6 +571,69 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: Path) -> None:
+    """An old call cannot overwrite a newer worker's authoritative token client."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    oauth_target = _oauth_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("account-a-token"),
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    tool.authenticate = lambda: _TokenGithub(tool.access_token)
+    old_ready = threading.Event()
+    release_old = threading.Event()
+
+    def old_call() -> tuple[str, str]:
+        tool._ensure_authenticated()
+        old_ready.set()
+        assert release_old.wait(timeout=5)
+        return tool.access_token, tool.g.token
+
+    def current_state() -> tuple[str, str]:
+        tool._ensure_authenticated()
+        return tool.access_token, tool.g.token
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as old_worker,
+        ThreadPoolExecutor(max_workers=1) as new_worker,
+    ):
+        old_future = old_worker.submit(old_call)
+        assert old_ready.wait(timeout=5)
+        credential_context = tool._oauth_credential_context()
+        _publish_oauth_credentials(credential_context, _oauth_credentials("account-b-token"))
+        new_state = new_worker.submit(current_state).result(timeout=5)
+        release_old.set()
+        old_state = old_future.result(timeout=5)
+        retained_new_state = new_worker.submit(current_state).result(timeout=5)
+
+    assert old_state == ("account-a-token", "account-a-token")
+    assert new_state == ("account-b-token", "account-b-token")
+    assert retained_new_state == new_state
+
+
+def test_changing_github_access_token_closes_previous_client(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    tool.g.close()
+    previous_client = _TokenGithub(MANUAL_ACCESS_TOKEN)
+    tool.g = previous_client
+
+    tool.access_token = "rotated-access"  # noqa: S105
+
+    assert previous_client.closed is True
 
 
 def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -> None:
@@ -519,7 +786,13 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
         captured.update(kwargs)
         return _FakeGithub()
 
-    with patch("mindroom.custom_tools.github.Github", side_effect=github_factory):
+    with (
+        patch("mindroom.custom_tools.github.Github", side_effect=github_factory),
+        patch(
+            "mindroom.custom_tools.github._install_github_provider_failure_capture",
+            side_effect=lambda client: client,
+        ),
+    ):
         tool = tool_class(
             access_token=MANUAL_ACCESS_TOKEN,
             base_url="https://github.example.test/api/v3",
@@ -568,6 +841,68 @@ def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> N
         "acceptance_rate": 0,
         "avg_time_to_merge": None,
     }
+
+
+def test_github_partial_results_do_not_log_nested_provider_details(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    sentinel = "provider-controlled-nested-secret"
+    tool.g = _NestedProviderFailureGithub(sentinel)
+    agno_log_output = io.StringIO()
+    agno_logger = agno_log_module.team_logger
+    original_log_level = agno_logger.level
+    agno_logger.setLevel(logging.DEBUG)
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_logger.addHandler(agno_handler)
+
+    try:
+        with (
+            patch.object(agno_log_module, "logger", agno_logger),
+            patch.object(agno_log_module, "debug_on", True),
+        ):
+            result = tool.get_repository_with_stats("example/project")
+    finally:
+        agno_logger.removeHandler(agno_handler)
+        agno_logger.setLevel(original_log_level)
+        agno_handler.close()
+
+    assert json.loads(result)["actual_open_issues"] is None
+    assert sentinel not in result
+    assert sentinel not in agno_log_output.getvalue()
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_github_captured_nested_failure_preserves_partial_result(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    managed_access_token = "managed-access"  # noqa: S105
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials(managed_access_token),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = f"provider-controlled-nested-secret-{status_code}"
+    tool.g = _CapturedNestedProviderFailureGithub(status_code, sentinel)
+
+    result = tool.get_repository_with_stats("example/project")
+
+    payload = json.loads(result)
+    assert payload["full_name"] == "example/project"
+    assert payload["actual_open_issues"] is None
+    assert sentinel not in result
+    assert tool.access_token == managed_access_token
 
 
 def test_issue_search_decodes_html_escaped_comparison_operators(tmp_path: Path) -> None:
@@ -746,18 +1081,17 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
     )
     refreshed = _oauth_credentials("rotated-access", refresh_token=ROTATED_REFRESH_TOKEN)
 
-    async def refresh_credentials(*_args: object, **_kwargs: object) -> dict[str, object]:
-        save_scoped_credentials(
-            "github_oauth",
-            refreshed,
-            credentials_manager=manager,
-            worker_target=oauth_target,
-        )
+    def refresh_credentials(*_args: object, **_kwargs: object) -> dict[str, object]:
+        _publish_oauth_credentials(tool._oauth_credential_context(), refreshed)
         return refreshed
 
     with (
-        patch("mindroom.custom_tools.github.refresh_scoped_oauth_credentials", side_effect=refresh_credentials),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=refresh_credentials),
         patch("mindroom.custom_tools.github.Github", return_value=_FakeGithub()),
+        patch(
+            "mindroom.custom_tools.github._install_github_provider_failure_capture",
+            side_effect=lambda client: client,
+        ),
     ):
         tool = tool_class(
             runtime_paths=runtime_paths,
@@ -766,11 +1100,7 @@ def test_expired_oauth_credentials_refresh_and_persist_rotation(tmp_path: Path) 
         )
         result = json.loads(tool.list_repositories())
 
-    stored = load_scoped_credentials(
-        "github_oauth",
-        credentials_manager=manager,
-        worker_target=oauth_target,
-    )
+    stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert result == ["example/project"]
     assert stored is not None
     assert stored["token"] == "rotated-access"  # noqa: S105
@@ -812,25 +1142,66 @@ def test_terminal_refresh_failure_returns_safe_connection_payload(tmp_path: Path
     )
     logger = _CapturingLogger()
 
-    async def reject_refresh(*_args: object, **_kwargs: object) -> None:
+    def reject_refresh(*_args: object, **_kwargs: object) -> None:
         msg = f"OAuth token refresh failed: invalid_grant {leaked_secret}"
         raise OAuthRefreshRejectedError(msg, oauth_error="invalid_grant")
 
     with (
-        patch("mindroom.custom_tools.github.refresh_scoped_oauth_credentials", side_effect=reject_refresh),
+        patch("mindroom.custom_tools.github.refresh_oauth_credentials_blocking", side_effect=reject_refresh),
         patch("mindroom.custom_tools.github.logger", logger),
     ):
-        result = tool_class(
+        tool = tool_class(
             runtime_paths=runtime_paths,
             credentials_manager=manager,
             worker_target=target,
-        ).list_repositories()
+        )
+        result = tool.list_repositories()
 
     payload = json.loads(result)
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
+    assert payload["reason"] == "refresh_rejected"
+    assert "session for this agent expired or is no longer valid" in payload["error"]
     assert leaked_secret not in result
     assert leaked_secret not in repr(logger.warning_calls)
+    assert tool.access_token is None
+
+
+def test_transient_refresh_failure_is_retryable_without_reconnect_payload(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool_class = _tool_class()
+    target = _worker_target("@alice:example.test")
+    oauth_target = _oauth_target("@alice:example.test")
+    leaked_detail = "temporary provider failure with secret detail"
+    original = _oauth_credentials("old-access", refresh_token=OLD_REFRESH_TOKEN, expires_at=1.0)
+    save_scoped_credentials(
+        "github_oauth",
+        original,
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=manager,
+        worker_target=target,
+    )
+    adopted = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
+    with (
+        patch(
+            "mindroom.custom_tools.github.refresh_oauth_credentials_blocking",
+            side_effect=OAuthProviderError(leaked_detail, oauth_error="temporarily_unavailable"),
+        ),
+        pytest.raises(OAuthProviderError) as exc_info,
+    ):
+        tool.list_repositories()
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert str(exc_info.value) == "OAuth credential refresh failed"
+    assert leaked_detail not in str(exc_info.value)
+    assert "/api/oauth/" not in str(exc_info.value)
+    assert load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials == adopted
 
 
 def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path) -> None:
@@ -845,15 +1216,237 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _RevokedTokenGithub()
+    revoked_client = _RevokedTokenGithub()
+    tool.g = revoked_client
 
     result = tool.list_repositories()
     payload = json.loads(result)
 
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "github"
+    assert payload["reason"] == "access_rejected"
+    assert "session for this agent expired or is no longer valid" in payload["error"]
     assert "/api/oauth/github/authorize?connect_token=" in payload["connect_url"]
     assert revoked_token not in result
+    assert tool.access_token is None
+    assert revoked_client.closed is True
+
+
+@pytest.mark.parametrize("status_code", [401, 404, 429, 500])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "list_repositories",
+        "update_file",
+        "delete_file",
+        "edit_issue",
+        "get_pull_request_count",
+    ],
+)
+def test_github_provider_failures_do_not_expose_provider_controlled_text(
+    tmp_path: Path,
+    status_code: int,
+    operation: str,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = f"provider-controlled-secret-{operation}-{status_code}"
+    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    mindroom_logger = _CapturingLogger()
+    agno_log_output = io.StringIO()
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_handler.setFormatter(logging.Formatter("%(message)s"))
+    agno_github_module.logger.addHandler(agno_handler)
+
+    try:
+        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+            if operation == "list_repositories":
+                result = tool.list_repositories()
+            elif operation == "update_file":
+                result = tool.update_file("example/project", "notes.txt", "body", "Update", "old-sha")
+            elif operation == "delete_file":
+                result = tool.delete_file("example/project", "notes.txt", "Delete", "old-sha")
+            elif operation == "edit_issue":
+                result = tool.edit_issue("example/project", 7, title="Updated")
+            else:
+                result = tool.get_pull_request_count("example/project")
+    finally:
+        agno_github_module.logger.removeHandler(agno_handler)
+        agno_handler.close()
+
+    payload = json.loads(result)
+    if status_code == 401:
+        assert payload["oauth_connection_required"] is True
+        assert payload["reason"] == "access_rejected"
+    else:
+        assert payload == {"error": "GitHub request failed"}
+    captured_logs = (
+        agno_log_output.getvalue(),
+        repr(mindroom_logger.warning_calls),
+        repr(mindroom_logger.exception_calls),
+    )
+    assert all(sentinel not in output for output in captured_logs)
+    assert sentinel not in result
+    assert any(kwargs.get("status_code") == status_code for _event, kwargs in mindroom_logger.warning_calls)
+
+
+def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "provider-controlled-secret: 401 null"
+    tool.g = _ProviderControlledFailureGithub(500, sentinel)
+
+    result = tool.list_repositories()
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
+
+
+def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabled(tmp_path: Path) -> None:
+    """Sanitization cannot depend on the upstream logger emitting an exception record."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "provider-controlled-secret-with-logging-disabled"
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        with patch.object(
+            Requester,
+            "requestJson",
+            return_value=(500, {}, json.dumps({"message": sentinel})),
+        ):
+            tool.g = tool.authenticate()
+            result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
+
+
+def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retry-raised provider failures must use the same typed sanitization boundary."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    client = tool.authenticate()
+    retry = cast("Retry", client._Github__requester.kwargs["retry"])
+    client.close()
+    sentinel = "provider-controlled-retry-secret-with-logging-disabled"
+    tool.g = _RetryProviderFailureGithub(retry, sentinel)
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    assert json.loads(result) == {"error": "GitHub request failed"}
+    assert sentinel not in result
+    assert sentinel not in caplog.text
+
+
+def test_github_wrapper_preserves_local_validation_error(tmp_path: Path) -> None:
+    """Caller-derived validation failures must not be mislabeled as provider failures."""
+
+    class _Branch:
+        name = "main"
+
+    class _ValidationRepository:
+        @staticmethod
+        def get_branches() -> list[_Branch]:
+            return [_Branch()]
+
+    class _ValidationGithub:
+        @staticmethod
+        def get_repo(_repo_name: str) -> _ValidationRepository:
+            return _ValidationRepository()
+
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    tool.g = _ValidationGithub()
+
+    result = tool.set_default_branch("example/project", "missing")
+
+    assert json.loads(result) == {"error": "Branch 'missing' does not exist"}
+
+
+def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabled(tmp_path: Path) -> None:
+    """Managed 401 recovery cannot depend on the upstream logger emitting a record."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    save_scoped_credentials(
+        "github_oauth",
+        _oauth_credentials("managed-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+    tool = _build_tool(runtime_paths, manager, target)
+    sentinel = "revoked-provider-controlled-secret-with-logging-disabled"
+    previous_disabled = agno_github_module.logger.disabled
+    agno_github_module.logger.disabled = True
+
+    try:
+        with patch.object(
+            Requester,
+            "requestJson",
+            return_value=(401, {}, json.dumps({"message": "Bad credentials", "detail": sentinel})),
+        ):
+            tool.g = tool.authenticate()
+            result = tool.list_repositories()
+    finally:
+        agno_github_module.logger.disabled = previous_disabled
+
+    payload = json.loads(result)
+    assert payload["oauth_connection_required"] is True
+    assert payload["reason"] == "access_rejected"
+    assert sentinel not in result
+    assert tool.access_token is None
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:

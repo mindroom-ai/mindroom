@@ -1302,6 +1302,19 @@ class Config(BaseModel):
         )
         return policy.effective_execution_scope
 
+    def agent_has_tool_at_execution_scope(
+        self,
+        agent_name: str,
+        tool_name: str,
+        execution_scope: WorkerScope | None,
+    ) -> bool:
+        """Return whether one agent can still reach a tool at an exact execution scope."""
+        return (
+            agent_name in self.agents
+            and tool_name in self.resolve_entity(agent_name).available_tools
+            and self._agent_execution_scope(agent_name) == execution_scope
+        )
+
     def _agent_scope_label(self, agent_name: str) -> str:
         """Return the user-facing authored scope label for one agent.
 
