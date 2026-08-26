@@ -34,6 +34,7 @@ __all__ = [
 ]
 
 type _UsageStorageScope = Literal["shared_agent", "private_agent", "team"]
+type _UsageReadMode = Literal["runs", "session_metrics", "both"]
 type _MetricValue = int | float | str | None
 
 _MAX_STRING_LENGTH = 512
@@ -76,6 +77,8 @@ class UsageRunNode:
     team_id: str | None
     requester_id: str | None
     run_id: str | None
+    model_provider: str | None
+    model: str | None
     metrics: Mapping[str, _MetricValue]
 
 
@@ -90,6 +93,8 @@ class UsageSessionRow:
     runs: tuple[UsageRunNode, ...]
     session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
     payload_bytes: int = 0
+    runs_available: bool = True
+    session_metrics_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,10 +325,10 @@ def _source(
 def iter_usage_storage_rows(
     source: UsageStorageSource,
     *,
-    mode: Literal["runs", "session_metrics"] = "runs",
+    mode: _UsageReadMode = "runs",
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
     """Yield the requested aggregate-only fields without writing or creating a database."""
-    if mode not in {"runs", "session_metrics"}:
+    if mode not in {"runs", "session_metrics", "both"}:
         raise ValueError(mode)
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
@@ -335,20 +340,42 @@ def iter_usage_storage_rows(
                 yield schema_error
                 return
             table = _quote_identifier(source.expected_session_table)
-            payload_column = "runs" if mode == "runs" else "session_data"
-            query = (
-                "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
-                f"{payload_column} AS payload, "
-                f"length(CAST({payload_column} AS BLOB)) AS payload_bytes "
-                f"FROM {table}"
-            )
+            if mode == "both":
+                query = (
+                    "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
+                    "runs AS runs_payload, "
+                    "length(CAST(runs AS BLOB)) AS runs_payload_bytes, "
+                    "session_data AS session_payload, "
+                    "length(CAST(session_data AS BLOB)) AS session_payload_bytes "
+                    f"FROM {table}"
+                )
+            else:
+                payload_column = "runs" if mode == "runs" else "session_data"
+                query = (
+                    "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
+                    f"{payload_column} AS payload, "
+                    f"length(CAST({payload_column} AS BLOB)) AS payload_bytes "
+                    f"FROM {table}"
+                )
             for row in connection.execute(query):
-                payload_bytes = row["payload_bytes"] or 0
-                if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
+                payload_sizes = (
+                    (row["runs_payload_bytes"], row["session_payload_bytes"])
+                    if mode == "both"
+                    else (row["payload_bytes"],)
+                )
+                if any(
+                    isinstance(size, bool) or (size is not None and (not isinstance(size, int) or size < 0))
+                    for size in payload_sizes
+                ):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
                     continue
                 try:
-                    yield _extract_row(source, row, mode=mode)
+                    yield _extract_row(
+                        source,
+                        row,
+                        mode=mode,
+                        payload_bytes=sum(size or 0 for size in payload_sizes),
+                    )
                 except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -380,7 +407,8 @@ def _extract_row(
     source: UsageStorageSource,
     row: sqlite3.Row,
     *,
-    mode: Literal["runs", "session_metrics"],
+    mode: _UsageReadMode,
+    payload_bytes: int,
 ) -> UsageSessionRow:
     entity_kind = row["session_type"]
     if entity_kind not in {"agent", "team"}:
@@ -390,25 +418,45 @@ def _extract_row(
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    payload_bytes = row["payload_bytes"] or 0
-    if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
-        raise TypeError
-    raw_runs = _decode_runs(row["payload"]) if mode == "runs" else []
-    session_metrics = _decode_session_metrics(row["payload"]) if mode == "session_metrics" else MappingProxyType({})
-    runs: list[UsageRunNode] = []
-    for raw_run in raw_runs:
-        extracted = _extract_run(raw_run, row_requester=row_requester)
-        if extracted is not None:
-            runs.append(extracted)
+    runs_available = mode != "session_metrics"
+    session_metrics_available = mode != "runs"
+    if mode == "runs":
+        runs = _extract_runs(row["payload"], row_requester=row_requester)
+        session_metrics = MappingProxyType({})
+    elif mode == "session_metrics":
+        runs = ()
+        session_metrics = _decode_session_metrics(row["payload"])
+    else:
+        try:
+            runs = _extract_runs(row["runs_payload"], row_requester=row_requester)
+        except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
+            runs = ()
+            runs_available = False
+        try:
+            session_metrics = _decode_session_metrics(row["session_payload"])
+        except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
+            session_metrics = MappingProxyType({})
+            session_metrics_available = False
     return UsageSessionRow(
         source=source,
         entity_id=_bounded_string(entity_id),
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
-        runs=tuple(runs),
+        runs=runs,
         session_metrics=session_metrics,
         payload_bytes=payload_bytes,
+        runs_available=runs_available,
+        session_metrics_available=session_metrics_available,
     )
+
+
+def _extract_runs(raw_value: object, *, row_requester: str | None) -> tuple[UsageRunNode, ...]:
+    runs: list[UsageRunNode] = []
+    for raw_run in _decode_runs(raw_value):
+        extracted = _extract_run(raw_run, row_requester=row_requester)
+        if extracted is not None:
+            runs.append(extracted)
+    return tuple(runs)
 
 
 def _decode_runs(raw_value: object) -> list[object]:
@@ -466,6 +514,8 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         team_id=_optional_string(run.get("team_id")),
         requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
         run_id=_optional_string(run.get("run_id")),
+        model_provider=_optional_string(run.get("model_provider")),
+        model=_optional_string(run.get("model")),
         metrics=selected_metrics,
     )
 

@@ -85,11 +85,15 @@ def _run(
     requester_id: str | None = "@alice:example.test",
     run_id: str | None = "run-1",
     total_tokens: int = 10,
+    model_provider: str | None = "openai",
+    model: str | None = "gpt-5.6",
 ) -> UsageRunNode:
     return UsageRunNode(
         team_id=None,
         requester_id=requester_id,
         run_id=run_id,
+        model_provider=model_provider,
+        model=model,
         metrics=_metrics(total_tokens),
     )
 
@@ -101,6 +105,8 @@ def _row(
     session_metrics: Mapping[str, object] | None = None,
     row_key: str = "session-1",
     payload_bytes: int = 0,
+    runs_available: bool = True,
+    session_metrics_available: bool = True,
 ) -> UsageSessionRow:
     is_team = source.scope == "team"
     return UsageSessionRow(
@@ -111,6 +117,8 @@ def _row(
         runs=tuple(runs),
         session_metrics=MappingProxyType(dict(session_metrics or {})),
         payload_bytes=payload_bytes,
+        runs_available=runs_available,
+        session_metrics_available=session_metrics_available,
     )
 
 
@@ -118,6 +126,7 @@ def _wire(
     monkeypatch: pytest.MonkeyPatch,
     sources: tuple[UsageStorageSource | UsageStorageDiagnostic, ...],
     rows: dict[str, tuple[UsageSessionRow | UsageStorageDiagnostic, ...]],
+    calls: list[tuple[str, str]] | None = None,
 ) -> None:
     monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: sources)
     monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: sources)
@@ -127,7 +136,8 @@ def _wire(
         *,
         mode: str = "runs",
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-        del mode
+        if calls is not None:
+            calls.append((source.path_label, mode))
         yield from rows.get(source.path_label, ())
 
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
@@ -143,7 +153,12 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
                 _row(
                     source,
                     _run(requester_id="@telegram-alice:example.test", run_id="own"),
-                    _run(requester_id="@bob:example.test", run_id="other", total_tokens=50),
+                    _run(
+                        requester_id="@bob:example.test",
+                        run_id="other",
+                        total_tokens=50,
+                        model="other-model",
+                    ),
                 ),
             ),
         },
@@ -162,9 +177,54 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
     assert payload["totals"]["total_tokens"] == 10  # type: ignore[index]
     assert payload["session_count"] == 1
     assert payload["breakdown"] == []
+    assert payload["model_breakdown"] == [
+        {
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "totals": {
+                **_metrics(),
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "audio_input_tokens": 0,
+                "audio_output_tokens": 0,
+                "audio_total_tokens": 0,
+            },
+            "run_count": 1,
+        },
+    ]
+    assert payload["model_coverage"]["scanned_sources"] == 1  # type: ignore[index]
+    assert payload["model_coverage"]["unavailable_sources"] == 0  # type: ignore[index]
+    assert "retained top-level runs" in payload["model_coverage"]["note"]  # type: ignore[index]
     assert "window" not in payload
     assert "run_count" not in payload
     assert "first_observed_at" not in payload
+
+
+def test_shared_self_reads_each_source_once_for_totals_and_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run(), session_metrics_available=False),)},
+        calls,
+    )
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    )
+
+    assert calls == [(source.path_label, "runs")]
+    assert report.totals.total_tokens == 10
+    assert report.model_breakdown[0].totals.total_tokens == 10
 
 
 def test_self_usage_accepts_missing_requester_in_exact_private_store(
@@ -193,7 +253,7 @@ def test_private_self_usage_uses_compaction_safe_session_metrics(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, session_metrics=_metrics(25)),)},
+        {source.path_label: (_row(source, _run(total_tokens=10), session_metrics=_metrics(25)),)},
     )
 
     report = collect_self_usage(
@@ -206,6 +266,8 @@ def test_private_self_usage_uses_compaction_safe_session_metrics(
 
     assert report.totals.total_tokens == 25
     assert report.session_count == 1
+    assert report.model_breakdown[0].totals.total_tokens == 10
+    assert report.model_breakdown[0].run_count == 1
 
 
 def test_self_usage_marks_missing_shared_requester_incomplete(
@@ -237,8 +299,20 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
         monkeypatch,
         (agent_source, team_source),
         {
-            agent_source.path_label: (_row(agent_source, _run(total_tokens=999), session_metrics=_metrics(10)),),
-            team_source.path_label: (_row(team_source, _run(total_tokens=999), session_metrics=_metrics(30)),),
+            agent_source.path_label: (
+                _row(
+                    agent_source,
+                    _run(total_tokens=7, model_provider="openai", model="gpt-5.6"),
+                    session_metrics=_metrics(10),
+                ),
+            ),
+            team_source.path_label: (
+                _row(
+                    team_source,
+                    _run(total_tokens=5, model_provider="vertexai", model="claude-opus-5"),
+                    session_metrics=_metrics(30),
+                ),
+            ),
         },
     )
 
@@ -250,6 +324,114 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
         ("code", 10),
         ("engineering", 30),
     }
+    assert [
+        (row.model_provider, row.model, row.totals.total_tokens, row.run_count) for row in report.model_breakdown
+    ] == [
+        ("openai", "gpt-5.6", 7, 1),
+        ("vertexai", "claude-opus-5", 5, 1),
+    ]
+
+
+def test_admin_reads_each_source_once_for_session_and_model_views(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run(), session_metrics=_metrics()),)},
+        calls,
+    )
+
+    collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert calls == [(source.path_label, "both")]
+
+
+def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="run-1", total_tokens=8),
+                    _run(run_id="run-2", total_tokens=12),
+                    _run(run_id="run-3", total_tokens=5, model_provider=None, model=None),
+                    session_metrics=_metrics(30),
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert [
+        (row.model_provider, row.model, row.totals.total_tokens, row.run_count) for row in report.model_breakdown
+    ] == [
+        ("openai", "gpt-5.6", 20, 2),
+        ("unknown", "unknown", 5, 1),
+    ]
+
+
+def test_model_breakdown_deduplicates_repeated_retained_run_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="duplicate", total_tokens=8),
+                    _run(run_id="duplicate", total_tokens=8),
+                    session_metrics=_metrics(8),
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert [(row.totals.total_tokens, row.run_count) for row in report.model_breakdown] == [(8, 1)]
+
+
+def test_model_breakdown_uses_provider_and_model_as_equal_token_tiebreakers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="z-model", model_provider="zeta", model="alpha"),
+                    _run(run_id="a-model", model_provider="alpha", model="zeta"),
+                    session_metrics=_metrics(20),
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert [(row.model_provider, row.model) for row in report.model_breakdown] == [
+        ("alpha", "zeta"),
+        ("zeta", "alpha"),
+    ]
 
 
 def test_admin_usage_rejects_unconfigured_entity_attribution(
@@ -263,6 +445,7 @@ def test_admin_usage_rejects_unconfigured_entity_attribution(
 
     assert report.totals.total_tokens == 0
     assert report.session_count == 0
+    assert report.model_breakdown == ()
 
 
 def test_invalid_admin_session_metrics_mark_source_incomplete(
@@ -280,6 +463,87 @@ def test_invalid_admin_session_metrics_mark_source_incomplete(
 
     assert report.totals.total_tokens == 0
     assert report.coverage.unavailable_sources == 1
+
+
+def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    invalid_run = UsageRunNode(
+        team_id=None,
+        requester_id="@alice:example.test",
+        run_id="invalid",
+        model_provider="openai",
+        model="gpt-5.6",
+        metrics=MappingProxyType({"total_tokens": -1}),
+    )
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, invalid_run, session_metrics=_metrics(20)),)},
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 20
+    assert report.coverage.unavailable_sources == 0
+    assert report.model_breakdown == ()
+    assert report.model_coverage.unavailable_sources == 1
+
+
+def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    session_metrics=_metrics(20),
+                    runs_available=False,
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 20
+    assert report.coverage.unavailable_sources == 0
+    assert report.model_breakdown == ()
+    assert report.model_coverage.unavailable_sources == 1
+
+
+def test_unavailable_session_payload_does_not_discard_model_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(total_tokens=12),
+                    session_metrics_available=False,
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 0
+    assert report.coverage.unavailable_sources == 1
+    assert report.model_breakdown[0].totals.total_tokens == 12
+    assert report.model_coverage.unavailable_sources == 0
 
 
 def test_admin_usage_reads_every_retained_session(

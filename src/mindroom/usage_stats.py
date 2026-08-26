@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.usage_stats_storage import (
     TOKEN_FIELDS,
+    UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
@@ -26,6 +28,7 @@ __all__ = [
     "TokenTotals",
     "UsageBreakdownRow",
     "UsageCoverage",
+    "UsageModelBreakdownRow",
     "UsageReport",
     "collect_admin_usage",
     "collect_self_usage",
@@ -37,6 +40,11 @@ _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
     "Private self and admin totals use Agno session aggregates, including team members. "
     "Deleted sessions are unavailable."
+)
+_MODEL_COVERAGE_NOTE = (
+    "Model breakdown uses retained top-level runs with usable token metrics. "
+    "It does not necessarily sum to report totals, which may include compacted history "
+    "and nested team-member usage."
 )
 
 
@@ -119,6 +127,25 @@ class UsageCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageModelBreakdownRow:
+    """Retained top-level usage for one provider and model."""
+
+    model_provider: str
+    model: str
+    totals: TokenTotals
+    run_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the public model breakdown row."""
+        return {
+            "provider": self.model_provider,
+            "model": self.model,
+            "totals": self.totals.to_dict(),
+            "run_count": self.run_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Aggregate-only retained token usage."""
 
@@ -127,6 +154,8 @@ class UsageReport:
     session_count: int
     breakdown: tuple[UsageBreakdownRow, ...]
     coverage: UsageCoverage
+    model_breakdown: tuple[UsageModelBreakdownRow, ...]
+    model_coverage: UsageCoverage
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
@@ -136,17 +165,102 @@ class UsageReport:
             "session_count": self.session_count,
             "breakdown": [row.to_dict() for row in self.breakdown],
             "coverage": self.coverage.to_dict(),
+            "model_breakdown": [row.to_dict() for row in self.model_breakdown],
+            "model_coverage": self.model_coverage.to_dict(),
         }
 
 
 @dataclass(slots=True)
 class _Aggregate:
     totals: TokenTotals = TokenTotals()
-    session_count: int = 0
+    count: int = 0
 
     def add(self, totals: TokenTotals) -> None:
         self.totals = self.totals.plus(totals)
-        self.session_count += 1
+        self.count += 1
+
+
+@dataclass(slots=True)
+class _UsageAccumulator:
+    total: TokenTotals = TokenTotals()
+    sessions: set[tuple[str, str]] = dataclass_field(default_factory=set)
+    buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
+    seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def add_row(
+        self,
+        row: UsageSessionRow,
+        *,
+        config: Config,
+        scope: _Scope,
+        expected_agent: str | None,
+        expected_requester: str | None,
+    ) -> None:
+        uses_runs = scope == "self" and not row.source.requester_isolated
+        if (uses_runs and not row.runs_available) or (not uses_runs and not row.session_metrics_available):
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        try:
+            if scope == "self":
+                row_totals = _self_row_totals(
+                    row,
+                    config=config,
+                    expected_agent=expected_agent,
+                    expected_requester=expected_requester,
+                    seen_runs=self.seen_runs,
+                )
+                entity_id = None
+            else:
+                entity_id = _admin_entity_id(row)
+                row_totals = _metrics_totals(row.session_metrics) if entity_id is not None else None
+        except ValueError:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        if row_totals is None:
+            return
+        self.total = self.total.plus(row_totals)
+        self.sessions.add((row.source.path_label, row.row_key))
+        if entity_id is not None:
+            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
+
+
+@dataclass(slots=True)
+class _ModelUsageAccumulator:
+    buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
+    seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def add_row(
+        self,
+        row: UsageSessionRow,
+        *,
+        config: Config,
+        scope: _Scope,
+        expected_agent: str | None,
+        expected_requester: str | None,
+    ) -> None:
+        if not row.runs_available:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        try:
+            entries = _model_entries_for_row(
+                row,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
+        except ValueError:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        _add_model_entries(
+            entries,
+            source_path=row.source.path_label,
+            row_key=row.row_key,
+            buckets=self.buckets,
+            seen_runs=self.seen_runs,
+        )
 
 
 def collect_self_usage(
@@ -191,63 +305,130 @@ def _collect_usage(
     expected_agent: str | None,
     expected_requester: str | None,
 ) -> UsageReport:
-    total = TokenTotals()
-    sessions: set[tuple[str, str]] = set()
-    buckets: dict[str, _Aggregate] = {}
-    seen_runs: set[tuple[str, str, str]] = set()
+    usage = _UsageAccumulator()
+    model_usage = _ModelUsageAccumulator()
     scanned_sources: set[str] = set()
-    unavailable_sources: set[str] = set()
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
-            unavailable_sources.add(discovered.path_label)
+            usage.unavailable_sources.add(discovered.path_label)
+            model_usage.unavailable_sources.add(discovered.path_label)
             continue
         source = discovered
         scanned_sources.add(source.path_label)
-        mode = "runs" if scope == "self" and not source.requester_isolated else "session_metrics"
+        mode = "runs" if scope == "self" and not source.requester_isolated else "both"
         for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
-                unavailable_sources.add(item.path_label)
+                usage.unavailable_sources.add(item.path_label)
+                model_usage.unavailable_sources.add(item.path_label)
                 continue
-            try:
-                if scope == "self":
-                    row_totals = _self_row_totals(
-                        item,
-                        config=config,
-                        expected_agent=expected_agent,
-                        expected_requester=expected_requester,
-                        seen_runs=seen_runs,
-                    )
-                    entity_id = None
-                else:
-                    entity_id = _admin_entity_id(item)
-                    row_totals = _metrics_totals(item.session_metrics) if entity_id is not None else None
-            except ValueError:
-                unavailable_sources.add(source.path_label)
-                continue
-            if row_totals is None:
-                continue
-            total = total.plus(row_totals)
-            sessions.add((source.path_label, item.row_key))
-            if entity_id is not None:
-                buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
+            usage.add_row(
+                item,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
+            model_usage.add_row(
+                item,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
 
     breakdown = tuple(
-        UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.session_count)
+        UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.count)
         for entity_id, aggregate in sorted(
+            usage.buckets.items(),
+            key=lambda item: (-item[1].totals.total_tokens, item[0]),
+        )
+    )
+    model_breakdown = _model_breakdown(model_usage.buckets)
+    model_coverage = UsageCoverage(
+        scanned_sources=len(scanned_sources),
+        unavailable_sources=len(model_usage.unavailable_sources),
+        note=_MODEL_COVERAGE_NOTE,
+    )
+    return UsageReport(
+        scope=scope,
+        totals=usage.total,
+        session_count=len(usage.sessions),
+        breakdown=breakdown,
+        coverage=UsageCoverage(
+            scanned_sources=len(scanned_sources),
+            unavailable_sources=len(usage.unavailable_sources),
+        ),
+        model_breakdown=model_breakdown,
+        model_coverage=model_coverage,
+    )
+
+
+def _model_breakdown(
+    buckets: Mapping[tuple[str, str], _Aggregate],
+) -> tuple[UsageModelBreakdownRow, ...]:
+    return tuple(
+        UsageModelBreakdownRow(
+            model_provider=key[0],
+            model=key[1],
+            totals=aggregate.totals,
+            run_count=aggregate.count,
+        )
+        for key, aggregate in sorted(
             buckets.items(),
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
         )
     )
-    return UsageReport(
-        scope=scope,
-        totals=total,
-        session_count=len(sessions),
-        breakdown=breakdown,
-        coverage=UsageCoverage(
-            scanned_sources=len(scanned_sources),
-            unavailable_sources=len(unavailable_sources),
-        ),
-    )
+
+
+def _add_model_entries(
+    entries: Iterable[tuple[UsageRunNode, TokenTotals]],
+    *,
+    source_path: str,
+    row_key: str,
+    buckets: dict[tuple[str, str], _Aggregate],
+    seen_runs: set[tuple[str, str, str]],
+) -> None:
+    row_seen_runs: set[tuple[str, str, str]] = set()
+    accepted_entries: list[tuple[tuple[str, str], TokenTotals]] = []
+    for run, totals in entries:
+        if run.run_id is not None:
+            identity = (source_path, row_key, run.run_id)
+            if identity in seen_runs or identity in row_seen_runs:
+                continue
+            row_seen_runs.add(identity)
+        key = (run.model_provider or "unknown", run.model or "unknown")
+        accepted_entries.append((key, totals))
+    seen_runs.update(row_seen_runs)
+    for key, totals in accepted_entries:
+        buckets.setdefault(key, _Aggregate()).add(totals)
+
+
+def _model_entries_for_row(
+    row: UsageSessionRow,
+    *,
+    config: Config,
+    scope: _Scope,
+    expected_agent: str | None,
+    expected_requester: str | None,
+) -> list[tuple[UsageRunNode, TokenTotals]]:
+    if scope == "admin":
+        if _admin_entity_id(row) is None:
+            return []
+    elif row.source.source_agent_id != expected_agent or expected_agent not in row.source.allowed_agent_ids:
+        return []
+
+    entries: list[tuple[UsageRunNode, TokenTotals]] = []
+    for run in row.runs:
+        if scope == "self" and not row.source.requester_isolated:
+            requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+            if requester_id is None:
+                raise ValueError
+            if requester_id != expected_requester:
+                continue
+        totals = _metrics_totals(run.metrics)
+        if totals is not None:
+            entries.append((run, totals))
+    return entries
 
 
 def _self_row_totals(
