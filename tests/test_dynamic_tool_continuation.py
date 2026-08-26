@@ -131,6 +131,8 @@ def test_malformed_model_switch_result_resumes_with_current_model() -> None:
     assert decision.should_continue is True
     assert decision.model_switch_name is None
     assert decision.model_switch_when is None
+    assert decision.next_prompt is not None
+    assert "Continue the same task with the current model" in decision.next_prompt
 
 
 def test_latest_successful_model_switch_wins_over_later_rejection() -> None:

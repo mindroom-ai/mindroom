@@ -528,13 +528,14 @@ def test_thread_model_tool_registered() -> None:
     assert "list_models" in TOOL_METADATA["thread_model"].function_names
 
 
-def test_thread_model_switch_stops_the_provider_before_it_can_answer_again() -> None:
-    """Without a control boundary, after-toolcall could let the old model continue generating."""
+def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:
+    """The continuation, not Agno's raw tool result, should own the final response."""
     tool = ThreadModelTools()
     function = tool.async_functions["switch_thread_model"]
     function.process_entrypoint(strict=False)
 
     assert function.stop_after_tool_call is True
+    assert function.show_result is False
     assert function.parameters["properties"]["model_name"]["type"] == "string"
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
     assert function.parameters["required"] == ["model_name"]

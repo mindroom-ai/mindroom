@@ -25,6 +25,8 @@ class ThreadModelTools(Toolkit):
             name="thread_model",
             tools=[self.list_models, self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
         )
+        # Toolkit's stop-after list also exposes the raw result as assistant text.
+        # The continuation owns final delivery, so only enable the control boundary.
         self.async_functions["switch_thread_model"].stop_after_tool_call = True
 
     @staticmethod
