@@ -170,6 +170,19 @@ def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[Co
     return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
 
 
+def _authored_tool_config_fields(
+    metadata: ToolMetadata | ToolValidationInfo,
+    *,
+    include_agent_only: bool = True,
+) -> tuple[ConfigField, ...]:
+    """Return fields that may be set on one authored tool entry."""
+    fields = _tool_config_fields(metadata)
+    if not include_agent_only:
+        return fields
+    declared_names = {field.name for field in fields}
+    return fields + tuple(field for field in (metadata.agent_override_fields or ()) if field.name not in declared_names)
+
+
 def _validate_text_authored_override_value(
     tool_name: str,
     field: ConfigField,
@@ -262,7 +275,13 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    fields_by_name = {field.name: field for field in _tool_config_fields(metadata)}
+    fields_by_name = {
+        field.name: field
+        for field in _authored_tool_config_fields(
+            metadata,
+            include_agent_only=config_path_prefix is None or not config_path_prefix.startswith("defaults.tools"),
+        )
+    }
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -476,7 +495,7 @@ def _build_tool_config_init_kwargs(
     _apply_tool_config_init_values(
         init_kwargs,
         tool_name=tool_name,
-        fields=fields,
+        fields=_authored_tool_config_fields(metadata),
         values=tool_config_overrides,
         skip_inherited=True,
     )
@@ -570,6 +589,8 @@ def _build_managed_tool_init_kwargs(
         elif init_arg == ToolManagedInitArg.CURRENT_ROOM_ID:
             execution_identity = worker_target.execution_identity if worker_target is not None else None
             init_kwargs[init_arg.value] = execution_identity.room_id if execution_identity is not None else None
+        elif init_arg == ToolManagedInitArg.AGENT_NAME:
+            init_kwargs[init_arg.value] = worker_target.routing_agent_name if worker_target is not None else None
     return init_kwargs
 
 

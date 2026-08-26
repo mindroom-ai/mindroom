@@ -357,15 +357,19 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
     ignored_param_names = IGNORED_AGNO_PARAMS.get(tool_name, set())
     agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
-    # Get our ConfigFields for the tool
+    # Get every declared constructor field, including agent-only overrides.
     tool_metadata = TOOL_METADATA[tool_name]
 
-    config_fields = tool_metadata.config_fields or []
+    config_fields = list(tool_metadata.config_fields or [])
+    config_field_names = {field.name for field in config_fields}
+    config_fields.extend(
+        field for field in (tool_metadata.agent_override_fields or []) if field.name not in config_field_names
+    )
     config_field_map = {field.name: field for field in config_fields}
 
     # Check parameter names
     agno_param_names = set(agno_params.keys())
-    config_field_names = set(config_field_map.keys())
+    config_field_names = set(config_field_map)
 
     missing_fields = agno_param_names - config_field_names
     extra_fields = config_field_names - agno_param_names - IGNORED_EXTRA_CONFIG_FIELDS.get(tool_name, set())

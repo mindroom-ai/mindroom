@@ -52,6 +52,7 @@ _LOCAL_ONLY_TOOL_NAMES = frozenset(
         "oauth_connections",
         "script",
         "todo",
+        "usage_stats",
     },
 )
 

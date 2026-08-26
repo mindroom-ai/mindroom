@@ -417,6 +417,7 @@ def test_create_team_instance_enables_native_team_history_and_disables_members(t
     assert team.add_history_to_context is True
     assert team.num_history_messages == 2
     assert team.store_history_messages is False
+    assert team.store_member_responses is False
 
 
 def test_create_team_instance_preserves_all_history_mode(tmp_path: Path) -> None:

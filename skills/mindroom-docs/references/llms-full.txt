@@ -9644,7 +9644,7 @@ Use these tools and presets to recover requester-scoped OAuth connections, coord
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need requester-scoped OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need requester-scoped OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
 
 ## Tools On This Page
 
@@ -9657,10 +9657,11 @@ Use these tools when you need requester-scoped OAuth recovery, multi-agent coord
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
+- [`usage_stats`] - Local, read-only summaries of retained Agno run usage.
 
 ## Common Setup Notes
 
-All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+All ten entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
 [`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
@@ -9725,6 +9726,69 @@ Providers that define requester-scoped credentials, such as GitHub, may resolve 
 - If the browser retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
 - Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
 - The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
+
+## [`usage_stats`]
+
+`usage_stats` returns aggregate retained usage for the caller without modifying session storage.
+All operations are local and read-only.
+`get_my_usage()` always scopes the result to the current agent and the canonical current requester.
+For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
+Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
+The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
+Provider billing, embedding usage, and speech-to-text usage are outside version one.
+
+### Self-Service Configuration
+
+Configure a normal agent with `usage_stats` to make only `get_my_usage()` available.
+
+```yaml
+agents:
+  usage_assistant:
+    display_name: Usage Assistant
+    role: Report the caller's retained MindRoom usage
+    tools:
+      - usage_stats
+```
+
+### Admin Configuration
+
+Configure an admin agent with the per-agent `admin_scope` override to make `get_all_usage()` available.
+Admin access requires both `admin_scope: true` AND the canonical requester to be present in `authorization.global_users`.
+
+```yaml
+authorization:
+  global_users:
+    - "@usage-admin:example.com"
+
+agents:
+  usage_admin:
+    display_name: Usage Administrator
+    role: Report retained MindRoom usage across configured entities
+    tools:
+      - usage_stats:
+          admin_scope: true
+```
+
+Both functions are intentionally parameter-free.
+`get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
+`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+
+### Response And Coverage
+
+Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
+A successful response also includes `scope`, token `totals`, `session_count`, a `breakdown`, and `coverage`.
+Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
+
+The admin response groups session aggregates by configured agent or team ID.
+The self response has no breakdown because its scope is already one agent and requester.
+Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
+Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
+The tool does not change Agno persistence settings.
+Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
+Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
+
+Errors use the same envelope with a stable code.
+Common codes are `authorization_error` and `context_unavailable`.
 
 ## [`subagents`]
 
