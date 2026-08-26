@@ -621,10 +621,75 @@ async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> No
 
     await gate.drain_all()
 
+    assert len(batches) == 2
     assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
         "$image:localhost": ["$image:localhost", "$caption:localhost"],
         None: ["$room:localhost"],
     }
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_does_not_promote_a_completed_room_media_turn() -> None:
+    """A room turn already closed by text must keep its original conversation scope."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    await _admit_ready(
+        gate,
+        room_key,
+        _pending(_text_event("$room-text:localhost", "room caption", 1_000_100)),
+    )
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$thread-reply:localhost", "later reply", 1_000_200)),
+    )
+
+    await gate.drain_all()
+
+    assert len(batches) == 2
+    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+        None: ["$image:localhost", "$room-text:localhost"],
+        "$image:localhost": ["$thread-reply:localhost"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_media_promotion_promptly_releases_the_empty_room_gate() -> None:
+    """Promotion must wake an already-waiting room drain so its empty gate exits."""
+    gate = CoalescingGate(
+        dispatch_turn=AsyncMock(),
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    await _wait_for(lambda: gate._gates[room_key].deadline is not None)
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "describe this", 1_000_100)),
+    )
+
+    try:
+        await _wait_for(lambda: room_key not in gate._gates, deadline_seconds=0.1)
+    finally:
+        await gate.drain_all()
 
 
 @pytest.mark.asyncio

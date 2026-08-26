@@ -331,15 +331,21 @@ class CoalescingGate:
         return gate
 
     @staticmethod
-    def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
-        if queued.source_event_id != thread_id or CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
-            return False
+    def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
         return source_or_event_allows_room_scope_batching(
             queued.source_kind,
             queued.pending_event.event,
         ) or source_or_event_allows_room_scope_batching(
             queued.pending_event.event.source_kind,
             queued.pending_event.event,
+        )
+
+    @staticmethod
+    def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
+        return (
+            queued.source_event_id == thread_id
+            and CoalescingGate._queued_kind(queued) is QueueKind.NORMAL
+            and CoalescingGate._queued_event_allows_room_scope_batching(queued)
         )
 
     def _promote_pending_room_media(self, key: CoalescingKey) -> _GateEntry | None:
@@ -352,7 +358,11 @@ class CoalescingGate:
             return None
         candidate_count = self._front_normal_run_length(room_gate, coalesce_normal_events=True)
         candidates = list(room_gate.queue)[:candidate_count]
-        if not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates):
+        if (
+            not candidates
+            or not self._queued_event_allows_room_scope_batching(candidates[-1])
+            or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
+        ):
             return None
 
         thread_gate = self._get_or_create_gate(key)
@@ -802,7 +812,7 @@ class CoalescingGate:
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             coalesce = coalesce_normal_events()
-            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
+            if not gate.queue or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
