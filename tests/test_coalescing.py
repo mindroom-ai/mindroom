@@ -591,6 +591,43 @@ async def test_room_level_text_dispatches_before_late_media() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> None:
+    """Later room traffic must stay outside a media turn promoted into a thread."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "describe this", 1_000_100)),
+    )
+    await _admit_ready(
+        gate,
+        room_key,
+        _pending(_text_event("$room:localhost", "unrelated room message", 1_000_200)),
+    )
+
+    await gate.drain_all()
+
+    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+        "$image:localhost": ["$image:localhost", "$caption:localhost"],
+        None: ["$room:localhost"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_text_dispatch_waits_for_same_window_unready_media_lane_slot() -> None:
     """An immediate text flush must not run before an in-window unready media slot delivers."""
     batches: list[PreparedTurn] = []
