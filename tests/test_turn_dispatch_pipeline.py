@@ -1679,7 +1679,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = _make_matrix_client_mock()
+        replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         event = self._router_relay_event(body="@general could you help with this?")
@@ -1732,7 +1732,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.client = _make_matrix_client_mock()
+        replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         body = "@calculator could you help with this?" if explicit_self_target else "could you help with this?"
