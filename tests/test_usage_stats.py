@@ -331,6 +331,59 @@ def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
     ]
 
 
+def test_model_breakdown_deduplicates_repeated_retained_run_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="duplicate", total_tokens=8),
+                    _run(run_id="duplicate", total_tokens=8),
+                    session_metrics=_metrics(8),
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert [(row.totals.total_tokens, row.run_count) for row in report.model_breakdown] == [(8, 1)]
+
+
+def test_model_breakdown_uses_provider_and_model_as_equal_token_tiebreakers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="z-model", model_provider="zeta", model="alpha"),
+                    _run(run_id="a-model", model_provider="alpha", model="zeta"),
+                    session_metrics=_metrics(20),
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert [(row.model_provider, row.model) for row in report.model_breakdown] == [
+        ("alpha", "zeta"),
+        ("zeta", "alpha"),
+    ]
+
+
 def test_admin_usage_rejects_unconfigured_entity_attribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
