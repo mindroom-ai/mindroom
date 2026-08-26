@@ -3528,6 +3528,7 @@ class ResponseRunner:
                             else None,
                             reason_prefix=team_request.reason_prefix,
                             pipeline_timing=request.pipeline_timing,
+                            attempt_model_runtime=self.deps.tool_runtime,
                             turn_recorder=team_turn_recorder,
                         )
 
@@ -3624,6 +3625,7 @@ class ResponseRunner:
                                     else None,
                                     reason_prefix=team_request.reason_prefix,
                                     pipeline_timing=request.pipeline_timing,
+                                    attempt_model_runtime=self.deps.tool_runtime,
                                     turn_recorder=team_turn_recorder,
                                 )
 
@@ -3926,6 +3928,7 @@ class ResponseRunner:
                 turn_recorder=turn_recorder,
                 pipeline_timing=pipeline_timing,
                 supports_native_tool_approval=True,
+                attempt_model_runtime=self.deps.tool_runtime,
             )
 
         try:
@@ -4018,6 +4021,7 @@ class ResponseRunner:
             turn_recorder=turn_recorder,
             pipeline_timing=pipeline_timing,
             supports_native_tool_approval=True,
+            attempt_model_runtime=self.deps.tool_runtime,
         )
 
         try:

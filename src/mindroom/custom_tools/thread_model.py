@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -12,6 +14,8 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
+_MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
+
 
 class ThreadModelTools(Toolkit):
     """Tools for switching the model used by all agents in the current Matrix thread."""
@@ -19,8 +23,9 @@ class ThreadModelTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="thread_model",
-            tools=[self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
+            tools=[self.list_models, self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
         )
+        self.async_functions["switch_thread_model"].stop_after_tool_call = True
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -34,6 +39,24 @@ class ThreadModelTools(Toolkit):
         if context.resolved_thread_id is None:
             return cls._payload("error", message="Thread model switching requires an active thread context.")
         return context, context.resolved_thread_id
+
+    async def list_models(self) -> str:
+        """List the configured model aliases available for selection."""
+        context = get_tool_runtime_context()
+        if context is None:
+            return self._payload("error", message="Thread model tool context is unavailable in this runtime path.")
+        return self._payload(
+            "ok",
+            action="list",
+            models=[
+                {
+                    "name": name,
+                    "provider": model.provider,
+                    "model_id": model.id,
+                }
+                for name, model in sorted(context.config.models.items())
+            ],
+        )
 
     async def get_thread_model(self) -> str:
         """Return the current thread's model override and the available model names."""
@@ -61,22 +84,34 @@ class ThreadModelTools(Toolkit):
             **stale_fields,
         )
 
-    async def switch_thread_model(self, model_name: str) -> str:
+    async def switch_thread_model(
+        self,
+        model_name: str,
+        when: Literal["after-toolcall", "next-turn"] = "next-turn",
+    ) -> str:
         """Switch the model that all agents and teams use in the current thread.
 
-        The override persists for this thread until reset. It takes effect from
-        the next message in the thread; the current response keeps the model it
-        started with.
+        The override persists for this thread until reset. It can take effect
+        after this tool call or from the next message in the thread.
 
         Args:
             model_name: Configured model name from the `models:` section of
                 config.yaml (for example "default" or "opus").
+            when: Whether the current response continues with the new model or
+                the change starts on the next turn.
 
         """
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
+        if when not in _MODEL_SWITCH_WHENS:
+            return self._payload(
+                "error",
+                action="switch",
+                message=f"Unknown switch timing '{when}'.",
+                available_when=list(_MODEL_SWITCH_WHENS),
+            )
         if model_name not in context.config.models:
             return self._payload(
                 "error",
@@ -99,7 +134,12 @@ class ThreadModelTools(Toolkit):
             model=model_name,
             provider=model.provider,
             model_id=model.id,
-            note="The new model applies from the next message in this thread.",
+            when=when,
+            note=(
+                "The current response will continue with the new model after this tool call."
+                if when == "after-toolcall"
+                else "The new model applies from the next message in this thread."
+            ),
         )
 
     async def reset_thread_model(self) -> str:

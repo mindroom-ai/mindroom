@@ -19,7 +19,12 @@ from mindroom.ai import ResponseTurnContext, ai_response
 from mindroom.authorization import is_sender_allowed_for_agent_reply
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    ToolRuntimeModelBinding,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -196,6 +201,7 @@ class DelegateTools(Toolkit):
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
                     refresh_scheduler=self._refresh_scheduler,
+                    attempt_model_runtime=ToolRuntimeModelBinding(),
                 )
         except Exception as e:
             logger.exception(

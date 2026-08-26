@@ -1328,6 +1328,7 @@ async def ai_response(  # noqa: C901
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
     supports_native_tool_approval: bool = False,
+    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_agent: Agent | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
@@ -1371,6 +1372,7 @@ async def ai_response(  # noqa: C901
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
+        attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -1407,6 +1409,7 @@ async def ai_response(  # noqa: C901
                 pipeline_timing=pipeline_timing,
                 eager_deferred_tools=eager_deferred_tools,
                 supports_native_tool_approval=supports_native_tool_approval,
+                attempt_model_runtime=attempt_model_runtime,
                 reusable_agent=reusable_agent,
             ),
             show_tool_calls=show_tool_calls,
@@ -1451,7 +1454,11 @@ async def ai_response(  # noqa: C901
         """Run one prepared agent attempt."""
         try:
             run_context = await _prepare_agent_run_context(
-                ctx,
+                (
+                    replace(ctx, active_model_name=continuation_state.active_model_name)
+                    if continuation_state.active_model_name is not None
+                    else ctx
+                ),
                 prompt=continuation_state.active_prompt,
                 session_id=session_id,
                 runtime_paths=runtime_paths,
@@ -1490,12 +1497,16 @@ async def ai_response(  # noqa: C901
             run_id=continuation_state.active_run_id,
         )
         holder.attempt = attempt
-        attempt_result = await _run_non_streaming_agent_attempts(
-            run_context=run_context,
-            attempt=attempt,
-            run_id_callback=run_id_callback,
-            scope_context=run.scope_context,
-            pipeline_timing=pipeline_timing,
+        attempt_result = await ai_runtime.run_attempt_with_model(
+            attempt_model_runtime,
+            active_model_name=prepared_run.runtime_model_name,
+            operation=lambda: _run_non_streaming_agent_attempts(
+                run_context=run_context,
+                attempt=attempt,
+                run_id_callback=run_id_callback,
+                scope_context=run.scope_context,
+                pipeline_timing=pipeline_timing,
+            ),
         )
         if attempt_result.user_error is not None:
             error_text = get_user_friendly_error_message(attempt_result.user_error, agent_name)
@@ -1568,6 +1579,7 @@ async def ai_response(  # noqa: C901
             session_id=response.session_id,
             run_id=response.run_id,
             attempt_run_id=attempt.attempt_run_id,
+            runtime_model_name=prepared_run.runtime_model_name,
             output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
             tool_executions=tuple(response.tools or ()),
             completed_tools=tuple(response_tool_trace),
@@ -1795,6 +1807,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     pipeline_timing: DispatchPipelineTiming | None = None,
     eager_deferred_tools: bool = False,
     supports_native_tool_approval: bool = False,
+    attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_agent: Agent | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
@@ -1834,6 +1847,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         pipeline_timing: Optional dispatch timing collector updated with AI-stage milestones.
         eager_deferred_tools: Whether to materialize every deferred toolkit without the dynamic loader.
         supports_native_tool_approval: Whether this caller can resume Agno confirmation pauses.
+        attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
 
@@ -1894,7 +1908,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:
             run_context = await _prepare_agent_run_context(
-                ctx,
+                (
+                    replace(ctx, active_model_name=continuation_state.active_model_name)
+                    if continuation_state.active_model_name is not None
+                    else ctx
+                ),
                 prompt=continuation_state.active_prompt,
                 session_id=session_id,
                 runtime_paths=runtime_paths,
@@ -1986,15 +2004,20 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 interrupted_tools=[pending.trace_entry for pending in state_ref.pending_tools],
             )
 
-        async for stream_chunk in _stream_agent_attempt_chunks(
-            run_context=run_context,
-            attempt=attempt,
-            state=state,
-            show_tool_calls=show_tool_calls,
-            run_id_callback=run_id_callback,
-            state_updated=_sync_live_turn_recorder,
-            pipeline_timing=pipeline_timing,
-        ):
+        attempt_stream = ai_runtime.stream_attempt_with_model(
+            attempt_model_runtime,
+            _stream_agent_attempt_chunks(
+                run_context=run_context,
+                attempt=attempt,
+                state=state,
+                show_tool_calls=show_tool_calls,
+                run_id_callback=run_id_callback,
+                state_updated=_sync_live_turn_recorder,
+                pipeline_timing=pipeline_timing,
+            ),
+            active_model_name=prepared_run.runtime_model_name,
+        )
+        async for stream_chunk in attempt_stream:
             yield stream_chunk
 
         run_error = state.user_error or state.stream_exception
@@ -2114,6 +2137,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 session_id=state.completed_run_event.session_id if state.completed_run_event is not None else None,
                 run_id=state.completed_run_event.run_id if state.completed_run_event is not None else None,
                 attempt_run_id=attempt.attempt_run_id,
+                runtime_model_name=prepared_run.runtime_model_name,
                 output_tokens=state.request_metric_totals.get("output_tokens"),
                 tool_executions=tuple(state.completed_tool_executions),
                 completed_tools=tuple(state.completed_tools),

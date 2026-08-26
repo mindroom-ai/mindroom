@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
+    "AttemptModelRuntime",
     "ModelRunInput",
     "attach_media_to_run_input",
     "cached_agent_run",
@@ -43,12 +44,65 @@ __all__ = [
     "note_attempt_run_id",
     "queued_message_signal_context",
     "register_queued_notice_storage",
+    "run_attempt_with_model",
     "scrub_queued_notice_session_context",
+    "stream_attempt_with_model",
 ]
 
 logger = get_logger(__name__)
 
 type ModelRunInput = str | Sequence[Message]
+
+
+class AttemptModelRuntime(Protocol):
+    """Bind attempt-local model identity around provider execution."""
+
+    async def run_with_model[ResultT](
+        self,
+        *,
+        active_model_name: str,
+        operation: Callable[[], Awaitable[ResultT]],
+    ) -> ResultT:
+        """Run one blocking attempt with its model bound to runtime state."""
+
+    def stream_with_model[ChunkT](
+        self,
+        stream: AsyncIterator[ChunkT],
+        *,
+        active_model_name: str,
+    ) -> AsyncIterator[ChunkT]:
+        """Bind one streaming attempt's model during stream pulls and close."""
+
+
+async def run_attempt_with_model[ResultT](
+    runtime: AttemptModelRuntime | None,
+    *,
+    active_model_name: str,
+    operation: Callable[[], Awaitable[ResultT]],
+) -> ResultT:
+    """Run an attempt through its optional model-aware runtime boundary."""
+    if runtime is None:
+        return await operation()
+    return await runtime.run_with_model(
+        active_model_name=active_model_name,
+        operation=operation,
+    )
+
+
+def stream_attempt_with_model[ChunkT](
+    runtime: AttemptModelRuntime | None,
+    stream: AsyncIterator[ChunkT],
+    *,
+    active_model_name: str,
+) -> AsyncIterator[ChunkT]:
+    """Wrap a stream in its optional model-aware runtime boundary."""
+    if runtime is None:
+        return stream
+    return runtime.stream_with_model(
+        stream,
+        active_model_name=active_model_name,
+    )
+
 
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"

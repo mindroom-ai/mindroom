@@ -56,6 +56,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
+    RuntimePaths,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
@@ -78,6 +79,8 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
+    ToolRuntimeContext,
+    ToolRuntimeModelBinding,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -116,6 +119,26 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
 
     from mindroom.final_delivery import StreamTransportOutcome
+
+
+def _model_runtime_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    active_model_name: str,
+) -> ToolRuntimeContext:
+    """Build an ambient tool context for model-transition integration tests."""
+    return ToolRuntimeContext(
+        agent_name="general",
+        target=MessageTarget.resolve("!test:localhost", None, "$user-message", room_mode=True),
+        requester_id="@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=MagicMock(),
+        relations=MagicMock(),
+        active_model_name=active_model_name,
+    )
 
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
@@ -1997,6 +2020,156 @@ class TestUserIdPassthrough:
         assert first_agent.arun.await_args.kwargs["run_id"] == "run-1"
         assert second_agent.arun.await_args.kwargs["run_id"] == run_ids[1]
         assert len(tool_trace) == 1
+
+    @pytest.mark.asyncio
+    async def test_ai_response_rebuilds_with_after_toolcall_model(self, tmp_path: Path) -> None:
+        """Passing the original turn context into preparation would silently rebuild the old model."""
+        observed_tool_models: list[str | None] = []
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "default-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "large-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch-model",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "after-toolcall"},
+            result=json.dumps(
+                {
+                    "action": "switch",
+                    "model": "large",
+                    "status": "ok",
+                    "tool": "thread_model",
+                    "when": "after-toolcall",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+        first_run_output = MagicMock(content="", status=RunStatus.completed, tools=[switch_execution])
+
+        async def first_arun(*_args: object, **_kwargs: object) -> object:
+            context = get_tool_runtime_context()
+            observed_tool_models.append(context.active_model_name if context is not None else None)
+            return first_run_output
+
+        first_agent.arun = AsyncMock(side_effect=first_arun)
+        second_run_output = MagicMock(content="Finished.", status=RunStatus.completed, tools=[])
+
+        async def second_arun(*_args: object, **_kwargs: object) -> object:
+            context = get_tool_runtime_context()
+            observed_tool_models.append(context.active_model_name if context is not None else None)
+            return second_run_output
+
+        second_agent.arun = AsyncMock(side_effect=second_arun)
+
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent, runtime_model_name="default"),
+                _prepared_prompt_result(second_agent, runtime_model_name="large"),
+            ]
+            with tool_runtime_context(
+                _model_runtime_context(config, runtime_paths, active_model_name="default"),
+            ):
+                response = await ai_response(
+                    make_turn_context("general", session_id="session1", run_id="run-1"),
+                    prompt="test",
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    show_tool_calls=False,
+                    attempt_model_runtime=ToolRuntimeModelBinding(),
+                )
+
+        assert response == "Finished."
+        assert mock_prepare.await_count == 2
+        assert mock_prepare.await_args_list[1].args[0].active_model_name == "large"
+        assert observed_tool_models == ["default", "large"]
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_rebuilds_with_after_toolcall_model(self, tmp_path: Path) -> None:
+        """Streaming continuation must pass the requested alias into the rebuilt agent context."""
+        observed_tool_models: list[str | None] = []
+        first_agent = MagicMock()
+        first_agent.model = MagicMock()
+        first_agent.model.__class__.__name__ = "OpenAIChat"
+        first_agent.model.id = "default-model"
+        first_agent.name = "GeneralAgent"
+        first_agent.add_history_to_context = False
+
+        second_agent = MagicMock()
+        second_agent.model = MagicMock()
+        second_agent.model.__class__.__name__ = "OpenAIChat"
+        second_agent.model.id = "large-model"
+        second_agent.name = "GeneralAgent"
+        second_agent.add_history_to_context = False
+
+        switch_execution = ToolExecution(
+            tool_call_id="call-switch-model",
+            tool_name="switch_thread_model",
+            tool_args={"model_name": "large", "when": "after-toolcall"},
+            result=json.dumps(
+                {
+                    "action": "switch",
+                    "model": "large",
+                    "status": "ok",
+                    "tool": "thread_model",
+                    "when": "after-toolcall",
+                },
+            ),
+            stop_after_tool_call=True,
+        )
+
+        async def first_stream() -> AsyncIterator[object]:
+            context = get_tool_runtime_context()
+            observed_tool_models.append(context.active_model_name if context is not None else None)
+            yield ToolCallCompletedEvent(tool=switch_execution)
+            yield RunCompletedEvent(content=None)
+
+        async def second_stream() -> AsyncIterator[object]:
+            context = get_tool_runtime_context()
+            observed_tool_models.append(context.active_model_name if context is not None else None)
+            yield RunContentEvent(content="Finished.")
+            yield RunCompletedEvent(content="Finished.")
+
+        first_agent.arun = MagicMock(return_value=first_stream())
+        second_agent.arun = MagicMock(return_value=second_stream())
+
+        config = _config()
+        runtime_paths = _runtime_paths(tmp_path)
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent, runtime_model_name="default"),
+                _prepared_prompt_result(second_agent, runtime_model_name="large"),
+            ]
+            with tool_runtime_context(
+                _model_runtime_context(config, runtime_paths, active_model_name="default"),
+            ):
+                chunks = [
+                    chunk
+                    async for chunk in stream_agent_response(
+                        make_turn_context("general", session_id="session1", run_id="run-1"),
+                        prompt="test",
+                        runtime_paths=runtime_paths,
+                        config=config,
+                        show_tool_calls=False,
+                        attempt_model_runtime=ToolRuntimeModelBinding(),
+                    )
+                ]
+
+        assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == ["Finished."]
+        assert mock_prepare.await_count == 2
+        assert mock_prepare.await_args_list[1].args[0].active_model_name == "large"
+        assert observed_tool_models == ["default", "large"]
 
     @pytest.mark.asyncio
     async def test_ai_response_continuation_cancelled_run_preserves_dynamic_tool_trace(self, tmp_path: Path) -> None:

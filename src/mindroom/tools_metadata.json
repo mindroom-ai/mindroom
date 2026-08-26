@@ -8966,10 +8966,11 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Switch which configured model the current Matrix thread uses",
+      "description": "List configured models or switch which model the current Matrix thread uses",
       "display_name": "Thread Model",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
+        "list_models",
         "get_thread_model",
         "switch_thread_model",
         "reset_thread_model"

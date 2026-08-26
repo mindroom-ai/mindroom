@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="thread_model",
     display_name="Thread Model",
-    description="Switch which configured model the current Matrix thread uses",
+    description="List configured models or switch which model the current Matrix thread uses",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     icon_color="text-purple-500",
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
-    function_names=("get_thread_model", "switch_thread_model", "reset_thread_model"),
+    function_names=("list_models", "get_thread_model", "switch_thread_model", "reset_thread_model"),
 )
 def thread_model_tools() -> type[ThreadModelTools]:
     """Return per-thread model switching tools."""
