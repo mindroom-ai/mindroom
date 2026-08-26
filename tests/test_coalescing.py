@@ -629,8 +629,9 @@ async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> No
 
 
 @pytest.mark.asyncio
-async def test_thread_reply_does_not_promote_a_completed_room_media_turn() -> None:
-    """A room turn already closed by text must keep its original conversation scope."""
+@pytest.mark.parametrize("completion_kind", ["text", "voice"])
+async def test_thread_reply_does_not_promote_a_completed_room_media_turn(completion_kind: str) -> None:
+    """A room turn closed by text-like content must keep its conversation scope."""
     batches: list[PreparedTurn] = []
 
     async def dispatch_batch(batch: PreparedTurn) -> None:
@@ -646,11 +647,12 @@ async def test_thread_reply_does_not_promote_a_completed_room_media_turn() -> No
     thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
 
     await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
-    await _admit_ready(
-        gate,
-        room_key,
-        _pending(_text_event("$room-text:localhost", "room caption", 1_000_100)),
+    completion_event = (
+        _pending(_text_event("$room-text:localhost", "room caption", 1_000_100))
+        if completion_kind == "text"
+        else _voice_pending("$voice:localhost", "voice caption", 1_000_100)
     )
+    await _admit_ready(gate, room_key, completion_event)
     await _admit_ready(
         gate,
         thread_key,
@@ -661,7 +663,7 @@ async def test_thread_reply_does_not_promote_a_completed_room_media_turn() -> No
 
     assert len(batches) == 2
     assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
-        None: ["$image:localhost", "$room-text:localhost"],
+        None: ["$image:localhost", completion_event.event.event_id],
         "$image:localhost": ["$thread-reply:localhost"],
     }
 

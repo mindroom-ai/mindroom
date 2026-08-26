@@ -360,6 +360,7 @@ class CoalescingGate:
         candidates = list(room_gate.queue)[:candidate_count]
         if (
             not candidates
+            or pending_event_is_text(candidates[-1].pending_event)
             or not self._queued_event_allows_room_scope_batching(candidates[-1])
             or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
         ):
