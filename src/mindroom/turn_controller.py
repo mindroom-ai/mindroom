@@ -491,6 +491,22 @@ class TurnController:
             response_envelope=envelope,
         )
 
+    def _event_allows_queued_notice(
+        self,
+        event: PreparedIngress,
+        envelope: MessageEnvelope,
+    ) -> bool:
+        """Return whether this event may notify the conversation's active response."""
+        if envelope.origin.intent is not TurnIntent.ROUTER_HANDOFF:
+            return True
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        return am_i_mentioned or not (mentioned_agents or has_non_agent_mentions)
+
     def _voice_queued_notice_reservation(
         self,
         *,
@@ -538,11 +554,15 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        queued_notice_reservation = self._queued_notice_reservation_if_busy(
-            target=target,
-            envelope=envelope,
-            existing=queued_notice_reservation,
-        )
+        if self._event_allows_queued_notice(prepared_event, envelope):
+            queued_notice_reservation = self._queued_notice_reservation_if_busy(
+                target=target,
+                envelope=envelope,
+                existing=queued_notice_reservation,
+            )
+        elif queued_notice_reservation is not None:
+            queued_notice_reservation.cancel()
+            queued_notice_reservation = None
         try:
             await self._enqueue_for_dispatch(
                 prepared_event,

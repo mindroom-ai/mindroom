@@ -147,6 +147,7 @@ class _GateEntry:
     phase: _GatePhase = _GatePhase.DEBOUNCE
     queue: deque[_QueuedEvent] = field(default_factory=deque)
     claimed_admissions: list[_QueuedEvent] = field(default_factory=list)
+    dispatch_key: CoalescingKey | None = None
     drain_task: asyncio.Task[None] | None = None
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
     wake_generation: int = 0
@@ -325,10 +326,44 @@ class CoalescingGate:
     def _get_or_create_gate(self, key: CoalescingKey) -> _GateEntry:
         gate = self._gates.get(key)
         if gate is None:
-            gate = _GateEntry()
+            gate = _GateEntry(dispatch_key=key)
             gate.drain_context = self._active_drain_context
             self._gates[key] = gate
         return gate
+
+    @staticmethod
+    def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
+        if queued.source_event_id != thread_id or CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
+            return False
+        return source_or_event_allows_room_scope_batching(
+            queued.source_kind,
+            queued.pending_event.event,
+        ) or source_or_event_allows_room_scope_batching(
+            queued.pending_event.event.source_kind,
+            queued.pending_event.event,
+        )
+
+    def _gate_for_admission(self, key: CoalescingKey) -> tuple[CoalescingKey, _GateEntry]:
+        """Return the gate that owns an admission, promoting a pending media root when needed."""
+        if (gate := self._gates.get(key)) is not None:
+            return key, gate
+        if key.thread_id is not None:
+            room_key = CoalescingKey(key.room_id, None, key.owner)
+            room_gate = self._gates.get(room_key)
+            if (
+                room_gate is not None
+                and room_gate.phase is _GatePhase.DEBOUNCE
+                and not room_gate.claimed_admissions
+                and room_gate.dispatch_key in {room_key, key}
+                and any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in room_gate.queue)
+            ):
+                room_gate.dispatch_key = key
+                return room_key, room_gate
+        return key, self._get_or_create_gate(key)
+
+    @staticmethod
+    def _dispatch_key(storage_key: CoalescingKey, gate: _GateEntry) -> CoalescingKey:
+        return gate.dispatch_key or storage_key
 
     def _current_drain_context(self, gate: _GateEntry | None = None) -> _DrainContext | None:
         if gate is not None and gate.drain_context is not None:
@@ -669,7 +704,8 @@ class CoalescingGate:
         """
         enqueue_start = time.monotonic()
         key = self._busy_conversation_key(key, ready_result)
-        gate = self._get_or_create_gate(key)
+        storage_key, gate = self._gate_for_admission(key)
+        dispatch_key = self._dispatch_key(storage_key, gate)
         admission = _QueuedEvent(
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
@@ -679,11 +715,11 @@ class CoalescingGate:
             lane_slot=lane_slot,
         )
         self._insert_queued_event(gate, admission)
-        self._schedule_drain(key, gate)
+        self._schedule_drain(storage_key, gate)
         kind = self._queued_kind(admission)
         path = self._enqueue_path(kind, ready_result.pending_event)
         self._record_enqueue(
-            key,
+            dispatch_key,
             gate,
             ready_result.pending_event,
             enqueue_start,
@@ -832,15 +868,16 @@ class CoalescingGate:
         pending_events: list[PendingEvent],
     ) -> str:
         """Dispatch a claimed batch."""
+        dispatch_key = self._dispatch_key(key, gate)
         flush_start = time.monotonic()
         gate.phase = _GatePhase.IN_FLIGHT
         gate.deadline = None
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(pending_events[-1].event.event_id)
         log_context: dict[str, object] = {
-            "room_id": key.room_id,
-            "thread_id": key.thread_id,
-            "requester_user_id": coalescing_owner_log_label(key.owner),
+            "room_id": dispatch_key.room_id,
+            "thread_id": dispatch_key.thread_id,
+            "requester_user_id": coalescing_owner_log_label(dispatch_key.owner),
             "pending_count": pending_count,
             "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
             "source_event_ids": self._source_event_ids(pending_events),
@@ -848,7 +885,7 @@ class CoalescingGate:
         }
         dispatched = False
         try:
-            diagnostics = self._flush_diagnostics(key, pending_events)
+            diagnostics = self._flush_diagnostics(dispatch_key, pending_events)
             pending_count = diagnostics.pending_count
             timing_scope = diagnostics.timing_scope
             log_context = diagnostics.log_context
@@ -964,9 +1001,10 @@ class CoalescingGate:
                 await self._wait_for_lane_slots(gate, window_slots)
                 return
 
+        dispatch_key = self._dispatch_key(key, gate)
         candidate_count = self._front_normal_run_length(
             gate,
-            coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
+            coalesce_normal_events=self._should_coalesce_normal_events(dispatch_key, gate),
             max_receipt_time=debounce_result.quiet_deadline,
         )
         if candidate_count == 0:
@@ -999,7 +1037,7 @@ class CoalescingGate:
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         drain_context = self._current_drain_context(gate)
         if not (self._is_shutting_down() or self._is_bounded_drain(drain_context)):
-            await self._wait_until_dispatch_allowed(key)
+            await self._wait_until_dispatch_allowed(self._dispatch_key(key, gate))
         if not gate.queue:
             return
 
@@ -1012,7 +1050,10 @@ class CoalescingGate:
 
         debounce_result = await self._wait_for_debounce(
             gate,
-            coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(key, entry),
+            coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(
+                self._dispatch_key(key, entry),
+                entry,
+            ),
         )
         if not gate.queue:
             return

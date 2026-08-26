@@ -1669,6 +1669,56 @@ class TestAgentBot(AgentBotTestBase):
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
+    async def test_router_handoff_for_another_agent_does_not_signal_active_response(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A router handoff for another agent must not interrupt this agent's active turn."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        ids = entity_ids(config, runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = self._router_relay_event(body="@general could you help with this?")
+        event.source["content"]["m.mentions"] = {"user_ids": [ids["general"].full_id]}
+        prepared_event = PreparedIngress(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=event.body,
+            source=event.source,
+            server_timestamp=event.server_timestamp,
+        )
+
+        with (
+            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as reserve_waiting_human_message,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
+        ):
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+            outcome = await bot._turn_controller._dispatch_prepared_text_like_ingress(
+                room=room,
+                prepared_event=prepared_event,
+                requester_user_id="@user:localhost",
+                reservation_owner=reservation_owner,
+                coalescing_thread_id="$thread_root:localhost",
+            )
+            await asyncio.wait_for(reservation_owner.slot.settled.wait(), timeout=1.0)
+
+        assert outcome is _IngressAdmissionOutcome.DEFERRED
+        reserve_waiting_human_message.assert_not_called()
+        admit.assert_awaited_once()
+        ready_result = admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        assert all(item.kind != "queued_notice_reservation" for item in ready_result.pending_event.dispatch_metadata)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
     async def test_handle_message_inner_enqueues_trusted_hook_source_kind_as_gate_bypass(
         self,

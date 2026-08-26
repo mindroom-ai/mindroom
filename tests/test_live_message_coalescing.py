@@ -841,6 +841,48 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_dispatch(tmp_path: Path) -> None:
+    """A caption that starts a thread on its upload must remain part of that upload turn."""
+    bot = _make_bot(tmp_path, debounce_ms=60_000)
+    room = _make_room()
+    image_event = _image_event(event_id="$img", server_timestamp=1000)
+    caption = _text_event(
+        event_id="$caption",
+        body="describe this",
+        server_timestamp=1001,
+        thread_id=image_event.event_id,
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        ingress_metadata: DispatchIngressMetadata | None = None,
+        **_metadata: object,
+    ) -> None:
+        coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
+        calls.append(
+            (
+                _handled_turn_source_event_ids(handled_turn),
+                coalescing_key.thread_id if coalescing_key is not None else None,
+            ),
+        )
+
+    with patch(
+        "mindroom.turn_controller.dispatch_text_message",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
+        await bot._turn_controller.handle_media_event(room, image_event)
+        await bot._turn_controller.handle_text_event(room, caption)
+        await bot._coalescing_gate.drain_all()
+
+    assert calls == [(["$img", "$caption"], "$img")]
+
+
+@pytest.mark.asyncio
 async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path) -> None:
     """Uploads arrive first and the trailing caption closes the batch into one dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=60_000)
