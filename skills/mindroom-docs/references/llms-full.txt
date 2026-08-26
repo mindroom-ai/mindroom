@@ -9776,13 +9776,17 @@ Both functions are intentionally parameter-free.
 ### Response And Coverage
 
 Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
-A successful response also includes `scope`, token `totals`, `session_count`, a `breakdown`, and `coverage`.
+A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
 The admin response groups session aggregates by configured agent or team ID.
 The self response has no breakdown because its scope is already one agent and requester.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
+Both responses group retained top-level runs by provider and model in `model_breakdown`.
+Model rows include token totals and run counts and are sorted by total tokens.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
+Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
+Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
 Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.

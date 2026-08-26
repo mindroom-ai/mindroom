@@ -203,6 +203,8 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert len(row.runs) == 1
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert row.runs[0].requester_id == "@alice:example.test"
+    assert row.runs[0].model_provider == "openai"
+    assert row.runs[0].model == "gpt-5.6"
     assert row.payload_bytes > 0
     assert not hasattr(row.runs[0], "member_responses")
     assert "secret" not in repr(row)
@@ -249,6 +251,8 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert isinstance(row, UsageSessionRow)
     assert len(row.runs) == 1
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+    assert row.runs[0].model_provider == "openai"
+    assert row.runs[0].model == "gpt-5.6"
 
 
 def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) -> None:
