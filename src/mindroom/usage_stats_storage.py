@@ -418,8 +418,8 @@ def _extract_row(
     row_requester = _optional_string(row["user_id"])
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    runs_available = True
-    session_metrics_available = True
+    runs_available = mode != "session_metrics"
+    session_metrics_available = mode != "runs"
     if mode == "runs":
         runs = _extract_runs(row["payload"], row_requester=row_requester)
         session_metrics = MappingProxyType({})

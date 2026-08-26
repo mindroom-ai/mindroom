@@ -210,11 +210,11 @@ def test_shared_self_reads_each_source_once_for_totals_and_models(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, _run()),)},
+        {source.path_label: (_row(source, _run(), session_metrics_available=False),)},
         calls,
     )
 
-    collect_self_usage(
+    report = collect_self_usage(
         agent_name="code",
         requester_id="@alice:example.test",
         config=_config(),
@@ -223,6 +223,8 @@ def test_shared_self_reads_each_source_once_for_totals_and_models(
     )
 
     assert calls == [(source.path_label, "runs")]
+    assert report.totals.total_tokens == 10
+    assert report.model_breakdown[0].totals.total_tokens == 10
 
 
 def test_self_usage_accepts_missing_requester_in_exact_private_store(

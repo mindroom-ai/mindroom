@@ -197,7 +197,8 @@ class _UsageAccumulator:
         expected_agent: str | None,
         expected_requester: str | None,
     ) -> None:
-        if not row.session_metrics_available:
+        uses_runs = scope == "self" and not row.source.requester_isolated
+        if (uses_runs and not row.runs_available) or (not uses_runs and not row.session_metrics_available):
             self.unavailable_sources.add(row.source.path_label)
             return
         try:

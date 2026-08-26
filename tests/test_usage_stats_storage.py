@@ -205,6 +205,8 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert row.runs[0].requester_id == "@alice:example.test"
     assert row.runs[0].model_provider == "openai"
     assert row.runs[0].model == "gpt-5.6"
+    assert row.runs_available is True
+    assert row.session_metrics_available is False
     assert row.payload_bytes > 0
     assert not hasattr(row.runs[0], "member_responses")
     assert "secret" not in repr(row)
@@ -298,6 +300,8 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
     assert isinstance(row, UsageSessionRow)
     assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
     assert row.runs == ()
+    assert row.runs_available is False
+    assert row.session_metrics_available is True
 
 
 def test_reader_both_mode_keeps_session_metrics_when_runs_are_malformed(tmp_path: Path) -> None:
