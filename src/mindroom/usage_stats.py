@@ -29,7 +29,6 @@ __all__ = [
     "UsageBreakdownRow",
     "UsageCoverage",
     "UsageModelBreakdownRow",
-    "UsageModelCoverage",
     "UsageReport",
     "collect_admin_usage",
     "collect_self_usage",
@@ -147,23 +146,6 @@ class UsageModelBreakdownRow:
 
 
 @dataclass(frozen=True, slots=True)
-class UsageModelCoverage:
-    """Coverage of the separately retained model attribution."""
-
-    scanned_sources: int
-    unavailable_sources: int
-    note: str = _MODEL_COVERAGE_NOTE
-
-    def to_dict(self) -> dict[str, object]:
-        """Return model-attribution coverage without implying completeness."""
-        return {
-            "scanned_sources": self.scanned_sources,
-            "unavailable_sources": self.unavailable_sources,
-            "note": self.note,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Aggregate-only retained token usage."""
 
@@ -173,7 +155,7 @@ class UsageReport:
     breakdown: tuple[UsageBreakdownRow, ...]
     coverage: UsageCoverage
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
-    model_coverage: UsageModelCoverage
+    model_coverage: UsageCoverage
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
@@ -191,21 +173,11 @@ class UsageReport:
 @dataclass(slots=True)
 class _Aggregate:
     totals: TokenTotals = TokenTotals()
-    session_count: int = 0
+    count: int = 0
 
     def add(self, totals: TokenTotals) -> None:
         self.totals = self.totals.plus(totals)
-        self.session_count += 1
-
-
-@dataclass(slots=True)
-class _ModelAggregate:
-    totals: TokenTotals = TokenTotals()
-    run_count: int = 0
-
-    def add(self, totals: TokenTotals) -> None:
-        self.totals = self.totals.plus(totals)
-        self.run_count += 1
+        self.count += 1
 
 
 @dataclass(slots=True)
@@ -254,7 +226,7 @@ class _UsageAccumulator:
 
 @dataclass(slots=True)
 class _ModelUsageAccumulator:
-    buckets: dict[tuple[str, str], _ModelAggregate] = dataclass_field(default_factory=dict)
+    buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
 
@@ -332,11 +304,10 @@ def _collect_usage(
     expected_agent: str | None,
     expected_requester: str | None,
 ) -> UsageReport:
-    discovered_sources = tuple(sources)
     usage = _UsageAccumulator()
     model_usage = _ModelUsageAccumulator()
     scanned_sources: set[str] = set()
-    for discovered in discovered_sources:
+    for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
             usage.unavailable_sources.add(discovered.path_label)
             model_usage.unavailable_sources.add(discovered.path_label)
@@ -365,16 +336,17 @@ def _collect_usage(
             )
 
     breakdown = tuple(
-        UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.session_count)
+        UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.count)
         for entity_id, aggregate in sorted(
             usage.buckets.items(),
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
         )
     )
     model_breakdown = _model_breakdown(model_usage.buckets)
-    model_coverage = UsageModelCoverage(
+    model_coverage = UsageCoverage(
         scanned_sources=len(scanned_sources),
         unavailable_sources=len(model_usage.unavailable_sources),
+        note=_MODEL_COVERAGE_NOTE,
     )
     return UsageReport(
         scope=scope,
@@ -391,14 +363,14 @@ def _collect_usage(
 
 
 def _model_breakdown(
-    buckets: Mapping[tuple[str, str], _ModelAggregate],
+    buckets: Mapping[tuple[str, str], _Aggregate],
 ) -> tuple[UsageModelBreakdownRow, ...]:
     return tuple(
         UsageModelBreakdownRow(
             model_provider=key[0],
             model=key[1],
             totals=aggregate.totals,
-            run_count=aggregate.run_count,
+            run_count=aggregate.count,
         )
         for key, aggregate in sorted(
             buckets.items(),
@@ -412,7 +384,7 @@ def _add_model_entries(
     *,
     source_path: str,
     row_key: str,
-    buckets: dict[tuple[str, str], _ModelAggregate],
+    buckets: dict[tuple[str, str], _Aggregate],
     seen_runs: set[tuple[str, str, str]],
 ) -> None:
     row_seen_runs: set[tuple[str, str, str]] = set()
@@ -427,7 +399,7 @@ def _add_model_entries(
         accepted_entries.append((key, totals))
     seen_runs.update(row_seen_runs)
     for key, totals in accepted_entries:
-        buckets.setdefault(key, _ModelAggregate()).add(totals)
+        buckets.setdefault(key, _Aggregate()).add(totals)
 
 
 def _model_entries_for_row(
