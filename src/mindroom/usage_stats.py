@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.usage_stats_storage import (
@@ -207,6 +208,88 @@ class _ModelAggregate:
         self.run_count += 1
 
 
+@dataclass(slots=True)
+class _UsageAccumulator:
+    total: TokenTotals = TokenTotals()
+    sessions: set[tuple[str, str]] = dataclass_field(default_factory=set)
+    buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
+    seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def add_row(
+        self,
+        row: UsageSessionRow,
+        *,
+        config: Config,
+        scope: _Scope,
+        expected_agent: str | None,
+        expected_requester: str | None,
+    ) -> None:
+        if not row.session_metrics_available:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        try:
+            if scope == "self":
+                row_totals = _self_row_totals(
+                    row,
+                    config=config,
+                    expected_agent=expected_agent,
+                    expected_requester=expected_requester,
+                    seen_runs=self.seen_runs,
+                )
+                entity_id = None
+            else:
+                entity_id = _admin_entity_id(row)
+                row_totals = _metrics_totals(row.session_metrics) if entity_id is not None else None
+        except ValueError:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        if row_totals is None:
+            return
+        self.total = self.total.plus(row_totals)
+        self.sessions.add((row.source.path_label, row.row_key))
+        if entity_id is not None:
+            self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
+
+
+@dataclass(slots=True)
+class _ModelUsageAccumulator:
+    buckets: dict[tuple[str, str], _ModelAggregate] = dataclass_field(default_factory=dict)
+    seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def add_row(
+        self,
+        row: UsageSessionRow,
+        *,
+        config: Config,
+        scope: _Scope,
+        expected_agent: str | None,
+        expected_requester: str | None,
+    ) -> None:
+        if not row.runs_available:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        try:
+            entries = _model_entries_for_row(
+                row,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
+        except ValueError:
+            self.unavailable_sources.add(row.source.path_label)
+            return
+        _add_model_entries(
+            entries,
+            source_path=row.source.path_label,
+            row_key=row.row_key,
+            buckets=self.buckets,
+            seen_runs=self.seen_runs,
+        )
+
+
 def collect_self_usage(
     *,
     agent_name: str,
@@ -250,122 +333,67 @@ def _collect_usage(
     expected_requester: str | None,
 ) -> UsageReport:
     discovered_sources = tuple(sources)
-    total = TokenTotals()
-    sessions: set[tuple[str, str]] = set()
-    buckets: dict[str, _Aggregate] = {}
-    seen_runs: set[tuple[str, str, str]] = set()
+    usage = _UsageAccumulator()
+    model_usage = _ModelUsageAccumulator()
     scanned_sources: set[str] = set()
-    unavailable_sources: set[str] = set()
     for discovered in discovered_sources:
         if isinstance(discovered, UsageStorageDiagnostic):
-            unavailable_sources.add(discovered.path_label)
+            usage.unavailable_sources.add(discovered.path_label)
+            model_usage.unavailable_sources.add(discovered.path_label)
             continue
         source = discovered
         scanned_sources.add(source.path_label)
-        mode = "runs" if scope == "self" and not source.requester_isolated else "session_metrics"
+        mode = "runs" if scope == "self" and not source.requester_isolated else "both"
         for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
-                unavailable_sources.add(item.path_label)
+                usage.unavailable_sources.add(item.path_label)
+                model_usage.unavailable_sources.add(item.path_label)
                 continue
-            try:
-                if scope == "self":
-                    row_totals = _self_row_totals(
-                        item,
-                        config=config,
-                        expected_agent=expected_agent,
-                        expected_requester=expected_requester,
-                        seen_runs=seen_runs,
-                    )
-                    entity_id = None
-                else:
-                    entity_id = _admin_entity_id(item)
-                    row_totals = _metrics_totals(item.session_metrics) if entity_id is not None else None
-            except ValueError:
-                unavailable_sources.add(source.path_label)
-                continue
-            if row_totals is None:
-                continue
-            total = total.plus(row_totals)
-            sessions.add((source.path_label, item.row_key))
-            if entity_id is not None:
-                buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
+            usage.add_row(
+                item,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
+            model_usage.add_row(
+                item,
+                config=config,
+                scope=scope,
+                expected_agent=expected_agent,
+                expected_requester=expected_requester,
+            )
 
     breakdown = tuple(
         UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.session_count)
         for entity_id, aggregate in sorted(
-            buckets.items(),
+            usage.buckets.items(),
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
         )
     )
-    model_breakdown, model_coverage = _collect_model_usage(
-        sources=discovered_sources,
-        config=config,
-        scope=scope,
-        expected_agent=expected_agent,
-        expected_requester=expected_requester,
+    model_breakdown = _model_breakdown(model_usage.buckets)
+    model_coverage = UsageModelCoverage(
+        scanned_sources=len(scanned_sources),
+        unavailable_sources=len(model_usage.unavailable_sources),
     )
     return UsageReport(
         scope=scope,
-        totals=total,
-        session_count=len(sessions),
+        totals=usage.total,
+        session_count=len(usage.sessions),
         breakdown=breakdown,
         coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
-            unavailable_sources=len(unavailable_sources),
+            unavailable_sources=len(usage.unavailable_sources),
         ),
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
     )
 
 
-def _collect_model_usage(
-    *,
-    sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
-    config: Config,
-    scope: _Scope,
-    expected_agent: str | None,
-    expected_requester: str | None,
-) -> tuple[tuple[UsageModelBreakdownRow, ...], UsageModelCoverage]:
-    buckets: dict[tuple[str, str], _ModelAggregate] = {}
-    seen_runs: set[tuple[str, str, str]] = set()
-    scanned_sources: set[str] = set()
-    unavailable_sources: set[str] = set()
-    for discovered in sources:
-        if isinstance(discovered, UsageStorageDiagnostic):
-            unavailable_sources.add(discovered.path_label)
-            continue
-        source = discovered
-        scanned_sources.add(source.path_label)
-        for item in iter_usage_storage_rows(source, mode="runs"):
-            if isinstance(item, UsageStorageDiagnostic):
-                unavailable_sources.add(item.path_label)
-                continue
-            try:
-                entries = _model_entries_for_row(
-                    item,
-                    config=config,
-                    scope=scope,
-                    expected_agent=expected_agent,
-                    expected_requester=expected_requester,
-                )
-            except ValueError:
-                unavailable_sources.add(source.path_label)
-                continue
-            row_seen_runs: set[tuple[str, str, str]] = set()
-            accepted_entries: list[tuple[tuple[str, str], TokenTotals]] = []
-            for run, totals in entries:
-                if run.run_id is not None:
-                    identity = (source.path_label, item.row_key, run.run_id)
-                    if identity in seen_runs or identity in row_seen_runs:
-                        continue
-                    row_seen_runs.add(identity)
-                key = (run.model_provider or "unknown", run.model or "unknown")
-                accepted_entries.append((key, totals))
-            seen_runs.update(row_seen_runs)
-            for key, totals in accepted_entries:
-                buckets.setdefault(key, _ModelAggregate()).add(totals)
-
-    breakdown = tuple(
+def _model_breakdown(
+    buckets: Mapping[tuple[str, str], _ModelAggregate],
+) -> tuple[UsageModelBreakdownRow, ...]:
+    return tuple(
         UsageModelBreakdownRow(
             model_provider=key[0],
             model=key[1],
@@ -377,10 +405,29 @@ def _collect_model_usage(
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
         )
     )
-    return breakdown, UsageModelCoverage(
-        scanned_sources=len(scanned_sources),
-        unavailable_sources=len(unavailable_sources),
-    )
+
+
+def _add_model_entries(
+    entries: Iterable[tuple[UsageRunNode, TokenTotals]],
+    *,
+    source_path: str,
+    row_key: str,
+    buckets: dict[tuple[str, str], _ModelAggregate],
+    seen_runs: set[tuple[str, str, str]],
+) -> None:
+    row_seen_runs: set[tuple[str, str, str]] = set()
+    accepted_entries: list[tuple[tuple[str, str], TokenTotals]] = []
+    for run, totals in entries:
+        if run.run_id is not None:
+            identity = (source_path, row_key, run.run_id)
+            if identity in seen_runs or identity in row_seen_runs:
+                continue
+            row_seen_runs.add(identity)
+        key = (run.model_provider or "unknown", run.model or "unknown")
+        accepted_entries.append((key, totals))
+    seen_runs.update(row_seen_runs)
+    for key, totals in accepted_entries:
+        buckets.setdefault(key, _ModelAggregate()).add(totals)
 
 
 def _model_entries_for_row(

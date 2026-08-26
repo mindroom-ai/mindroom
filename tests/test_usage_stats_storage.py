@@ -300,6 +300,53 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
     assert row.runs == ()
 
 
+def test_reader_both_mode_keeps_session_metrics_when_runs_are_malformed(tmp_path: Path) -> None:
+    """Run-attribution corruption cannot erase authoritative session metrics."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            'UPDATE "code_sessions" SET runs = ?, session_data = ?',
+            ("not-json", json.dumps({"session_metrics": {"total_tokens": 30}})),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database), mode="both"))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs == ()
+    assert row.runs_available is False
+    assert row.session_metrics == {"total_tokens": 30}
+    assert row.session_metrics_available is True
+
+
+def test_reader_both_mode_keeps_runs_when_session_metrics_are_malformed(tmp_path: Path) -> None:
+    """Session-aggregate corruption cannot erase retained model attribution."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute('UPDATE "code_sessions" SET session_data = ?', ("not-json",))
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database), mode="both"))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert len(row.runs) == 1
+    assert row.runs_available is True
+    assert row.session_metrics == {}
+    assert row.session_metrics_available is False
+
+
 def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
     """Delegated sibling runs must not be counted as top-level usage."""
     database = tmp_path / "code.db"

@@ -105,6 +105,8 @@ def _row(
     session_metrics: Mapping[str, object] | None = None,
     row_key: str = "session-1",
     payload_bytes: int = 0,
+    runs_available: bool = True,
+    session_metrics_available: bool = True,
 ) -> UsageSessionRow:
     is_team = source.scope == "team"
     return UsageSessionRow(
@@ -115,6 +117,8 @@ def _row(
         runs=tuple(runs),
         session_metrics=MappingProxyType(dict(session_metrics or {})),
         payload_bytes=payload_bytes,
+        runs_available=runs_available,
+        session_metrics_available=session_metrics_available,
     )
 
 
@@ -122,6 +126,7 @@ def _wire(
     monkeypatch: pytest.MonkeyPatch,
     sources: tuple[UsageStorageSource | UsageStorageDiagnostic, ...],
     rows: dict[str, tuple[UsageSessionRow | UsageStorageDiagnostic, ...]],
+    calls: list[tuple[str, str]] | None = None,
 ) -> None:
     monkeypatch.setattr("mindroom.usage_stats.discover_self_usage_sources", lambda **_: sources)
     monkeypatch.setattr("mindroom.usage_stats.discover_admin_usage_sources", lambda **_: sources)
@@ -131,7 +136,8 @@ def _wire(
         *,
         mode: str = "runs",
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-        del mode
+        if calls is not None:
+            calls.append((source.path_label, mode))
         yield from rows.get(source.path_label, ())
 
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
@@ -193,6 +199,30 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
     assert "window" not in payload
     assert "run_count" not in payload
     assert "first_observed_at" not in payload
+
+
+def test_shared_self_reads_each_source_once_for_totals_and_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run()),)},
+        calls,
+    )
+
+    collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    )
+
+    assert calls == [(source.path_label, "runs")]
 
 
 def test_self_usage_accepts_missing_requester_in_exact_private_store(
@@ -298,6 +328,24 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
         ("openai", "gpt-5.6", 7, 1),
         ("vertexai", "claude-opus-5", 5, 1),
     ]
+
+
+def test_admin_reads_each_source_once_for_session_and_model_views(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run(), session_metrics=_metrics()),)},
+        calls,
+    )
+
+    collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert calls == [(source.path_label, "both")]
 
 
 def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
@@ -440,6 +488,60 @@ def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
     assert report.coverage.unavailable_sources == 0
     assert report.model_breakdown == ()
     assert report.model_coverage.unavailable_sources == 1
+
+
+def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    session_metrics=_metrics(20),
+                    runs_available=False,
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 20
+    assert report.coverage.unavailable_sources == 0
+    assert report.model_breakdown == ()
+    assert report.model_coverage.unavailable_sources == 1
+
+
+def test_unavailable_session_payload_does_not_discard_model_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(total_tokens=12),
+                    session_metrics_available=False,
+                ),
+            ),
+        },
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert report.totals.total_tokens == 0
+    assert report.coverage.unavailable_sources == 1
+    assert report.model_breakdown[0].totals.total_tokens == 12
+    assert report.model_coverage.unavailable_sources == 0
 
 
 def test_admin_usage_reads_every_retained_session(
