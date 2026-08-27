@@ -2764,8 +2764,13 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_suspends_for_confirmation_pause_event() -> None:
-    """A streamed team confirmation pause must escape to the lifecycle suspension handler."""
+async def test_team_response_stream_drains_confirmation_pause_before_handoff() -> None:
+    """The provider must finish its persisted pause before control leaves the stream.
+
+    Agno persists the paused run before yielding ``TeamRunPausedEvent``. Closing
+    its stream at that yield is nevertheless treated as cancellation, which can
+    overwrite the paused run before a later approval resumes it.
+    """
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -2787,8 +2792,10 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
         tool_args={"value": 1},
         requires_confirmation=True,
     )
+    provider_pause_finished = False
 
     async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        nonlocal provider_pause_finished
         yield TeamRunContentEvent(content="Before approval.")
         yield TeamRunPausedEvent(
             run_id="run-paused",
@@ -2797,6 +2804,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
             tools=[tool],
             requirements=[RunRequirement(tool)],
         )
+        provider_pause_finished = True
 
     team_agent_ids = [
         fixture_entity_matrix_id(
@@ -2833,6 +2841,7 @@ async def test_team_response_stream_suspends_for_confirmation_pause_event() -> N
     assert "🔧 `dangerous` [1] ⏳" in raised.value.paused.response_text
     assert raised.value.paused.tool_trace[0].tool_call_id == "call-team-stream-approval"
     assert raised.value.paused.response_presentation_state["kind"] == "team_stream"
+    assert provider_pause_finished
 
 
 @pytest.mark.asyncio
