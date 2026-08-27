@@ -311,18 +311,32 @@ class _FakeKnowledge:
 def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cleaning one source must not discard another source's completed insert."""
     cleanup_scanned = Event()
     release_cleanup = Event()
-    insert_finished = Event()
+    insert_reached_store = Event()
+
+    class _SignalingLock:
+        def __init__(self) -> None:
+            self._lock = Lock()
+
+        def __enter__(self) -> None:
+            if self._lock.locked():
+                insert_reached_store.set()
+            self._lock.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            self._lock.release()
 
     class _PausingRecordList(list[_Record]):
         def __iter__(self) -> Iterator[_Record]:
             yield from super().__iter__()
             cleanup_scanned.set()
-            assert release_cleanup.wait(timeout=5)
+            assert release_cleanup.wait(timeout=10)
 
+    monkeypatch.setattr(_FakeVectorDb, "lock", _SignalingLock())
     collection = "concurrent-cleanup"
     vector_db = _FakeVectorDb(collection=collection, embedder=embedder)
     _FakeVectorDb.store[collection] = _PausingRecordList(
@@ -352,15 +366,15 @@ def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
             metadata={"source_path": inserted.name},
             upsert=True,
         )
-        insert_finished.set()
 
     insert_thread = Thread(target=_insert)
     insert_thread.start()
-    insert_finished.wait(timeout=1)
+    reached_store_before_cleanup = insert_reached_store.wait(timeout=5)
     release_cleanup.set()
     cleanup_thread.join(timeout=5)
     insert_thread.join(timeout=5)
 
+    assert reached_store_before_cleanup
     assert not cleanup_thread.is_alive()
     assert not insert_thread.is_alive()
     assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == [inserted.name]
