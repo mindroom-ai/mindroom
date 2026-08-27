@@ -28,11 +28,13 @@ from mindroom import constants, interactive
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescingKey,
+    PendingEvent,
     PreparedTurn,
     RequesterCoalescingOwner,
+    active_follow_up_coalescing_key,
     build_prepared_turn,
 )
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
@@ -46,7 +48,10 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EXTERNAL_TRIGGER_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -678,6 +683,40 @@ def _image_event(*, event_id: str) -> nio.RoomMessageImage:
                 "origin_server_ts": 1_000_000,
                 "room_id": _ROOM_ID,
                 "type": "m.room.message",
+            },
+        ),
+    )
+
+
+def _managed_file_event(
+    config: Config,
+    *,
+    event_id: str,
+    thread_id: str,
+) -> nio.RoomMessageFile:
+    """Return an unmentioned threaded file event authored by a managed agent."""
+    return cast(
+        "nio.RoomMessageFile",
+        nio.RoomMessageFile.from_dict(
+            {
+                "event_id": event_id,
+                "sender": _entity_user_id(config, "general"),
+                "origin_server_ts": 1_000,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "response.md",
+                    "filename": "response.md",
+                    "url": "mxc://localhost/managed-attachment",
+                    "info": {"mimetype": "text/markdown"},
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": thread_id,
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": thread_id},
+                    },
+                },
             },
         ),
     )
@@ -1451,6 +1490,105 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
     assert harness.runner.requests == []
     assert harness.turn_store.get_turn_record(event.event_id) is None
     assert not await obligation_runner.store.is_pending(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_history(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Non-actionable managed chatter must not become a poison retry during hydration."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _managed_file_event(
+        config,
+        event_id="$managed-attachment:localhost",
+        thread_id="$unavailable-root:localhost",
+    )
+    reader = harness.controller.deps.resolver.deps.conversation_reader
+    history_error = RuntimeError("RoomEventRelationsError: M_NOT_FOUND: Event not found in room")
+    reader.read.side_effect = history_error
+    reader.read_strict.side_effect = history_error
+
+    outcome = await harness.controller.handle_media_event(room, event)
+    await harness.gate.drain_all()
+
+    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+    assert harness.retried_dispatch_sources == []
+    reader.read.assert_not_awaited()
+    reader.read_strict.assert_not_awaited()
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_managed_primary_cannot_settle_human_source_in_mixed_follow_up_batch(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Whole-batch suppression requires every replayable source to share one requester."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    human_event = _text_event(
+        "please inspect the attachment",
+        event_id="$human-follow-up:localhost",
+        thread_id="$unavailable-root:localhost",
+        origin_server_ts=999,
+    )
+    managed_event = _managed_file_event(
+        config,
+        event_id="$managed-follow-up:localhost",
+        thread_id="$unavailable-root:localhost",
+    )
+    pending_events = (
+        make_pending_event(
+            human_event,
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=_SENDER,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+        make_pending_event(
+            managed_event,
+            room,
+            source_kind=MEDIA_SOURCE_KIND,
+            requester_user_id=_entity_user_id(config, "general"),
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    reader = harness.controller.deps.resolver.deps.conversation_reader
+    history_error = RuntimeError("RoomEventRelationsError: M_NOT_FOUND: Event not found in room")
+    reader.read.side_effect = history_error
+    reader.read_strict.side_effect = history_error
+    key = active_follow_up_coalescing_key(room.room_id, "$unavailable-root:localhost")
+    retried_batches: list[tuple[str, ...]] = []
+
+    def record_failed_batch(failed_events: tuple[PendingEvent, ...]) -> None:
+        retried_batches.append(tuple(pending.event.event_id for pending in failed_events))
+
+    gate = CoalescingGate(
+        dispatch_turn=harness.controller.handle_prepared_turn,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        on_dispatch_failure=record_failed_batch,
+    )
+
+    for pending_event in pending_events:
+        await gate.admit(
+            key,
+            ready_result=ReadyPendingEvent(pending_event=pending_event),
+            source_event_id=pending_event.event.event_id,
+            source_kind=pending_event.event.source_kind or MESSAGE_SOURCE_KIND,
+        )
+    await gate.drain_all()
+
+    source_event_ids = tuple(event.event_id for event in (human_event, managed_event))
+    assert harness.ignored_dispatch_sources == []
+    assert retried_batches == [source_event_ids]
+    assert reader.read.await_count + reader.read_strict.await_count > 0
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
 
 
 @pytest.mark.asyncio

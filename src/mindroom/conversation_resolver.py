@@ -228,6 +228,14 @@ class DispatchContextResult:
 
 
 @dataclass(frozen=True)
+class _PreHydrationPolicyFacts:
+    """Policy facts available without resolving thread history."""
+
+    origin: TurnOrigin
+    am_i_mentioned: bool
+
+
+@dataclass(frozen=True)
 class ConversationResolverDeps:
     """Explicit collaborators for conversation resolution."""
 
@@ -255,6 +263,20 @@ class ConversationResolver:
 
     def _matrix_id(self) -> MatrixID:
         return self.deps.matrix_id
+
+    def _mention_facts(
+        self,
+        event_source: dict[str, Any],
+    ) -> tuple[list[MatrixID], bool, bool]:
+        """Return mention facts from one already-normalized event source."""
+        if _should_skip_mentions(event_source):
+            return [], False, False
+        return check_agent_mentioned(
+            event_source,
+            self._matrix_id(),
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
 
     def _envelope_ingress_metadata(  # noqa: C901
         self,
@@ -324,6 +346,34 @@ class ConversationResolver:
             source_kind=source_kind,
             original_sender=original_sender,
             trusted_user_relay=trusted_human_relay,
+        )
+
+    def pre_hydration_policy_facts(
+        self,
+        *,
+        event: DispatchEvent,
+        requester_user_id: str,
+        payload_metadata: DispatchPayloadMetadata | None = None,
+        source_kind: str | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
+    ) -> _PreHydrationPolicyFacts:
+        """Classify mention and origin policy without reading conversation history."""
+        event_source = _source_with_payload_metadata(event.source, payload_metadata)
+        _mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(event_source)
+        resolved_source_kind, _hook_source, _message_received_depth = self._envelope_ingress_metadata(
+            event=event,
+            source_kind=source_kind,
+        )
+        return _PreHydrationPolicyFacts(
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
+            am_i_mentioned=am_i_mentioned,
         )
 
     def _sender_is_managed_entity(self, user_id: str) -> bool:
@@ -835,17 +885,7 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if _should_skip_mentions(resolved_event_source):
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                resolved_event_source,
-                self._matrix_id(),
-                config,
-                self.deps.runtime_paths,
-            )
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(resolved_event_source)
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
@@ -909,17 +949,7 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if _should_skip_mentions(resolved_event_source):
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                resolved_event_source,
-                self._matrix_id(),
-                config,
-                self.deps.runtime_paths,
-            )
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(resolved_event_source)
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)

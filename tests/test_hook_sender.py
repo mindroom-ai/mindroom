@@ -619,6 +619,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
             "content": {
                 "msgtype": "m.text",
                 "body": "automation",
+                "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
                 SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
