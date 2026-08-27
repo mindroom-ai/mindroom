@@ -17,7 +17,7 @@ import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import pytest
@@ -125,17 +125,19 @@ class _FakeCollection:
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         validate_where_operands(where)
-        _FakeVectorDb.get_calls += 1
-        if self._name in _FakeVectorDb.vanished_on_get:
-            message = f"Collection {self._name!r} does not exist"
-            raise NotFoundError(message)
-        records = list(_FakeVectorDb.store.get(self._name, []))
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.get_calls += 1
+            if self._name in _FakeVectorDb.vanished_on_get:
+                message = f"Collection {self._name!r} does not exist"
+                raise NotFoundError(message)
+            records = list(_FakeVectorDb.store.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
-        _FakeVectorDb.queries.append((len(selected), where))
-        _FakeVectorDb.enforce_row_ceiling(len(selected))
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.queries.append((len(selected), where))
+            _FakeVectorDb.enforce_row_ceiling(len(selected))
         return chroma_get_result(
             ids=[record.identifier for record in selected],
             metadatas=[dict(record.metadata) for record in selected],
@@ -156,38 +158,43 @@ class _FakeCollection:
             # Chroma rejects an empty write rather than treating it as a no-op.
             message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
             raise ValueError(message)
-        _FakeVectorDb.writes.append(len(ids))
-        if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
-            message = "vector store refused the write"
-            raise RuntimeError(message)
-        _FakeVectorDb.store.setdefault(self._name, []).extend(
-            _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
-            for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
-        )
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.writes.append(len(ids))
+            if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
+                message = "vector store refused the write"
+                raise RuntimeError(message)
+            _FakeVectorDb.store.setdefault(self._name, []).extend(
+                _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
+                for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
+            )
 
     def delete(self, *, where: dict[str, object]) -> None:
         validate_where_operands(where)
         key, condition = next(iter(where.items()))
-        _FakeVectorDb.store[self._name] = [
-            record
-            for record in _FakeVectorDb.store.get(self._name, [])
-            if not metadata_matches(record.metadata, key, condition)
-        ]
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.store[self._name] = [
+                record
+                for record in _FakeVectorDb.store.get(self._name, [])
+                if not metadata_matches(record.metadata, key, condition)
+            ]
 
 
 class _FakeClient:
     def get_collection(self, name: str) -> _FakeCollection:
-        if name not in _FakeVectorDb.store:
-            message = f"Collection {name!r} does not exist"
-            raise NotFoundError(message)
+        with _FakeVectorDb.lock:
+            if name not in _FakeVectorDb.store:
+                message = f"Collection {name!r} does not exist"
+                raise NotFoundError(message)
         return _FakeCollection(name)
 
     def list_collections(self) -> list[str]:
-        return sorted(_FakeVectorDb.store)
+        with _FakeVectorDb.lock:
+            return sorted(_FakeVectorDb.store)
 
 
 class _FakeVectorDb:
     store: ClassVar[dict[str, list[_Record]]] = {}
+    lock: ClassVar[Lock] = Lock()
     #: Rows returned by each ``get``, with its filter, so tests can prove a copy
     #: query was paged and that a verification probe was or was not issued.
     queries: ClassVar[list[tuple[int, dict[str, object] | None]]] = []
@@ -221,23 +228,25 @@ class _FakeVectorDb:
         self.client = _FakeClient()
 
     def exists(self) -> bool:
-        return self.collection_name in self.store
+        with self.lock:
+            return self.collection_name in self.store
 
     def create(self) -> None:
-        self.store.setdefault(self.collection_name, [])
+        with self.lock:
+            self.store.setdefault(self.collection_name, [])
 
     def delete(self) -> bool:
-        if self.collection_name not in self.store:
-            return False
-        self.store.pop(self.collection_name)
-        return True
+        with self.lock:
+            if self.collection_name not in self.store:
+                return False
+            self.store.pop(self.collection_name)
+            return True
 
     def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
         _ = (query, filters)
-        return [
-            Document(content=record.content, meta_data=dict(record.metadata))
-            for record in self.store.get(self.collection_name, [])[:limit]
-        ]
+        with self.lock:
+            records = list(self.store.get(self.collection_name, [])[:limit])
+        return [Document(content=record.content, meta_data=dict(record.metadata)) for record in records]
 
     async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
         return self.search(query=query, limit=limit, filters=filters)
@@ -266,7 +275,6 @@ class _FakeKnowledge:
         documents = (
             reader.read(source, name=source.name) if reader is not None else [Document(content=source.read_text())]
         )
-        records = _FakeVectorDb.store.setdefault(self.vector_db.collection_name, [])
         embedded: list[_Record] = []
         for document in documents:
             embedder = self.vector_db.embedder
@@ -280,22 +288,82 @@ class _FakeKnowledge:
                     metadata=dict(metadata),
                 ),
             )
-        records.extend(embedded)
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.store.setdefault(self.vector_db.collection_name, []).extend(embedded)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, Any]) -> bool:
         assert self.vector_db is not None
-        records = _FakeVectorDb.store.get(self.vector_db.collection_name, [])
-        kept = [
-            record
-            for record in records
-            if not all(record.metadata.get(key) == value for key, value in metadata.items())
-        ]
-        _FakeVectorDb.store[self.vector_db.collection_name] = kept
-        return len(kept) != len(records)
+        with _FakeVectorDb.lock:
+            records = _FakeVectorDb.store.get(self.vector_db.collection_name, [])
+            kept = [
+                record
+                for record in records
+                if not all(record.metadata.get(key) == value for key, value in metadata.items())
+            ]
+            _FakeVectorDb.store[self.vector_db.collection_name] = kept
+            return len(kept) != len(records)
 
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         assert self.vector_db is not None
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
+
+
+def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Cleaning one source must not discard another source's completed insert."""
+    cleanup_scanned = Event()
+    release_cleanup = Event()
+    insert_finished = Event()
+
+    class _PausingRecordList(list[_Record]):
+        def __iter__(self) -> Iterator[_Record]:
+            yield from super().__iter__()
+            cleanup_scanned.set()
+            assert release_cleanup.wait(timeout=5)
+
+    collection = "concurrent-cleanup"
+    vector_db = _FakeVectorDb(collection=collection, embedder=embedder)
+    _FakeVectorDb.store[collection] = _PausingRecordList(
+        [
+            _Record(
+                identifier=_next_record_id(),
+                content="stale",
+                embedding=[1.0],
+                metadata={"source_path": "stale.md"},
+            ),
+        ],
+    )
+    knowledge = _FakeKnowledge(vector_db)
+    inserted = tmp_path / "inserted.md"
+    inserted.write_text("new content", encoding="utf-8")
+
+    cleanup_thread = Thread(
+        target=knowledge.remove_vectors_by_metadata,
+        args=({"source_path": "stale.md"},),
+    )
+    cleanup_thread.start()
+    assert cleanup_scanned.wait(timeout=5)
+
+    def _insert() -> None:
+        knowledge.insert(
+            path=str(inserted),
+            metadata={"source_path": inserted.name},
+            upsert=True,
+        )
+        insert_finished.set()
+
+    insert_thread = Thread(target=_insert)
+    insert_thread.start()
+    insert_finished.wait(timeout=1)
+    release_cleanup.set()
+    cleanup_thread.join(timeout=5)
+    insert_thread.join(timeout=5)
+
+    assert not cleanup_thread.is_alive()
+    assert not insert_thread.is_alive()
+    assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == [inserted.name]
 
 
 class _AutoCreatingFakeKnowledge(_FakeKnowledge):
