@@ -1006,6 +1006,38 @@ class TurnController:
         )
         return _IngressAdmissionOutcome.DEFERRED
 
+    async def _settle_unmentioned_managed_sender_before_hydration(
+        self,
+        *,
+        event: PreparedIngress,
+        requester_user_id: str,
+        event_label: str,
+        handled_turn: TurnRecord,
+        ingress_metadata: DispatchIngressMetadata | None,
+        payload_metadata: DispatchPayloadMetadata | None,
+        original_sender: str | None,
+        trusted_user_relay: bool,
+    ) -> bool:
+        """Settle managed chatter before thread hydration can make it retryable."""
+        policy = self.deps.resolver.pre_hydration_policy_facts(
+            event=event,
+            requester_user_id=requester_user_id,
+            payload_metadata=payload_metadata,
+            source_kind=ingress_metadata.source_kind if ingress_metadata is not None else None,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_user_relay,
+        )
+        if not policy.origin.blocks_unmentioned_managed_sender or policy.am_i_mentioned:
+            return False
+        self.deps.logger.debug(
+            "ignore_unmentioned_agent_event",
+            agent=policy.origin.requester_entity_name,
+            event_label=event_label,
+            user_id=requester_user_id,
+        )
+        await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
+        return True
+
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
@@ -1021,13 +1053,37 @@ class TurnController:
     ) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        use_trusted_router_relay_context = False
         coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
         context_event = (
             _room_level_context_event(event)
             if coalescing_key is not None and coalescing_key.thread_id is None
             else event
         )
+        use_trusted_router_relay_context = (
+            not use_command_context
+            and self.deps.ingress.should_use_trusted_router_relay_context(
+                event,
+                ingress_metadata=ingress_metadata,
+                payload_metadata=payload_metadata,
+            )
+        )
+        original_sender = payload_metadata.original_sender if payload_metadata is not None else None
+        if original_sender is None and use_trusted_router_relay_context:
+            original_sender = payload_metadata_from_source(
+                event.source,
+                trust_internal_metadata=True,
+            ).original_sender
+        if await self._settle_unmentioned_managed_sender_before_hydration(
+            event=event,
+            requester_user_id=requester_user_id,
+            event_label=event_label,
+            handled_turn=handled_turn,
+            ingress_metadata=ingress_metadata,
+            payload_metadata=payload_metadata,
+            original_sender=original_sender,
+            trusted_user_relay=use_trusted_router_relay_context,
+        ):
+            return None
         if use_command_context:
             dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
@@ -1040,11 +1096,7 @@ class TurnController:
                 extract_context_start,
                 path="command",
             )
-        elif use_trusted_router_relay_context := self.deps.ingress.should_use_trusted_router_relay_context(
-            event,
-            ingress_metadata=ingress_metadata,
-            payload_metadata=payload_metadata,
-        ):
+        elif use_trusted_router_relay_context:
             dispatch_context_result = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
                 context_event,
@@ -1104,12 +1156,6 @@ class TurnController:
         )
         correlation_id = event.event_id
         envelope_start = time.monotonic()
-        original_sender = payload_metadata.original_sender if payload_metadata is not None else None
-        if original_sender is None and use_trusted_router_relay_context:
-            original_sender = payload_metadata_from_source(
-                event.source,
-                trust_internal_metadata=True,
-            ).original_sender
         envelope = self.deps.resolver.build_message_envelope(
             event=event,
             requester_user_id=requester_user_id,

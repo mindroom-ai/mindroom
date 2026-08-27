@@ -1454,6 +1454,56 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
 
 
 @pytest.mark.asyncio
+async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_history(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Non-actionable managed chatter must not become a poison retry during hydration."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = cast(
+        "nio.RoomMessageFile",
+        nio.RoomMessageFile.from_dict(
+            {
+                "event_id": "$managed-attachment:localhost",
+                "sender": _entity_user_id(config, "general"),
+                "origin_server_ts": 1_000,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": "response.md",
+                    "filename": "response.md",
+                    "url": "mxc://localhost/managed-attachment",
+                    "info": {"mimetype": "text/markdown"},
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$unavailable-root:localhost",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$unavailable-root:localhost"},
+                    },
+                },
+            },
+        ),
+    )
+    reader = harness.controller.deps.resolver.deps.conversation_reader
+    history_error = RuntimeError("RoomEventRelationsError: M_NOT_FOUND: Event not found in room")
+    reader.read.side_effect = history_error
+    reader.read_strict.side_effect = history_error
+
+    outcome = await harness.controller.handle_media_event(room, event)
+    await harness.gate.drain_all()
+
+    assert outcome is TurnDispatchOutcome.DEFERRED
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+    assert harness.retried_dispatch_sources == []
+    reader.read.assert_not_awaited()
+    reader.read_strict.assert_not_awaited()
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
 async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: Path) -> None:
     """An unauthorized sender is filtered at precheck and the turn gets a terminal record."""
     config = bind_runtime_paths(
