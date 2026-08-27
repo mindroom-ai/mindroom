@@ -3382,6 +3382,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         completed_tool_executions: list[ToolExecution] = []
         emitted_output = False
         completed_run_event: TeamRunCompletedEvent | None = None
+        paused_resolution: PausedAttempt | None = None
         usage = _TeamStreamUsage()
 
         ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
@@ -3418,6 +3419,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
         )
         bound_team_id = run.scope_context.scope.scope_id if run.scope_context is not None else team.id or ""
         async for event in raw_stream:
+            # Agno treats a stream closed at its pause event as cancellation and
+            # can overwrite the paused run. Drain its short post-pause tail first.
+            if paused_resolution is not None:
+                continue
             if isinstance(event, (TeamRunOutput, RunOutput)):
                 if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
                     logger.debug("Ignoring non-bound team run output", run_id=event.run_id)
@@ -3589,14 +3594,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
                             tool_trace=list(paused_attempt.tool_trace),
                             presentation_state=paused_attempt.response_presentation_state,
                         )
-                    yield AttemptResolved(
-                        replace(
-                            paused_attempt,
-                            runtime_model_name=prepared_execution.runtime_model_name,
-                            team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                        ),
+                    paused_resolution = replace(
+                        paused_attempt,
+                        runtime_model_name=prepared_execution.runtime_model_name,
+                        team_member_model_names=tuple(sorted(holder.member_model_names.items())),
                     )
-                    return
+                    continue
                 yield AttemptResolved(
                     ExcludedAttempt(
                         original_status=RunStatus.paused,
@@ -3686,6 +3689,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     presentation_state=presentation.to_state(),
                 )
 
+        if paused_resolution is not None:
+            yield AttemptResolved(paused_resolution)
+            return
         if emitted_output and ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
