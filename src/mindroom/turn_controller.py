@@ -153,6 +153,18 @@ _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
 _INTERACTIVE_SELECTION_METADATA_KIND = "interactive_selection"
 
 
+def _turn_sources_can_be_settled_for_requester(
+    handled_turn: TurnRecord,
+    requester_user_id: str,
+) -> bool:
+    """Return whether whole-turn settlement is safe for one requester-owned decision."""
+    replayable_sources = handled_turn.replay_source_event_ids
+    return len(replayable_sources) <= 1 or all(
+        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
+        for source_event_id in replayable_sources
+    )
+
+
 @dataclass(frozen=True)
 class _InteractiveSelectionDispatch:
     """Deferred selection work carried through receipt-ordered coalescing."""
@@ -1027,7 +1039,11 @@ class TurnController:
             original_sender=original_sender,
             trusted_user_relay=trusted_user_relay,
         )
-        if not policy.origin.blocks_unmentioned_managed_sender or policy.am_i_mentioned:
+        if (
+            not policy.origin.blocks_unmentioned_managed_sender
+            or policy.am_i_mentioned
+            or not _turn_sources_can_be_settled_for_requester(handled_turn, requester_user_id)
+        ):
             return False
         self.deps.logger.debug(
             "ignore_unmentioned_agent_event",
@@ -1204,7 +1220,11 @@ class TurnController:
         origin = envelope.origin
         sender_agent_name = origin.requester_entity_name
         blocks_unmentioned_managed_sender = origin.blocks_unmentioned_managed_sender
-        if blocks_unmentioned_managed_sender and not context.am_i_mentioned:
+        if (
+            blocks_unmentioned_managed_sender
+            and not context.am_i_mentioned
+            and _turn_sources_can_be_settled_for_requester(handled_turn, requester_user_id)
+        ):
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
                 agent=sender_agent_name,
