@@ -632,6 +632,14 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
             ),
             True,
         ),
+        (
+            TurnRecord.create(
+                ["$first"],
+                redacted_source_event_ids=["$first"],
+                requester_id="@bob:localhost",
+            ),
+            False,
+        ),
     ],
 )
 def test_turn_record_proves_all_replay_sources_belong_to_requester(

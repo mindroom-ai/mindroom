@@ -242,9 +242,10 @@ class TurnRecord:
 
     def replay_sources_all_from_requester(self, requester_user_id: str) -> bool:
         """Return whether every replayable source is proven to belong to one requester."""
-        return all(
+        replay_source_event_ids = self.replay_source_event_ids
+        return bool(replay_source_event_ids) and all(
             self.requester_id_for_source(source_event_id) == requester_user_id
-            for source_event_id in self.replay_source_event_ids
+            for source_event_id in replay_source_event_ids
         )
 
     @property
