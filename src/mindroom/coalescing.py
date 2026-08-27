@@ -334,7 +334,6 @@ class CoalescingGate:
     def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
         return source_or_event_allows_room_scope_batching(
             queued.source_kind,
-            queued.pending_event.event,
         ) or source_or_event_allows_room_scope_batching(
             queued.pending_event.event.source_kind,
             queued.pending_event.event,
@@ -372,11 +371,11 @@ class CoalescingGate:
         self._schedule_drain(room_key, room_gate)
         return thread_gate
 
-    def _gate_for_admission(self, key: CoalescingKey) -> tuple[CoalescingKey, _GateEntry]:
+    def _gate_for_admission(self, key: CoalescingKey) -> _GateEntry:
         """Return the gate that owns an admission, promoting a pending media root when needed."""
         if (gate := self._gates.get(key)) is not None:
-            return key, gate
-        return key, self._promote_pending_room_media(key) or self._get_or_create_gate(key)
+            return gate
+        return self._promote_pending_room_media(key) or self._get_or_create_gate(key)
 
     def _current_drain_context(self, gate: _GateEntry | None = None) -> _DrainContext | None:
         if gate is not None and gate.drain_context is not None:
@@ -717,7 +716,7 @@ class CoalescingGate:
         """
         enqueue_start = time.monotonic()
         key = self._busy_conversation_key(key, ready_result)
-        storage_key, gate = self._gate_for_admission(key)
+        gate = self._gate_for_admission(key)
         admission = _QueuedEvent(
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
@@ -727,11 +726,11 @@ class CoalescingGate:
             lane_slot=lane_slot,
         )
         self._insert_queued_event(gate, admission)
-        self._schedule_drain(storage_key, gate)
+        self._schedule_drain(key, gate)
         kind = self._queued_kind(admission)
         path = self._enqueue_path(kind, ready_result.pending_event)
         self._record_enqueue(
-            storage_key,
+            key,
             gate,
             ready_result.pending_event,
             enqueue_start,
@@ -838,12 +837,7 @@ class CoalescingGate:
         for queued in gate.queue:
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 return False
-            if source_or_event_allows_room_scope_batching(queued.source_kind):
-                return True
-            if source_or_event_allows_room_scope_batching(
-                queued.pending_event.event.source_kind,
-                queued.pending_event.event,
-            ):
+            if CoalescingGate._queued_event_allows_room_scope_batching(queued):
                 return True
         return False
 

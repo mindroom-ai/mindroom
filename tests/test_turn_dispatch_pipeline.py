@@ -1669,12 +1669,15 @@ class TestAgentBot(AgentBotTestBase):
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
-    async def test_router_handoff_for_another_agent_does_not_signal_active_response(
+    @pytest.mark.parametrize("mention_kind", ["other_agent", "non_agent"])
+    async def test_router_handoff_for_another_target_does_not_signal_active_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        *,
+        mention_kind: str,
     ) -> None:
-        """A router handoff for another agent must not interrupt this agent's active turn."""
+        """A router handoff addressed elsewhere must not interrupt this agent's active turn."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
@@ -1682,8 +1685,14 @@ class TestAgentBot(AgentBotTestBase):
         replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        event = self._router_relay_event(body="@general could you help with this?")
-        event.source["content"]["m.mentions"] = {"user_ids": [ids["general"].full_id]}
+        if mention_kind == "other_agent":
+            body = "@general could you help with this?"
+            mentioned_user_id = ids["general"].full_id
+        else:
+            body = "@person:localhost could you help with this?"
+            mentioned_user_id = "@person:localhost"
+        event = self._router_relay_event(body=body)
+        event.source["content"]["m.mentions"] = {"user_ids": [mentioned_user_id]}
         prepared_event = PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
