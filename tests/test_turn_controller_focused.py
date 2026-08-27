@@ -42,6 +42,7 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
@@ -69,7 +70,14 @@ from mindroom.event_journal import (
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.event_journal_open import open_event_journal
 from mindroom.handled_turns import TurnRecord
-from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
+from mindroom.hooks import (
+    EVENT_MESSAGE_RECEIVED,
+    HookContextSupport,
+    HookRegistry,
+    HookRegistryState,
+    MessageReceivedContext,
+    hook,
+)
 from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
@@ -1509,6 +1517,20 @@ async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_
     history_error = RuntimeError("RoomEventRelationsError: M_NOT_FOUND: Event not found in room")
     reader.read.side_effect = history_error
     reader.read_strict.side_effect = history_error
+    received_event_ids: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(context: MessageReceivedContext) -> None:
+        received_event_ids.append(context.envelope.source_event_id)
+
+    plugin = SimpleNamespace(
+        name="managed-ingress-observer",
+        discovered_hooks=(received,),
+        entry_config=PluginEntryConfig(path="./plugins/managed-ingress-observer"),
+        plugin_order=0,
+    )
+    hook_context = harness.controller.deps.ingress_hook_runner.hook_context
+    hook_context.hook_registry_state.registry = HookRegistry.from_plugins([cast("Any", plugin)])
 
     outcome = await harness.controller.handle_media_event(room, event)
     await harness.gate.drain_all()
@@ -1516,6 +1538,7 @@ async def test_unmentioned_managed_attachment_settles_before_unavailable_thread_
     assert outcome is TurnDispatchOutcome.DEFERRED
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
     assert harness.retried_dispatch_sources == []
+    assert received_event_ids == [event.event_id]
     reader.read.assert_not_awaited()
     reader.read_strict.assert_not_awaited()
     assert harness.policy.plan_turn_calls == 0

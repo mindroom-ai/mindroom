@@ -596,6 +596,53 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
         record.response_event_id = "$replacement"  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (TurnRecord.create(["$single"], requester_id="@bob:localhost"), True),
+        (TurnRecord.create(["$single"]), False),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@bob:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            True,
+        ),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@alice:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            False,
+        ),
+        (
+            TurnRecord.create(
+                ["$first", "$second"],
+                redacted_source_event_ids=["$first"],
+                source_event_metadata={
+                    "$first": SourceEventMetadata(sender="@alice:localhost"),
+                    "$second": SourceEventMetadata(sender="@bob:localhost"),
+                },
+            ),
+            True,
+        ),
+    ],
+)
+def test_turn_record_proves_all_replay_sources_belong_to_requester(
+    record: TurnRecord,
+    *,
+    expected: bool,
+) -> None:
+    """Whole-turn decisions must fail closed unless every live source has the requester."""
+    assert record.replay_sources_all_from_requester("@bob:localhost") is expected
+
+
 @pytest.mark.asyncio
 async def test_command_execution_checkpoint_persists_across_restart(journal_store: EventJournalStore) -> None:
     """Command effect and result evidence must survive process replacement."""

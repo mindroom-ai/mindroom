@@ -240,6 +240,13 @@ class TurnRecord:
         metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
         return metadata.sender if metadata is not None else None
 
+    def replay_sources_all_from_requester(self, requester_user_id: str) -> bool:
+        """Return whether every replayable source is proven to belong to one requester."""
+        return all(
+            self.requester_id_for_source(source_event_id) == requester_user_id
+            for source_event_id in self.replay_source_event_ids
+        )
+
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
         """Return source IDs whose content remains eligible for replay or regeneration."""
