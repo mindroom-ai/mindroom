@@ -330,6 +330,53 @@ class CoalescingGate:
             self._gates[key] = gate
         return gate
 
+    @staticmethod
+    def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
+        return source_or_event_allows_room_scope_batching(
+            queued.source_kind,
+        ) or source_or_event_allows_room_scope_batching(
+            queued.pending_event.event.source_kind,
+            queued.pending_event.event,
+        )
+
+    @staticmethod
+    def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
+        return (
+            queued.source_event_id == thread_id
+            and CoalescingGate._queued_kind(queued) is QueueKind.NORMAL
+            and CoalescingGate._queued_event_allows_room_scope_batching(queued)
+        )
+
+    def _promote_pending_room_media(self, key: CoalescingKey) -> _GateEntry | None:
+        """Move one pending room media burst to the thread started on its upload."""
+        if key.thread_id is None:
+            return None
+        room_key = CoalescingKey(key.room_id, None, key.owner)
+        room_gate = self._gates.get(room_key)
+        if room_gate is None or room_gate.phase is not _GatePhase.DEBOUNCE or room_gate.claimed_admissions:
+            return None
+        candidate_count = self._front_normal_run_length(room_gate, coalesce_normal_events=True)
+        candidates = list(room_gate.queue)[:candidate_count]
+        if (
+            not candidates
+            or pending_event_is_text(candidates[-1].pending_event)
+            or not self._queued_event_allows_room_scope_batching(candidates[-1])
+            or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
+        ):
+            return None
+
+        thread_gate = self._get_or_create_gate(key)
+        for _ in range(candidate_count):
+            self._insert_queued_event(thread_gate, room_gate.queue.popleft())
+        self._schedule_drain(room_key, room_gate)
+        return thread_gate
+
+    def _gate_for_admission(self, key: CoalescingKey) -> _GateEntry:
+        """Return the gate that owns an admission, promoting a pending media root when needed."""
+        if (gate := self._gates.get(key)) is not None:
+            return gate
+        return self._promote_pending_room_media(key) or self._get_or_create_gate(key)
+
     def _current_drain_context(self, gate: _GateEntry | None = None) -> _DrainContext | None:
         if gate is not None and gate.drain_context is not None:
             return gate.drain_context
@@ -669,7 +716,7 @@ class CoalescingGate:
         """
         enqueue_start = time.monotonic()
         key = self._busy_conversation_key(key, ready_result)
-        gate = self._get_or_create_gate(key)
+        gate = self._gate_for_admission(key)
         admission = _QueuedEvent(
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
@@ -765,7 +812,7 @@ class CoalescingGate:
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             coalesce = coalesce_normal_events()
-            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
+            if not gate.queue or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
@@ -790,12 +837,7 @@ class CoalescingGate:
         for queued in gate.queue:
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 return False
-            if source_or_event_allows_room_scope_batching(queued.source_kind):
-                return True
-            if source_or_event_allows_room_scope_batching(
-                queued.pending_event.event.source_kind,
-                queued.pending_event.event,
-            ):
+            if CoalescingGate._queued_event_allows_room_scope_batching(queued):
                 return True
         return False
 

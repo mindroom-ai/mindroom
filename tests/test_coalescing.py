@@ -591,6 +591,110 @@ async def test_room_level_text_dispatches_before_late_media() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_caption_promotes_only_the_pending_room_media_burst() -> None:
+    """Later room traffic must stay outside a media turn promoted into a thread."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "describe this", 1_000_100)),
+    )
+    await _admit_ready(
+        gate,
+        room_key,
+        _pending(_text_event("$room:localhost", "unrelated room message", 1_000_200)),
+    )
+
+    await gate.drain_all()
+
+    assert len(batches) == 2
+    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+        "$image:localhost": ["$image:localhost", "$caption:localhost"],
+        None: ["$room:localhost"],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_kind", ["text", "voice"])
+async def test_thread_reply_does_not_promote_a_completed_room_media_turn(completion_kind: str) -> None:
+    """A room turn closed by text-like content must keep its conversation scope."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    completion_event = (
+        _pending(_text_event("$room-text:localhost", "room caption", 1_000_100))
+        if completion_kind == "text"
+        else _voice_pending("$voice:localhost", "voice caption", 1_000_100)
+    )
+    await _admit_ready(gate, room_key, completion_event)
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$thread-reply:localhost", "later reply", 1_000_200)),
+    )
+
+    await gate.drain_all()
+
+    assert len(batches) == 2
+    assert {batch.ingress.coalescing_key.thread_id: list(batch.handled_turn.source_event_ids) for batch in batches} == {
+        None: ["$image:localhost", completion_event.event.event_id],
+        "$image:localhost": ["$thread-reply:localhost"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_media_promotion_promptly_releases_the_empty_room_gate() -> None:
+    """Promotion must wake an already-waiting room drain so its empty gate exits."""
+    gate = CoalescingGate(
+        dispatch_turn=AsyncMock(),
+        debounce_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    owner = RequesterCoalescingOwner("@user:localhost")
+    room_key = CoalescingKey("!room:localhost", None, owner)
+    thread_key = CoalescingKey("!room:localhost", "$image:localhost", owner)
+
+    await _admit_ready(gate, room_key, _image_pending("$image:localhost", 1_000_000))
+    await _wait_for(lambda: gate._gates[room_key].deadline is not None)
+    await _admit_ready(
+        gate,
+        thread_key,
+        _pending(_text_event("$caption:localhost", "describe this", 1_000_100)),
+    )
+
+    try:
+        await _wait_for(lambda: room_key not in gate._gates, deadline_seconds=0.1)
+    finally:
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_text_dispatch_waits_for_same_window_unready_media_lane_slot() -> None:
     """An immediate text flush must not run before an in-window unready media slot delivers."""
     batches: list[PreparedTurn] = []
