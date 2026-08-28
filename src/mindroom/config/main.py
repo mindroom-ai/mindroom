@@ -31,6 +31,12 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
+from mindroom.config.access_migration import (
+    AccessMigrationError,
+    access_config_needs_migration,
+    migrate_access_config_data,
+    persist_access_migration,
+)
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -63,7 +69,11 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
-from mindroom.config.yaml_includes import ConfigIncludeError, attach_partial_source_files, load_yaml_config_source
+from mindroom.config.yaml_includes import (
+    ConfigIncludeError,
+    attach_partial_source_files,
+    load_yaml_config_source_with_digests,
+)
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
@@ -168,9 +178,15 @@ class ConfigRuntimeValidationError(ValueError):
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
 
 
+type ConfigLoadUserError = (
+    ValidationError | ConfigRuntimeValidationError | AccessMigrationError | yaml.YAMLError | OSError | UnicodeError
+)
+
+
 CONFIG_LOAD_USER_ERROR_TYPES = (
     ValidationError,
     ConfigRuntimeValidationError,
+    AccessMigrationError,
     yaml.YAMLError,
     OSError,
     UnicodeError,
@@ -178,7 +194,7 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 
 
 def iter_config_validation_messages(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
@@ -195,7 +211,7 @@ def iter_config_validation_messages(
 
 
 def format_invalid_config_message(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
     *,
     footer: str | None = None,
 ) -> str:
@@ -2057,14 +2073,22 @@ def load_config(
         msg = f"Agent configuration file not found: {path}"
         raise FileNotFoundError(msg)
 
-    data, source_files = load_yaml_config_source(path)
+    original = path.read_bytes()
+    data, source_digests = load_yaml_config_source_with_digests(path, source=original)
+    source_files = frozenset(source_digests)
 
     try:
+        if access_config_needs_migration(data) and source_files != frozenset({path.resolve()}):
+            msg = "Automatic access migration does not support !include configurations"
+            raise AccessMigrationError(msg)
+        migration = migrate_access_config_data(data)
         config = Config.validate_with_runtime(
-            data,
+            migration.data,
             runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
+        if migration.changed:
+            persist_access_migration(path, original, migration.data)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         # Parsing succeeded, so the full file set is known; expose it the same
         # way as parse-time failures so reload watchers keep covering it.

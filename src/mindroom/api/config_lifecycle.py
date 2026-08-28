@@ -18,6 +18,7 @@ from mindroom import constants
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
+    ConfigLoadUserError,
     ConfigRuntimeValidationError,
     iter_config_validation_messages,
 )
@@ -147,7 +148,7 @@ def require_api_state(api_app: FastAPI) -> ApiState:
 
 
 def _config_error_detail(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
 ) -> list[dict[str, object]]:
     """Return one shared API error payload for invalid current config."""
     return [

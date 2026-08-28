@@ -45,10 +45,7 @@ from mindroom.runtime_env_policy import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import yaml  # type: ignore[import-untyped]
-    from pydantic import ValidationError
-
-    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.config.main import Config, ConfigLoadUserError
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -388,7 +385,7 @@ def _get_editor() -> str:
 
 
 def format_validation_errors(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""

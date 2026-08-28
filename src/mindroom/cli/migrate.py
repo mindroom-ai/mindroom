@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 
 import typer
 
 from mindroom import constants
 from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors
+from mindroom.config.access_migration import write_text_atomic as _write_text_atomic
 
 _OLD_CONFIG_INIT_MIND_MEMORY_TOOL_BLOCK = """\
     knowledge_bases:
@@ -113,30 +112,6 @@ def _migrate_old_config_init_mind_memory(content: str) -> tuple[str, bool]:
         1,
     )
     return migrated, migrated != content
-
-
-def _write_text_atomic(path: Path, content: str) -> None:
-    """Replace an existing text file after fully writing a sibling temp file."""
-    file_mode = path.stat().st_mode & 0o777
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(content)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        temp_path.chmod(file_mode)
-        temp_path.replace(path)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
 
 
 def config_migrate(
