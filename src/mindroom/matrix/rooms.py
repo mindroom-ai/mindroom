@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.access_policy import EffectiveRoomPolicy, resolve_room_policy
 from mindroom.constants import resolve_avatar_path
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.logging_config import get_logger
@@ -91,23 +92,28 @@ async def _configure_managed_room_access(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
+    room_policy: EffectiveRoomPolicy | None = None,
     room_alias: str | None = None,
     context: str,
 ) -> bool:
     """Apply configured room joinability/discoverability policy for one managed room."""
     access_config = config.matrix_room_access
-    target_join_rule = access_config.get_target_join_rule(
-        room_key,
-        runtime_paths,
-        room_id=room_id,
-        room_alias=room_alias,
-    )
-    target_directory_visibility = access_config.get_target_directory_visibility(
-        room_key,
-        runtime_paths,
-        room_id=room_id,
-        room_alias=room_alias,
-    )
+    if room_policy is not None:
+        target_join_rule = room_policy.join_policy
+        target_directory_visibility = "public" if room_policy.listed else "private"
+    else:
+        target_join_rule = access_config.get_target_join_rule(
+            room_key,
+            runtime_paths,
+            room_id=room_id,
+            room_alias=room_alias,
+        )
+        target_directory_visibility = access_config.get_target_directory_visibility(
+            room_key,
+            runtime_paths,
+            room_id=room_id,
+            room_alias=room_alias,
+        )
 
     if target_join_rule is None or target_directory_visibility is None:
         logger.info(
@@ -158,17 +164,61 @@ async def _configure_managed_room_access(
     return False
 
 
-def _managed_room_should_be_encrypted(room_key: str, config: Config) -> bool:
+async def _apply_managed_room_access(
+    client: nio.AsyncClient,
+    room_key: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    room_policy: EffectiveRoomPolicy | None,
+    room_alias: str,
+    context: str,
+) -> bool:
+    """Apply one access mode without changing the legacy call contract."""
+    if room_policy is None:
+        return await _configure_managed_room_access(
+            client=client,
+            room_key=room_key,
+            room_id=room_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            room_alias=room_alias,
+            context=context,
+        )
+    return await _configure_managed_room_access(
+        client=client,
+        room_key=room_key,
+        room_id=room_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        room_policy=room_policy,
+        room_alias=room_alias,
+        context=context,
+    )
+
+
+def _managed_room_should_be_encrypted(
+    room_key: str,
+    config: Config,
+    room_policy: EffectiveRoomPolicy | None = None,
+) -> bool:
     """Return whether one managed room is configured for Matrix encryption."""
+    if room_policy is not None:
+        return room_policy.encrypted
     room_config = config.rooms.get(room_key)
     if room_config is not None and room_config.encrypted is not None:
         return room_config.encrypted
     return config.matrix_room_access.encrypt_managed_rooms
 
 
-def _room_admin_user_ids(config: Config) -> list[str]:
+def _room_admin_user_ids(
+    config: Config,
+    room_policy: EffectiveRoomPolicy | None = None,
+) -> list[str]:
     """Return configured managed-room admins, skipping wildcard or placeholder entries."""
-    concrete_ids, skipped = split_concrete_matrix_user_ids(config.matrix_room_access.room_admins)
+    configured_ids = room_policy.admins if room_policy is not None else config.matrix_room_access.room_admins
+    concrete_ids, skipped = split_concrete_matrix_user_ids(configured_ids)
     if skipped:
         logger.warning("Skipping non-concrete room admin user IDs", user_ids=skipped)
     return concrete_ids
@@ -219,6 +269,7 @@ async def _reconcile_joined_existing_room(
     *,
     explicit_room_name: str | None,
     room_alias: str,
+    room_policy: EffectiveRoomPolicy | None = None,
     admin_user_ids: Sequence[str] = (),
 ) -> None:
     """Reconcile name, topic, power levels, encryption, and access policy for one joined managed room."""
@@ -227,15 +278,18 @@ async def _reconcile_joined_existing_room(
         await ensure_room_name(client, room_id, explicit_room_name)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
     await ensure_managed_room_power_levels(client, room_id, admin_user_ids)
-    if _managed_room_should_be_encrypted(room_key, config):
+    if _managed_room_should_be_encrypted(room_key, config, room_policy):
         await ensure_room_encryption_enabled(client, room_id)
-    if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
-        await _configure_managed_room_access(
+    if room_policy is not None or (
+        config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms
+    ):
+        await _apply_managed_room_access(
             client=client,
             room_key=room_key,
             room_id=room_id,
             config=config,
             runtime_paths=runtime_paths,
+            room_policy=room_policy,
             room_alias=room_alias,
             context="existing_room_reconciliation",
         )
@@ -255,6 +309,7 @@ async def _ensure_room_exists(
     runtime_paths: RuntimePaths,
     room_name: str | None = None,
     power_users: list[str] | None = None,
+    room_policy: EffectiveRoomPolicy | None = None,
     admin_user_ids: Sequence[str] = (),
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
@@ -266,6 +321,7 @@ async def _ensure_room_exists(
         runtime_paths: Explicit runtime context for room aliases, topics, and avatars
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
+        room_policy: Resolved membership-mode room policy, or None in legacy mode
         admin_user_ids: Concrete Matrix user IDs granted room admin power (100)
 
     Returns:
@@ -310,6 +366,7 @@ async def _ensure_room_exists(
                 runtime_paths,
                 explicit_room_name=explicit_room_name,
                 room_alias=full_alias,
+                room_policy=room_policy,
                 admin_user_ids=admin_user_ids,
             )
         else:
@@ -346,7 +403,7 @@ async def _ensure_room_exists(
         topic=topic,
         power_users=power_users or [],
         admin_users=list(admin_user_ids),
-        encrypted=_managed_room_should_be_encrypted(room_key, config),
+        encrypted=_managed_room_should_be_encrypted(room_key, config, room_policy),
     )
 
     if created_room_id:
@@ -354,13 +411,14 @@ async def _ensure_room_exists(
         _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
-        if config.matrix_room_access.is_multi_user_mode():
-            await _configure_managed_room_access(
+        if room_policy is not None or config.matrix_room_access.is_multi_user_mode():
+            await _apply_managed_room_access(
                 client=client,
                 room_key=room_key,
                 room_id=created_room_id,
                 config=config,
                 runtime_paths=runtime_paths,
+                room_policy=room_policy,
                 room_alias=full_alias,
                 context="new_room_creation",
             )
@@ -409,9 +467,6 @@ async def ensure_all_rooms_exist(
     # Get all configured rooms
     all_rooms = config.get_all_configured_rooms()
 
-    # Configured room admins are room-independent; filter and warn once per pass.
-    admin_user_ids = _room_admin_user_ids(config)
-
     for room_key in all_rooms:
         # Skip if this is a room ID (starts with !)
         if room_key.startswith("!"):
@@ -420,6 +475,8 @@ async def ensure_all_rooms_exist(
 
         # Get power users for this room
         power_users = managed_entity_power_user_ids_for_room(room_key, config, runtime_paths)
+        room_policy = resolve_room_policy(config, room_key) if config.access_model == "room_membership" else None
+        admin_user_ids = _room_admin_user_ids(config, room_policy)
 
         # Ensure room exists
         room_config = config.rooms.get(room_key)
@@ -434,6 +491,7 @@ async def ensure_all_rooms_exist(
                 runtime_paths=runtime_paths,
                 room_name=room_name,
                 power_users=power_users,
+                room_policy=room_policy,
                 admin_user_ids=admin_user_ids,
             )
         except RuntimeError:

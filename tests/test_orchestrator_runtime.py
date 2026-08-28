@@ -1423,6 +1423,67 @@ class TestMultiAgentOrchestrator:
         }
 
     @pytest.mark.asyncio
+    async def test_membership_schema_invites_only_effective_room_invite_users(self, tmp_path: Path) -> None:
+        """Unrelated membership authorities must never become room invitation candidates."""
+        config = _runtime_bound_config(
+            Config.model_validate(
+                {
+                    "access_model": "room_membership",
+                    "administrators": ["@platform-admin:localhost"],
+                    "room_defaults": {"invite_users": ["@default:localhost"]},
+                    "rooms": {
+                        "one": {
+                            "invite_users": ["@one:localhost"],
+                            "admins": ["@room-admin:localhost"],
+                        },
+                        "two": {"invite_users": []},
+                    },
+                    "agents": {
+                        "general": {
+                            "display_name": "GeneralAgent",
+                            "rooms": ["one", "two"],
+                            "access": {"users": ["@responder-user:localhost"]},
+                            "credential_managers": ["@credential-manager:localhost"],
+                        },
+                    },
+                },
+            ),
+            tmp_path,
+        )
+        state = MatrixState.load(runtime_paths=runtime_paths_for(config))
+        state.add_room("one", "!room1:localhost", "#one:localhost", "One")
+        state.add_room("two", "!room2:localhost", "#two:localhost", "Two")
+        state.save(runtime_paths=runtime_paths_for(config))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+        room_members = {
+            "!room1:localhost": {"@mindroom_router:localhost"},
+            "!room2:localhost": {"@mindroom_router:localhost"},
+        }
+
+        async def mock_get_room_members(_client: AsyncMock, room_id: str) -> set[str]:
+            return room_members[room_id]
+
+        mock_invite = AsyncMock(return_value=True)
+        with (
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        invited_users_by_room = {(call.args[1], call.args[2]) for call in mock_invite.await_args_list}
+        assert invited_users_by_room == {
+            ("!room1:localhost", "@one:localhost"),
+            ("!room1:localhost", "@mindroom_general:localhost"),
+            ("!room2:localhost", "@mindroom_general:localhost"),
+        }
+
+    @pytest.mark.asyncio
     async def test_ensure_room_invitations_does_not_expand_room_grants_via_default_access(
         self,
         tmp_path: Path,

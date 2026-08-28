@@ -106,7 +106,7 @@ from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
-from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
+from .orchestration.rooms import get_room_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
@@ -2085,7 +2085,12 @@ class _MultiAgentOrchestrator:
     ) -> None:
         """Invite authorized human users who can access a given room."""
         for authorized_user_id in authorized_user_ids:
-            if not is_authorized_sender(authorized_user_id, config, room_id, self.runtime_paths):
+            if config.access_model != "room_membership" and not is_authorized_sender(
+                authorized_user_id,
+                config,
+                room_id,
+                self.runtime_paths,
+            ):
                 continue
             await self._invite_user_if_missing(
                 room_id,
@@ -2142,7 +2147,7 @@ class _MultiAgentOrchestrator:
             if current_members is None:
                 logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
                 continue
-            authorized_user_ids = get_authorized_user_ids_to_invite(config, room_id, self.runtime_paths)
+            authorized_user_ids = get_room_user_ids_to_invite(config, room_id, self.runtime_paths)
             if internal_user_id is not None:
                 authorized_user_ids.discard(internal_user_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
