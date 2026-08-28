@@ -1,0 +1,25 @@
+{
+  "name": "mindroom-letta-bridge",
+  "version": "0.0.1",
+  "type": "module",
+  "packageManager": "nub@0.7.5",
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.7.5",
+      "onFail": "ignore"
+    }
+  },
+  "scripts": {
+    "start": "nub index.ts",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@nubjs/types": ">=0.4.13 <=0.7.5",
+    "@types/node": "^26",
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@letta-ai/letta-agent-sdk": "0.7.7"
+  }
+}

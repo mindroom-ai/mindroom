@@ -210,6 +210,8 @@ export function resolveEffectiveDefaultTools(
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
+  runtime?: "agno" | "letta";
+  letta_agent_id?: string | null;
   role: string;
   tools: string[];
   include_default_tools?: boolean; // Whether to merge defaults.tools into this agent's tools

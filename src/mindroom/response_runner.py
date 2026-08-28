@@ -28,6 +28,7 @@ from mindroom.approval_response import (
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -56,6 +57,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
+from mindroom.letta_runtime import LettaRuntimeAdapter, LettaTurn
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
@@ -4426,6 +4428,26 @@ class ResponseRunner:
         if admitted_request is None:
             return None
         request = admitted_request
+        agent_config = self.deps.runtime.config.agents[self.deps.agent_name]
+        if agent_config.runtime == "letta":
+            if agent_config.letta_agent_id is None:
+                msg = f"Agent {self.deps.agent_name!r} uses the Letta runtime without letta_agent_id"
+                raise ValueError(msg)
+            request = await self._prepare_admitted_locked_turn(
+                request,
+                resolved_target=resolved_target,
+                history_scope=history_scope,
+                execution_identity=execution_identity,
+                placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
+                early_placeholder_state=placeholder_state,
+            )
+            placeholder_state.settlement_started = True
+            return await self._generate_letta_response_locked(
+                request,
+                resolved_target=resolved_target,
+                agent_id=agent_config.letta_agent_id,
+            )
+
         response_thread_id = _response_thread_id(request, resolved_target)
         active_model_name = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
@@ -4583,4 +4605,127 @@ class ResponseRunner:
                 show_tool_calls=runtime.show_tool_calls,
             ),
             show_tool_calls=runtime.show_tool_calls,
+        )
+
+    async def _generate_letta_response_locked(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        agent_id: str,
+    ) -> str | None:
+        """Generate one Matrix response through a persistent Letta conversation."""
+        response_run_id = str(uuid4())
+        response_identity = self._response_identity(request, response_kind="ai")
+        lifecycle = self._build_lifecycle(identity=response_identity, request=request)
+        progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+        tool_trace: list[Any] = []
+        run_metadata_content: dict[str, Any] = {
+            AI_RUN_METADATA_KEY: {
+                "version": 1,
+                "status": "running",
+                "run_id": response_run_id,
+                "session_id": resolved_target.session_id,
+                "model": {
+                    "config": "letta",
+                    "id": agent_id,
+                    "provider": "letta",
+                },
+            },
+        }
+        self._note_pipeline_metadata(request, response_kind="agent", used_streaming=True)
+
+        def note_terminal(status: Literal["completed", "error", "cancelled"]) -> None:
+            run_metadata_content[AI_RUN_METADATA_KEY]["status"] = status
+
+        async def generate(message_id: str | None) -> None:
+            progress.track_event(message_id)
+            delivery_request = self._request_for_delivery(request, message_id=message_id)
+            adapter = LettaRuntimeAdapter(self.deps.runtime_paths.storage_root)
+            response_stream = adapter.stream(
+                LettaTurn(
+                    entity_name=self.deps.agent_name,
+                    agent_id=agent_id,
+                    room_id=request.room_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                    prompt=request.prompt,
+                    cwd=self.deps.runtime_paths.config_dir,
+                    on_terminal=note_terminal,
+                ),
+            )
+            transport_outcome = await self.deps.delivery_gateway.deliver_stream(
+                StreamingDeliveryRequest(
+                    target=resolved_target,
+                    identity=response_identity,
+                    response_stream=response_stream,
+                    existing_event_id=delivery_request.existing_event_id,
+                    adopt_existing_placeholder=delivery_request.existing_event_is_placeholder,
+                    show_tool_calls=True,
+                    extra_content=run_metadata_content,
+                    tool_trace_collector=tool_trace,
+                    streaming_cls=StreamingResponse,
+                    pipeline_timing=request.pipeline_timing,
+                    visible_event_id_callback=progress.note_delivery_started,
+                ),
+            )
+            progress.note_delivery_started(transport_outcome.last_physical_stream_event_id)
+            run_metadata_content[AI_RUN_METADATA_KEY]["tools"] = {"count": len(tool_trace)}
+            progress.settle(
+                await self._finalize_streamed_turn(
+                    request=delivery_request,
+                    delivery_target=resolved_target,
+                    transport_outcome=transport_outcome,
+                    delivery_kind="edited" if delivery_request.existing_event_id else "sent",
+                    response_identity=response_identity,
+                    tool_trace=tool_trace,
+                    extra_content=run_metadata_content,
+                ),
+            )
+
+        async def settle_stream_error(error: StreamingDeliveryError) -> FinalDeliveryOutcome:
+            tool_trace[:] = error.tool_trace
+            run_metadata_content[AI_RUN_METADATA_KEY]["status"] = error.transport_outcome.terminal_status
+            run_metadata_content[AI_RUN_METADATA_KEY]["tools"] = {"count": len(tool_trace)}
+            return await self.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=resolved_target,
+                    stream_transport_outcome=error.transport_outcome,
+                    initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                    identity=response_identity,
+                    tool_trace=tool_trace,
+                    extra_content=run_metadata_content,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
+            )
+
+        def build_post_response_outcome(final: FinalDeliveryOutcome) -> ResponseOutcome:
+            return ResponseOutcome(
+                response_run_id=response_run_id,
+                run_succeeded=final.terminal_status == "completed",
+                response_target=resolved_target,
+                thread_summary_room_id=request.room_id if resolved_target.resolved_thread_id is not None else None,
+                thread_summary_thread_id=resolved_target.resolved_thread_id,
+                thread_summary_message_count_hint=thread_summary_message_count_hint(
+                    request.thread_history,
+                    trusted_sender_ids=current_internal_sender_ids(
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
+                ),
+                thread_summary_entity_name=self.deps.agent_name,
+            )
+
+        return await self._run_and_settle_locked_response(
+            request,
+            target=resolved_target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=generate,
+            user_id=request.user_id,
+            run_id=response_run_id,
+            build_post_response_outcome=build_post_response_outcome,
+            post_response_deps=lambda: self._post_response_deps(request),
+            streaming_delivery_error_handler=settle_stream_error,
+            show_tool_calls=True,
         )

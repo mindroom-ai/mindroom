@@ -179,6 +179,14 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     display_name: str = Field(description="Human-readable name for the agent")
+    runtime: Literal["agno", "letta"] = Field(
+        default="agno",
+        description="Agent execution runtime",
+    )
+    letta_agent_id: str | None = Field(
+        default=None,
+        description="Persistent Letta agent ID when runtime is 'letta'",
+    )
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[ToolConfigEntry] = Field(
         default_factory=list,
@@ -354,6 +362,14 @@ class AgentConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each normalized tool appears at most once."""
         return validate_unique_tool_entries(tools, scope_name="agent")
+
+    @model_validator(mode="after")
+    def _validate_runtime_configuration(self) -> Self:
+        """Require the persistent Letta identity selected by the Letta runtime."""
+        if self.runtime == "letta" and not self.letta_agent_id:
+            msg = "letta_agent_id is required when runtime is 'letta'"
+            raise ValueError(msg)
+        return self
 
     @field_validator("knowledge_bases")
     @classmethod

@@ -119,6 +119,7 @@ export function AgentEditor() {
     },
   });
   const learningEnabled = useWatch({ name: "learning", control });
+  const agentRuntime = useWatch({ name: "runtime", control }) ?? "agno";
   const effectiveLearningEnabled = learningEnabled ?? defaultLearning;
   const agentTools = useWatch({ name: "tools", control });
   const includeDefaultTools = useWatch({
@@ -169,6 +170,7 @@ export function AgentEditor() {
     ["private", "knowledge", "path"],
     true,
   );
+  const lettaAgentIdError = validationErrorForPath(["letta_agent_id"], true);
   // Split tools into configured, default, and setup-required categories.
   const {
     configuredTools,
@@ -622,38 +624,96 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Model Selection */}
       <FieldGroup
-        label="Model"
-        helperText="AI model to use (defaults to 'default' model if not specified)"
-        htmlFor="model"
+        label="Runtime"
+        helperText="Run this Matrix identity with MindRoom's built-in Agno runtime or a persistent Letta agent."
+        htmlFor="runtime"
       >
         <Controller
-          name="model"
+          name="runtime"
           control={control}
           render={({ field }) => (
             <Select
-              value={field.value || "default"}
-              onValueChange={(value) => {
+              value={field.value ?? "agno"}
+              onValueChange={(value: "agno" | "letta") => {
                 field.onChange(value);
-                handleFieldChange("model", value);
+                handleFieldChange("runtime", value);
               }}
             >
-              <SelectTrigger id="model">
+              <SelectTrigger id="runtime">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {config &&
-                  Object.keys(config.models).map((modelId) => (
-                    <SelectItem key={modelId} value={modelId}>
-                      {modelId}
-                    </SelectItem>
-                  ))}
+                <SelectItem value="agno">MindRoom (Agno)</SelectItem>
+                <SelectItem value="letta">Letta</SelectItem>
               </SelectContent>
             </Select>
           )}
         />
       </FieldGroup>
+
+      {agentRuntime === "letta" && (
+        <FieldGroup
+          label="Letta Agent ID"
+          helperText="Persistent Letta agent identity used for every Matrix conversation handled by this agent."
+          error={lettaAgentIdError ?? undefined}
+          htmlFor="letta_agent_id"
+        >
+          <Controller
+            name="letta_agent_id"
+            control={control}
+            render={({ field }) => (
+              <Input
+                {...field}
+                value={field.value ?? ""}
+                id="letta_agent_id"
+                placeholder="agent-…"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  const resolved = value === "" ? undefined : value;
+                  field.onChange(resolved);
+                  handleFieldChange("letta_agent_id", resolved);
+                }}
+              />
+            )}
+          />
+        </FieldGroup>
+      )}
+
+      {/* Model Selection */}
+      {agentRuntime === "agno" && (
+        <FieldGroup
+          label="Model"
+          helperText="AI model to use (defaults to 'default' model if not specified)"
+          htmlFor="model"
+        >
+          <Controller
+            name="model"
+            control={control}
+            render={({ field }) => (
+              <Select
+                value={field.value || "default"}
+                onValueChange={(value) => {
+                  field.onChange(value);
+                  handleFieldChange("model", value);
+                }}
+              >
+                <SelectTrigger id="model">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {config &&
+                    Object.keys(config.models).map((modelId) => (
+                      <SelectItem key={modelId} value={modelId}>
+                        {modelId}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            )}
+          />
+        </FieldGroup>
+      )}
 
       {/* Memory Backend */}
       <FieldGroup

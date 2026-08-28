@@ -3,6 +3,7 @@
 # Good target for sandbox runners where image size matters.
 FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM oven/bun:1 AS bun
+FROM ghcr.io/nubjs/nub:0.7.5 AS nub
 
 # Builder stage with uv for dependencies
 FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
@@ -11,6 +12,9 @@ COPY --from=uv /uv /uvx /bin/
 # Copy bun for explicit frontend builds in the builder stage
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
+COPY --from=nub /usr/local/bin/node /usr/local/bin/node
+COPY --from=nub /usr/local/bin/nub /usr/local/bin/nub
+COPY --from=nub /usr/local/lib/node_modules/@nubjs/nub /usr/local/lib/node_modules/@nubjs/nub
 
 WORKDIR /app
 
@@ -30,6 +34,7 @@ COPY src /app/src
 COPY avatars /app/avatars
 COPY skills /app/skills
 COPY frontend /app/frontend
+RUN cd /app/src/mindroom/_letta_bridge && nub install --frozen-lockfile
 
 # Install the project itself (base only, no extras)
 # Opt into the editable-install frontend build so the final image has
@@ -50,6 +55,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM public.ecr.aws/docker/library/python:3.13-slim AS final
 # Copy uv for runtime (needed for auto-installing tool extras)
 COPY --from=uv /uv /uvx /bin/
+COPY --from=nub /usr/local/bin/node /usr/local/bin/node
+COPY --from=nub /usr/local/bin/nub /usr/local/bin/nub
+COPY --from=nub /usr/local/lib/node_modules/@nubjs/nub /usr/local/lib/node_modules/@nubjs/nub
 
 # Set version for setuptools-scm at runtime (no .git in container)
 ARG VERSION=0.0.0

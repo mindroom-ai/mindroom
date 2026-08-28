@@ -584,6 +584,55 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("edits the persistent Letta identity when Letta owns execution", () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [
+        {
+          ...mockAgent,
+          runtime: "letta",
+          letta_agent_id: "agent-globalia",
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    const agentId = screen.getByLabelText("Letta Agent ID");
+    expect(agentId).toHaveValue("agent-globalia");
+    fireEvent.change(agentId, { target: { value: "agent-replacement" } });
+
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      letta_agent_id: "agent-replacement",
+    });
+    expect(screen.queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("preserves the Letta identity when temporarily switching to Agno", () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [
+        {
+          ...mockAgent,
+          runtime: "letta",
+          letta_agent_id: "agent-globalia",
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText("Runtime"));
+    fireEvent.click(screen.getByRole("option", { name: "MindRoom (Agno)" }));
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith("test_agent", {
+      runtime: "agno",
+    });
+    expect(mockStore.updateAgent).not.toHaveBeenCalledWith("test_agent", {
+      letta_agent_id: undefined,
+    });
+  });
+
   it("does not cause infinite update loops when updateAgent is called", async () => {
     let updateCount = 0;
     const trackingUpdateAgent = vi.fn((_id, _updates) => {

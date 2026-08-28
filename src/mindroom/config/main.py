@@ -675,6 +675,13 @@ class Config(BaseModel):
         """Ensure team members exist and do not use private requester-local state."""
         for team_name, team_config in self.teams.items():
             self.assert_team_agents_supported(team_config.agents, team_name=team_name)
+            letta_agents = [name for name in team_config.agents if self.agents[name].runtime == "letta"]
+            if letta_agents:
+                msg = (
+                    f"Team '{team_name}' contains Letta runtime agents, which are not yet supported: "
+                    f"{', '.join(letta_agents)}"
+                )
+                raise ValueError(msg)
         return self
 
     def _invalid_compaction_model_references(self) -> list[str]:
