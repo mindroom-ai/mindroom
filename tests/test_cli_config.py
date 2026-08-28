@@ -1670,6 +1670,39 @@ class TestConfigMigrate:
         backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
         assert backup.read_text(encoding="utf-8") == original
 
+    def test_migrate_applies_access_and_starter_memory_migrations_together(self, tmp_path: Path) -> None:
+        """A prior starter config must not lose either migration when both are required."""
+        cfg = tmp_path / "config.yaml"
+        original = (
+            _old_config_init_mind_memory_config("./mindroom_data/agents/mind/workspace/memory")
+            + """
+authorization:
+  global_users:
+    - '@owner:example.com'
+  default_room_access: false
+matrix_room_access:
+  mode: single_user_private
+"""
+        )
+        cfg.write_text(original, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 0
+        assert "membership access schema" in output
+        assert "starter Mind file-memory semantic search" in output
+        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert migrated["administrators"] == ["@owner:example.com"]
+        assert migrated["agents"]["mind"]["tools"][2] == "memory"
+        assert "knowledge_bases" not in migrated["agents"]["mind"]
+        assert "knowledge_bases" not in migrated
+        assert migrated["memory"]["search"]["include"] == ["memory/**/*.md"]
+        assert "authorization" not in migrated
+        assert "matrix_room_access" not in migrated
+        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
+        assert backup.read_text(encoding="utf-8") == original
+
     def test_migrate_rejects_access_migration_with_include_without_writing(self, tmp_path: Path) -> None:
         """The explicit command must error on composed access config before any write."""
         cfg = tmp_path / "config.yaml"

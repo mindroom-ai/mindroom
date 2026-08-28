@@ -237,6 +237,83 @@ def test_access_migration_maps_default_room_access_to_current_membership() -> No
     assert result.data["router"]["access"] == expected_access
 
 
+def test_access_migration_coerces_legacy_boolean_values_before_mapping() -> None:
+    """Legacy boolean spellings must keep the meaning accepted by the retired schema."""
+    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+
+    result = migrate_access_config_data(
+        {
+            "agents": {"talent": {"display_name": "Talent"}},
+            "authorization": {"default_room_access": "false"},
+        },
+    )
+
+    assert "access" not in result.data["agents"]["talent"]
+
+
+@pytest.mark.parametrize(
+    ("policy", "field_name"),
+    [
+        ({"users": "@owner:example.com"}, "users"),
+        ({"joined_rooms": "core"}, "joined_rooms"),
+        ({"typo": ["@owner:example.com"]}, "typo"),
+    ],
+)
+def test_access_migration_rejects_malformed_reply_policies(
+    policy: dict[str, object],
+    field_name: str,
+) -> None:
+    """A malformed retired policy must not become partial or character-level grants."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(AccessMigrationError, match=field_name):
+        migrate_access_config_data(
+            {
+                "agents": {"talent": {"display_name": "Talent"}},
+                "authorization": {"agent_reply_permissions": {"talent": policy}},
+            },
+        )
+
+
+def test_access_migration_rejects_malformed_current_grants_in_mixed_config() -> None:
+    """Migration must not discard malformed current grants while combining retired ones."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(AccessMigrationError, match=r"agents\.talent\.access\.users"):
+        migrate_access_config_data(
+            {
+                "agents": {
+                    "talent": {
+                        "display_name": "Talent",
+                        "access": {"users": "@current:example.com"},
+                    },
+                },
+                "authorization": {
+                    "agent_reply_permissions": {"talent": ["@retired:example.com"]},
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("legacy_config", "field_name"),
+    [
+        ({"authorization": {"room_permissions": []}}, "authorization.room_permissions"),
+        ({"matrix_room_access": None}, "matrix_room_access"),
+        ({"matrix_room_access": {"mode": "shared"}}, "matrix_room_access.mode"),
+    ],
+)
+def test_access_migration_rejects_malformed_retired_sections(
+    legacy_config: dict[str, object],
+    field_name: str,
+) -> None:
+    """A malformed retired section must not disappear during migration."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(AccessMigrationError, match=field_name):
+        migrate_access_config_data(legacy_config)
+
+
 def test_access_migration_rejects_unknown_room_permission_key() -> None:
     """A room-scoped grant must never migrate onto an unmanaged room key."""
     from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415

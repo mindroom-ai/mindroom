@@ -7,7 +7,7 @@ from pathlib import Path  # noqa: TC003
 import typer
 
 from mindroom import constants
-from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors, load_config_quiet
+from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors, validate_config_source_quiet
 
 _OLD_CONFIG_INIT_MIND_MEMORY_TOOL_BLOCK = """\
     knowledge_bases:
@@ -125,11 +125,13 @@ def config_migrate(
         raise typer.Exit(1)
 
     try:
-        content = config_file.read_text(encoding="utf-8")
+        original = config_file.read_bytes()
+        content = original.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
+    migrated, migrated_mind_memory = _migrate_old_config_init_mind_memory(content)
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_file,
         process_env=constants.exported_process_env(),
@@ -137,19 +139,22 @@ def config_migrate(
     from yaml import YAMLError  # noqa: PLC0415
 
     try:
-        load_config_quiet(runtime_paths, tolerate_plugin_load_errors=True)
-        access_migrated_content = config_file.read_text(encoding="utf-8")
+        validate_config_source_quiet(
+            runtime_paths,
+            source=migrated.encode("utf-8"),
+            original=original,
+            tolerate_plugin_load_errors=True,
+        )
+        migrated_access = config_file.read_bytes() != original
     except (ValueError, YAMLError, OSError) as exc:
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
-    migrated_access = access_migrated_content != content
-    migrated, migrated_mind_memory = _migrate_old_config_init_mind_memory(access_migrated_content)
     if not migrated_access and not migrated_mind_memory:
         console.print("[green]No migrations applied.[/green]")
         return
 
-    if migrated_mind_memory:
+    if migrated_mind_memory and not migrated_access:
         from mindroom.yaml_io import write_text_atomic  # noqa: PLC0415
 
         try:

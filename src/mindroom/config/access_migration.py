@@ -14,6 +14,8 @@ from errno import EBUSY
 from pathlib import Path
 from typing import Any, cast
 
+from pydantic import TypeAdapter, ValidationError
+
 from mindroom import yaml_io
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
 
@@ -25,6 +27,11 @@ _RETIRED_AUTHORIZATION_FIELDS = frozenset(
         "room_permissions",
     },
 )
+_LEGACY_BOOLEAN_ADAPTER = TypeAdapter(bool)
+_LEGACY_STRING_LIST_ADAPTER = TypeAdapter(list[str])
+_LEGACY_MATRIX_ACCESS_MODES = frozenset({"multi_user", "single_user_private"})
+_LEGACY_MULTI_USER_JOIN_RULES = frozenset({"knock", "public"})
+_REPLY_POLICY_FIELDS = frozenset({"joined_rooms", "users"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,9 +126,34 @@ def persist_access_migration(path: Path, original: bytes, migrated: dict[str, An
     return rendered.encode("utf-8")
 
 
-def _stable_union(left: object, right: object) -> list[Any]:
-    left_items = left if isinstance(left, list) else []
-    right_items = right if isinstance(right, list) else []
+def _legacy_boolean(value: object, *, field_name: str) -> bool:
+    """Apply the retired schema's Pydantic boolean coercion before migration."""
+    try:
+        return _LEGACY_BOOLEAN_ADAPTER.validate_python(value)
+    except ValidationError as exc:
+        msg = f"Automatic access migration cannot convert {field_name}; fix the retired value before retrying"
+        raise AccessMigrationError(msg) from exc
+
+
+def _legacy_string_list(value: object, *, field_name: str) -> list[str]:
+    """Validate one list with the same shape required by the retired schema."""
+    try:
+        return _LEGACY_STRING_LIST_ADAPTER.validate_python(value)
+    except ValidationError as exc:
+        msg = f"Automatic access migration cannot convert {field_name}; fix the retired value before retrying"
+        raise AccessMigrationError(msg) from exc
+
+
+def _legacy_mapping(value: object, *, field_name: str) -> dict[Any, Any]:
+    if not isinstance(value, dict):
+        msg = f"Automatic access migration cannot convert {field_name}; fix the retired value before retrying"
+        raise AccessMigrationError(msg)
+    return value
+
+
+def _stable_union(left: object, right: object, *, field_name: str) -> list[str]:
+    left_items = [] if left is None else _legacy_string_list(left, field_name=field_name)
+    right_items = [] if right is None else _legacy_string_list(right, field_name=field_name)
     return list(dict.fromkeys([*left_items, *right_items]))
 
 
@@ -143,37 +175,117 @@ def _validate_concrete_legacy_user_ids(user_ids: object, *, field_name: str) -> 
         raise AccessMigrationError(msg)
 
 
-def _normalized_reply_policy(raw_policy: object) -> dict[str, Any] | None:
+def _normalized_reply_policy(raw_policy: object, *, field_name: str) -> dict[str, Any]:
     if isinstance(raw_policy, list):
-        return {"users": raw_policy}
-    return cast("dict[str, Any]", raw_policy) if isinstance(raw_policy, dict) else None
+        return {
+            "users": _legacy_string_list(raw_policy, field_name=f"{field_name}.users"),
+            "joined_rooms": [],
+        }
+    if not isinstance(raw_policy, dict):
+        msg = f"Automatic access migration cannot convert {field_name}; fix the retired value before retrying"
+        raise AccessMigrationError(msg)
+    policy = cast("dict[str, object]", raw_policy)
+    unknown_fields = sorted(str(key) for key in policy if key not in _REPLY_POLICY_FIELDS)
+    if unknown_fields:
+        msg = f"Automatic access migration cannot convert {field_name}.{unknown_fields[0]}; remove the unknown field"
+        raise AccessMigrationError(msg)
+    return {
+        "users": _legacy_string_list(policy.get("users", []), field_name=f"{field_name}.users"),
+        "joined_rooms": _legacy_string_list(
+            policy.get("joined_rooms", []),
+            field_name=f"{field_name}.joined_rooms",
+        ),
+    }
+
+
+def _normalized_reply_permissions(reply_permissions: object) -> dict[str, dict[str, Any]]:
+    policies = _legacy_mapping(
+        reply_permissions,
+        field_name="authorization.agent_reply_permissions",
+    )
+    return {
+        str(entity_name): _normalized_reply_policy(
+            raw_policy,
+            field_name=f"authorization.agent_reply_permissions.{entity_name}",
+        )
+        for entity_name, raw_policy in policies.items()
+    }
+
+
+def _normalized_matrix_access(matrix_access: object) -> dict[str, Any]:
+    access = _legacy_mapping(matrix_access, field_name="matrix_room_access")
+    mode = access.get("mode", "single_user_private")
+    if mode not in _LEGACY_MATRIX_ACCESS_MODES:
+        msg = "Automatic access migration cannot convert matrix_room_access.mode; fix the retired value before retrying"
+        raise AccessMigrationError(msg)
+    join_rule = access.get("multi_user_join_rule", "public")
+    if join_rule not in _LEGACY_MULTI_USER_JOIN_RULES:
+        msg = (
+            "Automatic access migration cannot convert matrix_room_access.multi_user_join_rule; "
+            "fix the retired value before retrying"
+        )
+        raise AccessMigrationError(msg)
+    return {
+        **access,
+        "mode": mode,
+        "multi_user_join_rule": join_rule,
+        "publish_to_room_directory": _legacy_boolean(
+            access.get("publish_to_room_directory", False),
+            field_name="matrix_room_access.publish_to_room_directory",
+        ),
+        "reconcile_existing_rooms": _legacy_boolean(
+            access.get("reconcile_existing_rooms", False),
+            field_name="matrix_room_access.reconcile_existing_rooms",
+        ),
+        "encrypt_managed_rooms": _legacy_boolean(
+            access.get("encrypt_managed_rooms", False),
+            field_name="matrix_room_access.encrypt_managed_rooms",
+        ),
+        "invite_only_rooms": _legacy_string_list(
+            access.get("invite_only_rooms", []),
+            field_name="matrix_room_access.invite_only_rooms",
+        ),
+        "room_admins": _legacy_string_list(
+            access.get("room_admins", []),
+            field_name="matrix_room_access.room_admins",
+        ),
+    }
 
 
 def _apply_reply_policy(
     entity_data: dict[str, Any],
-    raw_policy: object,
+    policy: dict[str, Any] | None,
     *,
+    entity_field_name: str,
     migrate_credential_managers: bool,
 ) -> None:
-    policy = _normalized_reply_policy(raw_policy)
     if policy is None:
         return
-    users = list(policy.get("users", []))
+    users = policy["users"]
     existing_access = entity_data.get("access")
+    if existing_access is not None and not isinstance(existing_access, dict):
+        msg = f"Automatic access migration cannot combine malformed {entity_field_name}.access"
+        raise AccessMigrationError(msg)
     authored_access = existing_access if isinstance(existing_access, dict) else {}
     entity_data["access"] = {
         "current_room_members": authored_access.get("current_room_members", False),
         "members_of_rooms": _stable_union(
             authored_access.get("members_of_rooms"),
-            policy.get("joined_rooms"),
+            policy["joined_rooms"],
+            field_name=f"{entity_field_name}.access.members_of_rooms",
         ),
-        "users": _stable_union(authored_access.get("users"), users),
+        "users": _stable_union(
+            authored_access.get("users"),
+            users,
+            field_name=f"{entity_field_name}.access.users",
+        ),
     }
     if migrate_credential_managers:
         concrete_users, _skipped_users = split_concrete_matrix_user_ids(users)
         entity_data["credential_managers"] = _stable_union(
             entity_data.get("credential_managers"),
             concrete_users,
+            field_name=f"{entity_field_name}.credential_managers",
         )
 
 
@@ -232,10 +344,18 @@ def _migrate_global_users(migrated: dict[str, Any], global_users: list[Any]) -> 
     if not global_users:
         return
     _validate_concrete_legacy_user_ids(global_users, field_name="authorization.global_users")
-    migrated["administrators"] = _stable_union(migrated.get("administrators"), global_users)
+    migrated["administrators"] = _stable_union(
+        migrated.get("administrators"),
+        global_users,
+        field_name="administrators",
+    )
     room_defaults = migrated.setdefault("room_defaults", {})
     if isinstance(room_defaults, dict):
-        room_defaults["invite_users"] = _stable_union(room_defaults.get("invite_users"), global_users)
+        room_defaults["invite_users"] = _stable_union(
+            room_defaults.get("invite_users"),
+            global_users,
+            field_name="room_defaults.invite_users",
+        )
 
 
 def _validate_reply_policy_entities(migrated: dict[str, Any], policies: dict[str, Any]) -> None:
@@ -271,6 +391,7 @@ def _migrate_reply_permissions(
                 _apply_reply_policy(
                     entity_data,
                     raw_policy,
+                    entity_field_name=f"{section_name}.{entity_name}",
                     migrate_credential_managers=section_name == "agents",
                 )
                 if default_room_access and raw_policy is None:
@@ -281,6 +402,7 @@ def _migrate_reply_permissions(
             _apply_reply_policy(
                 router,
                 raw_policy,
+                entity_field_name="router",
                 migrate_credential_managers=False,
             )
             if default_room_access and raw_policy is None:
@@ -306,7 +428,11 @@ def _migrate_room_permissions(
             )
             room = rooms.setdefault(room_key, {})
             if isinstance(room, dict):
-                room["invite_users"] = _stable_union(room.get("invite_users"), invite_users)
+                room["invite_users"] = _stable_union(
+                    room.get("invite_users"),
+                    invite_users,
+                    field_name=f"rooms.{room_key}.invite_users",
+                )
 
 
 def _migrate_matrix_room_access(
@@ -339,6 +465,7 @@ def _migrate_matrix_room_access(
         room_defaults["admins"] = _stable_union(
             room_defaults.get("admins"),
             room_admins,
+            field_name="room_defaults.admins",
         )
 
     rooms = migrated.get("rooms")
@@ -359,13 +486,24 @@ def migrate_access_config_data(data: dict[str, Any]) -> _AccessMigrationResult:
 
     migrated = deepcopy(data)
     migrated.pop("access_model", None)
-    matrix_access = migrated.pop("matrix_room_access", None)
+    matrix_access = (
+        _normalized_matrix_access(migrated.pop("matrix_room_access")) if "matrix_room_access" in migrated else None
+    )
     authorization = migrated.get("authorization")
     if isinstance(authorization, dict):
-        global_users = list(authorization.pop("global_users", []))
-        reply_permissions = authorization.pop("agent_reply_permissions", {})
-        room_permissions = authorization.pop("room_permissions", {})
-        default_room_access = authorization.pop("default_room_access", False)
+        global_users = _legacy_string_list(
+            authorization.pop("global_users", []),
+            field_name="authorization.global_users",
+        )
+        reply_permissions = _normalized_reply_permissions(authorization.pop("agent_reply_permissions", {}))
+        room_permissions = _legacy_mapping(
+            authorization.pop("room_permissions", {}),
+            field_name="authorization.room_permissions",
+        )
+        default_room_access = _legacy_boolean(
+            authorization.pop("default_room_access", False),
+            field_name="authorization.default_room_access",
+        )
         if not authorization:
             migrated.pop("authorization")
     else:

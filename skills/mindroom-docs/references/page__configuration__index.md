@@ -642,6 +642,7 @@ timezone: America/Los_Angeles      # Default: UTC
 
 Retired access fields in a monolithic configuration are migrated automatically when the file loads.
 MindRoom validates the result, saves the original file once as `config.yaml.pre-membership-access`, and atomically writes the new schema.
+For a single-file Docker bind mount, run the directed `mindroom config migrate --path <host-config.yaml>` command on the host before startup.
 Access migration fails without changing files or creating a backup when any `!include` is present.
 See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 

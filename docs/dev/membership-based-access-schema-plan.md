@@ -233,6 +233,7 @@ Credential-manager entries must be concrete Matrix user IDs; wildcard credential
 One pure migration function runs before nested Pydantic validation, so file loading and programmatic configuration construction reach the same authored schema.
 `load_config` validates the migrated data before it writes anything, preserves the original root file as a one-time sibling backup, atomically writes the normalized YAML, and then publishes the validated configuration.
 Normalized YAML does not preserve comments or hand formatting; the exact backup remains the recovery source for both.
+When a single-file Docker bind mount cannot be replaced atomically, migration fails with a command that must be run against the host config path.
 When migration encounters any `!include`, loading fails before validation or persistence with a clear unsupported-migration error.
 
 The deterministic mapping is:
@@ -283,7 +284,7 @@ The migration intentionally removes implicit or wildcard credential-management a
   - `unresolved_membership_index(config, room_key) -> AgentReplyMembershipIndex`
   - `reconcile_invites(config, tmp_path) -> Awaitable[set[tuple[str, str]]]`
 
-- [ ] **Step 1: Write parsing, inheritance, and validation tests**
+- [x] **Step 1: Write parsing, inheritance, and validation tests**
 
 ```python
 def test_room_list_override_replaces_default() -> None:
@@ -318,13 +319,13 @@ def test_omitted_agent_access_uses_configured_rooms() -> None:
     assert access.current_room_members is False
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm the new fields are rejected**
+- [x] **Step 2: Run the focused tests and confirm the new fields are rejected**
 
 Run: `uv run pytest -q tests/test_access_schema.py`
 
 Expected: FAIL because `room_defaults`, responder `access`, and `credential_managers` do not exist.
 
-- [ ] **Step 3: Implement the Pydantic models and frozen resolvers**
+- [x] **Step 3: Implement the Pydantic models and frozen resolvers**
 
 ```python
 class ResponderAccessConfig(BaseModel):
@@ -348,7 +349,7 @@ class RoomDefaultsConfig(BaseModel):
 Add optional room overrides to `RoomConfig`, optional `access` to agents, teams, and router, `credential_managers` to agents, and top-level `administrators` and `room_defaults` to `Config`.
 Validate duplicate entries, concrete administrator and credential-manager IDs, and known managed-room keys.
 
-- [ ] **Step 4: Run focused model tests and formatting**
+- [x] **Step 4: Run focused model tests and formatting**
 
 Run: `uv run pytest -q tests/test_access_schema.py tests/test_config_validation_helpers.py`
 
@@ -358,7 +359,7 @@ Run: `uv run ruff check src/mindroom/config/access.py src/mindroom/access_policy
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the schema foundation**
+- [x] **Step 5: Commit the schema foundation**
 
 ```bash
 git add src/mindroom/config/access.py src/mindroom/access_policy.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/main.py tests/access_schema_support.py tests/test_access_schema.py
@@ -379,7 +380,7 @@ git commit -m "feat: add membership access schema"
 - Consumes: `resolve_room_policy(config, room_key) -> EffectiveRoomPolicy` from Task 1.
 - Produces: room reconciliation whose invitations, power levels, join rules, visibility, and encryption come from one resolved room policy.
 
-- [ ] **Step 1: Add replacement-inheritance and invitation-isolation regressions**
+- [x] **Step 1: Add replacement-inheritance and invitation-isolation regressions**
 
 ```python
 @pytest.mark.asyncio
@@ -400,13 +401,13 @@ async def test_membership_schema_invites_only_effective_room_invite_users(tmp_pa
 Add assertions proving that administrators, room admins, responder users, and credential managers are not invitation candidates.
 Add an existing-room regression with retired `reconcile_existing_rooms: false` input that proves membership join policy and visibility are still reconciled after migration.
 
-- [ ] **Step 2: Run the regressions and verify legacy invitation behavior cannot satisfy them**
+- [x] **Step 2: Run the regressions and verify legacy invitation behavior cannot satisfy them**
 
 Run: `uv run pytest -q tests/test_matrix_room_access.py tests/test_orchestrator_runtime.py -k 'membership_schema or effective_room'`
 
 Expected: FAIL because room reconciliation still consumes `matrix_room_access` and legacy authorization candidates.
 
-- [ ] **Step 3: Route membership-mode reconciliation through `EffectiveRoomPolicy`**
+- [x] **Step 3: Route membership-mode reconciliation through `EffectiveRoomPolicy`**
 
 Update `ensure_all_rooms_exist` to resolve each managed room key before applying state.
 Replace calls to `get_authorized_user_ids_to_invite` with the effective `invite_users` tuple for that room.
@@ -416,13 +417,13 @@ Preserve the irreversible encryption check.
 
 Do not call `is_authorized_sender` for membership-mode invitees; the invitation roster is intentionally independent from conversation access.
 
-- [ ] **Step 4: Run room and orchestrator suites**
+- [x] **Step 4: Run room and orchestrator suites**
 
 Run: `uv run pytest -q tests/test_matrix_room_access.py tests/test_room_invites.py tests/test_orchestrator_runtime.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit room reconciliation**
+- [x] **Step 5: Commit room reconciliation**
 
 ```bash
 git add src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestrator.py tests/test_matrix_room_access.py tests/test_orchestrator_runtime.py
@@ -465,7 +466,7 @@ git commit -m "feat: reconcile membership room policy"
 - Consumes: `resolve_responder_access(config, entity_name) -> EffectiveResponderAccess` from Task 1 and the existing authoritative membership index.
 - Produces: `is_sender_allowed_for_responder(sender_id, entity_name, room_id, config, runtime_paths, membership_index) -> bool`.
 
-- [ ] **Step 1: Write two-gate elimination and fail-closed tests**
+- [x] **Step 1: Write two-gate elimination and fail-closed tests**
 
 ```python
 @pytest.mark.asyncio
@@ -501,13 +502,13 @@ Cover text, media, approval reactions, Matrix RTC calls, external triggers, back
 Each regression must prove a current grant-room member is accepted and an unresolved membership snapshot is denied.
 Add a scheduled-fire regression that records the task while membership is valid, removes that membership before execution, and proves the preserved requester is denied at the normal responder boundary.
 
-- [ ] **Step 2: Run focused tests and confirm the legacy precheck rejects the member**
+- [x] **Step 2: Run focused tests and confirm the legacy precheck rejects the member**
 
 Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py -k 'membership_mode'`
 
 Expected: FAIL because `is_authorized_sender` remains an independent room gate.
 
-- [ ] **Step 3: Implement one membership-mode responder gate**
+- [x] **Step 3: Implement one membership-mode responder gate**
 
 Remove the retired room allowlist from ingress and require every selected responder to pass `is_sender_allowed_for_responder`.
 Make the existing `is_sender_allowed_for_agent_reply` and `is_sender_allowed_for_agent_reply_in_room` entry points delegate to the new resolver so secondary callers cannot retain retired semantics accidentally.
@@ -520,13 +521,13 @@ Treat missing, stale, or unresolved membership snapshots as denial for membershi
 Replace standalone `is_authorized_sender` calls at approval continuation, attachment, and room-lifecycle boundaries with context-specific membership checks.
 Tool-approval policy remains unchanged, but the human acting on an approval must still pass the responder policy captured by that continuation before it is consumed.
 
-- [ ] **Step 4: Run authorization and ingress suites**
+- [x] **Step 4: Run authorization and ingress suites**
 
 Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_controller_focused.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit responder authorization**
+- [x] **Step 5: Commit responder authorization**
 
 ```bash
 git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval_inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_turn_controller_focused.py
@@ -560,7 +561,7 @@ git commit -m "feat: authorize responders by room membership"
 - Consumes: top-level `administrators` and `AgentConfig.credential_managers` from Task 1.
 - Produces: `is_platform_administrator(sender_id, config) -> bool` and membership-mode `is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config) -> bool`.
 
-- [ ] **Step 1: Write authority-separation tests**
+- [x] **Step 1: Write authority-separation tests**
 
 ```python
 def test_room_member_cannot_manage_agent_credentials() -> None:
@@ -592,13 +593,13 @@ def test_administrator_manages_credentials_without_being_an_invitee() -> None:
 
 Add tests proving a credential manager does not bypass responder access and a Matrix room admin is neither a platform administrator nor a credential manager.
 
-- [ ] **Step 2: Run focused authority tests and confirm current static reply users conflate them**
+- [x] **Step 2: Run focused authority tests and confirm current static reply users conflate them**
 
 Run: `uv run pytest -q tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py -k 'credential_manager or platform_administrator'`
 
 Expected: FAIL because credential management still reads static reply users.
 
-- [ ] **Step 3: Implement separate administrator and credential checks**
+- [x] **Step 3: Implement separate administrator and credential checks**
 
 Authorize agent credential management only when the canonical requester is in `administrators` or the target agent's concrete `credential_managers`.
 
@@ -606,13 +607,13 @@ Route plugin reload, configuration commands, configuration-confirmation reaction
 Update command help text to name platform administrators rather than retired global users.
 Do not make administrators room members, Matrix room admins, or invite candidates.
 
-- [ ] **Step 4: Run credential and command suites**
+- [x] **Step 4: Run credential and command suites**
 
 Run: `uv run pytest -q tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_commands.py tests/test_config_commands.py tests/test_bot_reactions_approvals.py tests/test_usage_stats_tool.py tests/test_config_reload.py tests/api/test_oauth_api.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit authority separation**
+- [x] **Step 5: Commit authority separation**
 
 ```bash
 git add src/mindroom/authorization.py src/mindroom/api/dashboard_credential_scope.py src/mindroom/commands/handler.py src/mindroom/commands/config_confirmation.py src/mindroom/commands/parsing.py src/mindroom/custom_tools/config_manager.py src/mindroom/custom_tools/usage_stats.py src/mindroom/oauth/reset.py src/mindroom/commands/config_commands.py src/mindroom/orchestrator.py tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_commands.py tests/test_config_commands.py tests/test_bot_reactions_approvals.py tests/test_usage_stats_tool.py tests/test_config_reload.py tests/api/test_oauth_api.py
@@ -659,7 +660,7 @@ git commit -m "feat: separate credential and platform authority"
 - Consumes: raw YAML mappings plus the schema and resolvers from Tasks 1-4.
 - Produces: `migrate_access_config_data(data) -> AccessMigrationResult`, `persist_access_migration(path, result) -> None`, and one membership-only runtime.
 
-- [ ] **Step 1: Write pure migration and load-boundary tests**
+- [x] **Step 1: Write pure migration and load-boundary tests**
 
 ```python
 def test_legacy_owner_access_is_split_into_explicit_capabilities() -> None:
@@ -696,13 +697,13 @@ def test_load_config_validates_before_atomic_migration_write(tmp_path: Path) -> 
 
 Add tests for wildcard materialization, concrete credential managers, room defaults, invite-only overrides, existing new-schema precedence, idempotence, one-time backup retention, atomic write failure, and multi-source refusal.
 
-- [ ] **Step 2: Run migration tests and verify they fail before implementation**
+- [x] **Step 2: Run migration tests and verify they fail before implementation**
 
 Run: `uv run pytest -q tests/test_access_migration.py tests/test_cli_config.py -k 'access_migration or migrate_access'`
 
 Expected: FAIL because the migration result, mapping, backup, and automatic persistence do not exist.
 
-- [ ] **Step 3: Implement migration, validation-before-write, and atomic persistence**
+- [x] **Step 3: Implement migration, validation-before-write, and atomic persistence**
 
 `migrate_access_config_data` must copy its input, apply the documented mapping, remove retired fields, and return the migrated mapping plus whether anything changed.
 It must be idempotent and must not perform I/O.
@@ -711,24 +712,25 @@ The pure function runs from the root pre-validation boundary so direct `Config` 
 
 `load_config` must validate the migrated mapping before persistence.
 After validation, it keeps the original root file at the fixed migration-backup path when that backup does not already exist and atomically writes the normalized YAML.
+If a single-file Docker bind mount rejects atomic replacement, report the host-side `mindroom config migrate --path <host-config.yaml>` remedy and leave the original file usable.
 When `source_files` contains more than the root file, it must raise a clear unsupported-migration error and leave every source untouched.
 An I/O failure must leave the original configuration usable and surface as a configuration-load error.
 
-- [ ] **Step 4: Remove the dual runtime path and retired schema fields**
+- [x] **Step 4: Remove the dual runtime path and retired schema fields**
 
 Remove `access_model` checks from authorization, membership snapshots, room reconciliation, approvals, attachment access, room lifecycle handling, delegation, and orchestration.
 Remove the retired access fields from `AuthorizationConfig`, remove `matrix_room_access` from `Config`, and delete code that consumes those fields.
 Keep `authorization.aliases` and `authorization.config_command_enabled`.
 Replace the read-only `config explain-access` skeleton with the existing `config migrate` command invoking the same migration path explicitly.
 
-- [ ] **Step 5: Update examples and migration documentation**
+- [x] **Step 5: Update examples and migration documentation**
 
 Remove `access_model` from current examples.
 Document the automatic mapping, validation-before-write behavior, backup path, atomic replacement, and multi-source refusal.
 Document that stale `agent_reply_permissions` entity keys must be removed before migration can continue.
 Retired fields may appear only in the migration reference and migration tests.
 
-- [ ] **Step 6: Run CLI, config, authorization, and documentation checks**
+- [x] **Step 6: Run CLI, config, authorization, and documentation checks**
 
 Run: `uv run pytest -q tests/test_access_migration.py tests/test_access_schema.py tests/test_cli_config.py tests/test_authorization.py tests/test_matrix_room_access.py tests/test_config_commands.py`
 
@@ -738,7 +740,7 @@ Run: `uv run pre-commit run --files src/mindroom/config/access_migration.py src/
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit automatic migration and the single runtime model**
+- [x] **Step 7: Commit automatic migration and the single runtime model**
 
 ```bash
 git add src/mindroom/config/access_migration.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval_inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
@@ -754,7 +756,7 @@ git commit -m "feat: auto migrate membership access config"
 - Consumes: the complete schema, policy resolvers, room reconciliation, responder authorization, and credential authorization from Tasks 1-5.
 - Produces: one verified implementation with a deterministic migration and no runtime compatibility branch.
 
-- [ ] **Step 1: Run the complete access-focused test set**
+- [x] **Step 1: Run the complete access-focused test set**
 
 Run:
 
@@ -789,19 +791,19 @@ uv run pytest -q \
 
 Expected: PASS.
 
-- [ ] **Step 2: Run repository architecture and quality gates**
+- [x] **Step 2: Run repository architecture and quality gates**
 
 Run: `uv run pre-commit run --all-files`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run the full test suite**
+- [x] **Step 3: Run the full test suite**
 
 Run: `uv run pytest -q`
 
 Expected: PASS.
 
-- [ ] **Step 4: Review authored examples for one-purpose fields**
+- [x] **Step 4: Review authored examples for one-purpose fields**
 
 Search:
 
@@ -812,7 +814,7 @@ rg -n "global_users|room_permissions|default_room_access|agent_reply_permissions
 Every primary example must use the membership model.
 Retired fields may appear only in explicitly labeled migration sections.
 
-- [ ] **Step 5: Confirm verification left no uncommitted corrections**
+- [x] **Step 5: Confirm verification left no uncommitted corrections**
 
 ```bash
 git status --short

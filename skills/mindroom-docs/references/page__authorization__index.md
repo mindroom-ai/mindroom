@@ -141,6 +141,7 @@ authorization:
 
 Loading a monolithic configuration with retired access fields automatically converts it to this schema.
 MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
+When `config.yaml` is a single-file Docker bind mount that cannot be replaced atomically, migration stops and directs the operator to run `mindroom config migrate --path <host-config.yaml>` on the host.
 The migration preserves explicit new-schema values and removes the retired fields.
 The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
 Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
