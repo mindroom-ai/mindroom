@@ -2449,6 +2449,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         # Create config with one agent
         config = MagicMock(spec=Config)
+        config.access_model = None
         config.authorization = AuthorizationConfig()
         config.agents = {"test_agent": MagicMock()}
         config.teams = {}
@@ -2500,6 +2501,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
+    config.access_model = None
     config.authorization = AuthorizationConfig()
     config.agents = {"general": MagicMock()}
     config.teams = {}
@@ -2570,6 +2572,7 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
+    config.access_model = None
     config.authorization = AuthorizationConfig(
         agent_reply_permissions={
             "general": AgentReplyPermission(joined_rooms=["grant"]),
@@ -2672,6 +2675,7 @@ def _orchestrator_with_membership_startup_bots(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     config = MagicMock(spec=Config)
+    config.access_model = None
     config.authorization = AuthorizationConfig(
         agent_reply_permissions={
             "general": AgentReplyPermission(joined_rooms=["grant"]),

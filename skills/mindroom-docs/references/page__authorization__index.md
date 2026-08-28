@@ -1,244 +1,173 @@
 # Authorization
 
-MindRoom controls which Matrix users can interact with agents.
+MindRoom supports a membership-based access model that keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
 
-Room access (joinability/discoverability) is configured separately through `matrix_room_access`.
+Set `access_model: room_membership` to opt in.
 
-## Configuration
-
-Configure authorization in `config.yaml`:
+## Membership-based configuration
 
 ```yaml
-authorization:
-  # Users with access to all rooms
-  global_users:
-    - "@admin:example.com"
-    - "@developer:example.com"
+access_model: room_membership
 
-  # Room-specific permissions (room ID, full alias, or managed room key)
-  room_permissions:
-    "!abc123:example.com":
-      - "@user1:example.com"
-      - "@user2:example.com"
-    "#lobby:example.com":
-      - "@user3:example.com"
-    "ops":
-      - "@user4:example.com"
+administrators:
+  - "@owner:example.com"
 
-  # Default for rooms not in room_permissions
-  default_room_access: false
+room_defaults:
+  join_policy: invite
+  listed: false
+  encrypted: true
+  invite_users:
+    - "@member:example.com"
+  admins: []
 
-  # Optional: enable !config for global admin users
-  config_command_enabled: false
+rooms:
+  engineering:
+    display_name: Engineering
+    invite_users:
+      - "@engineer:example.com"
+    admins:
+      - "@room-admin:example.com"
 
-  # Optional: per-agent/team/router reply policies
-  # Keys must match an agent name, team name, "router", or "*"
-  # Values may use the user-list shorthand or structured users/joined_rooms
-  agent_reply_permissions:
-    "*":
-      - "@admin:example.com"
-    code:
+agents:
+  code:
+    display_name: Code
+    rooms: [engineering]
+    access:
+      current_room_members: false
+      members_of_rooms: [engineering]
       users:
-        - "@admin:example.com"
-      joined_rooms:
-        - engineering
-    research:
-      - "@developer:example.com"
-    router:
-      - "*"
+        - "@contractor:example.com"
+    credential_managers:
+      - "@credential-owner:example.com"
 
-# Optional: configure the internal MindRoom user identity (omit for hosted/public profiles)
-mindroom_user:
-  username: mindroom_user          # Set before first startup (account-creation request cannot be changed later)
-  display_name: MindRoomUser
+router:
+  access:
+    current_room_members: true
+    members_of_rooms: []
+    users: []
 
-# Optional: room onboarding/discoverability policy
-matrix_room_access:
-  mode: single_user_private        # default
-  multi_user_join_rule: public     # public or knock (multi_user only)
-  publish_to_room_directory: false # publish managed rooms to public directory
-  invite_only_rooms: []            # room keys/aliases/IDs that stay restricted
-  reconcile_existing_rooms: false  # migrate existing managed rooms when true
-  encrypt_managed_rooms: false     # enable E2EE for managed rooms; rooms.<key>.encrypted overrides
-  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
+authorization:
+  config_command_enabled: false
+  aliases:
+    "@owner:example.com":
+      - "@telegram_owner:example.com"
 ```
 
-Enabling encryption is irreversible for a Matrix room, and MindRoom never disables encryption after it is enabled.
+Each field has one responsibility.
 
-**Defaults** (when `authorization` block is omitted):
+| Field | Responsibility |
+| --- | --- |
+| `administrators` | Platform configuration and credential authority plus a responder-policy bypass |
+| `room_defaults` | Default desired Matrix state for managed rooms |
+| `rooms.<key>.invite_users` | Automatic invitations for one managed room |
+| `rooms.<key>.admins` | Matrix power level 100 for one managed room |
+| `agents.<name>.rooms` and `teams.<name>.rooms` | Rooms where a responder operates |
+| `<responder>.access` | Users who may converse with that responder |
+| `agents.<name>.credential_managers` | Users who may manage that agent's credentials and OAuth connections |
 
-- `global_users: []`
-- `room_permissions: {}`
-- `default_room_access: false`
-- `config_command_enabled: false`
-- `agent_reply_permissions: {}`
-- `aliases: {}`
+No field in this table implies another row.
 
-This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
+Administrators are not automatically invited and do not receive Matrix room power.
+Room administrators are not platform administrators or credential managers.
+Responder users and room membership do not grant credential authority.
+Credential managers do not gain responder access.
 
-`!config` is disabled by default.
-Set `authorization.config_command_enabled: true` only for trusted single-user or admin-managed environments.
-Even when enabled, callers must be in `authorization.global_users`.
+## Room policy
 
-`mindroom_user.username` is a one-time account-creation request used to create the internal Matrix account.
-After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
-If hosted provisioning returns a different actual Matrix ID, MindRoom persists and authorizes that actual ID.
+`room_defaults` supplies the default `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` values for every managed room.
 
-For `authorization.room_permissions`, MindRoom accepts these key formats:
+An authored field under `rooms.<key>` replaces the corresponding default.
+List overrides replace the whole default list instead of merging with it.
+An explicit empty list therefore disables the inherited invitations or admins for that room.
 
-- Room ID: `!roomid:example.com`
-- Full room alias: `#alias:example.com`
-- Managed room key: `alias` (the configured room name/key used by MindRoom)
+`join_policy` accepts `invite`, `knock`, or `public`.
+MindRoom reconciles membership-mode join policy, directory visibility, invitations, and power levels for existing managed rooms without consulting the legacy `reconcile_existing_rooms` flag.
+Encryption can be enabled but never disabled because enabling Matrix room encryption is irreversible.
 
-## Matrix Room Onboarding for OIDC Users
+`invite_users` is declarative desired invitation state.
+A listed user who leaves or is kicked is invited again during reconciliation, so remove the user from configuration before intentionally removing access.
 
-When users authenticate through Synapse OIDC, they are regular Matrix users. To let them join managed MindRoom rooms by alias without manual invites:
+The root Matrix Space receives the union of managed-room `invite_users` as invitations.
+Membership-mode invitees do not automatically receive root Space admin power.
 
-1. Set `matrix_room_access.mode: multi_user`.
-2. Set `multi_user_join_rule` to `public` (direct join) or `knock` (request access).
-3. Set `publish_to_room_directory: true` if rooms should appear in Explore/public room directory.
+## Responder access
 
-If you keep `mode: single_user_private` (default), managed rooms remain invite-only and private in the directory.
+Responder access supports three independent clauses.
 
-## Managed Room Admins
+- `current_room_members: true` allows authoritative joined members of the current room.
+- `members_of_rooms` allows authoritative joined members of any listed managed room.
+- `users` allows canonical Matrix user IDs or glob patterns.
 
-`matrix_room_access.room_admins` lists Matrix user IDs that automatically receive room admin power (power level 100) in every managed room.
-Admin power is seeded when a managed room is created and reconciled for existing managed rooms on startup and config reload, regardless of `mode` or `reconcile_existing_rooms`.
-Existing power levels are never lowered: users already at admin level or above keep their level.
-Removing a user from `room_admins` stops future grants but does not lower admin power they already have, because the managing account cannot demote an equal-power admin in Matrix.
-Membership is not changed by this setting, so listed users become admins once they are in the room (for invites, use `authorization.global_users` or `room_permissions`).
-Admin power on the root Matrix Space is granted separately to `authorization.global_users`, so list a user in both places when they should administer both the Space and the managed rooms.
-Entries must be concrete Matrix user IDs; wildcard or placeholder entries are skipped with a warning.
+Agent and team access defaults `members_of_rooms` to that responder's configured `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
+The router defaults `current_room_members` to `true`.
+An explicit `members_of_rooms: []` disables inferred room grants.
 
-### Required Service Account Permissions
+MindRoom resolves aliases before administrator and static-user matching.
+Internal MindRoom identities bypass responder restrictions because they are system participants.
+The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
+Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 
-MindRoom applies room join rules and directory visibility using its managing account, typically the router entity's persisted Matrix account.
+The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
 
-- The managing account must be joined to the room.
-- The managing account must have enough power to send `m.room.join_rules`.
-- To publish to the room directory, Synapse requires moderator/admin-level power in that room.
+## Platform and credential authority
 
-If permissions are insufficient, MindRoom logs actionable warnings including the Matrix API error and required permission hint.
+`administrators` contains concrete Matrix user IDs and does not accept wildcards.
+Platform administrators may use administrative commands when their independent feature flag is enabled, manage any agent's credentials, and bypass responder policies.
 
-## Migration Guide (Existing Deployments)
+`agents.<name>.credential_managers` also contains concrete Matrix user IDs and does not accept wildcards.
+A credential manager may manage only the named agent's credentials and OAuth connections.
 
-Use this opt-in migration flow to move existing managed rooms to multi-user onboarding safely:
+Agent-scoped dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests resolve to the owner Matrix identity.
 
-1. Update config:
-   - `matrix_room_access.mode: multi_user`
-   - choose `multi_user_join_rule`
-   - set `publish_to_room_directory` as needed
-   - optionally list restricted rooms in `invite_only_rooms`
-2. Enable reconciliation once:
-   - `matrix_room_access.reconcile_existing_rooms: true`
-3. Restart MindRoom and verify logs for each managed room.
-4. After migration is complete, set `reconcile_existing_rooms: false` again (recommended steady state).
+`!config` remains disabled by default through `authorization.config_command_enabled`.
+When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a platform administrator.
 
-Only managed rooms (rooms configured through MindRoom agents/teams) are reconciled.
+## Bridge aliases
 
-## Matrix ID Format
-
-User IDs follow the Matrix format: `@localpart:homeserver.domain`
-
-Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
-
-## Authorization Flow
-
-Authorization checks are performed in order:
-
-1. **Internal system user** - When `mindroom_user` is configured and its Matrix account has been prepared, the persisted actual internal user ID is always authorized.
-When omitted (hosted/public profiles), this check is skipped.
-2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
-3. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
-4. **Global users** - Users in `global_users` have access to all rooms
-5. **Room permissions** - If any matching room identifier exists in `room_permissions` (room ID, full alias, or managed room key), user must be in that list (does NOT fall through to `default_room_access`)
-6. **Default access** - Rooms not in `room_permissions` use `default_room_access`
-
-> [!TIP]
-> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
-
-## Bridge Aliases
-
-When using Matrix bridges (e.g., mautrix-telegram, mautrix-signal), messages from the bridged platform arrive with a different Matrix user ID. Use `aliases` to map these bridge-created IDs to a canonical user so they inherit the same permissions:
+`authorization.aliases` remains available in both access models.
+It maps bridge-created Matrix IDs to a canonical Matrix user before access, administration, or credential checks.
 
 ```yaml
 authorization:
-  global_users:
-    - "@alice:example.com"
-  room_permissions:
-    "!room1:example.com":
-      - "@bob:example.com"
   aliases:
     "@alice:example.com":
       - "@telegram_123:example.com"
       - "@signal_456:example.com"
-    "@bob:example.com":
-      - "@telegram_789:example.com"
 ```
 
-In this example, messages from `@telegram_123:example.com` are treated as `@alice:example.com` (global access), and messages from `@telegram_789:example.com` are treated as `@bob:example.com` (access to `!room1:example.com` only).
+## Legacy compatibility
 
-## Per-Responder Reply Permissions
+Omitting `access_model` preserves the existing authorization behavior unchanged.
 
-Use `authorization.agent_reply_permissions` to restrict which users each responder can reply to.
+Legacy mode continues to use `authorization.global_users`, `authorization.room_permissions`, `authorization.default_room_access`, `authorization.agent_reply_permissions`, and `matrix_room_access`.
+Legacy static `agent_reply_permissions.<entity>.users` entries continue to authorize credential management for that agent.
+Legacy `joined_rooms` grants conversation access only.
 
-- The map key is an entity name: agent name, team name, `router`, or `*`.
-- The `*` key is a default rule for entities that do not have an explicit entry.
-- The value may be the existing list shorthand or a structured policy with `users` and `joined_rooms`.
-- `users` contains canonical Matrix user IDs or glob patterns such as `*:example.com`.
-- `joined_rooms` contains managed room keys, not display names, aliases, or raw room IDs.
-- A `*` user entry means "allow any sender" for that specific entity.
-- If neither an explicit entity policy nor the `*` fallback exists, the entity has no extra reply restriction.
-- An explicit entity policy completely overrides the `*` policy, including when one of its lists is empty.
-- A structured policy allows replies when the sender matches `users` or is currently joined to any listed `joined_rooms` room.
-- An invite does not grant access, and a leave, kick, or ban revokes access.
-- MindRoom resolves every managed room key to its persisted stable Matrix room ID and fails closed while membership state is unresolved or being refreshed.
-- Grant-room membership can authorize an agent in a different configured or ad-hoc room, including a DM where the router is absent, as long as normal room authorization passes and the agent is present and available there.
-- Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
-- Room membership grants conversation access across text, voice, calls, reactions, external triggers, and delegated runs through the shared reply gate.
-- Room membership never grants dashboard credential or OAuth management access; those operations use only the policy's static `users` entries.
-- Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
-- Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
-- Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
-- Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
-- `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
-- Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.
-- For voice messages, the permission check uses the original human sender, not the router that posted the transcription.
+Membership mode rejects non-default values in overlapping legacy fields because their old meanings combined capabilities that now require separate operator decisions.
 
-```yaml
-authorization:
-  global_users:
-    - "@alice:example.com"
-    - "@bob:example.com"
-  aliases:
-    "@alice:example.com":
-      - "@telegram_111:example.com"
-  agent_reply_permissions:
-    "*":
-      - "@alice:example.com"
-    code:
-      users:
-        - "@alice:example.com"
-      joined_rooms:
-        - engineering
-    research:
-      joined_rooms:
-        - research-project
-    router:
-      - "*"
-```
+| Legacy field | Manual membership-mode decision |
+| --- | --- |
+| `authorization.global_users` | Decide separately among `administrators`, room `invite_users`, responder `access.users`, and `credential_managers` |
+| `authorization.room_permissions.<room>` | Decide separately between `rooms.<room>.invite_users` and responder access |
+| `authorization.default_room_access` | Choose explicit responder access, usually `current_room_members` |
+| `authorization.agent_reply_permissions.<entity>` | Move conversation grants to responder `access` and separately choose credential managers |
+| `matrix_room_access.mode` and `multi_user_join_rule` | Move the desired join policy to `room_defaults` or a room override |
+| `matrix_room_access.publish_to_room_directory` | Move visibility to `room_defaults.listed` or `rooms.<key>.listed` |
+| `matrix_room_access.invite_only_rooms` | Use per-room `join_policy`, `listed`, and `invite_users` overrides |
+| `matrix_room_access.encrypt_managed_rooms` | Move encryption intent to `room_defaults.encrypted` or `rooms.<key>.encrypted` |
+| `matrix_room_access.room_admins` | Move Matrix power to `room_defaults.admins` or `rooms.<key>.admins` |
 
-In this example, `*` restricts entities to Alice by default, `code` allows Alice or anyone joined to `engineering`, `research` overrides the wildcard and allows members of `research-project`, and `router` can reply to anyone.
+Run `mindroom config explain-access` to print the effective legacy inputs and a conservative membership-mode skeleton.
+The command is read-only and never assumes that legacy global users should become platform administrators.
 
-## Bot Accounts
+## Bot accounts
 
-The `bot_accounts` field is a **top-level** config option (not under `authorization:`). It lists Matrix user IDs of non-MindRoom bots — such as bridge bots for Telegram, Slack, or other platforms — that should be treated like agents for response logic. Bots in this list won't trigger the multi-human-thread mention requirement.
+The top-level `bot_accounts` field lists non-MindRoom bot identities that should be treated like agents for response logic.
+These accounts are not exempt from responder access checks.
 
 ```yaml
-# Top-level config, not under authorization:
 bot_accounts:
   - "@telegram_bot:example.com"
   - "@slack_bot:example.com"
 ```
-
-For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/) page.

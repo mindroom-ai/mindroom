@@ -1484,6 +1484,35 @@ class TestMultiAgentOrchestrator:
         }
 
     @pytest.mark.asyncio
+    async def test_membership_space_invitees_do_not_receive_admin_power(self, tmp_path: Path) -> None:
+        """Invitation intent must remain separate from root Space Matrix power."""
+        config = _runtime_bound_config(
+            Config.model_validate(
+                {
+                    "access_model": "room_membership",
+                    "rooms": {"one": {"invite_users": ["@member:localhost"]}},
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+        with (
+            patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")) as ensure,
+            patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_invite_user_if_missing", new=AsyncMock()) as invite,
+        ):
+            await orchestrator._ensure_root_space({"one": "!one:localhost"})
+
+        assert ensure.await_args.kwargs["admin_user_ids"] == set()
+        invite.assert_awaited_once()
+        assert invite.await_args.args[1] == "@member:localhost"
+
+    @pytest.mark.asyncio
     async def test_ensure_room_invitations_does_not_expand_room_grants_via_default_access(
         self,
         tmp_path: Path,

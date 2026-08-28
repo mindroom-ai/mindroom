@@ -597,7 +597,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         run_id="run-1",
         session_id="session-1",
         entity_kind="agent",
-        entity_name="code",
+        entity_name="origin-team",
         room_id=room_id,
         thread_id="$thread",
         requester_id="@user:localhost",
@@ -672,6 +672,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: "DEVICE",
     )
+    authorize_responder = MagicMock(return_value=True)
     try:
         result = await manager.handle_card_response(
             room_id=room_id,
@@ -679,10 +680,12 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
             card_event_id=card_event_id,
             status="approved",
             reason=None,
+            authorize_responder=authorize_responder,
         )
 
         assert result.consumed is True
         assert result.resolved is True
+        authorize_responder.assert_called_once_with("origin-team")
         assert sent == [DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
         assert decided is not None

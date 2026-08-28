@@ -442,9 +442,9 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
     assert not bot._runtime_view.agent_reply_memberships.is_allowed(
         sender_id,
         ["grant", "second-grant"],
-        bot.config.authorization,
+        bot.config,
     )
-    assert bot._runtime_view.agent_reply_memberships.needs_refresh(bot.config.authorization)
+    assert bot._runtime_view.agent_reply_memberships.needs_refresh(bot.config)
 
 
 @pytest.mark.asyncio
@@ -509,7 +509,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
     await index.refresh(bot.config, bot.runtime_paths, client)
-    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert index.is_allowed(sender_id, ["grant"], bot.config)
     fence_started = asyncio.Event()
     release_fence = asyncio.Event()
 
@@ -536,8 +536,8 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
         apply_task = asyncio.create_task(apply_membership(response))
         await asyncio.wait_for(fence_started.wait(), timeout=1)
         try:
-            assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-            assert index.needs_refresh(bot.config.authorization)
+            assert not index.is_allowed(sender_id, ["grant"], bot.config)
+            assert index.needs_refresh(bot.config)
         finally:
             release_fence.set()
             await apply_task
@@ -607,8 +607,8 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert index.needs_refresh(bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
+    assert index.needs_refresh(bot.config)
     orchestrator.revoke_reply_authorized_calls.assert_awaited_once_with()
 
 
@@ -648,8 +648,8 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert index.needs_refresh(bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
+    assert index.needs_refresh(bot.config)
 
 
 @pytest.mark.asyncio
@@ -733,15 +733,15 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
-    assert not index.needs_refresh(bot.config.authorization)
+    assert index.is_allowed(sender_id, ["grant"], bot.config)
+    assert not index.needs_refresh(bot.config)
     orchestrator.revoke_reply_authorized_calls.assert_not_awaited()
 
     live_event = nio.RoomMemberEvent.from_dict(member_event)
     assert isinstance(live_event, nio.RoomMemberEvent)
     await bot._apply_live_reply_membership_transition(grant_room_id, live_event)
 
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
     orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
 
 
@@ -800,7 +800,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     bot._before_sync_response_admission(response)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
     orchestrator.revoke_reply_authorized_calls.assert_not_awaited()
 
 
@@ -872,13 +872,13 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
 
     orchestrator.reconcile_reply_authorized_calls = AsyncMock()
     bot._before_sync_response_admission(response)
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
 
     await bot._apply_live_reply_membership_transition(room_id, live_join_event)
-    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert index.is_allowed(sender_id, ["grant"], bot.config)
     await bot._apply_live_reply_membership_transition(room_id, live_revoke_event)
 
-    assert not index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert not index.is_allowed(sender_id, ["grant"], bot.config)
     assert orchestrator.reconcile_reply_authorized_calls.await_count == 2
 
     later_join = nio.RoomMemberEvent.from_dict(
@@ -887,7 +887,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     assert isinstance(later_join, nio.RoomMemberEvent)
     await bot._apply_live_reply_membership_transition(room_id, later_join)
 
-    assert index.is_allowed(sender_id, ["grant"], bot.config.authorization)
+    assert index.is_allowed(sender_id, ["grant"], bot.config)
     assert orchestrator.reconcile_reply_authorized_calls.await_count == 3
 
 

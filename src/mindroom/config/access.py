@@ -20,10 +20,15 @@ def _validate_unique_entries(values: list[str], *, field_name: str) -> list[str]
     return values
 
 
-def validate_concrete_matrix_user_ids(values: list[str], *, field_name: str) -> list[str]:
-    """Validate an authority list that cannot safely accept patterns or placeholders."""
+def validate_concrete_matrix_user_ids(
+    values: list[str],
+    *,
+    field_name: str,
+    allowed_placeholders: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Validate exact authority identities plus any explicitly inert onboarding placeholders."""
     _validate_unique_entries(values, field_name=field_name)
-    _, invalid = split_concrete_matrix_user_ids(values)
+    _, invalid = split_concrete_matrix_user_ids(value for value in values if value not in allowed_placeholders)
     if invalid:
         msg = f"{field_name} must contain concrete Matrix user IDs: {', '.join(invalid)}"
         raise ValueError(msg)
@@ -45,6 +50,7 @@ class ResponderAccessConfig(BaseModel):
         """Reject duplicate grants so authored intent has one interpretation."""
         if values is None:
             return None
+        assert info.field_name is not None
         return _validate_unique_entries(values, field_name=info.field_name)
 
 
@@ -63,4 +69,5 @@ class RoomDefaultsConfig(BaseModel):
     @classmethod
     def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
         """Reject duplicate room-policy entries."""
+        assert info.field_name is not None
         return _validate_unique_entries(values, field_name=info.field_name)

@@ -24,7 +24,7 @@ class EffectiveRoomPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class EffectiveResponderAccess:
+class _EffectiveResponderAccess:
     """Complete conversation-access policy for one responder."""
 
     current_room_members: bool
@@ -42,9 +42,13 @@ def resolve_room_policy(config: Config, room_key: str) -> EffectiveRoomPolicy:
     defaults = config.room_defaults
     override = config.rooms.get(room_key)
     return EffectiveRoomPolicy(
-        join_policy=(override.join_policy if override is not None and override.join_policy is not None else defaults.join_policy),
+        join_policy=(
+            override.join_policy if override is not None and override.join_policy is not None else defaults.join_policy
+        ),
         listed=override.listed if override is not None and override.listed is not None else defaults.listed,
-        encrypted=(override.encrypted if override is not None and override.encrypted is not None else defaults.encrypted),
+        encrypted=(
+            override.encrypted if override is not None and override.encrypted is not None else defaults.encrypted
+        ),
         invite_users=tuple(
             override.invite_users
             if override is not None and override.invite_users is not None
@@ -59,14 +63,14 @@ def _resolved_access(
     *,
     default_current_room_members: bool,
     default_room_grants: tuple[str, ...],
-) -> EffectiveResponderAccess:
+) -> _EffectiveResponderAccess:
     if authored is None:
-        return EffectiveResponderAccess(
+        return _EffectiveResponderAccess(
             current_room_members=default_current_room_members,
             members_of_rooms=default_room_grants,
             users=(),
         )
-    return EffectiveResponderAccess(
+    return _EffectiveResponderAccess(
         current_room_members=authored.current_room_members,
         members_of_rooms=(
             default_room_grants if authored.members_of_rooms is None else tuple(authored.members_of_rooms)
@@ -75,7 +79,7 @@ def _resolved_access(
     )
 
 
-def resolve_responder_access(config: Config, entity_name: str) -> EffectiveResponderAccess:
+def resolve_responder_access(config: Config, entity_name: str) -> _EffectiveResponderAccess:
     """Resolve authored access and entity-specific defaults exactly once."""
     if entity_name in config.agents:
         entity = config.agents[entity_name]

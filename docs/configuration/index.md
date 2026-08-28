@@ -570,24 +570,20 @@ mindroom_user:
   username: mindroom_user          # Set before first startup (account-creation request localpart only)
   display_name: MindRoomUser       # Can be changed later
 
-# Matrix room onboarding/discoverability (optional)
-matrix_room_access:
-  mode: single_user_private        # Default keeps invite-only/private behavior
-  multi_user_join_rule: public     # In multi_user mode: public or knock
-  publish_to_room_directory: false # Publish managed rooms in server room directory
-  invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
-  reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
-  encrypt_managed_rooms: false     # Enable Matrix E2EE on managed rooms (irreversible per room)
-  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
+# Membership-based access (recommended opt-in)
+access_model: room_membership
+administrators: []                 # Concrete Matrix IDs with platform and credential authority
+room_defaults:
+  join_policy: invite              # invite, knock, or public
+  listed: false                    # Publish managed rooms in the room directory
+  encrypted: false                 # Enable Matrix E2EE; enabling is irreversible
+  invite_users: []                 # Automatic invitation roster only
+  admins: []                       # Matrix room power level 100 only
 
-# Authorization (optional)
+# Non-overlapping authorization features remain under authorization.
 authorization:
-  global_users: []                 # Users with access to all rooms
-  room_permissions: {}             # Keys: room ID (!id), full alias (#alias:domain), or managed room key (alias)
-  default_room_access: false       # Default: false
-  config_command_enabled: false    # Enable !config for global admin users; default: false
-  aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
-  agent_reply_permissions: {}      # Reply policies: user-list shorthand or {users, joined_rooms} with managed room keys
+  config_command_enabled: false    # Enable !config for platform administrators
+  aliases: {}                      # Map canonical Matrix user IDs to bridge aliases
 
 # Managed room metadata (optional)
 # Keys are managed room keys.
@@ -596,6 +592,11 @@ rooms:
   lobby:
     display_name: Lobby
     description: Main assistant room
+    join_policy: invite             # Optional override
+    listed: false                   # Optional override
+    encrypted: false                # Optional override
+    invite_users: []                # Replaces room_defaults.invite_users
+    admins: []                      # Replaces room_defaults.admins
 
 # Room-specific model overrides (optional)
 # Keys are room aliases, values are model names from the models section.
@@ -639,11 +640,16 @@ matrix_sync:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
-When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
+Omit `access_model` to keep the legacy `authorization` and `matrix_room_access` fields unchanged.
+Membership mode rejects non-default overlapping legacy fields because invitation, conversation, Matrix power, platform, and credential authority require separate operator decisions.
+Run `mindroom config explain-access` for a read-only migration report and see [Authorization](../authorization.md) for the manual migration table.
+
+In membership mode, the root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
+In legacy mode, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
 If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
-Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+Legacy room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Removing a legacy user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 ## Credential Seeds
@@ -804,16 +810,15 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
-- When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
-- `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` still requires `global_users`
-- `authorization.agent_reply_permissions` can restrict replies by static user/glob matches or current membership in configured managed rooms
-- `authorization.agent_reply_permissions.<entity>.joined_rooms` grants conversation access only and never dashboard credential or OAuth management
+- `access_model: room_membership` separates `administrators`, room invitations, responder access, Matrix power, and `credential_managers`
+- `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
+- Responder `access` can match static users, current-room members, or members of configured managed rooms
+- Responder access and room membership never grant dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
-- `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
-- `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
-- `matrix_room_access.encrypt_managed_rooms` enables Matrix end-to-end encryption on managed rooms; per-room `rooms.<key>.encrypted` overrides it, enabling is irreversible, and MindRoom never disables encryption on a room
-- In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
-- In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
+- Membership-mode `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
+- Omit `access_model` to retain legacy `authorization` and `matrix_room_access` behavior unchanged
+- Run `mindroom config explain-access` before manually migrating overloaded legacy fields
+- Membership mode also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

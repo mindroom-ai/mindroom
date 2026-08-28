@@ -667,13 +667,11 @@ class TestProvisionerEndpoints:
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
         set_string_args = _helm_set_string_args(helm_args)
-        assert set_args["matrixRoomAccess.mode"] == "multi_user"
-        assert set_args["matrixRoomAccess.multiUserJoinRule"] == "public"
-        assert set_args["matrixRoomAccess.publishToRoomDirectory"] == "false"
-        assert set_args["matrixRoomAccess.reconcileExistingRooms"] == "true"
+        assert set_args["roomDefaults.joinPolicy"] == "public"
+        assert set_args["roomDefaults.listed"] == "false"
         assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "analysis"
         assert set_string_args["matrixAutoJoinRoomKeys[9]"] == "lobby"
-        assert set_string_args["authorizationGlobalUsers[0]"] == "@owner.user+test:123.mindroom.test"
+        assert set_string_args["administrators[0]"] == "@owner.user+test:123.mindroom.test"
         _assert_helm_uses_external_instance_secret(helm_args)
 
     def test_provision_re_provision_existing(

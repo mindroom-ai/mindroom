@@ -2122,6 +2122,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoked_layer", ["room", "entity"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
     tmp_path: Path,
     revoked_layer: str,

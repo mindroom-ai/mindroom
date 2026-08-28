@@ -27,6 +27,7 @@ from mindroom.approval_manager import (
 from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
 from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
@@ -2030,7 +2031,7 @@ class TestAgentBot(AgentBotTestBase):
 
         approval_handler = AsyncMock(return_value=True)
         with (
-            patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply", return_value=False),
+            patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply_in_room", return_value=False),
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", approval_handler),
             _mock_interactive_claim(bot, None) as interactive_handler,
         ):
@@ -2155,9 +2156,27 @@ class TestAgentBot(AgentBotTestBase):
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A reply claimed by approval handling must retain that owner after a crash."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        legacy_config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(legacy_config)
+        membership_payload = legacy_config.authored_model_dump()
+        membership_payload["access_model"] = "room_membership"
+        membership_payload["authorization"] = {}
+        for agent in cast("dict[str, dict[str, object]]", membership_payload["agents"]).values():
+            agent["access"] = {"members_of_rooms": [], "users": []}
+        membership_payload["router"] = {
+            "access": {
+                "members_of_rooms": [],
+                "users": ["@user:localhost"],
+            },
+        }
+        config = Config.validate_with_runtime(membership_payload, runtime_paths)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _approval_reply_event()
 
@@ -2183,17 +2202,32 @@ class TestAgentBot(AgentBotTestBase):
         pending = await journal.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.APPROVAL_REPLY
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
         handle_text_event = _install_text_dispatch_mock(monkeypatch, restarted)
+
+        async def reject_revoked_origin(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+            authorize_responder: Callable[[str], bool] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is None
+            assert authorize_responder is not None
+            assert authorize_responder("calculator") is False
+            return ApprovalActionResult(consumed=False, resolved=False)
+
         with patch(
-            "mindroom.bot.maybe_handle_tool_approval_reply",
-            new=AsyncMock(return_value=False),
-        ) as approval_reply:
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(side_effect=reject_revoked_origin),
+        ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
 
-        approval_reply.assert_awaited_once()
-        assert approval_reply.await_args.kwargs["before_consume"] is None
-        assert approval_reply.await_args.kwargs["authorization_prevalidated"] is True
+        approval_action.assert_awaited_once()
         handle_text_event.assert_not_awaited()
         assert await restarted._journal_dispatcher.store.pending() == ()
 
@@ -2204,26 +2238,44 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A reaction claimed by approval handling must never fall through to hooks."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        legacy_config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(legacy_config)
+        membership_payload = legacy_config.authored_model_dump()
+        membership_payload["access_model"] = "room_membership"
+        membership_payload["authorization"] = {}
+        for agent in cast("dict[str, dict[str, object]]", membership_payload["agents"]).values():
+            agent["access"] = {"members_of_rooms": [], "users": []}
+        membership_payload["router"] = {
+            "access": {
+                "members_of_rooms": [],
+                "users": ["@user:localhost"],
+            },
+        }
+        config = Config.validate_with_runtime(membership_payload, runtime_paths)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$approval-reaction")
         failure = RuntimeError("crash after approval reaction side effect")
 
-        async def fail_after_claim(
-            _action: MatrixApprovalAction,
-            *,
-            before_consume: Callable[[], Awaitable[None]] | None = None,
-        ) -> ApprovalActionResult:
-            assert before_consume is not None
+        async def fail_after_claim(**kwargs: object) -> bool:
+            before_consume = cast("Callable[[], Awaitable[None]]", kwargs["before_consume"])
             await before_consume()
             raise failure
 
         with (
             patch(
-                "mindroom.approval_inbound.handle_matrix_approval_action",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mindroom.reaction_dispatch.handle_tool_approval_action",
                 new=AsyncMock(side_effect=fail_after_claim),
             ),
         ):
@@ -2233,15 +2285,28 @@ class TestAgentBot(AgentBotTestBase):
             0
         ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
+
+        async def reject_revoked_origin(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+            authorize_responder: Callable[[str], bool] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is None
+            assert authorize_responder is not None
+            assert authorize_responder("calculator") is False
+            return ApprovalActionResult(consumed=False, resolved=False)
+
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=False, resolved=False)),
-        ):
+            new=AsyncMock(side_effect=reject_revoked_origin),
+        ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
 
+        approval_action.assert_awaited_once()
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 

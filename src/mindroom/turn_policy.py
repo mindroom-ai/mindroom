@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
-    is_sender_allowed_for_agent_reply,
     is_sender_allowed_for_agent_reply_in_room,
     responder_candidate_entities_for_room,
 )
@@ -294,16 +293,6 @@ class TurnPolicy:
     """Own pure decision logic for one prepared inbound turn."""
 
     deps: TurnPolicyDeps
-
-    def can_reply_to_sender(self, sender_id: str) -> bool:
-        """Return whether this entity may reply to ``sender_id``."""
-        return is_sender_allowed_for_agent_reply(
-            sender_id,
-            self.deps.agent_name,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
-        )
 
     def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
         """Return whether this entity may reply to a sender in one room."""

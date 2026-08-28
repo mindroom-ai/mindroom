@@ -1810,8 +1810,8 @@ class _MultiAgentOrchestrator:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
         reply_membership_policy_changed = agent_reply_membership_policy_changed(
-            current_config.authorization,
-            new_config.authorization,
+            current_config,
+            new_config,
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
@@ -1843,7 +1843,11 @@ class _MultiAgentOrchestrator:
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
-                authorized_user_ids=new_config.authorization.global_users,
+                platform_administrator_ids=(
+                    new_config.administrators
+                    if new_config.access_model == "room_membership"
+                    else new_config.authorization.global_users
+                ),
             )
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
@@ -1990,12 +1994,13 @@ class _MultiAgentOrchestrator:
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
         root_space_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
+        root_space_admin_ids = root_space_user_ids if config.access_model != "room_membership" else set()
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
             self.runtime_paths,
             normalized_room_ids,
-            admin_user_ids=root_space_user_ids,
+            admin_user_ids=root_space_admin_ids,
         )
         if root_space_id is None:
             return

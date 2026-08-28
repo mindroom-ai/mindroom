@@ -509,9 +509,9 @@ class TestDynamicConfigUpdate:
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
         assert orchestrator.agent_reply_memberships.snapshot.policy_signature == (
-            _agent_reply_membership_policy_signature(updated_config.authorization)
+            _agent_reply_membership_policy_signature(updated_config)
         )
-        assert orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
+        assert orchestrator.agent_reply_memberships.needs_refresh(updated_config)
 
     @pytest.mark.asyncio
     async def test_matrix_space_change_preserves_ready_reply_memberships(
@@ -583,7 +583,7 @@ class TestDynamicConfigUpdate:
         assert orchestrator.agent_reply_memberships.is_allowed(
             "@alice:example.com",
             ["lobby"],
-            updated_config.authorization,
+            updated_config,
         )
         assert membership_client.joined_members.await_count == 1
 
@@ -663,11 +663,11 @@ class TestDynamicConfigUpdate:
         assert plan.entities_to_restart == set()
         assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME, "general"}
         reconcile_rooms.assert_awaited_once_with(plan, set())
-        assert not orchestrator.agent_reply_memberships.needs_refresh(updated_config.authorization)
+        assert not orchestrator.agent_reply_memberships.needs_refresh(updated_config)
         assert orchestrator.agent_reply_memberships.is_allowed(
             "@alice:example.com",
             ["lobby"],
-            updated_config.authorization,
+            updated_config,
         )
 
     @pytest.mark.asyncio

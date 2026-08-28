@@ -402,12 +402,24 @@ class BotRoomLifecycle:
             self._logger().info("Ignored invite", room_id=room.room_id, sender=event.sender)
             return
 
-        if not is_authorized_sender(
-            event.sender,
-            self._config(),
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
+        config = self._config()
+        if config.access_model == "room_membership":
+            invite_allowed = is_sender_allowed_for_agent_reply_in_room(
+                event.sender,
+                self.deps.agent_name,
+                config,
+                room.room_id,
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+            )
+        else:
+            invite_allowed = is_authorized_sender(
+                event.sender,
+                config,
+                room.room_id,
+                self.deps.runtime_paths,
+            )
+        if not invite_allowed:
             self._logger().debug(
                 "ignoring_invite_from_unauthorized_sender",
                 user_id=event.sender,

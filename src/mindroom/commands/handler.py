@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import is_platform_administrator, responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
@@ -310,8 +310,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = get_command_help(topic)
 
     elif command.type == CommandType.RELOAD_PLUGINS:
-        resolved_requester_user_id = context.config.authorization.resolve_alias(requester_user_id)
-        if resolved_requester_user_id not in context.config.authorization.global_users:
+        if not is_platform_administrator(requester_user_id, context.config):
             response_text = "❌ Admin only."
         elif context.reload_plugins is None:
             response_text = "❌ Plugin reload unavailable."
@@ -410,12 +409,12 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization
-        resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
         if not authorization.config_command_enabled:
             response_text = "❌ Config command disabled."
-        elif resolved_requester_user_id not in authorization.global_users:
+        elif not is_platform_administrator(requester_user_id, context.config):
             response_text = "❌ Admin only."
         else:
+            resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
             # Handle config command
             args_text = command.args.get("args_text", "")
             response_text, change_info = await handle_config_command(

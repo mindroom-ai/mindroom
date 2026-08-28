@@ -95,7 +95,7 @@ class ReactionDispatcher:
             status="approved",
             reason=None,
             before_consume=None if approval_claimed else claim_approval_reaction,
-            authorization_prevalidated=approval_claimed,
+            membership_index=self.deps.turn_policy.deps.agent_reply_memberships,
         )
         return approval_claimed or approval_handled
 

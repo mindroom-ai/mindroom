@@ -26,7 +26,7 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return set(concrete_user_ids)
 
 
-def get_authorized_user_ids_to_invite(
+def _get_authorized_user_ids_to_invite(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -49,7 +49,7 @@ def get_room_user_ids_to_invite(
 ) -> set[str]:
     """Return the invitation roster for one room under the active access model."""
     if config.access_model != "room_membership":
-        return get_authorized_user_ids_to_invite(config, room_id, runtime_paths)
+        return _get_authorized_user_ids_to_invite(config, room_id, runtime_paths)
 
     state = MatrixState.load(runtime_paths=runtime_paths)
     room_keys = sorted(room_key for room_key, room in state.rooms.items() if room.room_id == room_id)

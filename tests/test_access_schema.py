@@ -206,6 +206,45 @@ def test_responder_access_rejects_unknown_managed_room() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("entity_kind", "room_reference"),
+    [
+        ("agent", "!external:example.com"),
+        ("agent", "#external:example.com"),
+        ("team", "!external:example.com"),
+        ("team", "#external:example.com"),
+    ],
+)
+def test_inferred_responder_access_rejects_unmanaged_room_identifiers(
+    entity_kind: str,
+    room_reference: str,
+) -> None:
+    """Omitted access must not turn raw IDs or aliases into membership grant rooms."""
+    payload: dict[str, object] = {
+        "access_model": "room_membership",
+        "agents": {"research": {"display_name": "Research"}},
+    }
+    if entity_kind == "agent":
+        payload["agents"] = {
+            "research": {
+                "display_name": "Research",
+                "rooms": [room_reference],
+            },
+        }
+    else:
+        payload["teams"] = {
+            "reviewers": {
+                "display_name": "Reviewers",
+                "role": "Review",
+                "agents": ["research"],
+                "rooms": [room_reference],
+            },
+        }
+
+    with pytest.raises(ValidationError, match=room_reference):
+        Config.model_validate(payload)
+
+
 def test_policy_resolvers_reject_unknown_targets() -> None:
     """Runtime callers must not receive permissive policies for unknown targets."""
     config = Config.model_validate({"access_model": "room_membership"})
@@ -214,3 +253,72 @@ def test_policy_resolvers_reject_unknown_targets() -> None:
         resolve_room_policy(config, "missing")
     with pytest.raises(ValueError, match="Unknown responder"):
         resolve_responder_access(config, "missing")
+
+
+def test_membership_mode_rejects_legacy_room_permissions() -> None:
+    """Membership mode must not silently combine an overloaded legacy room allowlist."""
+    with pytest.raises(ValidationError, match=r"authorization\.room_permissions\.talent"):
+        Config.model_validate(
+            {
+                "access_model": "room_membership",
+                "authorization": {
+                    "room_permissions": {"talent": ["@owner:example.com"]},
+                },
+            },
+        )
+
+
+def test_membership_mode_reports_every_overlapping_legacy_field() -> None:
+    """One validation error must identify every authored legacy capability conflict."""
+    with pytest.raises(ValidationError) as error:
+        Config.model_validate(
+            {
+                "access_model": "room_membership",
+                "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
+                "authorization": {
+                    "global_users": ["@owner:example.com"],
+                    "room_permissions": {"talent": ["@owner:example.com"]},
+                    "default_room_access": True,
+                    "agent_reply_permissions": {"talent": ["@owner:example.com"]},
+                },
+                "matrix_room_access": {
+                    "mode": "multi_user",
+                    "multi_user_join_rule": "knock",
+                    "publish_to_room_directory": True,
+                    "invite_only_rooms": ["talent"],
+                    "encrypt_managed_rooms": True,
+                    "room_admins": ["@owner:example.com"],
+                },
+            },
+        )
+
+    message = str(error.value)
+    for path in (
+        "authorization.global_users",
+        "authorization.room_permissions.talent",
+        "authorization.default_room_access",
+        "authorization.agent_reply_permissions.talent",
+        "matrix_room_access.mode",
+        "matrix_room_access.multi_user_join_rule",
+        "matrix_room_access.publish_to_room_directory",
+        "matrix_room_access.invite_only_rooms",
+        "matrix_room_access.encrypt_managed_rooms",
+        "matrix_room_access.room_admins",
+    ):
+        assert path in message
+    assert "operator" in message
+
+
+def test_legacy_mode_remains_unchanged() -> None:
+    """Omitting access_model must retain the authored legacy values."""
+    config = Config.model_validate(
+        {
+            "authorization": {
+                "default_room_access": False,
+                "room_permissions": {"talent": ["@owner:example.com"]},
+            },
+        },
+    )
+
+    assert config.access_model is None
+    assert config.authorization.room_permissions == {"talent": ["@owner:example.com"]}
