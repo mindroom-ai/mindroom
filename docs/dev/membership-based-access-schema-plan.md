@@ -352,6 +352,7 @@ git commit -m "feat: add membership access schema"
 - Modify: `src/mindroom/orchestration/rooms.py:1-65`
 - Modify: `src/mindroom/orchestrator.py:2079-2150`
 - Test: `tests/test_matrix_room_access.py`
+- Test: `tests/test_room_invites.py`
 - Test: `tests/test_orchestrator_runtime.py`
 
 **Interfaces:**
@@ -433,6 +434,9 @@ git commit -m "feat: reconcile membership room policy"
 - Test: `tests/test_visible_voice_echo.py`
 - Test: `tests/test_turn_policy.py`
 - Test: `tests/test_edit_response_regeneration.py`
+- Test: `tests/test_voice_command_processing.py`
+- Test: `tests/test_routing_regression.py`
+- Test: `tests/test_turn_controller_focused.py`
 
 **Interfaces:**
 - Consumes: `resolve_responder_access(config, entity_name) -> EffectiveResponderAccess` from Task 1 and the existing authoritative membership index.
@@ -441,9 +445,10 @@ git commit -m "feat: reconcile membership room policy"
 - [ ] **Step 1: Write two-gate elimination and fail-closed tests**
 
 ```python
-def test_membership_mode_does_not_apply_legacy_room_gate() -> None:
+@pytest.mark.asyncio
+async def test_membership_mode_does_not_apply_legacy_room_gate() -> None:
     config = membership_config(agent_rooms=["talent"])
-    memberships = membership_index({"talent": {"@member:example.com"}})
+    memberships = await membership_index(config, {"talent": {"@member:example.com"}})
 
     assert is_sender_allowed_for_responder(
         "@member:example.com",
@@ -457,7 +462,7 @@ def test_membership_mode_does_not_apply_legacy_room_gate() -> None:
 
 def test_membership_mode_fails_closed_when_grant_room_is_unresolved() -> None:
     config = membership_config(agent_rooms=["talent"])
-    memberships = unresolved_membership_index("talent")
+    memberships = unresolved_membership_index(config, "talent")
 
     assert not is_sender_allowed_for_responder(
         "@member:example.com",
@@ -469,7 +474,9 @@ def test_membership_mode_fails_closed_when_grant_room_is_unresolved() -> None:
     )
 ```
 
-Cover text, media, approval reactions, Matrix RTC calls, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled-resume entry points with membership-mode regressions. Each regression must prove a current grant-room member is accepted and an unresolved membership snapshot is denied.
+Cover text, media, approval reactions, Matrix RTC calls, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled-resume entry points with membership-mode regressions.
+Each regression must prove a current grant-room member is accepted and an unresolved membership snapshot is denied.
+Add a scheduled-fire regression that records the task while membership is valid, removes that membership before execution, and proves the preserved requester is denied at the normal responder boundary.
 
 - [ ] **Step 2: Run focused tests and confirm the legacy precheck rejects the member**
 
@@ -487,14 +494,14 @@ Replace standalone `is_authorized_sender` calls at approval continuation, attach
 
 - [ ] **Step 4: Run authorization and ingress suites**
 
-Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py`
+Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_controller_focused.py`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit responder authorization**
 
 ```bash
-git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval_inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py
+git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval_inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_turn_controller_focused.py
 git commit -m "feat: authorize responders by room membership"
 ```
 
@@ -513,6 +520,7 @@ git commit -m "feat: authorize responders by room membership"
 - Modify: `src/mindroom/orchestrator.py:1835-1855`
 - Test: `tests/test_authorization.py`
 - Test: `tests/api/test_dashboard_credential_scope.py`
+- Test: `tests/api/test_oauth_api.py`
 - Test: `tests/test_oauth_connection_tools.py`
 - Test: `tests/test_commands.py`
 - Test: `tests/test_config_commands.py`
@@ -541,7 +549,10 @@ def test_room_member_cannot_manage_agent_credentials() -> None:
 
 
 def test_administrator_manages_credentials_without_being_an_invitee() -> None:
-    config = membership_config(administrators=["@admin:example.com"])
+    config = membership_config(
+        administrators=["@admin:example.com"],
+        agent_rooms=["talent"],
+    )
 
     assert is_sender_allowed_for_agent_credential_management(
         "@admin:example.com",
@@ -702,7 +713,9 @@ uv run pytest -q \
   tests/test_attachments_tool.py \
   tests/test_matrix_rtc_call_manager.py \
   tests/test_visible_voice_echo.py \
+  tests/test_turn_controller_focused.py \
   tests/api/test_dashboard_credential_scope.py \
+  tests/api/test_oauth_api.py \
   tests/test_oauth_connection_tools.py \
   tests/test_commands.py \
   tests/test_config_commands.py \

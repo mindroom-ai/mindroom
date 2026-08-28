@@ -39,6 +39,7 @@ from mindroom.coalescing_batch import (
 )
 from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -480,6 +481,7 @@ def _build_harness(
                 runtime_paths=runtime_paths,
                 agent_name=agent_name,
                 matrix_id=matrix_id,
+                agent_reply_memberships=runtime.agent_reply_memberships,
             ),
         ),
     )
@@ -2081,6 +2083,25 @@ def _single_agent_config(tmp_path: Path, thread_mode: str) -> Config:
     )
 
 
+def _membership_single_agent_config(tmp_path: Path) -> Config:
+    """One agent whose current room membership is its only human access clause."""
+    return bind_runtime_paths(
+        Config(
+            access_model="room_membership",
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(
+                        current_room_members=True,
+                        members_of_rooms=[],
+                    ),
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_scheduled_fire_history_limit_reaches_response_request(config: Config, tmp_path: Path) -> None:
     """The history limit annotated on a trusted scheduled fire lands on the ResponseRequest."""
@@ -2097,6 +2118,40 @@ async def test_scheduled_fire_history_limit_reaches_response_request(config: Con
         source_event_id="$scheduled:localhost",
     )
     assert request.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
+
+
+@pytest.mark.asyncio
+async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp_path: Path) -> None:
+    """A requester removed after scheduling cannot execute through the preserved identity."""
+    config = _membership_single_agent_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _scheduled_fire_event(config, extra_content={})
+    responder_user_id = _entity_user_id(config, "general")
+    client = make_matrix_client_mock(user_id=responder_user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(_SENDER, None, None),
+            nio.RoomMember(responder_user_id, None, None),
+        ],
+        room_id=room.room_id,
+    )
+    memberships = harness.controller.deps.runtime.agent_reply_memberships
+    await memberships.refresh(config, runtime_paths_for(config), client)
+    assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(responder_user_id, None, None)],
+        room_id=room.room_id,
+    )
+    await memberships.refresh(config, runtime_paths_for(config), client)
+
+    await harness.deliver(room, event)
+
+    assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+    assert harness.runner.requests == []
+    assert harness.turn_store.is_handled(event.event_id)
 
 
 @pytest.mark.asyncio
