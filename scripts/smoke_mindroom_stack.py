@@ -139,6 +139,8 @@ def main() -> int:
                     "GOOGLE_API_KEY=",
                     "OPENROUTER_API_KEY=",
                     f"OLLAMA_HOST={OLLAMA_HOST_DEFAULT}",
+                    f"MINDROOM_RUNTIME_UID={os.getuid()}",
+                    f"MINDROOM_RUNTIME_GID={os.getgid()}",
                     f"HOST_HOMESERVER_PORT={stack_synapse_port}",
                     f"HOST_DASHBOARD_PORT={stack_mindroom_port}",
                     f"HOST_CLIENT_PORT={stack_client_port}",

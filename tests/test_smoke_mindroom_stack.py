@@ -47,7 +47,7 @@ def test_migrate_stack_config_accepts_writable_config_directory(tmp_path: Path) 
     assert config_path.read_text(encoding="utf-8") == "agents: {}\n"
 
 
-def test_smoke_mindroom_stack_uses_env_port_overrides(
+def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -97,6 +97,8 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(
     )
     monkeypatch.setattr(smoke_mindroom_stack, "wait_for_http_match", fake_wait_for_http_match)
     monkeypatch.setattr(smoke_mindroom_stack, "wait_for_http_status", fake_wait_for_http_status)
+    monkeypatch.setattr(smoke_mindroom_stack.os, "getuid", lambda: 1234)
+    monkeypatch.setattr(smoke_mindroom_stack.os, "getgid", lambda: 5678)
     monkeypatch.setattr(sys, "argv", ["smoke_mindroom_stack.py", str(stack_dir)])
 
     assert smoke_mindroom_stack.main() == 0
@@ -108,6 +110,8 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(
     assert "HOST_CLIENT_PORT=18080" in captured_env_text
     assert "CLIENT_HOMESERVER_URL=http://localhost:18008" in captured_env_text
     assert "CLIENT_MINDROOM_URL=http://localhost:18765" in captured_env_text
+    assert "MINDROOM_RUNTIME_UID=1234" in captured_env_text
+    assert "MINDROOM_RUNTIME_GID=5678" in captured_env_text
 
     up_command = next(command for command in commands if "up" in command)
     assert up_command[up_command.index("-f") + 1] == str(compose_file)
