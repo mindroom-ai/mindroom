@@ -29,6 +29,7 @@ from mindroom.agent_policy import (
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
+from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -391,6 +392,18 @@ class Config(BaseModel):
         "matrix_message": ("attachments", "matrix_room"),
     }
 
+    access_model: Literal["room_membership"] | None = Field(
+        default=None,
+        description="Opt-in access-policy model",
+    )
+    administrators: list[str] = Field(
+        default_factory=list,
+        description="Concrete Matrix user IDs with platform-wide administrative authority",
+    )
+    room_defaults: RoomDefaultsConfig = Field(
+        default_factory=RoomDefaultsConfig,
+        description="Desired Matrix state inherited by managed rooms in membership mode",
+    )
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
@@ -460,6 +473,12 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
+
+    @field_validator("administrators")
+    @classmethod
+    def validate_administrators(cls, values: list[str]) -> list[str]:
+        """Require unique, concrete platform-administrator identities."""
+        return validate_concrete_matrix_user_ids(values, field_name="administrators")
 
     @classmethod
     def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
@@ -653,6 +672,33 @@ class Config(BaseModel):
             msg = (
                 "authorization.agent_reply_permissions joined_rooms must reference configured managed room keys: "
                 + ", ".join(invalid_room_references)
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_membership_access_room_references(self) -> Config:
+        """Require membership grants to reference configured managed-room keys."""
+        if self.access_model != "room_membership":
+            return self
+        configured_managed_room_keys = {
+            room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
+        }
+        responders = {
+            **{name: agent.access for name, agent in self.agents.items()},
+            **{name: team.access for name, team in self.teams.items()},
+            ROUTER_AGENT_NAME: self.router.access,
+        }
+        invalid_room_references = sorted(
+            f"{entity_name} -> {room_key}"
+            for entity_name, access in responders.items()
+            if access is not None and access.members_of_rooms is not None
+            for room_key in access.members_of_rooms
+            if room_key not in configured_managed_room_keys
+        )
+        if invalid_room_references:
+            msg = "Responder access members_of_rooms must reference configured managed room keys: " + ", ".join(
+                invalid_room_references,
             )
             raise ValueError(msg)
         return self
