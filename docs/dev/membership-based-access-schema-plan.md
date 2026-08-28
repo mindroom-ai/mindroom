@@ -1,10 +1,13 @@
 # Membership-Based Access Schema Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task.
+> Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace overlapping room, responder, invitation, and credential policies with a membership-based access schema whose fields each have one user-visible purpose.
 
-**Architecture:** Existing configurations remain on the legacy authorization path. Configurations opt into the new path with `access_model: room_membership`; rooms own membership and Matrix state, responders own conversation access, and agents own credential managers. Runtime resolvers produce effective immutable policies so ingress, room reconciliation, and credential APIs consume one interpretation instead of reimplementing inheritance.
+**Architecture:** Configuration loading converts the retired access fields into the membership schema, validates the result, keeps a one-time backup, and atomically persists the migrated YAML before runtime startup.
+Rooms own membership and Matrix state, responders own conversation access, and agents own credential managers.
+Runtime resolvers consume only the membership schema, so ingress, room reconciliation, and credential APIs have one interpretation instead of parallel compatibility paths.
 
 **Tech Stack:** Python 3.13, Pydantic v2, Matrix/Nio, Typer, pytest, YAML
 
@@ -12,8 +15,11 @@
 
 ## Global Constraints
 
-- Existing configurations that omit `access_model` retain their current behavior.
-- `access_model: room_membership` rejects overlapping legacy access fields instead of guessing precedence.
+- Runtime code supports only the membership access model.
+- Loading a configuration with retired access fields automatically validates and persists one deterministic migration before startup.
+- Migration keeps the original root configuration as a one-time backup and never overwrites that backup.
+- Automatic migration is limited to single-file configurations; any `!include` causes a clear error before validation or persistence.
+- Inputs whose room references cannot be resolved to managed room keys fail before any file is written.
 - Room-specific values replace room defaults; list values are never implicitly combined.
 - `invite_users` controls invitations only and never grants administrative or credential authority.
 - Platform administrators are not automatically invited and do not receive Matrix room power.
@@ -39,13 +45,12 @@ The current authored model combines several unrelated decisions:
 - Static `agent_reply_permissions.<entity>.users` entries also authorize agent credential management.
 - `matrix_room_access` owns global room defaults while `rooms.<key>` owns only some room-specific overrides.
 
-Because both the room gate and responder gate must pass, a current room member can satisfy the responder membership policy and still be rejected by the room allowlist. Conversely, using authorization lists as invitation sources makes changes intended for conversation access mutate room membership.
+Because both the room gate and responder gate must pass, a current room member can satisfy the responder membership policy and still be rejected by the room allowlist.
+Conversely, using authorization lists as invitation sources makes changes intended for conversation access mutate room membership.
 
 ### User-facing schema
 
 ```yaml
-access_model: room_membership
-
 administrators:
   - "@owner:example.com"
 
@@ -73,7 +78,8 @@ agents:
       - "@talent-owner:example.com"
 ```
 
-The common case has no authored responder `access` block. An agent or team defaults to membership in its configured `rooms`; the router defaults to membership in the current room.
+The common case has no authored responder `access` block.
+An agent or team defaults to membership in its configured `rooms`; the router defaults to membership in the current room.
 
 An exceptional policy is explicit:
 
@@ -102,7 +108,8 @@ Administrators and internal system identities bypass responder conversation poli
 
 ### Room inheritance
 
-`room_defaults` provides desired state for every managed room, including rooms created implicitly by an agent or team assignment. Each field on `rooms.<key>` is an override:
+`room_defaults` provides desired state for every managed room, including rooms created implicitly by an agent or team assignment.
+Each field on `rooms.<key>` is an override:
 
 - Omitted field: inherit the corresponding default.
 - Scalar value: replace the default.
@@ -124,9 +131,11 @@ rooms:
     invite_users: []
 ```
 
-Only the project owner is invited to `project`; the default user is not combined with the override. Nobody is automatically invited to `isolated`.
+Only the project owner is invited to `project`; the default user is not combined with the override.
+Nobody is automatically invited to `isolated`.
 
-`invite_users` is declarative desired invitation state. A listed user who leaves or is kicked is invited again on reconciliation; remove the user from configuration before intentionally removing their access.
+`invite_users` is declarative desired invitation state.
+A listed user who leaves or is kicked is invited again on reconciliation; remove the user from configuration before intentionally removing their access.
 
 ### Separation of authority
 
@@ -163,7 +172,9 @@ class EffectiveResponderAccess:
     users: tuple[str, ...]
 ```
 
-`resolve_room_policy(config, room_key)` applies replacement inheritance once. `resolve_responder_access(config, entity_name)` applies responder defaults once. Callers never merge lists or reinterpret omitted values.
+`resolve_room_policy(config, room_key)` applies replacement inheritance once.
+`resolve_responder_access(config, entity_name)` applies responder defaults once.
+Callers never merge lists or reinterpret omitted values.
 
 Responder defaults are:
 
@@ -175,7 +186,9 @@ Responder defaults are:
 
 ### Conversation authorization
 
-In `room_membership` mode, the legacy room-level sender allowlist is removed from ingress. Matrix admission already establishes that an event sender was able to send into the current room. The selected responder then applies one authoritative policy:
+The retired room-level sender allowlist is removed from ingress.
+Matrix admission already establishes that an event sender was able to send into the current room.
+The selected responder then applies one authoritative policy:
 
 1. Resolve aliases to a canonical requester.
 2. Allow internal system identities.
@@ -198,7 +211,9 @@ Room reconciliation consumes only `EffectiveRoomPolicy`:
 
 Neither `administrators`, responder `access.users`, nor `credential_managers` participates in room invitations.
 
-Membership mode is declarative for existing managed rooms. It does not consult the legacy `matrix_room_access.reconcile_existing_rooms` opt-in before applying reversible join-policy, directory-visibility, invitation, or power-level changes. Encryption remains one-way: reconciliation may enable it but never disable it.
+The membership schema is declarative for existing managed rooms.
+Reconciliation always applies reversible join-policy, directory-visibility, invitation, and power-level changes.
+Encryption remains one-way: reconciliation may enable it but never disable it.
 
 ### Credential management
 
@@ -207,29 +222,31 @@ Agent credential and OAuth endpoints authorize only:
 - a platform administrator, or
 - a canonical user listed in `agents.<name>.credential_managers`.
 
-Room membership and responder access do not authorize credential operations. Alias resolution remains supported before exact manager matching. Credential-manager entries must be concrete Matrix user IDs; wildcard credential administrators are not accepted.
+Room membership and responder access do not authorize credential operations.
+Alias resolution remains supported before exact manager matching.
+Credential-manager entries must be concrete Matrix user IDs; wildcard credential administrators are not accepted.
 
-### Compatibility
+### Automatic migration
 
-The transition has two explicit modes:
+One pure migration function runs before nested Pydantic validation, so file loading and programmatic configuration construction reach the same authored schema.
+`load_config` validates the migrated data before it writes anything, preserves the original root file as a one-time sibling backup, atomically writes the normalized YAML, and then publishes the validated configuration.
+When migration encounters any `!include`, loading fails before validation or persistence with a clear unsupported-migration error.
 
-- `access_model` omitted: parse and execute the current legacy fields unchanged.
-- `access_model: room_membership`: execute only the new access model.
+The deterministic mapping is:
 
-In membership mode, configuration validation rejects authored non-default values for these overlapping legacy fields:
+- `authorization.global_users` becomes `administrators` and `room_defaults.invite_users`.
+- `authorization.room_permissions.<room>` becomes `rooms.<room>.invite_users` after resolving the key to one managed room.
+- `authorization.agent_reply_permissions.<entity>.users` becomes `<entity>.access.users`.
+- `authorization.agent_reply_permissions.<entity>.joined_rooms` becomes `<entity>.access.members_of_rooms`.
+- The wildcard responder policy is materialized onto every responder without an entity-specific policy.
+- Concrete static agent users become `agents.<name>.credential_managers`; wildcard and pattern entries do not become credential managers.
+- `matrix_room_access` join, listing, encryption, invite-only, and room-admin settings become `room_defaults` and per-room overrides.
+- `authorization.aliases` and `authorization.config_command_enabled` remain under `authorization` because they are not access grants.
+- The obsolete `access_model` marker is removed.
 
-- `authorization.global_users`
-- `authorization.room_permissions`
-- `authorization.default_room_access`
-- `authorization.agent_reply_permissions`
-- `matrix_room_access.mode`
-- `matrix_room_access.multi_user_join_rule`
-- `matrix_room_access.publish_to_room_directory`
-- `matrix_room_access.invite_only_rooms`
-- `matrix_room_access.encrypt_managed_rooms`
-- `matrix_room_access.room_admins`
-
-Non-overlapping legacy fields such as alias resolution, bot-account classification, and independent feature flags remain valid. Documentation shows a manual migration table because the old fields intentionally combined capabilities that cannot always be split safely without operator intent.
+Existing new-schema values win over migrated scalar defaults, while list-valued grants are combined without duplicates so an authored capability is not silently discarded.
+Unresolvable room IDs or aliases fail closed before validation or persistence.
+The migration intentionally removes implicit or wildcard credential-management authority because the new field requires concrete identities; platform administrators retain credential authority.
 
 ### Non-goals
 
@@ -238,7 +255,7 @@ Non-overlapping legacy fields such as alias resolution, bot-account classificati
 - Automatically promote invitees to Matrix room admins.
 - Infer credential managers from responder access.
 - Redesign identity aliases, bridge bot classification, external triggers, or tool approval.
-- Automatically rewrite a legacy configuration whose overloaded entries have ambiguous intent.
+- Automatically rewrite a multi-file `!include` configuration.
 
 ---
 
@@ -268,7 +285,6 @@ Non-overlapping legacy fields such as alias resolution, bot-account classificati
 def test_room_list_override_replaces_default() -> None:
     config = Config.model_validate(
         {
-            "access_model": "room_membership",
             "room_defaults": {"invite_users": ["@default:example.com"]},
             "rooms": {"project": {"invite_users": ["@owner:example.com"]}},
         }
@@ -282,7 +298,6 @@ def test_room_list_override_replaces_default() -> None:
 def test_omitted_agent_access_uses_configured_rooms() -> None:
     config = Config.model_validate(
         {
-            "access_model": "room_membership",
             "agents": {
                 "research": {
                     "display_name": "Research",
@@ -303,7 +318,7 @@ def test_omitted_agent_access_uses_configured_rooms() -> None:
 
 Run: `uv run pytest -q tests/test_access_schema.py`
 
-Expected: FAIL because `access_model`, `room_defaults`, responder `access`, and `credential_managers` do not exist.
+Expected: FAIL because `room_defaults`, responder `access`, and `credential_managers` do not exist.
 
 - [ ] **Step 3: Implement the Pydantic models and frozen resolvers**
 
@@ -326,7 +341,8 @@ class RoomDefaultsConfig(BaseModel):
     admins: list[str] = Field(default_factory=list)
 ```
 
-Add optional room overrides to `RoomConfig`, optional `access` to agents, teams, and router, `credential_managers` to agents, and top-level `access_model`, `administrators`, and `room_defaults` to `Config`. Validate duplicate entries, concrete administrator and credential-manager IDs, and known managed-room keys.
+Add optional room overrides to `RoomConfig`, optional `access` to agents, teams, and router, `credential_managers` to agents, and top-level `administrators` and `room_defaults` to `Config`.
+Validate duplicate entries, concrete administrator and credential-manager IDs, and known managed-room keys.
 
 - [ ] **Step 4: Run focused model tests and formatting**
 
@@ -377,7 +393,8 @@ async def test_membership_schema_invites_only_effective_room_invite_users(tmp_pa
     assert invited == {("one", "@one:localhost")}
 ```
 
-Add assertions proving that administrators, room admins, responder users, and credential managers are not invitation candidates. Add an existing-room regression with legacy `reconcile_existing_rooms: false` that proves membership-mode join policy and visibility are still reconciled.
+Add assertions proving that administrators, room admins, responder users, and credential managers are not invitation candidates.
+Add an existing-room regression with retired `reconcile_existing_rooms: false` input that proves membership join policy and visibility are still reconciled after migration.
 
 - [ ] **Step 2: Run the regressions and verify legacy invitation behavior cannot satisfy them**
 
@@ -387,9 +404,11 @@ Expected: FAIL because room reconciliation still consumes `matrix_room_access` a
 
 - [ ] **Step 3: Route membership-mode reconciliation through `EffectiveRoomPolicy`**
 
-Update `ensure_all_rooms_exist` to resolve each managed room key before applying state. Replace membership-mode calls to `get_authorized_user_ids_to_invite` with the effective `invite_users` tuple for that room. Keep the legacy branch unchanged when `access_model` is omitted.
+Update `ensure_all_rooms_exist` to resolve each managed room key before applying state.
+Replace calls to `get_authorized_user_ids_to_invite` with the effective `invite_users` tuple for that room.
 
-In membership mode, do not gate existing-room desired state on `matrix_room_access.reconcile_existing_rooms`. Retain the legacy guard only for legacy mode. Preserve the irreversible encryption check in both modes.
+Apply reversible desired state to existing rooms without an opt-in guard.
+Preserve the irreversible encryption check.
 
 Do not call `is_authorized_sender` for membership-mode invitees; the invitation roster is intentionally independent from conversation access.
 
@@ -486,11 +505,16 @@ Expected: FAIL because `is_authorized_sender` remains an independent room gate.
 
 - [ ] **Step 3: Implement one membership-mode responder gate**
 
-Keep `is_authorized_sender` unchanged for legacy mode. In membership mode, remove that legacy room allowlist from ingress and require every selected responder to pass `is_sender_allowed_for_responder`. Make the existing `is_sender_allowed_for_agent_reply` and `is_sender_allowed_for_agent_reply_in_room` entry points delegate to the new resolver in membership mode so secondary callers cannot retain legacy semantics accidentally. Reuse the current authoritative membership snapshot; do not issue a Matrix request per candidate or per event.
+Remove the retired room allowlist from ingress and require every selected responder to pass `is_sender_allowed_for_responder`.
+Make the existing `is_sender_allowed_for_agent_reply` and `is_sender_allowed_for_agent_reply_in_room` entry points delegate to the new resolver so secondary callers cannot retain retired semantics accidentally.
+Reuse the current authoritative membership snapshot; do not issue a Matrix request per candidate or per event.
 
-Apply aliases before static and administrator matching. Preserve internal-system bypasses. Treat missing, stale, or unresolved membership snapshots as denial for membership clauses.
+Apply aliases before static and administrator matching.
+Preserve internal-system bypasses.
+Treat missing, stale, or unresolved membership snapshots as denial for membership clauses.
 
-Replace standalone `is_authorized_sender` calls at approval continuation, attachment, and room-lifecycle boundaries with context-specific membership-mode checks. Tool-approval policy remains unchanged, but the human acting on an approval must still pass the responder policy captured by that continuation before it is consumed.
+Replace standalone `is_authorized_sender` calls at approval continuation, attachment, and room-lifecycle boundaries with context-specific membership checks.
+Tool-approval policy remains unchanged, but the human acting on an approval must still pass the responder policy captured by that continuation before it is consumed.
 
 - [ ] **Step 4: Run authorization and ingress suites**
 
@@ -572,9 +596,11 @@ Expected: FAIL because credential management still reads static reply users.
 
 - [ ] **Step 3: Implement separate administrator and credential checks**
 
-In membership mode, authorize agent credential management only when the canonical requester is in `administrators` or the target agent's concrete `credential_managers`. Keep the legacy static-reply-user path unchanged in legacy mode.
+Authorize agent credential management only when the canonical requester is in `administrators` or the target agent's concrete `credential_managers`.
 
-Route plugin reload, configuration commands, configuration-confirmation reactions, administrative usage statistics, config-manager operations, and related config-reload reporting through `is_platform_administrator` while preserving their existing feature-enable flags. Update command help text to name platform administrators rather than legacy global users. Do not make administrators room members, Matrix room admins, or invite candidates.
+Route plugin reload, configuration commands, configuration-confirmation reactions, administrative usage statistics, config-manager operations, and related config-reload reporting through `is_platform_administrator` while preserving their existing feature-enable flags.
+Update command help text to name platform administrators rather than retired global users.
+Do not make administrators room members, Matrix room admins, or invite candidates.
 
 - [ ] **Step 4: Run credential and command suites**
 
@@ -589,11 +615,29 @@ git add src/mindroom/authorization.py src/mindroom/api/dashboard_credential_scop
 git commit -m "feat: separate credential and platform authority"
 ```
 
-### Task 5: Enforce compatibility boundaries and document migration
+### Task 5: Automatically migrate retired access fields and remove compatibility branches
 
 **Files:**
-- Modify: `src/mindroom/config/main.py:634-670`
-- Modify: `src/mindroom/cli/config.py`
+- Create: `src/mindroom/config/access_migration.py`
+- Modify: `src/mindroom/config/main.py`
+- Modify: `src/mindroom/config/auth.py`
+- Modify: `src/mindroom/config/agent.py`
+- Modify: `src/mindroom/config/models.py`
+- Modify: `src/mindroom/config/matrix.py`
+- Modify: `src/mindroom/authorization.py`
+- Modify: `src/mindroom/agent_reply_membership.py`
+- Modify: `src/mindroom/matrix/rooms.py`
+- Modify: `src/mindroom/orchestration/rooms.py`
+- Modify: `src/mindroom/orchestration/config_updates.py`
+- Modify: `src/mindroom/orchestrator.py`
+- Modify: `src/mindroom/approval_inbound.py`
+- Modify: `src/mindroom/bot_room_lifecycle.py`
+- Modify: `src/mindroom/custom_tools/attachment_helpers.py`
+- Modify: `src/mindroom/custom_tools/delegate.py`
+- Modify: `src/mindroom/workers/backends/docker_projection.py`
+- Modify: `src/mindroom/cli/migrate.py`
+- Delete membership-only report code from: `src/mindroom/cli/config.py`
+- Test: `tests/test_access_migration.py`
 - Modify: `tests/test_cli_config.py`
 - Modify: `README.md`
 - Modify: `config.yaml`
@@ -608,78 +652,92 @@ git commit -m "feat: separate credential and platform authority"
 - Test: `tests/test_access_schema.py`
 
 **Interfaces:**
-- Consumes: all new fields and legacy models from Tasks 1-4.
-- Produces: a config-level compatibility validator and `mindroom config explain-access` migration report.
+- Consumes: raw YAML mappings plus the schema and resolvers from Tasks 1-4.
+- Produces: `migrate_access_config_data(data) -> AccessMigrationResult`, `persist_access_migration(path, result) -> None`, and one membership-only runtime.
 
-- [ ] **Step 1: Write mixed-mode rejection and migration-report tests**
+- [ ] **Step 1: Write pure migration and load-boundary tests**
 
 ```python
-def test_membership_mode_rejects_legacy_room_permissions() -> None:
-    with pytest.raises(ValidationError, match="room_permissions"):
-        Config.model_validate(
-            {
-                "access_model": "room_membership",
-                "authorization": {
-                    "room_permissions": {"talent": ["@owner:example.com"]},
-                },
-            }
-        )
-
-
-def test_legacy_mode_remains_unchanged() -> None:
-    config = Config.model_validate(
+def test_legacy_owner_access_is_split_into_explicit_capabilities() -> None:
+    result = migrate_access_config_data(
         {
+            "agents": {"talent": {"rooms": ["talent"]}},
             "authorization": {
-                "default_room_access": False,
-                "room_permissions": {"talent": ["@owner:example.com"]},
-            }
-        }
+                "global_users": ["@owner:example.com"],
+                "agent_reply_permissions": {
+                    "talent": ["@owner:example.com"],
+                },
+            },
+        },
     )
 
-    assert config.access_model is None
-    assert is_authorized_sender(
-        "@owner:example.com",
-        config,
-        "#talent:example.com",
-        runtime_paths_for(config),
-    )
+    assert result.changed
+    assert result.data["administrators"] == ["@owner:example.com"]
+    assert result.data["room_defaults"]["invite_users"] == ["@owner:example.com"]
+    assert result.data["agents"]["talent"]["access"]["users"] == ["@owner:example.com"]
+    assert result.data["agents"]["talent"]["credential_managers"] == ["@owner:example.com"]
+    assert "global_users" not in result.data["authorization"]
+
+
+def test_load_config_validates_before_atomic_migration_write(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(legacy_config_with_unknown_room(), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="managed room"):
+        load_config(test_runtime_paths(tmp_path))
+
+    assert config_path.read_text(encoding="utf-8") == legacy_config_with_unknown_room()
+    assert not access_migration_backup_path(config_path).exists()
 ```
 
-CLI tests must assert that the report separates invitation intent, conversation access, Matrix power, and credential authority instead of generating an unsafe automatic rewrite.
+Add tests for wildcard materialization, concrete credential managers, room defaults, invite-only overrides, existing new-schema precedence, idempotence, one-time backup retention, atomic write failure, and multi-source refusal.
 
-- [ ] **Step 2: Run compatibility tests and verify mixed fields currently parse**
+- [ ] **Step 2: Run migration tests and verify they fail before implementation**
 
-Run: `uv run pytest -q tests/test_access_schema.py tests/test_cli_config.py -k 'membership_mode or explain_access or legacy_mode'`
+Run: `uv run pytest -q tests/test_access_migration.py tests/test_cli_config.py -k 'access_migration or migrate_access'`
 
-Expected: FAIL because compatibility validation and the report command do not exist.
+Expected: FAIL because the migration result, mapping, backup, and automatic persistence do not exist.
 
-- [ ] **Step 3: Add the validator, report command, and migration documentation**
+- [ ] **Step 3: Implement migration, validation-before-write, and atomic persistence**
 
-The validation error must list every conflicting path and explain that old overloaded entries require an operator to decide separately:
+`migrate_access_config_data` must copy its input, apply the documented mapping, remove retired fields, and return the migrated mapping plus whether anything changed.
+It must be idempotent and must not perform I/O.
+Room permissions and invite-only entries must resolve to configured managed room keys or fail closed.
+The pure function runs from the root pre-validation boundary so direct `Config` construction and file loading share one schema.
 
-```text
-authorization.room_permissions.talent must be split into rooms.talent.invite_users and responder access; MindRoom cannot infer whether every listed user should receive both capabilities
-```
+`load_config` must validate the migrated mapping before persistence.
+After validation, it keeps the original root file at the fixed migration-backup path when that backup does not already exist and atomically writes the normalized YAML.
+When `source_files` contains more than the root file, it must raise a clear unsupported-migration error and leave every source untouched.
+An I/O failure must leave the original configuration usable and surface as a configuration-load error.
 
-`mindroom config explain-access` is read-only. It prints the effective legacy behavior and a skeleton membership-mode configuration but never writes configuration or assumes that global users are administrators.
+- [ ] **Step 4: Remove the dual runtime path and retired schema fields**
 
-Document the new model first, followed by a legacy compatibility section and a field-by-field manual migration table.
+Remove `access_model` checks from authorization, membership snapshots, room reconciliation, approvals, attachment access, room lifecycle handling, delegation, and orchestration.
+Remove the retired access fields from `AuthorizationConfig`, remove `matrix_room_access` from `Config`, and delete code that consumes those fields.
+Keep `authorization.aliases` and `authorization.config_command_enabled`.
+Replace the read-only `config explain-access` skeleton with the existing `config migrate` command invoking the same migration path explicitly.
 
-- [ ] **Step 4: Run CLI, config, and documentation checks**
+- [ ] **Step 5: Update examples and migration documentation**
 
-Run: `uv run pytest -q tests/test_access_schema.py tests/test_cli_config.py tests/test_config_commands.py`
+Remove `access_model` from current examples.
+Document the automatic mapping, validation-before-write behavior, backup path, atomic replacement, and multi-source refusal.
+Retired fields may appear only in the migration reference and migration tests.
+
+- [ ] **Step 6: Run CLI, config, authorization, and documentation checks**
+
+Run: `uv run pytest -q tests/test_access_migration.py tests/test_access_schema.py tests/test_cli_config.py tests/test_authorization.py tests/test_matrix_room_access.py tests/test_config_commands.py`
 
 Expected: PASS.
 
-Run: `uv run pre-commit run --files src/mindroom/config/main.py src/mindroom/cli/config.py tests/test_cli_config.py docs/authorization.md docs/configuration/index.md docs/dev/agent_configuration.md`
+Run: `uv run pre-commit run --files src/mindroom/config/access_migration.py src/mindroom/config/main.py src/mindroom/authorization.py src/mindroom/matrix/rooms.py src/mindroom/cli/migrate.py tests/test_access_migration.py tests/test_cli_config.py docs/authorization.md docs/configuration/index.md docs/dev/agent_configuration.md`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit compatibility and documentation**
+- [ ] **Step 7: Commit automatic migration and the single runtime model**
 
 ```bash
-git add src/mindroom/config/main.py src/mindroom/cli/config.py tests/test_cli_config.py tests/test_access_schema.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
-git commit -m "docs: add membership access migration"
+git add src/mindroom/config/access_migration.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval_inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
+git commit -m "feat: auto migrate membership access config"
 ```
 
 ### Task 6: Verify the complete access model
@@ -689,7 +747,7 @@ git commit -m "docs: add membership access migration"
 
 **Interfaces:**
 - Consumes: the complete schema, policy resolvers, room reconciliation, responder authorization, and credential authorization from Tasks 1-5.
-- Produces: one verified implementation with no legacy regression and no new policy ambiguity.
+- Produces: one verified implementation with a deterministic migration and no runtime compatibility branch.
 
 - [ ] **Step 1: Run the complete access-focused test set**
 
@@ -746,7 +804,8 @@ Search:
 rg -n "global_users|room_permissions|default_room_access|agent_reply_permissions|invite_users|credential_managers|administrators" README.md config.yaml docs local cluster
 ```
 
-Every primary example must use the membership model. Legacy fields may appear only in explicitly labeled compatibility or migration sections.
+Every primary example must use the membership model.
+Retired fields may appear only in explicitly labeled migration sections.
 
 - [ ] **Step 5: Confirm verification left no uncommitted corrections**
 
@@ -754,4 +813,5 @@ Every primary example must use the membership model. Legacy fields may appear on
 git status --short
 ```
 
-Expected: no output. If a verification command required a correction, return to the task that owns that file, rerun that task's focused tests, and commit the correction with that task rather than creating an unscoped cleanup commit.
+Expected: no output.
+If a verification command required a correction, return to the task that owns that file, rerun that task's focused tests, and commit the correction with that task rather than creating an unscoped cleanup commit.
