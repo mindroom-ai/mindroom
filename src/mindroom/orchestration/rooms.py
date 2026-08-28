@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.authorization import explicit_room_permission_user_ids
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
@@ -23,10 +24,15 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return set(concrete_user_ids)
 
 
-def get_authorized_user_ids_to_invite(config: Config) -> set[str]:
-    """Collect Matrix users from authorization config that can be invited."""
+def get_authorized_user_ids_to_invite(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+) -> set[str]:
+    """Collect Matrix users explicitly eligible for invitation to one room."""
     user_ids = set(config.authorization.global_users)
-    for room_users in config.authorization.room_permissions.values():
+    room_users = explicit_room_permission_user_ids(config, room_id, runtime_paths)
+    if room_users is not None:
         user_ids.update(room_users)
     return _filter_concrete_matrix_user_ids(
         user_ids,

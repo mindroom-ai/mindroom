@@ -60,6 +60,37 @@ def _lookup_managed_room_identifiers(
     return None, None
 
 
+def explicit_room_permission_user_ids(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+) -> frozenset[str] | None:
+    """Return the explicit permission entry for a room, if one is configured."""
+    room_permissions = config.authorization.room_permissions
+
+    # Prefer direct room identifiers. A room ID is stable; a direct alias target
+    # is an explicit caller target rather than room state content.
+    for permission_key in _room_permission_lookup_keys(room_id, runtime_paths=runtime_paths):
+        if permission_key in room_permissions:
+            return frozenset(room_permissions[permission_key])
+
+    # Resolve persisted managed-room identifiers when only a room ID is
+    # available. Arbitrary canonical aliases from Matrix room events are not
+    # trusted for this mapping.
+    if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
+        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths)
+        for permission_key in _room_permission_lookup_keys(
+            room_id,
+            room_alias=persisted_alias,
+            room_key=room_key,
+            runtime_paths=runtime_paths,
+        ):
+            if permission_key in room_permissions:
+                return frozenset(room_permissions[permission_key])
+
+    return None
+
+
 def is_authorized_sender(
     sender_id: str,
     config: Config,
@@ -89,28 +120,9 @@ def is_authorized_sender(
     if resolved_id in config.authorization.global_users:
         return True
 
-    room_permissions = config.authorization.room_permissions
-    # Check room-specific permissions by direct room identifiers first. A room
-    # ID is stable; a direct alias target is an explicit caller target rather
-    # than room state content.
-    for permission_key in _room_permission_lookup_keys(room_id, runtime_paths=runtime_paths):
-        if permission_key in room_permissions:
-            return resolved_id in room_permissions[permission_key]
-
-    # Try persisted managed-room identifiers so room key/alias permissions still
-    # work when only room_id is available. This state is authored by MindRoom's
-    # room-management flow, unlike arbitrary canonical aliases from Matrix room
-    # events.
-    if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
-        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths)
-        for permission_key in _room_permission_lookup_keys(
-            room_id,
-            room_alias=persisted_alias,
-            room_key=room_key,
-            runtime_paths=runtime_paths,
-        ):
-            if permission_key in room_permissions:
-                return resolved_id in room_permissions[permission_key]
+    room_user_ids = explicit_room_permission_user_ids(config, room_id, runtime_paths)
+    if room_user_ids is not None:
+        return resolved_id in room_user_ids
 
     # Use default access for rooms not explicitly configured
     return config.authorization.default_room_access
