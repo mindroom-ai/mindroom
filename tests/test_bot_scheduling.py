@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -777,6 +778,7 @@ class TestCommandHandling:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_command_blocked_by_reply_permissions(self) -> None:
         """Router should ignore commands from senders disallowed by router reply rules."""
         agent_user = AgentMatrixUser(
@@ -789,11 +791,10 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(
             Config(
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {"router": ["@alice:server"]},
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:server"]),
+                ),
             ),
         )
 
@@ -843,20 +844,17 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(
             Config(
-                router=RouterConfig(model="default"),
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["*"]),
+                ),
                 agents={
                     "code": AgentConfig(
                         display_name="Code Agent",
                         rooms=["!test:server"],
                         skills=["audit"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "router": ["*"],
-                        "code": ["@alice:localhost"],
-                    },
                 },
             ),
         )

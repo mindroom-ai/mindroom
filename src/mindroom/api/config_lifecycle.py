@@ -15,11 +15,14 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
+from mindroom.config.access_migration import validate_access_migration_source
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
+    ConfigLoadUserError,
     ConfigRuntimeValidationError,
     iter_config_validation_messages,
+    validate_loaded_config_source,
 )
 from mindroom.config.yaml_includes import (
     load_yaml_config_source,
@@ -147,7 +150,7 @@ def require_api_state(api_app: FastAPI) -> ApiState:
 
 
 def _config_error_detail(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
 ) -> list[dict[str, object]]:
     """Return one shared API error payload for invalid current config."""
     return [
@@ -180,11 +183,15 @@ def _load_config_result(
         data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source_bytes)
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        runtime_config = Config.validate_with_runtime(
+        runtime_config, source_digests = validate_loaded_config_source(
             data,
+            source_digests,
+            source_bytes,
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
+        source_files = frozenset(source_digests)
+        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
         validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         detail = _config_error_detail(exc)
@@ -593,9 +600,11 @@ def _validate_raw_config_source(
         runtime_paths.config_path,
         source=source.encode("utf-8"),
     )
+    source_files = frozenset(source_digests)
+    validate_access_migration_source(data, source_files, runtime_paths.config_path)
     runtime_config = Config.validate_with_runtime(data, runtime_paths)
     source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-    return runtime_config, runtime_config.authored_model_dump(), frozenset(source_digests), source_fingerprint
+    return runtime_config, runtime_config.authored_model_dump(), source_files, source_fingerprint
 
 
 def _commit_replaced_snapshot(

@@ -132,7 +132,8 @@ def _stored_oauth_credentials(
 def _config_payload(
     worker_scope: str | None = "user_agent",
     *,
-    authorization: dict[str, Any] | None = None,
+    allowed_users: list[str] | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
@@ -144,16 +145,21 @@ def _config_payload(
                 "tools": ["google_drive"],
                 "worker_scope": worker_scope,
                 "rooms": [],
+                "access": {"users": allowed_users or []},
+                "credential_managers": allowed_users or [],
             },
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
+    if allowed_users is None:
+        payload["administrators"] = ["@alice:example.org"]
+    if aliases is not None:
+        payload["authorization"] = {"aliases": aliases}
     return payload
 
 
 def _mcp_oauth_config_payload(worker_scope: str | None = "user_agent") -> dict[str, Any]:
     return {
+        "administrators": ["@alice:example.org"],
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {
@@ -1175,7 +1181,11 @@ def test_provider_exchange_and_refresh_use_oauth_client(
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     provider = _fake_provider()
     provider = OAuthProvider(
@@ -1262,7 +1272,11 @@ def test_provider_refresh_token_data_skips_unexpired_access_token(
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     provider = _fake_provider()
     seen: dict[str, bool] = {}
@@ -1299,7 +1313,11 @@ def test_provider_refresh_token_data_sanitizes_terminal_error_body(
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     provider = _fake_provider()
 
@@ -1361,7 +1379,11 @@ def test_provider_refresh_token_data_handles_non_utf8_oauth_error_body(
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     provider = _fake_provider()
 
@@ -2460,7 +2482,7 @@ def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Pat
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -2957,7 +2979,11 @@ def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
 def test_shared_scope_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
@@ -3050,7 +3076,7 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3112,10 +3138,8 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={
-                "aliases": {canonical: [alias]},
-                "agent_reply_permissions": {"general": [canonical]},
-            },
+            allowed_users=[canonical],
+            aliases={canonical: [alias]},
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3191,7 +3215,11 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
 def test_shared_scope_plugin_oauth_token_uses_agent_store_not_shared_or_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
     provider = _fake_provider(
@@ -3296,8 +3324,8 @@ def test_dashboard_private_oauth_rejects_unbound_standalone_requester(tmp_path: 
             _login(client)
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
-    assert response.status_code == 400
-    assert "Matrix requester identity" in response.json()["detail"]
+    assert response.status_code == 403
+    assert "Not authorized" in response.json()["detail"]
 
 
 def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_path: Path) -> None:
@@ -3746,7 +3774,7 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3788,7 +3816,7 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3852,7 +3880,7 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3870,7 +3898,7 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
                 runtime_paths,
                 _config_payload(
                     worker_scope="shared",
-                    authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+                    allowed_users=["@bob:example.org"],
                 ),
             )
             _use_runtime_auth_settings(api_app)
@@ -3900,7 +3928,7 @@ def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: 
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3928,7 +3956,7 @@ def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> N
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+            allowed_users=["@bob:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -4048,7 +4076,7 @@ def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(t
 
 
 @pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
-def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requester(
+def test_agent_connect_token_rejects_historical_requester_without_explicit_authority(
     tmp_path: Path,
     matrix_user_id: str,
 ) -> None:
@@ -4077,22 +4105,7 @@ def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requeste
                 headers=trusted_upstream_headers(matrix_user_id=matrix_user_id),
                 follow_redirects=False,
             )
-            state = _state_from_auth_url(authorize_response.headers["location"])
-            callback_response = client.get(
-                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                headers=trusted_upstream_headers(matrix_user_id=matrix_user_id),
-                follow_redirects=False,
-            )
-
-    assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
-    matrix_credentials = _stored_oauth_credentials(
-        provider,
-        runtime_paths,
-        requester_id=matrix_user_id,
-    )
-    assert matrix_credentials is not None
-    assert matrix_credentials["token"] == "google_drive-access-token"
+    assert authorize_response.status_code == 403
 
 
 def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_path: Path) -> None:
@@ -4303,10 +4316,8 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 409
-    assert callback_response.headers["content-type"].startswith("text/html")
-    assert "Start the connection again from the dashboard" in callback_response.text
-    assert '"detail"' not in callback_response.text
+    assert callback_response.status_code == 403
+    assert "Not authorized" in callback_response.json()["detail"]
 
 
 def _config_payload_with_extra_google_agents(worker_scope: str = "user_agent") -> dict[str, Any]:
@@ -4501,7 +4512,11 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
 def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@bob:example.org",
+        },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
     provider = _fake_provider()
@@ -4539,7 +4554,11 @@ def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_pa
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
     first_provider = _fake_provider("first_drive", credential_service="first_drive_oauth")

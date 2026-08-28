@@ -12,7 +12,6 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
@@ -25,6 +24,7 @@ from mindroom.visible_voice_echo import (
     VisibleVoiceEchoLifecycle,
     VisibleVoiceEchoRequest,
 )
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -125,10 +125,11 @@ def _echo_harness(
     router_ready: bool = True,
 ) -> _EchoHarness:
     config = bind_runtime_paths(
-        Config(
-            agents={"home": {"display_name": "Home"}},
-            authorization={"default_room_access": True},
-            voice={"enabled": voice_enabled, "visible_router_echo": True},
+        with_current_room_member_access(
+            Config(
+                agents={"home": {"display_name": "Home"}},
+                voice={"enabled": voice_enabled, "visible_router_echo": True},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -227,6 +228,7 @@ async def test_responder_waits_for_claimed_echo_publication(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
     """A voice echo started before reload must not publish after the requester is revoked."""
     harness = _echo_harness(tmp_path, voice_enabled=True)
@@ -240,10 +242,7 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
     assert not harness.gateway.send_started.is_set()
 
     replacement_config = harness.config.model_copy(deep=True)
-    replacement_config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: AgentReplyPermission(users=[])},
-    )
+    with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     harness.runtime.config = replacement_config
     admission_gate.reopen()
     await harness.router.finish(handle, _normalized_event(source_event_id))

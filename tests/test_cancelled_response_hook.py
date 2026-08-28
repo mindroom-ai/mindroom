@@ -11,7 +11,6 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -46,6 +45,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -72,11 +72,12 @@ if TYPE_CHECKING:
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
-            },
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
+                },
+            ),
         ),
         runtime_paths,
     )

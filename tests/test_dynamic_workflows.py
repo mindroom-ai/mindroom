@@ -24,7 +24,6 @@ from agno.workflow.types import StepInput, StepOutput
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
@@ -41,6 +40,7 @@ from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -1815,19 +1815,13 @@ def test_dynamic_workflow_tool_rejects_unavailable_room_agent_during_validation(
     assert "not available to this requester in this room" in result["message"]
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_dynamic_workflow_validation_uses_current_authorization_after_reload(tmp_path: Path) -> None:
     """A long-lived tool context must reject room agents revoked by a config reload."""
     tool = DynamicWorkflowTools()
     context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
-    current_config = context.config.model_copy(
-        update={
-            "authorization": AuthorizationConfig(
-                agent_reply_permissions={
-                    "specialist": AgentReplyPermission(users=[]),
-                },
-            ),
-        },
-    )
+    current_config = context.config.model_copy(deep=True)
+    with_responder_access(current_config, "specialist", users=[])
     context = replace(context, config_provider=lambda: current_config)
     spec = _workflow_spec(
         participants=[

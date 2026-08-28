@@ -28,6 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _attachment_record_stub,
@@ -120,7 +121,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
@@ -265,7 +266,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
@@ -468,12 +469,14 @@ class TestAgentBot(AgentBotTestBase):
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
         """A file event in a multi-responder room should register exactly one attachment."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                        "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -567,7 +570,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -605,12 +608,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -659,7 +664,7 @@ class TestAgentBot(AgentBotTestBase):
                     entity_ids(config, runtime_paths_for(config))["general"],
                 ],
             ),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -687,12 +692,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -777,9 +784,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -826,9 +835,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -870,9 +881,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -912,7 +925,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             ),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -963,7 +976,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await bot._on_message(room, event)
@@ -1025,7 +1038,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),

@@ -100,6 +100,7 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
             status="approved",
             reason=None,
         ),
+        authorize_responder=lambda _entity_name: True,
         before_consume=before_consume,
     )
 
@@ -125,6 +126,7 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
                 status="denied",
                 reason=None,
             ),
+            authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
         )
     finally:
@@ -195,6 +197,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
             card_event_id="$approval",
             status="approved",
             reason=None,
+            authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
         )
     finally:
@@ -386,6 +389,7 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -442,6 +446,7 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -494,6 +499,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
                 card_event_id="$approval",
                 status="denied",
                 reason="No",
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -558,6 +564,7 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -597,7 +604,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         run_id="run-1",
         session_id="session-1",
         entity_kind="agent",
-        entity_name="code",
+        entity_name="origin-team",
         room_id=room_id,
         thread_id="$thread",
         requester_id="@user:localhost",
@@ -672,6 +679,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         transport_sender=lambda: "@mindroom_router:localhost",
         sending_device=lambda: "DEVICE",
     )
+    authorize_responder = MagicMock(return_value=True)
     try:
         result = await manager.handle_card_response(
             room_id=room_id,
@@ -679,10 +687,12 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
             card_event_id=card_event_id,
             status="approved",
             reason=None,
+            authorize_responder=authorize_responder,
         )
 
         assert result.consumed is True
         assert result.resolved is True
+        authorize_responder.assert_called_once_with("origin-team")
         assert sent == [DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
         assert decided is not None

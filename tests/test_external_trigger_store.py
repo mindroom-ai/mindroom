@@ -47,15 +47,19 @@ def _config(
     return Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
-            "agents": {"watcher": {"display_name": "Watcher", "model": "default", "rooms": ["lobby"]}},
+            "agents": {
+                "watcher": {
+                    "display_name": "Watcher",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                    "access": {"users": [_OWNER]},
+                },
+            },
             "rooms": {"lobby": {"display_name": "Lobby"}},
             "external_trigger_policy": policy_overrides,
             "bot_accounts": bot_accounts or [],
             "mindroom_user": mindroom_user,
-            "authorization": {
-                "global_users": [_OWNER],
-                "agent_reply_permissions": {"*": [_OWNER]},
-            },
+            "administrators": [_OWNER],
         },
     )
 

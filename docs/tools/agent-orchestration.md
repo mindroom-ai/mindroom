@@ -77,7 +77,8 @@ Normal `tool_approval` policy still applies, so a matching `require_approval` ru
 The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.
-Both link issuance and confirmation apply `authorization.agent_reply_permissions` for the current agent, including configured sender aliases.
+Both link issuance and confirmation apply the current agent's credential-management policy, including configured sender aliases.
+Credential management accepts platform `administrators` and `agents.<name>.credential_managers`.
 The resolved credential scope must be `user` or `user_agent`; shared and unscoped credentials are refused.
 Use the authenticated dashboard connection controls to disconnect and reconnect shared or installation-level credentials.
 A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
@@ -118,12 +119,11 @@ agents:
 ### Admin Configuration
 
 Configure an admin agent with the per-agent `admin_scope` override to make `get_all_usage()` available.
-Admin access requires both `admin_scope: true` AND the canonical requester to be present in `authorization.global_users`.
+Admin access requires both `admin_scope: true` and platform-administrator authority.
 
 ```yaml
-authorization:
-  global_users:
-    - "@usage-admin:example.com"
+administrators:
+  - "@usage-admin:example.com"
 
 agents:
   usage_admin:

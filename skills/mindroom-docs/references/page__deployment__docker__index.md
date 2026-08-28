@@ -11,6 +11,10 @@ MindRoom ships as a single runtime container that serves:
 - the dashboard API at `http://localhost:8765/api`
 - the OpenAI-compatible API at `http://localhost:8765/v1`
 
+MindRoom may atomically rewrite `config.yaml` at startup when an automatic configuration migration is required.
+Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
+Current configs can remain read-only as shown below.
+
 Run it with:
 
 ```bash

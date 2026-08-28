@@ -208,7 +208,7 @@ def _write_plugin_removal_test_config(tmp_path: Path, *, with_plugin: bool) -> N
                 "rooms": ["lobby"],
             },
         },
-        "authorization": {"global_users": ["@owner:localhost"]},
+        "administrators": ["@owner:localhost"],
         "plugins": [{"path": "./plugins/removed-task-plugin"}] if with_plugin else [],
     }
     (tmp_path / "config.yaml").write_text(
@@ -1474,7 +1474,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -2012,13 +2012,13 @@ def test_config_update_plan_restarts_call_agent_when_profile_voice_changes() -> 
     assert plan.entities_to_restart == {"general"}
 
 
-def test_config_update_plan_restarts_call_agents_when_authorization_changes() -> None:
-    """Call tool contexts rebuild so authorization changes cannot leave stale policy."""
+def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
+    """Call tool contexts rebuild so administrator changes cannot leave stale policy."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             calls=_calls_for("general"),
-            authorization={"global_users": ["@allowed:example.org"]},
+            administrators=["@allowed:example.org"],
             router=RouterConfig(model="default"),
         ),
     )
@@ -2026,7 +2026,7 @@ def test_config_update_plan_restarts_call_agents_when_authorization_changes() ->
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             calls=_calls_for("general"),
-            authorization={"global_users": ["@replacement:example.org"]},
+            administrators=["@replacement:example.org"],
             router=RouterConfig(model="default"),
         ),
     )
@@ -2244,7 +2244,7 @@ def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_mode
 @pytest.mark.parametrize(
     "encryption_config",
     [
-        {"matrix_room_access": {"encrypt_managed_rooms": True}},
+        {"room_defaults": {"encrypted": True}},
         {"rooms": {"lobby": {"encrypted": True}}},
     ],
 )

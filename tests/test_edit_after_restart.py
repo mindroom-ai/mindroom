@@ -13,6 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
@@ -23,10 +24,12 @@ if TYPE_CHECKING:
 
 def _test_config() -> Config:
     """Return one typed config for edit-after-restart tests."""
-    return Config(
-        agents={"test_agent": AgentConfig(display_name="Test Agent")},
-        authorization={"default_room_access": True},
-        mindroom_user={"username": "mindroom"},
+    return with_current_room_member_access(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            authorization={},
+            mindroom_user={"username": "mindroom"},
+        ),
     )
 
 
@@ -137,7 +140,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the methods needed for regeneration
     with (
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered edit event
         await bot._on_message(room, edit_event)
@@ -220,7 +223,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Mock methods
     with (
         patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         # Process the redelivered message
         await bot._on_message(room, message_event)

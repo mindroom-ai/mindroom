@@ -175,6 +175,7 @@ async def test_matrix_room_rejects_malformed_arguments(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_matrix_room_explicit_room_requires_authorization() -> None:
     """Explicit room targeting should enforce authorization checks."""
     tool = MatrixRoomTools()

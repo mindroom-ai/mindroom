@@ -99,8 +99,8 @@ Expected outcome: The new or changed team becomes available with the updated mem
 - [ ] `CONF-005` Add, remove, or edit a configured knowledge base, skill, or plugin during a live run.
 Expected outcome: Runtime caches invalidate correctly and the change is visible on the next relevant request without stale copies lingering.
 
-- [ ] `CONF-006` Enable `matrix_room_access.reconcile_existing_rooms` for one restart and then disable it again.
-Expected outcome: Existing managed rooms are reconciled once to the configured access policy and steady-state behavior returns after the flag is turned back off.
+- [ ] `CONF-006` Change `room_defaults.join_policy` or `room_defaults.listed` while the runtime is active.
+Expected outcome: Existing managed rooms reconcile to the replacement policy without a separate opt-in flag.
 
 - [ ] `CONF-007` Edit only shared defaults such as `defaults.enable_streaming` during a live run without changing any entities.
 Expected outcome: Unchanged bots pick up the new defaults in place without restart and subsequent responses reflect the updated default behavior immediately.
@@ -263,7 +263,7 @@ Expected outcome: Mentions do not revive the removed command and the runtime sti
 - [ ] `CMD-009` Exercise reaction-based interactive prompts that are scoped to one conversation.
 Expected outcome: Reactions outside the intended room, message, or thread do not mutate the interactive workflow.
 
-- [ ] `CMD-010` With `authorization.config_command_enabled: true` and a global admin user, use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
+- [ ] `CMD-010` With `authorization.config_command_enabled: true` and a platform administrator, use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
 Expected outcome: The router uses the active runtime config path, returns current values correctly, and `set` produces a preview plus confirmation flow before applying the change.
 
 - [ ] `CMD-011` Attempt malformed or invalid `!config set` inputs while enabled, including quote-parse failures and runtime-invalid changes.
@@ -271,22 +271,22 @@ Expected outcome: Parse or validation errors are explained clearly and no partia
 
 ## 8. Authorization And Room Access Policy
 
-Source anchors: `src/mindroom/authorization.py`, `src/mindroom/config/auth.py`, `src/mindroom/config/matrix.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
+Source anchors: `src/mindroom/access_policy.py`, `src/mindroom/authorization.py`, `src/mindroom/config/access.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
 
-- [ ] `AUTH-001` Test a user listed in `authorization.global_users`.
-Expected outcome: The user can interact across managed rooms without needing room-specific entries.
+- [ ] `AUTH-001` Test a user listed in `administrators`.
+Expected outcome: The user bypasses responder access without being invited or granted Matrix room power automatically.
 
-- [ ] `AUTH-002` Test room permissions keyed by room ID, full alias, and managed room key.
-Expected outcome: Each identifier format matches the same intended access rule and does not fall through unexpectedly.
+- [ ] `AUTH-002` Test `access.users`, `access.current_room_members`, and `access.members_of_rooms` independently.
+Expected outcome: Each responder clause grants only conversation access and unresolved membership state fails closed.
 
-- [ ] `AUTH-003` Test a room that is not in `room_permissions`.
-Expected outcome: Access is controlled solely by `default_room_access` for that room.
+- [ ] `AUTH-003` Test a responder whose `access` field is omitted.
+Expected outcome: Access defaults to current membership in one of the responder's configured rooms.
 
 - [ ] `AUTH-004` Test bridged or alternate identities configured through `authorization.aliases`.
 Expected outcome: Alias mapping resolves to the canonical user ID before room access and reply-permission checks run.
 
-- [ ] `AUTH-005` Configure `authorization.agent_reply_permissions` with both `*` and per-agent entries.
-Expected outcome: Default reply rules and explicit per-entity overrides both enforce exactly as configured.
+- [ ] `AUTH-005` Configure both default and per-agent responder `access` values.
+Expected outcome: The explicit per-agent value replaces the default without combining list fields.
 
 - [ ] `AUTH-006` Verify internal MindRoom identities and non-MindRoom bot accounts under the same scenario.
 Expected outcome: Internal system identities bypass the intended checks, while `bot_accounts` still obey reply permission enforcement.

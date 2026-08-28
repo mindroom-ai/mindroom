@@ -18,6 +18,7 @@ from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -46,7 +47,7 @@ def _stop_test_config(tmp_path: Path, *, include_helper: bool = False) -> Config
     if include_helper:
         agents["helper"] = {"display_name": "Helper Agent", "rooms": ["!test:example.com"]}
     config = bind_runtime_paths(
-        Config(agents=agents, authorization={"default_room_access": True}),
+        with_current_room_member_access(Config(agents=agents, authorization={})),
         test_runtime_paths(tmp_path),
     )
     persist_entity_accounts(config, runtime_paths_for(config))
@@ -608,12 +609,14 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     """Test that 🛑 reactions from agents fall through to other handlers."""
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "test_agent": {"display_name": "Test Agent", "rooms": ["!test:localhost"]},
-                "helper": {"display_name": "Helper Agent", "rooms": ["!test:localhost"]},
-            },
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "test_agent": {"display_name": "Test Agent", "rooms": ["!test:localhost"]},
+                    "helper": {"display_name": "Helper Agent", "rooms": ["!test:localhost"]},
+                },
+                authorization={},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -694,11 +697,8 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
                 "test_agent": {
                     "display_name": "Test Agent",
                     "rooms": ["!test:example.com"],
+                    "access": {"users": ["@alice:example.com"]},
                 },
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
             },
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),

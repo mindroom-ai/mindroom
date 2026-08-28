@@ -49,6 +49,7 @@ from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
@@ -87,19 +88,21 @@ OTHER_USER_ID = "@other-user:example.com"
 def _make_config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "test_agent": {
-                    "display_name": "Test Agent",
-                    "rooms": [ROOM_ID],
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "test_agent": {
+                        "display_name": "Test Agent",
+                        "rooms": [ROOM_ID],
+                    },
+                    "other": {
+                        "display_name": "Other Agent",
+                        "rooms": [ROOM_ID],
+                    },
                 },
-                "other": {
-                    "display_name": "Other Agent",
-                    "rooms": [ROOM_ID],
-                },
-            },
-            authorization={"default_room_access": True, "agent_reply_permissions": {}},
-            mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+                authorization={},
+                mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+            ),
         ),
         runtime_paths,
     )
@@ -3426,8 +3429,10 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     def _mark_ready() -> None:
         ready.set()
 
-    def _start_sync_task(_: str, __: object) -> None:
+    def _start_sync_task(entity_name: str, __: object) -> None:
         call_order.append("sync")
+        if entity_name == ROUTER_AGENT_NAME:
+            orchestrator._router_reply_memberships_live_sync_ready.set()
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
@@ -3451,7 +3456,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                     await runtime_task
 
     router_bot.recover_pending_turn_journal_events.assert_not_awaited()
-    assert call_order == ["wait", "sync", "recover", "setup", "recover"]
+    assert call_order == ["wait", "recover", "setup", "sync", "recover"]
 
 
 @pytest.mark.asyncio

@@ -51,22 +51,23 @@ def _config(
                     "role": "Watch external systems.",
                     "model": "default",
                     "rooms": ["lobby"],
+                    "access": {
+                        "users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
+                    },
                 },
                 "other": {
                     "display_name": "Other",
                     "role": "Other agent.",
                     "model": "default",
                     "rooms": ["other-room"],
+                    "access": {
+                        "users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
+                    },
                 },
             },
             "rooms": {"lobby": {"display_name": "Lobby"}, "other-room": {"display_name": "Other"}},
             "external_trigger_policy": {"admin_users": admin_users or []},
-            "authorization": {
-                "global_users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
-                "agent_reply_permissions": {
-                    "*": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
-                },
-            },
+            "administrators": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
         },
     )
     if private_watcher:

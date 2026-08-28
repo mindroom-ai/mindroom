@@ -9,8 +9,8 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import get_available_responders_in_room, responder_candidate_entities_for_room
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
@@ -359,13 +359,12 @@ class TestResponderCandidateSelection:
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_responder_candidates_ad_hoc_room_respects_sender_permissions(self) -> None:
         """Ad-hoc room fallback should still apply per-agent sender allowlists."""
         runtime_paths = runtime_paths_for(self.config)
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": AgentReplyPermission(users=["@user:localhost"]),
-            "writer": AgentReplyPermission(users=["@other:localhost"]),
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=["@user:localhost"])
+        self.config.agents["writer"].access = ResponderAccessConfig(users=["@other:localhost"])
         room = MagicMock()
         room.room_id = "!adhoc:localhost"
         room.members_synced = True
@@ -398,14 +397,9 @@ class TestResponderCandidateSelection:
                     "assistant": AgentConfig(
                         display_name="Assistant",
                         rooms=["project"],
+                        access=ResponderAccessConfig(members_of_rooms=["project"]),
                     ),
                 },
-                authorization=AuthorizationConfig(
-                    global_users=["@alice:localhost"],
-                    agent_reply_permissions={
-                        "assistant": AgentReplyPermission(joined_rooms=["project"]),
-                    },
-                ),
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
         )

@@ -92,10 +92,11 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
-    authorization: dict[str, Any] | None = None,
+    allowed_users: list[str] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, Any] = {
+        "administrators": ["@owner:example.org"],
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
             "general": {
@@ -104,6 +105,8 @@ def _config_with_worker_scope(
                 "tools": ["homeassistant"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "access": {"users": allowed_users or []},
+                "credential_managers": allowed_users or [],
             },
         },
         "defaults": {
@@ -111,8 +114,6 @@ def _config_with_worker_scope(
             "worker_grantable_credentials": worker_grantable_credentials,
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -1714,7 +1715,7 @@ def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "shared",
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     tools = [
         {
@@ -1865,7 +1866,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=app_runtime_paths.config_path,
         storage_path=app_runtime_paths.storage_root,
-        process_env={},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -1971,7 +1972,7 @@ def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "user",
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -2047,6 +2048,7 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
         storage_path=app_runtime_paths.storage_root,
         process_env={
             "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
         },
     )
     tools = [
@@ -2119,11 +2121,7 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "user_agent",
-        authorization={
-            "agent_reply_permissions": {
-                "general": ["@alice:example.org", "@bob:example.org"],
-            },
-        },
+        allowed_users=["@alice:example.org", "@bob:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     alice_identity = ToolExecutionIdentity(
@@ -2195,7 +2193,7 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         None,
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -4145,7 +4143,10 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,

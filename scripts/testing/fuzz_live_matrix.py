@@ -2675,18 +2675,7 @@ class ManagedTuwunelStack:
             "memory": {"backend": "file"},
             "router": {"model": "router"},
             "mindroom_user": {"username": "livefuzzowner", "display_name": "Live Fuzz Owner"},
-            "matrix_room_access": {
-                "mode": "multi_user",
-                "multi_user_join_rule": "public",
-                "publish_to_room_directory": False,
-                "invite_only_rooms": [],
-                "reconcile_existing_rooms": False,
-            },
-            "authorization": {
-                "default_room_access": True,
-                "global_users": [],
-                "agent_reply_permissions": {},
-            },
+            "room_defaults": {"join_policy": "public"},
         }
         if self.profile in {"recovery-cliff", "sustained-stream-capacity"}:
             config["matrix_sync"] = {"mode": "sliding", "sliding_timeline_limit": 100}

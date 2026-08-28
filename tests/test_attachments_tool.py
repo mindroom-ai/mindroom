@@ -30,6 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -53,9 +54,11 @@ def _tool_context(
         process_env=process_env or {},
     )
     config = bind_runtime_paths(
-        Config(
-            agents={"openclaw": AgentConfig(display_name="OpenClaw")},
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={"openclaw": AgentConfig(display_name="OpenClaw")},
+                authorization={},
+            ),
         ),
         runtime_paths,
     )
@@ -1078,7 +1081,7 @@ async def test_send_context_attachments_cross_room_send_requires_authorization(t
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
-        patch("mindroom.custom_tools.attachment_helpers.is_authorized_sender", return_value=False),
+        patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         result, send_error = await send_context_attachments(

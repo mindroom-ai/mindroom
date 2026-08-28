@@ -49,6 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -120,17 +121,19 @@ def _test_config(
     agent_names: tuple[str, ...] = ("test_agent",),
     voice_enabled: bool = False,
 ) -> Config:
-    config = Config(
-        agents={
-            name: {
-                "display_name": name.replace("_", " ").title(),
-                "rooms": ["!test:example.com"],
-            }
-            for name in agent_names
-        },
-        voice={"enabled": voice_enabled},
-        authorization={"default_room_access": True, "agent_reply_permissions": {}},
-        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    config = with_current_room_member_access(
+        Config(
+            agents={
+                name: {
+                    "display_name": name.replace("_", " ").title(),
+                    "rooms": ["!test:example.com"],
+                }
+                for name in agent_names
+            },
+            voice={"enabled": voice_enabled},
+            authorization={},
+            mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+        ),
     )
     return _bind_runtime_paths(config, tmp_path)
 
@@ -246,29 +249,31 @@ def _run_response_context_metadata(
 
 
 def _team_test_config(tmp_path: Path) -> Config:
-    config = Config(
-        agents={
-            "worker": {
-                "display_name": "Worker",
-                "rooms": ["!test:example.com"],
+    config = with_current_room_member_access(
+        Config(
+            agents={
+                "worker": {
+                    "display_name": "Worker",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        teams={
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "Coordinate worker",
-                "agents": ["worker"],
-                "rooms": ["!test:example.com"],
+            teams={
+                "test_team": {
+                    "display_name": "Test Team",
+                    "role": "Coordinate worker",
+                    "agents": ["worker"],
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        models={
-            "default": {
-                "provider": "openai",
-                "id": "test-model",
+            models={
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                },
             },
-        },
-        authorization={"default_room_access": True, "agent_reply_permissions": {}},
-        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+            authorization={},
+            mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+        ),
     )
     return _bind_runtime_paths(config, tmp_path)
 
@@ -4116,8 +4121,8 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
 
     with (
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-        patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+        patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$ack:example.com"),
         patch.object(
             bot._response_runner,
@@ -4162,7 +4167,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
+async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
     """Disallowed reactions must not consume interactive questions."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -4177,11 +4182,8 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
                 "test_agent": {
                     "display_name": "Test Agent",
                     "rooms": ["!test:example.com"],
+                    "access": {"users": ["@alice:example.com"]},
                 },
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
             },
         ),
         tmp_path,
@@ -4299,10 +4301,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
                     "rooms": ["!test:example.com"],
                 },
             },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-            },
+            router={"access": {"users": ["@alice:example.com"]}},
         ),
         tmp_path,
     )
@@ -4362,7 +4361,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_committed_config_confirmation_resumes_before_changed_reply_permissions(tmp_path: Path) -> None:
+async def test_committed_config_confirmation_resumes_before_changed_responder_access(tmp_path: Path) -> None:
     """A frozen config decision must finish after that decision changes authorization."""
     agent_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -4373,10 +4372,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
     config = _bind_runtime_paths(
         Config(
             agents={"assistant": {"display_name": "Assistant", "rooms": ["!test:example.com"]}},
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-            },
+            router={"access": {"users": ["@alice:example.com"]}},
         ),
         tmp_path,
     )
@@ -4400,7 +4396,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
         requester="@bob:example.com",
         room_id=room.room_id,
         thread_id=None,
-        config_path="authorization.agent_reply_permissions.router",
+        config_path="router.access.users",
         old_value=["@bob:example.com"],
         new_value=["@alice:example.com"],
         decision_event_id=reaction_event_id,
@@ -4513,7 +4509,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -4624,7 +4620,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
@@ -4656,6 +4652,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     """Test that unauthorized users cannot trigger response regeneration through edits."""
     # Create a mock agent user
@@ -4669,11 +4666,13 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     # Create a minimal mock config with authorization
     config = _bind_runtime_paths(
         Config(
-            agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
-            authorization={
-                "global_users": ["@authorized:example.com"],
-                "room_permissions": {},
-                "default_room_access": False,
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "role": "Test agent",
+                    "rooms": ["!test:example.com"],
+                    "access": {"users": ["@authorized:example.com"]},
+                },
             },
         ),
         tmp_path,
@@ -4729,16 +4728,14 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
 
     # Test that authorization check works
     with (
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=False) as mock_is_auth,
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False) as mock_is_auth,
         patch.object(bot._edit_regenerator, "handle_message_edit") as mock_handle_edit,
     ):
         await bot._on_message(room, edit_event)
         # Verify authorization was checked
         mock_is_auth.assert_called_once_with(
             edit_event.sender,
-            config,
             room.room_id,
-            runtime_paths_for(config),
         )
         # Should not handle edit for unauthorized user
         mock_handle_edit.assert_not_called()
@@ -4815,7 +4812,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Mock is_authorized_sender to return False
     with (
-        patch("mindroom.ingress_validation.is_authorized_sender", return_value=False) as mock_is_authorized,
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False) as mock_is_authorized,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event

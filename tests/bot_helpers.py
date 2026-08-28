@@ -14,11 +14,11 @@ import nio
 
 from mindroom.attachments import AttachmentRecord, register_local_attachment
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
+    ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_runtime_paths,
@@ -51,6 +51,7 @@ from mindroom.response_runner import (
     ResponseRequest,
 )
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -214,6 +215,14 @@ async def _run_orchestrator_start_until_ready(
 
     with patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready):
         runtime_task = asyncio.create_task(orchestrator.start())
+
+        async def publish_router_membership_readiness() -> None:
+            while ROUTER_AGENT_NAME not in orchestrator._sync_tasks and not runtime_task.done():  # noqa: ASYNC110
+                await asyncio.sleep(0)
+            if not runtime_task.done():
+                orchestrator._router_reply_memberships_live_sync_ready.set()
+
+        router_ready_task = asyncio.create_task(publish_router_membership_readiness())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
             if wait_for_startup_maintenance:
@@ -223,6 +232,10 @@ async def _run_orchestrator_start_until_ready(
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
+            if not router_ready_task.done():
+                router_ready_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await router_ready_task
             if not runtime_task.done():
                 runtime_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -477,21 +490,22 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
 def _configured_team_test_config(runtime_root: Path) -> Config:
     """Return a runtime-bound config with one configured team for TeamBot tests."""
     return _runtime_bound_config(
-        Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-            },
-            teams={
-                "support_team": TeamConfig(
-                    display_name="Support Team",
-                    role="Coordinate test responses",
-                    agents=["general"],
-                    rooms=["!test:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                teams={
+                    "support_team": TeamConfig(
+                        display_name="Support Team",
+                        role="Coordinate test responses",
+                        agents=["general"],
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
         ),
         runtime_root,
     )
@@ -866,14 +880,15 @@ class AgentBotTestBase:
     def create_mock_config(runtime_root: Path) -> Config:
         """Create a typed config for tests that do not need a runtime-bound YAML load."""
         return _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                teams={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization=AuthorizationConfig(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    teams={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                ),
             ),
             runtime_root,
         )

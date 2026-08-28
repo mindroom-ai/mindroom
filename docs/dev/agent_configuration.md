@@ -22,8 +22,8 @@ The configuration file has these common top-level sections; see the exhaustive [
 7. **knowledge_bases** - File-backed RAG knowledge bases
 8. **router** - Agent routing system configuration
 9. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
-10. **authorization** - Fine-grained user and room permissions
-11. **matrix_room_access** - Managed room access mode and discoverability
+10. **administrators** and **authorization** - Platform authority and identity aliases
+11. **room_defaults** and **rooms** - Managed room state, invitations, and Matrix power
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
 13. **mindroom_user** - Internal MindRoom user account settings
 14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
@@ -306,45 +306,47 @@ voice:
 
 ## Authorization Configuration
 
-Fine-grained access control for rooms and agents:
+MindRoom separates platform, room, responder, and credential authority:
 
 ```yaml
-authorization:
-  default_room_access: false
-  global_users:
+administrators:
+  - "@owner:example.com"
+room_defaults:
+  join_policy: invite
+  listed: false
+  encrypted: false
+  invite_users:
     - "@owner:example.com"
-  room_permissions:
-    dev: ["@developer:example.com"]
+  admins: []
+rooms:
+  dev:
+    invite_users:
+      - "@developer:example.com"
+    admins: []
+agents:
+  code:
+    display_name: Code
+    rooms: [dev]
+    access:
+      current_room_members: false
+      members_of_rooms: [dev]
+      users: []
+    credential_managers:
+      - "@owner:example.com"
+authorization:
+  config_command_enabled: false
   aliases:
     "@alice:example.com": ["@telegram_123:example.com"]
-  agent_reply_permissions:
-    "*":
-      - "@owner:example.com"
-    code:
-      users:
-        - "@operator:example.com"
-      joined_rooms:
-        - dev
 ```
 
-- **global_users**: Users with access to all rooms
-- **room_permissions**: Per-room user allowlists
+- **administrators**: Concrete Matrix users with platform and credential authority plus responder-policy bypass
+- **room_defaults** and **rooms**: Desired join policy, visibility, encryption, invitation roster, and Matrix admins
+- **access**: Per-responder conversation access through static users or authoritative room membership
+- **credential_managers**: Concrete Matrix users who may manage one agent's credentials and OAuth connections
 - **aliases**: Map canonical Matrix user IDs to bridge aliases
-- **agent_reply_permissions**: Per-agent/team reply policies using the user-list shorthand or structured `users` and managed-room `joined_rooms` grants (`*` applies only when no explicit entity policy exists)
 
-## Matrix Room Access Configuration
-
-Control how managed rooms are created and accessed:
-
-```yaml
-matrix_room_access:
-  mode: single_user_private  # "single_user_private" or "multi_user"
-  multi_user_join_rule: public  # "public" or "knock" (for multi_user mode)
-  publish_to_room_directory: false
-  invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
-  reconcile_existing_rooms: false  # Reconcile existing rooms on startup
-  room_admins: []  # Matrix user IDs granted admin power (100) in every managed room
-```
+Retired access fields in a monolithic configuration are migrated automatically when the file loads.
+Access migration fails without writing or creating a backup when any `!include` is present.
 
 ## Matrix Space Configuration
 
@@ -356,11 +358,8 @@ matrix_space:
   name: "MindRoom"  # Display name for the root Space
 ```
 
-Concrete Matrix users in `authorization.global_users` receive root Space admin power.
-The configured `mindroom_user` also receives root Space admin power when the internal account exists.
-Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
+Managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 
 ## Defaults Configuration
 
@@ -687,23 +686,22 @@ router:
   model: "default"
   accept_invites: true
 
-# Managed room access
-matrix_room_access:
-  mode: single_user_private
-  room_admins:
+# Access
+administrators:
+  - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+room_defaults:
+  join_policy: invite
+  invite_users:
     - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  admins: []
 
 # Timezone
 timezone: "America/Los_Angeles"
 
-# Authorization
+# Non-overlapping authorization features
 authorization:
-  default_room_access: false
-  global_users:
-    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
-  agent_reply_permissions:
-    "*":
-      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  config_command_enabled: false
+  aliases: {}
 ```
 
 ## Troubleshooting

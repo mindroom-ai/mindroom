@@ -111,6 +111,12 @@ export type CultureMode = "automatic" | "agentic" | "manual";
 
 export type ThreadMode = "thread" | "room";
 
+export interface ResponderAccessConfig {
+  current_room_members?: boolean;
+  members_of_rooms?: string[];
+  users?: string[];
+}
+
 export interface CompactionConfig {
   enabled?: boolean;
   threshold_tokens?: number | null;
@@ -216,6 +222,8 @@ export interface Agent {
   skills: string[];
   instructions: string[];
   rooms: string[];
+  access?: ResponderAccessConfig;
+  credential_managers?: string[];
   knowledge_bases?: string[];
   context_files?: string[]; // Workspace-relative files loaded into each freshly built agent instance
   markdown?: boolean; // Per-agent markdown override
@@ -244,6 +252,7 @@ export interface Team {
   role: string;
   agents: string[]; // List of agent IDs
   rooms: string[];
+  access?: ResponderAccessConfig;
   mode: "coordinate" | "collaborate";
   model?: string; // Optional team-specific model
   compaction?: CompactionConfig | null; // Per-team required-compaction overrides
@@ -274,6 +283,19 @@ export interface Room {
 export interface RoomConfig {
   display_name?: string;
   description?: string;
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
+}
+
+export interface RoomDefaultsConfig {
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
 }
 
 export interface VoiceSTTConfig {
@@ -295,17 +317,8 @@ export interface VoiceConfig {
   intelligence: VoiceLLMConfig;
 }
 
-export interface MatrixRoomAccessConfig {
-  mode?: "single_user_private" | "multi_user";
-  multi_user_join_rule?: "public" | "knock";
-  publish_to_room_directory?: boolean;
-  invite_only_rooms?: string[];
-  reconcile_existing_rooms?: boolean;
-  encrypt_managed_rooms?: boolean;
-  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
-}
-
 export interface Config {
+  administrators?: string[];
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   cultures?: Record<string, Omit<Culture, "id">>; // Culture configurations
@@ -330,13 +343,14 @@ export interface Config {
   };
   router: {
     model: string;
+    access?: ResponderAccessConfig;
   };
   rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
+  room_defaults?: RoomDefaultsConfig; // Defaults for managed Matrix rooms
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
-  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {

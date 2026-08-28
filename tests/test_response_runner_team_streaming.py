@@ -18,7 +18,6 @@ from agno.session.team import TeamSession
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -39,6 +38,7 @@ from mindroom.response_runner import (
 )
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -123,18 +123,14 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_team_response_rechecks_every_member_before_execution(tmp_path: Path) -> None:
     """A revoked member must fence an already-planned ad-hoc team at the locked boundary."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _config()
     config.agents["worker"] = AgentConfig(display_name="Worker")
-    config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "general": AgentReplyPermission(users=["@alice:localhost"]),
-            "worker": AgentReplyPermission(users=[]),
-        },
-    )
+    with_responder_access(config, "general", users=["@alice:localhost"])
+    with_responder_access(config, "worker", users=[])
     config = bind_runtime_paths(config, runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="general")
 
@@ -168,13 +164,8 @@ async def test_configured_team_response_rechecks_only_the_team_policy(tmp_path: 
     """A configured team's explicit policy must override its members' policies."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _config_with_team()
-    config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "ultimate": AgentReplyPermission(users=["@alice:localhost"]),
-            "general": AgentReplyPermission(users=[]),
-        },
-    )
+    with_responder_access(config, "ultimate", users=["@alice:localhost"])
+    with_responder_access(config, "general", users=[])
     config = bind_runtime_paths(config, runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
 
@@ -250,16 +241,17 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
     """ResponseRunner preflight should not reject direct private members before team_response."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "private_worker": AgentConfig(
-                    display_name="PrivateWorker",
-                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
-                ),
-                "calculator": AgentConfig(display_name="Calculator"),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "private_worker": AgentConfig(
+                        display_name="PrivateWorker",
+                        private=AgentPrivateConfig(per="user", root="private_worker_data"),
+                    ),
+                    "calculator": AgentConfig(display_name="Calculator"),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         runtime_paths,
     )

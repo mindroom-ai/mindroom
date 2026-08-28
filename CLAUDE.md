@@ -198,6 +198,9 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
+| `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
+| `config/access.py` | Membership access configuration models (responder access, room defaults) |
+| `config/access_migration.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
 | `thread_utils.py` | Thread analysis and agent detection |
 | `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
@@ -274,6 +277,11 @@ agents:
       - Always read files before modifying them.
     rooms: [lobby, dev]
     knowledge_bases: [engineering_docs]
+    access:
+      current_room_members: false
+      members_of_rooms: [lobby, dev]
+      users: []
+    credential_managers: []
 
 defaults:
   tools: [scheduler]
@@ -328,20 +336,21 @@ mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
 
-matrix_room_access:
-  mode: single_user_private
-  multi_user_join_rule: public
-  publish_to_room_directory: false
-  invite_only_rooms: []
-  reconcile_existing_rooms: false
+administrators:
+  - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+
+room_defaults:
+  join_policy: invite
+  listed: false
+  encrypted: false
+  invite_users:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  admins:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
 authorization:
-  default_room_access: false
-  global_users:
-    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
-  agent_reply_permissions:
-    "*":
-      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  config_command_enabled: false
+  aliases: {}
 
 timezone: America/Los_Angeles
 ```

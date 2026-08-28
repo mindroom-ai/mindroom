@@ -20,6 +20,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -42,6 +43,7 @@ from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -121,11 +123,13 @@ def setup_test_bot(
                 rooms=[room_id],
             )
         config = _runtime_bound_config(
-            Config(
-                agents=agents,
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents=agents,
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             storage_path,
         )
@@ -167,16 +171,18 @@ def _router_readiness_runtime(
     """Return a live router and one running target that has not completed first sync."""
     room_id = "!router-readiness:localhost"
     config = _runtime_bound_config(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    rooms=[room_id],
-                    tools=["mcp_demo"] if with_mcp_server else [],
-                ),
-            },
-            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}} if with_mcp_server else {},
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        rooms=[room_id],
+                        tools=["mcp_demo"] if with_mcp_server else [],
+                    ),
+                },
+                mcp_servers={"demo": {"transport": "stdio", "command": "npx"}} if with_mcp_server else {},
+                authorization={},
+            ),
         ),
         tmp_path,
     )
@@ -209,12 +215,14 @@ def _selective_router_recovery_runtime(
     """Return router recovery state with one ready and one unready room candidate."""
     room_id = "!selective-router-recovery:localhost"
     config = _runtime_bound_config(
-        Config(
-            agents={
-                "healthy": AgentConfig(display_name="Healthy", rooms=[room_id]),
-                "stuck": AgentConfig(display_name="Stuck", rooms=[room_id]),
-            },
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "healthy": AgentConfig(display_name="Healthy", rooms=[room_id]),
+                    "stuck": AgentConfig(display_name="Stuck", rooms=[room_id]),
+                },
+                authorization={},
+            ),
         ),
         tmp_path,
     )
@@ -787,22 +795,24 @@ class TestRoutingRegression:
 
         # Create test config with agents configured for the test room
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "research": AgentConfig(
-                        display_name="MindRoomResearch",
-                        rooms=[test_room_id],  # Configured for test room
-                    ),
-                    "news": AgentConfig(
-                        display_name="MindRoomNews",
-                        rooms=[test_room_id],  # Configured for test room
-                    ),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "research": AgentConfig(
+                            display_name="MindRoomResearch",
+                            rooms=[test_room_id],  # Configured for test room
+                        ),
+                        "news": AgentConfig(
+                            display_name="MindRoomNews",
+                            rooms=[test_room_id],  # Configured for test room
+                        ),
+                    },
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -876,6 +886,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -890,22 +901,18 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
                 router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                    },
-                },
             ),
             tmp_path,
         )
@@ -984,15 +991,17 @@ class TestRoutingRegression:
         """Router relay provenance is human-origin metadata, not managed-agent identity."""
         test_room_id = "!managed-requester:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1060,15 +1069,17 @@ class TestRoutingRegression:
         """Router failure notices are not trusted handoffs to another responder."""
         test_room_id = "!router-failure:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1132,15 +1143,17 @@ class TestRoutingRegression:
         """Router relays only honor provenance when canonical relay metadata is present."""
         test_room_id = "!router-mentions:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1208,24 +1221,26 @@ class TestRoutingRegression:
         """Router relay must not route to configured responders that cannot currently answer."""
         test_room_id = "!live-filter:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                    "writer": AgentConfig(display_name="WriterAgent"),
-                },
-                teams={
-                    "ops": TeamConfig(
-                        display_name="Ops Team",
-                        role="Operations",
-                        agents=["beta"],
-                        rooms=[test_room_id],
-                    ),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                        "writer": AgentConfig(display_name="WriterAgent"),
+                    },
+                    teams={
+                        "ops": TeamConfig(
+                            display_name="Ops Team",
+                            role="Operations",
+                            agents=["beta"],
+                            rooms=[test_room_id],
+                        ),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    router=RouterConfig(model="default"),
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1295,23 +1310,25 @@ class TestRoutingRegression:
         """Direct response planning should use the same filtered configured-room candidates."""
         test_room_id = "!live-direct:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
-                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
-                    "writer": AgentConfig(display_name="WriterAgent"),
-                },
-                teams={
-                    "ops": TeamConfig(
-                        display_name="Ops Team",
-                        role="Operations",
-                        agents=["beta"],
-                        rooms=[test_room_id],
-                    ),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                        "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                        "writer": AgentConfig(display_name="WriterAgent"),
+                    },
+                    teams={
+                        "ops": TeamConfig(
+                            display_name="Ops Team",
+                            role="Operations",
+                            agents=["beta"],
+                            rooms=[test_room_id],
+                        ),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1387,21 +1404,23 @@ class TestRoutingRegression:
         """A live TeamBot must surface configured-team rejection even if members are unavailable."""
         test_room_id = "!team-reject:localhost"
         test_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent"),
-                },
-                teams={
-                    "ops": TeamConfig(
-                        display_name="Ops Team",
-                        role="Operations",
-                        agents=["alpha"],
-                        rooms=[test_room_id],
-                    ),
-                },
-                room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent"),
+                    },
+                    teams={
+                        "ops": TeamConfig(
+                            display_name="Ops Team",
+                            role="Operations",
+                            agents=["alpha"],
+                            rooms=[test_room_id],
+                        ),
+                    },
+                    room_models={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1462,7 +1481,8 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
-    async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    async def test_router_filters_by_agent_access_with_multiple_allowed(
         self,
         mock_suggest_responder: AsyncMock,
         mock_research_agent: AgentMatrixUser,
@@ -1477,27 +1497,26 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                     "facts": AgentConfig(
                         display_name="MindRoomFacts",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                        "facts": ["@bob:localhost"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@bob:localhost"]),
+                ),
             ),
             tmp_path,
         )
@@ -1549,6 +1568,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1564,24 +1584,21 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["*"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["*"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "router": ["@alice:localhost"],
-                        "research": ["*"],
-                        "news": ["*"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:localhost"]),
+                ),
             ),
             tmp_path,
         )
@@ -1627,6 +1644,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1642,28 +1660,26 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                     "facts": AgentConfig(
                         display_name="MindRoomFacts",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                        "news": ["@bob:localhost"],
-                        "facts": ["@alice:localhost"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:localhost"]),
+                ),
             ),
             tmp_path,
         )
@@ -1751,15 +1767,17 @@ class TestRoutingRegression:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
         mock_config = _runtime_bound_config(
-            Config(
-                agents={
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),
-                    "news": AgentConfig(display_name="NewsAgent", rooms=["!research:localhost"]),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),
+                        "news": AgentConfig(display_name="NewsAgent", rooms=["!research:localhost"]),
+                    },
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )

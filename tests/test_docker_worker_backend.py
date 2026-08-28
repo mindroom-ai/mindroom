@@ -340,11 +340,14 @@ cultures:
     description: Keep things clean
     agents: [code]
     mode: automatic
-authorization:
-  global_users:
+administrators:
+  - "@owner:example.org"
+room_defaults:
+  invite_users:
     - "@owner:example.org"
-matrix_room_access:
-  mode: single_user_private
+rooms:
+  lobby:
+    display_name: Lobby
 mindroom_user:
   username: mindroom
 """.lstrip(),
@@ -2039,8 +2042,10 @@ def test_docker_backend_redacts_projected_config_secrets_and_support_state(
     assert "api_key" not in projected_config["voice"]["stt"]
     assert projected_config["teams"] == {}
     assert projected_config["cultures"] == {}
+    assert projected_config["administrators"] == []
+    assert projected_config["room_defaults"] == {}
+    assert projected_config["rooms"] == {}
     assert projected_config["authorization"] == {}
-    assert projected_config["matrix_room_access"] == {}
     assert projected_config["mindroom_user"] is None
 
 

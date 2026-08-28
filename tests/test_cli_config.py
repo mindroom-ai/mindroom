@@ -26,7 +26,6 @@ import mindroom.constants as constants_module
 import mindroom.google_adc as google_adc_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
-from mindroom.cli import migrate as migrate_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
@@ -279,12 +278,15 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "models:" in content
+        assert "access_model" not in content
         assert "authorization:" in content
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
         config = yaml.safe_load(content)
-        assert config["matrix_room_access"]["room_admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["administrators"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"]["invite_users"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"]["admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
 
     def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
         """mindroom.chat should default to OpenAI without prompting for a provider."""
@@ -737,9 +739,9 @@ class TestConfigInit:
         config_content = target.read_text(encoding="utf-8")
         config = yaml.safe_load(config_content)
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in config_content
-        assert config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
-        assert config["authorization"]["global_users"] == ["@alice:mindroom.chat"]
-        assert config["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat"]
+        assert config["administrators"] == ["@alice:mindroom.chat"]
+        assert config["room_defaults"]["invite_users"] == ["@alice:mindroom.chat"]
+        assert config["room_defaults"]["admins"] == ["@alice:mindroom.chat"]
 
     def test_init_mindroom_chat_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex config should use Codex defaults and hosted Matrix settings."""
@@ -1214,9 +1216,13 @@ class TestConfigInit:
         assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
-        assert config["matrix_room_access"] == {
-            "mode": "single_user_private",
-            "room_admins": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
+        assert "access_model" not in config
+        assert config["administrators"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"] == {
+            "join_policy": "invite",
+            "listed": False,
+            "invite_users": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
+            "admins": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
         }
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
@@ -1469,8 +1475,9 @@ router:
   model: default
   accept_invites: true
 
-matrix_room_access:
-  mode: single_user_private
+room_defaults:
+  join_policy: invite
+  listed: false
 
 knowledge_bases:
   mind_memory:
@@ -1559,8 +1566,9 @@ router:
   model: default
   accept_invites: true
 
-matrix_room_access:
-  mode: single_user_private
+room_defaults:
+  join_policy: invite
+  listed: false
 
 # File-based memory requires no external LLM.
 memory:
@@ -1645,6 +1653,73 @@ class TestConfigMigrate:
         assert "No migrations applied" in normalize_console_output(result.output)
         assert cfg.read_text(encoding="utf-8") == original
 
+    def test_migrate_applies_access_migration_and_creates_backup(self, tmp_path: Path) -> None:
+        """The explicit command must use the same validated access migration as config loading."""
+        cfg = tmp_path / "config.yaml"
+        original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
+        cfg.write_text(original, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 0
+        assert "membership access schema" in output
+        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert migrated["administrators"] == ["@owner:example.com"]
+        assert "authorization" not in migrated
+        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
+        assert backup.read_text(encoding="utf-8") == original
+
+    def test_migrate_applies_access_and_starter_memory_migrations_together(self, tmp_path: Path) -> None:
+        """A prior starter config must not lose either migration when both are required."""
+        cfg = tmp_path / "config.yaml"
+        original = (
+            _old_config_init_mind_memory_config("./mindroom_data/agents/mind/workspace/memory")
+            + """
+authorization:
+  global_users:
+    - '@owner:example.com'
+  default_room_access: false
+matrix_room_access:
+  mode: single_user_private
+"""
+        )
+        cfg.write_text(original, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 0
+        assert "membership access schema" in output
+        assert "starter Mind file-memory semantic search" in output
+        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert migrated["administrators"] == ["@owner:example.com"]
+        assert migrated["agents"]["mind"]["tools"][2] == "memory"
+        assert "knowledge_bases" not in migrated["agents"]["mind"]
+        assert "knowledge_bases" not in migrated
+        assert migrated["memory"]["search"]["include"] == ["memory/**/*.md"]
+        assert "authorization" not in migrated
+        assert "matrix_room_access" not in migrated
+        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
+        assert backup.read_text(encoding="utf-8") == original
+
+    def test_migrate_rejects_access_migration_with_include_without_writing(self, tmp_path: Path) -> None:
+        """The explicit command must error on composed access config before any write."""
+        cfg = tmp_path / "config.yaml"
+        authorization = tmp_path / "authorization.yaml"
+        config_text = "authorization: !include authorization.yaml\n"
+        authorization_text = "global_users:\n  - '@owner:example.com'\n"
+        cfg.write_text(config_text, encoding="utf-8")
+        authorization.write_text(authorization_text, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "does not support !include" in normalize_console_output(result.output)
+        assert cfg.read_text(encoding="utf-8") == config_text
+        assert authorization.read_text(encoding="utf-8") == authorization_text
+        assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
+
     def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
         """Config migrate should fail cleanly when no config exists."""
         missing = tmp_path / "config.yaml"
@@ -1660,7 +1735,7 @@ class TestConfigMigrate:
         original = _old_config_init_mind_memory_config("${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory")
         cfg.write_text(original, encoding="utf-8")
 
-        with patch.object(migrate_cli, "_write_text_atomic", side_effect=OSError("disk full")):
+        with patch("mindroom.yaml_io.write_text_atomic", side_effect=OSError("disk full")):
             result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
 
         output = normalize_console_output(result.output)

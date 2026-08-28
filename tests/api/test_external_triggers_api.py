@@ -100,10 +100,8 @@ def _config_payload(
     owner_authorized: bool = True,
     private_research: bool = False,
 ) -> dict[str, object]:
-    authorization: dict[str, object] = {"agent_reply_permissions": {"*": [_OWNER]}}
-    if owner_authorized:
-        authorization["global_users"] = [_OWNER]
     payload: dict[str, object] = {
+        "administrators": [_OWNER] if owner_authorized else [],
         "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
         "router": {"model": "default"},
         "agents": {
@@ -111,6 +109,7 @@ def _config_payload(
                 "display_name": "Research",
                 "role": "test",
                 "rooms": ["campground"],
+                "access": {"users": [_OWNER] if owner_authorized else []},
             },
         },
         "rooms": {"campground": {"display_name": "Campground"}},
@@ -118,7 +117,6 @@ def _config_payload(
             "default_max_body_bytes": min(max_body_bytes, 65536),
             "max_body_bytes": max_body_bytes,
         },
-        "authorization": authorization,
     }
     if private_research:
         agents = cast("dict[str, dict[str, object]]", payload["agents"])
@@ -255,10 +253,9 @@ async def test_runtime_config_type_error_is_not_masked(monkeypatch: pytest.Monke
 async def test_external_trigger_target_accepts_grant_room_member(tmp_path: Path) -> None:
     """External trigger owners should pass target reply auth through the shared membership index."""
     payload = _config_payload()
-    authorization = cast("dict[str, object]", payload["authorization"])
-    authorization["agent_reply_permissions"] = {
-        "research": {"joined_rooms": ["campground"]},
-    }
+    payload["administrators"] = []
+    agents = cast("dict[str, dict[str, object]]", payload["agents"])
+    agents["research"]["access"] = {"members_of_rooms": ["campground"]}
     config = Config.model_validate(payload)
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -307,10 +304,9 @@ async def _membership_authorized_runtime(
     """Build a config and ready membership index for the trigger owner."""
     config_path = tmp_path / "config.yaml"
     payload = _config_payload()
-    authorization = cast("dict[str, object]", payload["authorization"])
-    authorization["agent_reply_permissions"] = {
-        "research": {"joined_rooms": ["campground"]},
-    }
+    payload["administrators"] = []
+    agents = cast("dict[str, dict[str, object]]", payload["agents"])
+    agents["research"]["access"] = {"members_of_rooms": ["campground"]}
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     config = Config.model_validate(payload)
     runtime_paths = constants.resolve_primary_runtime_paths(
@@ -687,6 +683,7 @@ def test_policy_caps_apply_at_request_time(
         api_main.unbind_external_trigger_runtime(api_main.app)
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     trigger_api: TriggerApiContext,
 ) -> None:
@@ -703,6 +700,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

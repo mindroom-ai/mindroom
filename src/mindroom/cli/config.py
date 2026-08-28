@@ -43,12 +43,9 @@ from mindroom.runtime_env_policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
-    import yaml  # type: ignore[import-untyped]
-    from pydantic import ValidationError
-
-    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -388,7 +385,7 @@ def _get_editor() -> str:
 
 
 def format_validation_errors(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: Exception,
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""
@@ -696,12 +693,8 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def load_config_quiet(
-    runtime_paths: RuntimePaths,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> Config:
-    """Load config while temporarily suppressing structlog output.
+def _call_config_loader_quietly(loader: Callable[[], Config]) -> Config:
+    """Call one config loader while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
     route it through stdlib with the root level at WARNING for the
@@ -709,8 +702,6 @@ def load_config_quiet(
     can configure structlog themselves.
     """
     import structlog  # noqa: PLC0415
-
-    from mindroom.config.main import load_config  # noqa: PLC0415
 
     was_configured = structlog.is_configured()
     if not was_configured:
@@ -720,13 +711,51 @@ def load_config_quiet(
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
-        return load_config(
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
+        return loader()
     finally:
         if not was_configured:
             structlog.reset_defaults()
+
+
+def load_config_quiet(
+    runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
+    """Load config while temporarily suppressing structlog output."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
+
+    return _call_config_loader_quietly(
+        lambda: load_config(
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        ),
+    )
+
+
+def validate_config_source_quiet(
+    runtime_paths: RuntimePaths,
+    *,
+    source: bytes,
+    original: bytes,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
+    """Validate one supplied source and apply automatic migrations without config logs."""
+    from mindroom.config.main import validate_loaded_config_source  # noqa: PLC0415
+    from mindroom.config.yaml_includes import load_yaml_config_source_with_digests  # noqa: PLC0415
+
+    def validate() -> Config:
+        data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source)
+        config, _source_digests = validate_loaded_config_source(
+            data,
+            source_digests,
+            original,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        return config
+
+    return _call_config_loader_quietly(validate)
 
 
 def _find_missing_env_keys(
@@ -1003,10 +1032,15 @@ router:
   model: default
   accept_invites: true
 {mindroom_user_block}
-matrix_room_access:
-  mode: single_user_private
-  room_admins:
-    # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+administrators:
+  # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+  - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+room_defaults:
+  join_policy: invite
+  listed: false
+  invite_users:
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  admins:
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 matrix_space:
@@ -1031,15 +1065,7 @@ memory:
     enabled: true
 
 authorization:
-  default_room_access: false
   config_command_enabled: false
-  global_users:
-    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
-  agent_reply_permissions:
-    "*":
-      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the

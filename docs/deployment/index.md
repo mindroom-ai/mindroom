@@ -113,6 +113,8 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
+Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+
 See the [Docker deployment guide](docker.md) for the full single-container setup.
 
 ### Kubernetes

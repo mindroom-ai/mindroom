@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.access_policy import resolve_responder_access
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
@@ -17,8 +18,6 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.matrix_identifiers import room_alias_identifier_candidates
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,128 +31,33 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _room_permission_lookup_keys(
-    room_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    room_alias: str | None = None,
-    room_key: str | None = None,
-) -> list[str]:
-    """Build room identifiers that can be used as authorization map keys."""
-    keys = room_alias_identifier_candidates(room_id, runtime_paths) if room_id.startswith("#") else [room_id]
-    if room_key:
-        keys.append(room_key)
-    if room_alias:
-        keys.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
-    return list(dict.fromkeys(keys))
-
-
-def _lookup_managed_room_identifiers(
-    room_id: str,
-    runtime_paths: RuntimePaths,
-) -> tuple[str | None, str | None]:
-    """Return managed room key + alias from persisted Matrix state for a room ID."""
-    state = matrix_state_for_runtime(runtime_paths)
-    for room_key, room in state.rooms.items():
-        if room.room_id == room_id:
-            return room_key, room.alias
-    return None, None
-
-
-def explicit_room_permission_user_ids(
-    config: Config,
-    room_id: str,
-    runtime_paths: RuntimePaths,
-) -> frozenset[str] | None:
-    """Return the explicit permission entry for a room, if one is configured."""
-    room_permissions = config.authorization.room_permissions
-
-    # Prefer direct room identifiers. A room ID is stable; a direct alias target
-    # is an explicit caller target rather than room state content.
-    for permission_key in _room_permission_lookup_keys(room_id, runtime_paths=runtime_paths):
-        if permission_key in room_permissions:
-            return frozenset(room_permissions[permission_key])
-
-    # Resolve persisted managed-room identifiers when only a room ID is
-    # available. Arbitrary canonical aliases from Matrix room events are not
-    # trusted for this mapping.
-    if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
-        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths)
-        for permission_key in _room_permission_lookup_keys(
-            room_id,
-            room_alias=persisted_alias,
-            room_key=room_key,
-            runtime_paths=runtime_paths,
-        ):
-            if permission_key in room_permissions:
-                return frozenset(room_permissions[permission_key])
-
-    return None
-
-
-def is_authorized_sender(
+def is_sender_allowed_for_responder(
     sender_id: str,
-    config: Config,
-    room_id: str,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Check if a sender is authorized to interact with agents.
-
-    Args:
-        sender_id: Matrix ID of the message sender
-        config: Application configuration
-        room_id: Room ID for permission checks
-        runtime_paths: Explicit runtime context for Matrix identity resolution
-
-    Returns:
-        True if the sender is authorized, False otherwise
-
-    """
-    # Always allow active internal identities owned by this runtime.
-    if sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths):
-        return True
-
-    # Resolve bridge aliases to canonical user ID before permission checks.
-    resolved_id = config.authorization.resolve_alias(sender_id)
-
-    # Check global authorized users (they have access to all rooms)
-    if resolved_id in config.authorization.global_users:
-        return True
-
-    room_user_ids = explicit_room_permission_user_ids(config, room_id, runtime_paths)
-    if room_user_ids is not None:
-        return resolved_id in room_user_ids
-
-    # Use default access for rooms not explicitly configured
-    return config.authorization.default_room_access
-
-
-def is_sender_allowed_for_agent_reply(
-    sender_id: str,
-    agent_name: str,
+    entity_name: str,
+    room_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
 ) -> bool:
-    """Check whether *agent_name* is allowed to reply to *sender_id*.
-
-    Internal MindRoom identities (agents/teams/router and internal user) bypass
-    this allowlist because they are system participants, not end users.
-    """
-    if _is_sender_allowed_by_static_agent_reply_policy(sender_id, agent_name, config):
-        return True
-
-    policy = config.authorization.agent_reply_policy(agent_name)
-    if policy is not None and membership_index.is_allowed(
-        sender_id,
-        policy.joined_rooms,
-        config.authorization,
-    ):
-        return True
-
-    # Internal MindRoom participants are not restricted by per-user reply lists.
-    # Bridge bot accounts are intentionally not exempt.
-    return sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
+    """Apply the complete membership policy for one responder."""
+    allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
+    resolved_sender = config.authorization.resolve_alias(sender_id)
+    access = resolve_responder_access(config, entity_name)
+    allowed = allowed or resolved_sender in config.administrators
+    allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
+    allowed = allowed or (
+        room_id is not None
+        and access.current_room_members
+        and membership_index.is_current_room_member(resolved_sender, room_id, config)
+    )
+    return allowed or (
+        bool(access.members_of_rooms)
+        and membership_index.is_allowed(
+            resolved_sender,
+            access.members_of_rooms,
+            config,
+        )
+    )
 
 
 def is_sender_allowed_for_agent_reply_in_room(
@@ -183,13 +87,12 @@ def is_sender_allowed_for_entity_replies_in_room(
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
 ) -> bool:
-    """Require current-room access and reply access for every execution entity."""
-    if not is_authorized_sender(sender_id, config, room_id, runtime_paths):
-        return False
+    """Require membership access for every execution entity."""
     return all(
-        is_sender_allowed_for_agent_reply(
+        is_sender_allowed_for_responder(
             sender_id,
             entity_name,
+            room_id,
             config,
             runtime_paths,
             membership_index,
@@ -207,25 +110,23 @@ def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: Runtime
         return frozenset()
 
 
-def _is_sender_allowed_by_static_agent_reply_policy(sender_id: str, agent_name: str, config: Config) -> bool:
-    """Check only the configured static users for one entity."""
-    policy = config.authorization.agent_reply_policy(agent_name)
-    if policy is None:
-        return True
-    if "*" in policy.users:
-        return True
-
-    resolved_sender = config.authorization.resolve_alias(sender_id)
-    return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in policy.users)
-
-
 def is_sender_allowed_for_agent_credential_management(
     sender_id: str,
     agent_name: str,
     config: Config,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
-    return _is_sender_allowed_by_static_agent_reply_policy(sender_id, agent_name, config)
+    agent = config.agents.get(agent_name)
+    if agent is None:
+        return False
+    resolved_sender = config.authorization.resolve_alias(sender_id)
+    return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
+
+
+def is_platform_administrator(sender_id: str, config: Config) -> bool:
+    """Return whether a requester has platform-wide administrative authority."""
+    resolved_sender = config.authorization.resolve_alias(sender_id)
+    return resolved_sender in config.administrators
 
 
 def get_effective_sender_id_for_reply_permissions(
@@ -265,15 +166,17 @@ def filter_responders_by_sender_permissions(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    room_id: str | None = None,
 ) -> list[MatrixID]:
     """Return only responders that may reply to *sender_id* per config rules."""
     registry = entity_identity_registry(config, runtime_paths)
     result: list[MatrixID] = []
     for responder in responders:
         name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
-        if name is not None and is_sender_allowed_for_agent_reply(
+        if name is not None and is_sender_allowed_for_responder(
             sender_id,
             name,
+            room_id,
             config,
             runtime_paths,
             membership_index,
@@ -329,6 +232,7 @@ def _get_available_responders_for_sender(
         config,
         runtime_paths,
         membership_index,
+        room.room_id,
     )
 
 
@@ -376,6 +280,7 @@ async def _get_available_responders_for_sender_authoritative(
         config,
         runtime_paths,
         membership_index,
+        room.room_id,
     )
     if room.members_synced:
         return cached_visible_responders
@@ -402,6 +307,7 @@ async def _get_available_responders_for_sender_authoritative(
         config,
         runtime_paths,
         membership_index,
+        room.room_id,
     )
     logger.info(
         "authoritative_room_membership_refreshed",
@@ -457,6 +363,7 @@ def _configured_responder_candidates_for_room(
         config,
         runtime_paths,
         membership_index,
+        room.room_id,
     )
 
 

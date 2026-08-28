@@ -3336,6 +3336,10 @@ def test_restart_config_uses_agent_specific_replacement_model() -> None:
         assert config["router"]["model"] == "router"
         assert config["models"]["default"]["id"] == "mindroom-live-fuzz"
         assert config["models"]["router"]["id"] == "mindroom-live-fuzz"
+        assert config["room_defaults"]["join_policy"] == "public"
+        assert "matrix_room_access" not in config
+        assert "authorization" not in config
+        Config.model_validate(config)
 
         stack.apply_replacement_config("!restart:example")
         replacement = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))

@@ -212,7 +212,10 @@ class TestTeamRoomMembership:
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(
+            "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
+            lambda *_args, **_kwargs: True,
+        )
         monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
         room = MagicMock(room_id="!team-room:localhost")

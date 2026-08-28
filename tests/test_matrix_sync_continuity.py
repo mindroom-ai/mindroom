@@ -22,7 +22,6 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, PreparedTurn, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -52,6 +51,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     FencedRoomRecorder,
     _configured_team_test_config,
@@ -98,10 +98,12 @@ _STORE_GENERATION = "test-store-generation"
 def _config(tmp_path: Path, *, authorize_senders: bool = False) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=authorize_senders),
+        with_current_room_member_access(
+            Config(
+                agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+            enabled=authorize_senders,
         ),
         runtime_paths,
     )

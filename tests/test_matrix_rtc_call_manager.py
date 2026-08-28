@@ -14,8 +14,8 @@ import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
@@ -242,11 +242,25 @@ def _config(*, enabled: bool = True, credentials_service: str = "openai") -> Con
                 role="Answer questions",
                 instructions=["Be kind."],
                 rooms=[ROOM_ID],
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
             ),
         },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(enabled=enabled, credentials_service=credentials_service),
+    )
+
+
+def _set_helper_access(
+    config: Config,
+    *,
+    users: list[str] | None = None,
+    members_of_rooms: list[str] | None = None,
+) -> None:
+    """Replace the helper's authored responder policy for one test."""
+    config.administrators = []
+    config.agents["helper"].access = ResponderAccessConfig(
+        users=users or [],
+        members_of_rooms=members_of_rooms or [],
     )
 
 
@@ -490,10 +504,10 @@ async def test_manager_joins_requester_private_agent_in_owned_rooms(
                 display_name="Helper",
                 rooms=[] if invited_room else [ROOM_ID],
                 private=AgentPrivateConfig(per="user_agent"),
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
             ),
         },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(),
     )
     client = _client()
@@ -1078,13 +1092,14 @@ async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None:
     """A participant must pass normal room authorization before the agent joins."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     config = _config()
-    config.authorization = AuthorizationConfig()
+    _set_helper_access(config)
     manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
@@ -1093,15 +1108,14 @@ async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_members_denied_by_agent_reply_permissions(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_manager_rejects_members_denied_by_agent_access(tmp_path: Path) -> None:
     """Per-agent reply permissions also gate whole-call admission."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     config = _config()
-    config.authorization.agent_reply_permissions = {
-        "helper": AgentReplyPermission(users=["@other:example.org"]),
-    }
+    _set_helper_access(config, users=["@other:example.org"])
     manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
@@ -1117,12 +1131,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = ["grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", ROOM_ID, "#grant:example.org", "Grant")
@@ -1148,6 +1157,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path) -> None:
     """A grant-room departure must end an active call without another call-room event."""
     grant_room_id = "!grant:example.org"
@@ -1156,12 +1166,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
@@ -1208,6 +1213,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(tmp_path: Path) -> None:
     """A successful refresh must reconsider a call denied while grants were unready."""
     grant_room_id = "!grant:example.org"
@@ -1217,12 +1223,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
@@ -1251,6 +1252,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path) -> None:
     """A live grant-room join must reconsider a previously denied joined call."""
     grant_room_id = "!grant:example.org"
@@ -1260,12 +1262,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
@@ -1307,6 +1304,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_policy(tmp_path: Path) -> None:
     """A call queued behind reload admission must use the replacement policy."""
     client = _client()
@@ -1335,12 +1333,7 @@ async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_pol
     await asyncio.wait_for(wait_started.wait(), timeout=1)
     client.room_get_state.assert_not_awaited()
 
-    config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(users=[]),
-        },
-    )
+    _set_helper_access(config)
     gate.reopen()
     await reconcile
 
@@ -1385,6 +1378,7 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: Path) -> None:
     """Revocation is control-plane cleanup and must not wait for positive admission."""
     grant_room_id = "!grant:example.org"
@@ -1393,12 +1387,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
     bridge = FakeBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
@@ -1448,6 +1437,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -> None:
     """A grant-room departure must not wait for voice-agent startup to finish."""
 
@@ -1468,12 +1458,7 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     bridge = StartingBridge()
     config = _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    config.authorization = AuthorizationConfig(
-        global_users=["@alice:example.org"],
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
@@ -1525,15 +1510,14 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
     """Authorization-only reloads must replace the call manager's live config."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     initial_config = _config()
-    initial_config.authorization.agent_reply_permissions = {
-        "helper": AgentReplyPermission(users=["@other:example.org"]),
-    }
+    _set_helper_access(initial_config, users=["@other:example.org"])
     manager = _manager(client, bridge, tmp_path, initial_config)
     reloaded_config = _config()
 
@@ -1544,6 +1528,7 @@ async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: Path) -> None:
     """Removing a static reply grant must end an already active call immediately."""
     client = _client()
@@ -1555,9 +1540,7 @@ async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: 
     assert bridge.connected_grant is not None
 
     reloaded_config = _config()
-    reloaded_config.authorization.agent_reply_permissions = {
-        "helper": AgentReplyPermission(users=["@other:example.org"]),
-    }
+    _set_helper_access(reloaded_config, users=["@other:example.org"])
     manager.update_config(reloaded_config)
     for _ in range(10):
         if bridge.closed:
@@ -1629,10 +1612,12 @@ async def test_manager_leaves_when_a_denied_member_joins(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) -> None:
     """Mixed speakers cannot share one requester identity for tool calls."""
     config = _config()
-    config.authorization.global_users.append("@bob:example.org")
+    assert config.agents["helper"].access is not None
+    config.agents["helper"].access.users.append("@bob:example.org")
     client = _client()
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, config)
@@ -1650,6 +1635,7 @@ async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_restarts_when_sole_requester_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1667,7 +1653,8 @@ async def test_manager_restarts_when_sole_requester_changes(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     config = _config()
-    config.authorization.global_users.append("@bob:example.org")
+    assert config.agents["helper"].access is not None
+    config.agents["helper"].access.users.append("@bob:example.org")
     client = _client()
     alice_bridge = FakeBridge()
     bob_bridge = FakeBridge()
@@ -2625,9 +2612,14 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     config = Config(
-        agents={"helper": AgentConfig(display_name="Helper", rooms=["#voice:example.org"])},
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                rooms=["#voice:example.org"],
+                access=ResponderAccessConfig(users=["@alice:example.org"]),
+            ),
+        },
         models={},
-        authorization=AuthorizationConfig(global_users=["@alice:example.org"]),
         calls=_realtime_calls(),
     )
     room = _room(encrypted=True)
@@ -3248,6 +3240,7 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_voice_runtime_error_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
     """A queued call failure notice must not publish after its requester is revoked."""
     client = _client()
@@ -3270,12 +3263,7 @@ async def test_voice_runtime_error_waits_for_reload_and_rechecks_authorization(t
     assert gate.close_if_idle()
 
     bridge.agent_options.on_session_error("Voice call failed.")
-    config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "helper": AgentReplyPermission(users=[]),
-        },
-    )
+    _set_helper_access(config)
     gate.reopen()
     await asyncio.gather(*list(manager._background_tasks))
 

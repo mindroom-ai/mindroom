@@ -546,6 +546,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method_name", ["tag_thread", "untag_thread", "list_thread_tags"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_thread_tags_explicit_room_target_requires_authorization(method_name: str) -> None:
     """Explicit room targeting should enforce the same room access checks as matrix_message."""
     tool = ThreadTagsTools()

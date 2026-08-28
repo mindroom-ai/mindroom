@@ -333,7 +333,7 @@ Usage: `!reload-plugins` - Force-reload all configured plugins from disk
 Alternative syntax: `!reload_plugins`
 
 Notes:
-- Admin only. Caller must be in `authorization.global_users`.
+- Admin only: platform administrators.
 - Use this when you want to force a plugin reload immediately instead of waiting for the file watcher.
 - The reply shows the active plugin set and the count of cancelled background tasks."""
 
@@ -404,7 +404,7 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 - String values with spaces must be quoted
 
 **Permission:** Disabled by default.
-Set `authorization.config_command_enabled: true`; caller must also be in `authorization.global_users`.
+Set `authorization.config_command_enabled: true`; the caller must also be a platform administrator.
 
 **Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
 
@@ -454,8 +454,8 @@ Usage: `!encrypt [confirm]` - Enable end-to-end encryption for the current room
 How it works:
 - Enabling encryption is **irreversible**; a room can never go back to unencrypted
 - People joining later cannot read messages sent before they joined
-- Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true`
-  or `matrix_room_access.encrypt_managed_rooms: true`"""
+- Managed rooms can also be encrypted from config via `room_defaults.encrypted: true`
+  or `rooms.<key>.encrypted: true`"""
 
     if topic in {"thread_mode", "thread-mode", "threadmode"}:
         return """**Thread Mode Command**

@@ -65,10 +65,8 @@ class TestHelmArgsAssembly:
         assert "matrixOidc.enabled=true" in set_pairs
         assert "matrixOidc.issuer=https://api.mindroom.test/matrix-oidc" in set_pairs
         assert "matrixOidc.clientId=mindroom-synapse" in set_pairs
-        assert "matrixRoomAccess.mode=multi_user" in set_pairs
-        assert "matrixRoomAccess.multiUserJoinRule=public" in set_pairs
-        assert "matrixRoomAccess.publishToRoomDirectory=false" in set_pairs
-        assert "matrixRoomAccess.reconcileExistingRooms=true" in set_pairs
+        assert "roomDefaults.joinPolicy=public" in set_pairs
+        assert "roomDefaults.listed=false" in set_pairs
         assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=analysis"
         assert len(set_string_pairs) == len(provisioner_service._HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS)
 

@@ -14,7 +14,7 @@ from mindroom import inbound_turn_normalizer, interactive, voice_handler
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import ActiveFollowUpCoalescingOwner, CoalescingKey, RequesterCoalescingOwner
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -458,15 +458,9 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
     """The exceptional command notice must not publish after its requester is revoked."""
     sender_id = "@user:localhost"
     bot = _make_bot(tmp_path, agent_name="router")
-    bot.config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={"router": AgentReplyPermission(users=[sender_id])},
-    )
+    bot.config.router.access = ResponderAccessConfig(users=[sender_id])
     replacement_config = bot.config.model_copy(deep=True)
-    replacement_config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={"router": AgentReplyPermission(users=[])},
-    )
+    replacement_config.router.access = ResponderAccessConfig(users=[])
     room = _make_room()
     command_event = _text_event(
         event_id="$cmd-during-reload",
