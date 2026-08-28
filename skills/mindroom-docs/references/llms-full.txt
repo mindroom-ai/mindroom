@@ -1526,10 +1526,8 @@ matrix_sync:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
-Retired access fields in a monolithic configuration are migrated automatically when the file loads.
-MindRoom validates the result, saves the original file once as `config.yaml.pre-membership-access`, and atomically writes the new schema.
-For a single-file Docker bind mount, run the directed `mindroom config migrate --path <host-config.yaml>` command on the host before startup.
-Access migration fails without changing files or creating a backup when any `!include` is present.
+Configurations must use the current membership access schema.
+Retired access fields fail validation, and configuration loading never rewrites source files.
 See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
@@ -1700,7 +1698,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - Responder access and room membership never grant dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
-- Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually
+- Retired access fields fail validation instead of being migrated
 - Room reconciliation also updates managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
@@ -16514,19 +16512,10 @@ authorization:
       - "@signal_456:example.com"
 ```
 
-## Automatic migration
+## Retired fields
 
-Loading a monolithic configuration with retired access fields automatically converts it to this schema.
-MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
-When `config.yaml` is a single-file Docker bind mount that cannot be replaced atomically, migration stops and directs the operator to run `mindroom config migrate --path <host-config.yaml>` on the host.
-The migration preserves explicit new-schema values and removes the retired fields.
-The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
-Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
-Also remove `authorization.agent_reply_permissions` entries whose agent or team is no longer configured.
-
-Access migration does not support configurations that use `!include`.
-If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.
-Remove the includes or migrate the combined configuration manually before retrying.
+Configurations must use the membership access schema described above.
+Retired access fields fail validation, and MindRoom does not rewrite configuration files during loading.
 
 ## Bot accounts
 
@@ -17464,7 +17453,8 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
-Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+Configuration files mounted read-only must already use the current membership access schema.
+Retired access fields fail validation.
 
 See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/) for the full single-container setup.
 
@@ -18139,9 +18129,7 @@ MindRoom ships as a single runtime container that serves:
 - the dashboard API at `http://localhost:8765/api`
 - the OpenAI-compatible API at `http://localhost:8765/v1`
 
-MindRoom may atomically rewrite `config.yaml` at startup when an automatic configuration migration is required.
-Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
-Current configs can remain read-only as shown below.
+Configuration files can remain read-only as shown below.
 
 Run it with:
 
@@ -18345,7 +18333,8 @@ This directory is shared across all worker scopes — switching `worker_scope` c
 Worker runtimes may keep their own virtualenvs, caches, and scratch files, but those are not agent data.
 Multiple runtimes may access the same agent directory concurrently, so files and databases there must tolerate concurrent access.
 
-Before using the read-only single-file config mounts below with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+Configuration files mounted read-only must already use the current membership access schema.
+Retired access fields fail validation.
 
 ## Deployment modes
 

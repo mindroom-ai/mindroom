@@ -13,9 +13,6 @@ config parsing is cold.
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
 from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
@@ -107,23 +104,3 @@ def safe_dump(
         encoding=encoding,
         **kwargs,
     )
-
-
-def write_text_atomic(path: Path, content: str) -> None:
-    """Replace an existing text file after fully writing a sibling temp file."""
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temp_file:
-        temp_path = Path(temp_file.name)
-        temp_file.write(content.encode("utf-8"))
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
-    temp_path.chmod(path.stat().st_mode & 0o777)
-    try:
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)

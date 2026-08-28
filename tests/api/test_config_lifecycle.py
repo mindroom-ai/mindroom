@@ -6,7 +6,6 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 """
 
 import copy
-import hashlib
 import threading
 from pathlib import Path
 from typing import Any
@@ -106,28 +105,6 @@ class TestLoadAndValidationFailure:
         assert snapshot.runtime_config is not None
         assert snapshot.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert snapshot.source_fingerprint is not None
-
-    def test_initial_load_persists_access_migration_and_fingerprints_rewrite(self, tmp_path: Path) -> None:
-        """The API loader must publish the migrated monolith under its rewritten fingerprint."""
-        config_path = tmp_path / "config.yaml"
-        original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
-        config_path.write_text(original, encoding="utf-8")
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path / "storage",
-            process_env={},
-        )
-        api_app = _make_api_app(runtime_paths)
-
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
-
-        snapshot = _snapshot(api_app)
-        rewritten = config_path.read_bytes()
-        assert snapshot.config_data["administrators"] == ["@owner:example.com"]
-        assert snapshot.source_fingerprint == hashlib.sha256(rewritten).hexdigest()
-        assert b"global_users" not in rewritten
-        backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
-        assert backup_path.read_text(encoding="utf-8") == original
 
     def test_reload_of_unchanged_source_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """Reloading byte-identical source keeps the generation stable."""

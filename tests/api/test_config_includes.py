@@ -131,31 +131,6 @@ class TestIncludeAwareSnapshots:
         assert snapshot.source_fingerprint == hashlib.sha256(config_path.read_bytes()).hexdigest()
         assert snapshot.source_files == frozenset({config_path.resolve()})
 
-    def test_api_load_rejects_access_migration_with_include(self, tmp_path: Path) -> None:
-        """The API loader must leave every source untouched when legacy access uses includes."""
-        config_path = tmp_path / "config.yaml"
-        authorization_path = tmp_path / "authorization.yaml"
-        config_source = "authorization: !include authorization.yaml\n"
-        authorization_source = "global_users:\n  - '@owner:example.com'\n"
-        config_path.write_text(config_source, encoding="utf-8")
-        authorization_path.write_text(authorization_source, encoding="utf-8")
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=tmp_path / "storage",
-            process_env={},
-        )
-        api_app = _make_api_app(runtime_paths)
-
-        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is False
-
-        result = _snapshot(api_app).config_load_result
-        assert result is not None
-        assert result.error_status_code == 422
-        assert "does not support !include" in str(result.error_detail)
-        assert config_path.read_text(encoding="utf-8") == config_source
-        assert authorization_path.read_text(encoding="utf-8") == authorization_source
-        assert not config_path.with_name(f"{config_path.name}.pre-membership-access").exists()
-
     def test_fingerprint_changes_when_included_file_changes(self, split_app: FastAPI) -> None:
         """Editing only an included file changes the fingerprint and bumps the generation."""
         snapshot = _snapshot(split_app)
@@ -410,28 +385,6 @@ class TestRawSourceWithIncludes:
 
         assert exc_info.value.status_code == 422
         assert _snapshot(split_app).runtime_paths.config_path.read_text(encoding="utf-8") == top_before
-
-    def test_raw_replace_rejects_access_migration_with_include(self, split_app: FastAPI) -> None:
-        """The raw editor must reject rather than persist a legacy split configuration."""
-        snapshot = _snapshot(split_app)
-        authorization_path = snapshot.runtime_paths.config_path.parent / "authorization.yaml"
-        authorization_path.write_text("global_users:\n  - '@owner:example.com'\n", encoding="utf-8")
-        top_before = snapshot.runtime_paths.config_path.read_text(encoding="utf-8")
-        source = f"{top_before}authorization: !include authorization.yaml\n"
-
-        with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_raw_config_source(
-                _request_for(split_app),
-                source,
-                error_prefix="Failed to save raw configuration",
-            )
-
-        assert exc_info.value.status_code == 422
-        assert "does not support !include" in str(exc_info.value.detail)
-        assert snapshot.runtime_paths.config_path.read_text(encoding="utf-8") == top_before
-        assert not snapshot.runtime_paths.config_path.with_name(
-            f"{snapshot.runtime_paths.config_path.name}.pre-membership-access",
-        ).exists()
 
     def test_raw_replace_with_monolith_reenables_structured_saves(self, split_app: FastAPI) -> None:
         """Collapsing back to one file through the raw editor re-enables structured saves."""

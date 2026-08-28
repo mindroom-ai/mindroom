@@ -141,19 +141,10 @@ authorization:
       - "@signal_456:example.com"
 ```
 
-## Automatic migration
+## Retired fields
 
-Loading a monolithic configuration with retired access fields automatically converts it to this schema.
-MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
-When `config.yaml` is a single-file Docker bind mount that cannot be replaced atomically, migration stops and directs the operator to run `mindroom config migrate --path <host-config.yaml>` on the host.
-The migration preserves explicit new-schema values and removes the retired fields.
-The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
-Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
-Also remove `authorization.agent_reply_permissions` entries whose agent or team is no longer configured.
-
-Access migration does not support configurations that use `!include`.
-If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.
-Remove the includes or migrate the combined configuration manually before retrying.
+Configurations must use the membership access schema described above.
+Retired access fields fail validation, and MindRoom does not rewrite configuration files during loading.
 
 ## Bot accounts
 

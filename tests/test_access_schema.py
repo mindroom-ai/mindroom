@@ -206,6 +206,23 @@ def test_matrix_identity_fields_require_concrete_user_ids(payload: dict[str, obj
         Config.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("payload", "retired_field"),
+    [
+        ({"access_model": "membership"}, "access_model"),
+        ({"authorization": {"global_users": []}}, "authorization"),
+        ({"matrix_room_access": {}}, "matrix_room_access"),
+    ],
+)
+def test_membership_schema_rejects_retired_access_fields(
+    payload: dict[str, object],
+    retired_field: str,
+) -> None:
+    """Retired access fields must fail validation instead of being migrated."""
+    with pytest.raises(ValidationError, match=retired_field):
+        Config.model_validate(payload)
+
+
 def test_responder_access_rejects_unknown_managed_room() -> None:
     """A misspelled grant room must fail closed during configuration parsing."""
     with pytest.raises(ValidationError, match="missing"):
