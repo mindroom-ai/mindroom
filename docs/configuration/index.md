@@ -300,6 +300,11 @@ agents:
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
+    access:                        # Optional: Conversation access (omit to grant members of this agent's rooms)
+      current_room_members: false  # Allow joined members of whatever room the message arrives in
+      members_of_rooms: [lobby]    # Allow joined members of these managed rooms
+      users: []                    # Matrix user IDs or glob patterns
+    credential_managers: []        # Optional: Concrete Matrix IDs allowed to manage this agent's credentials
     accept_invites: true           # Optional: Accept authorized ad-hoc room invites
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)

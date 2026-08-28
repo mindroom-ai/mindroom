@@ -149,6 +149,8 @@ agents:
 | `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
+| `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](../authorization.md) |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |

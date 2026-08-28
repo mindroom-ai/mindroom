@@ -1182,6 +1182,11 @@ agents:
     skills: []                     # Optional: List of skill names
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
+    access:                        # Optional: Conversation access (omit to grant members of this agent's rooms)
+      current_room_members: false  # Allow joined members of whatever room the message arrives in
+      members_of_rooms: [lobby]    # Allow joined members of these managed rooms
+      users: []                    # Matrix user IDs or glob patterns
+    credential_managers: []        # Optional: Concrete Matrix IDs allowed to manage this agent's credentials
     accept_invites: true           # Optional: Accept authorized ad-hoc room invites
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
@@ -1847,6 +1852,8 @@ agents:
 | `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
+| `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -2921,6 +2928,7 @@ teams:
 | `agents` | Yes | - | List of agent names that compose this team |
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
+| `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
 | `model` | No | `default` | Model used for team coordination and synthesis |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
 | `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
@@ -16465,6 +16473,7 @@ Responder access supports three independent clauses.
 - `users` allows canonical Matrix user IDs or glob patterns.
 
 Agent and team access defaults `members_of_rooms` to that responder's configured `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
+Only managed room keys are inferred this way: raw Matrix room IDs and full aliases listed in `rooms` produce no membership grant, so name them under `members_of_rooms` by their managed room key when they should grant access.
 The router defaults `current_room_members` to `true`.
 An explicit `members_of_rooms: []` disables inferred room grants.
 
