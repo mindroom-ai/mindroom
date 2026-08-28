@@ -233,6 +233,7 @@ class _PreHydrationPolicyFacts:
 
     origin: TurnOrigin
     am_i_mentioned: bool
+    mentioned_agents: tuple[MatrixID, ...]
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,14 @@ class ConversationResolver:
             self._matrix_id(),
             self.deps.runtime.config,
             self.deps.runtime_paths,
+        )
+
+    def _mentioned_agent_names(self, mentioned_agents: Sequence[MatrixID]) -> tuple[str, ...]:
+        """Return canonical entity names for mentioned managed users."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return tuple(
+            registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
+            for agent_id in mentioned_agents
         )
 
     def _envelope_ingress_metadata(  # noqa: C901
@@ -360,7 +369,7 @@ class ConversationResolver:
     ) -> _PreHydrationPolicyFacts:
         """Classify mention and origin policy without reading conversation history."""
         event_source = _source_with_payload_metadata(event.source, payload_metadata)
-        _mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(event_source)
+        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(event_source)
         resolved_source_kind, _hook_source, _message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
@@ -374,6 +383,7 @@ class ConversationResolver:
                 trusted_user_relay=trusted_user_relay,
             ),
             am_i_mentioned=am_i_mentioned,
+            mentioned_agents=tuple(mentioned_agents),
         )
 
     def _sender_is_managed_entity(self, user_id: str) -> bool:
@@ -489,15 +499,12 @@ class ConversationResolver:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
 
-        config = self.deps.runtime.config
         resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-
         return MessageEnvelope(
             source_event_id=event.event_id,
             target=target,
@@ -505,10 +512,7 @@ class ConversationResolver:
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
-            mentioned_agents=tuple(
-                registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
-                for agent_id in context.mentioned_agents
-            ),
+            mentioned_agents=self._mentioned_agent_names(context.mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
@@ -535,6 +539,7 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        mentioned_agents: Sequence[MatrixID] = (),
         original_sender: str | None = None,
         trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
@@ -554,7 +559,7 @@ class ConversationResolver:
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
-            mentioned_agents=(),
+            mentioned_agents=self._mentioned_agent_names(mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
             message_received_depth=message_received_depth,

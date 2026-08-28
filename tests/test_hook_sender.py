@@ -2107,7 +2107,10 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         event,
         "@mindroom_router:localhost",
         event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        handled_turn=TurnRecord.create(
+            [event.event_id],
+            requester_id="@mindroom_router:localhost",
+        ),
     )
 
     # Plain hook messages without mention should still be filtered

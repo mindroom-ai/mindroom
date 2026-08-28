@@ -415,15 +415,17 @@ def build_prepared_turn(
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
     routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
+    requester_user_id = _batch_requester_user_id(key, primary_pending_event)
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
-        requester_user_id=_batch_requester_user_id(key, primary_pending_event),
+        requester_user_id=requester_user_id,
         handled_turn=TurnRecord.create(
             source_event_ids,
             discovery_event_ids=routed_aliases,
             source_event_prompts=source_event_prompts,
             source_event_metadata=source_event_metadata if len(source_event_ids) > 1 or routed_aliases else None,
+            requester_id=requester_user_id,
         ),
         ingress=DispatchIngressMetadata(
             source_kind=_batch_source_kind(ordered_pending_events),

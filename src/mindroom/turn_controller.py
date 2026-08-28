@@ -153,18 +153,6 @@ _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
 _INTERACTIVE_SELECTION_METADATA_KIND = "interactive_selection"
 
 
-def _turn_sources_can_be_settled_for_requester(
-    handled_turn: TurnRecord,
-    requester_user_id: str,
-) -> bool:
-    """Return whether whole-turn settlement is safe for one requester-owned decision."""
-    replayable_sources = handled_turn.replay_source_event_ids
-    return len(replayable_sources) <= 1 or all(
-        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
-        for source_event_id in replayable_sources
-    )
-
-
 @dataclass(frozen=True)
 class _InteractiveSelectionDispatch:
     """Deferred selection work carried through receipt-ordered coalescing."""
@@ -1021,7 +1009,9 @@ class TurnController:
     async def _settle_unmentioned_managed_sender_before_hydration(
         self,
         *,
+        room: nio.MatrixRoom,
         event: PreparedIngress,
+        context_event: PreparedIngress,
         requester_user_id: str,
         event_label: str,
         handled_turn: TurnRecord,
@@ -1042,15 +1032,84 @@ class TurnController:
         if (
             not policy.origin.blocks_unmentioned_managed_sender
             or policy.am_i_mentioned
-            or not _turn_sources_can_be_settled_for_requester(handled_turn, requester_user_id)
+            or not handled_turn.replay_sources_all_from_requester(requester_user_id)
         ):
             return False
+        coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=(
+                coalescing_key.thread_id
+                if coalescing_key is not None
+                else EventInfo.from_event(context_event.source).thread_id
+            ),
+            reply_to_event_id=event.event_id,
+            event_source=context_event.source,
+        )
+        envelope = self.deps.resolver.build_ingress_envelope(
+            event=event,
+            requester_user_id=requester_user_id,
+            target=target,
+            attachment_ids=(
+                list(payload_metadata.attachment_ids)
+                if payload_metadata is not None and payload_metadata.attachment_ids is not None
+                else None
+            ),
+            source_kind=ingress_metadata.source_kind if ingress_metadata is not None else None,
+            dispatch_policy_source_kind=(
+                ingress_metadata.dispatch_policy_source_kind if ingress_metadata is not None else None
+            ),
+            hook_source=ingress_metadata.hook_source if ingress_metadata is not None else None,
+            message_received_depth=(ingress_metadata.message_received_depth if ingress_metadata is not None else None),
+            mentioned_agents=policy.mentioned_agents,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_user_relay,
+        )
+        if await self._message_received_hook_settles_turn(
+            room=room,
+            envelope=envelope,
+            correlation_id=event.event_id,
+            handled_turn=handled_turn,
+        ):
+            return True
         self.deps.logger.debug(
             "ignore_unmentioned_agent_event",
             agent=policy.origin.requester_entity_name,
             event_label=event_label,
             user_id=requester_user_id,
         )
+        await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
+        return True
+
+    async def _message_received_hook_settles_turn(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        envelope: MessageEnvelope,
+        correlation_id: str,
+        handled_turn: TurnRecord,
+    ) -> bool:
+        """Run the authorized ingress hook and settle when it blocks dispatch."""
+        hooks_start = time.monotonic()
+        async with admitted_response_decision(
+            self.deps.runtime.response_admission_gate,
+            self.deps.response_runner.wait_for_admission_or_shutdown,
+        ):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(envelope.requester_id, room.room_id):
+                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
+                return True
+            suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
+                envelope=envelope,
+                correlation_id=correlation_id,
+                policy=hook_ingress_policy(envelope),
+            )
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.emit_message_received_hooks",
+            hooks_start,
+            suppressed=suppressed,
+        )
+        if not suppressed:
+            return False
         await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
         return True
 
@@ -1090,7 +1149,9 @@ class TurnController:
                 trust_internal_metadata=True,
             ).original_sender
         if await self._settle_unmentioned_managed_sender_before_hydration(
+            room=room,
             event=event,
+            context_event=context_event,
             requester_user_id=requester_user_id,
             event_label=event_label,
             handled_turn=handled_turn,
@@ -1194,27 +1255,12 @@ class TurnController:
             envelope_start,
             source_kind=envelope.source_kind,
         )
-        ingress_policy = hook_ingress_policy(envelope)
-        hooks_start = time.monotonic()
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
+        if await self._message_received_hook_settles_turn(
+            room=room,
+            envelope=envelope,
+            correlation_id=correlation_id,
+            handled_turn=handled_turn,
         ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
-                return None
-            suppressed = await self.deps.ingress_hook_runner.emit_message_received_hooks(
-                envelope=envelope,
-                correlation_id=correlation_id,
-                policy=ingress_policy,
-            )
-        emit_elapsed_timing(
-            "dispatch_handoff.prepare_dispatch.emit_message_received_hooks",
-            hooks_start,
-            suppressed=suppressed,
-        )
-        if suppressed:
-            await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
         origin = envelope.origin
@@ -1223,7 +1269,7 @@ class TurnController:
         if (
             blocks_unmentioned_managed_sender
             and not context.am_i_mentioned
-            and _turn_sources_can_be_settled_for_requester(handled_turn, requester_user_id)
+            and handled_turn.replay_sources_all_from_requester(requester_user_id)
         ):
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
