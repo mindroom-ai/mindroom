@@ -10,6 +10,7 @@ import tempfile
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
+from errno import EBUSY
 from pathlib import Path
 from typing import Any, cast
 
@@ -104,7 +105,17 @@ def persist_access_migration(path: Path, original: bytes, migrated: dict[str, An
         sort_keys=False,
         allow_unicode=True,
     )
-    yaml_io.write_text_atomic(path, rendered)
+    try:
+        yaml_io.write_text_atomic(path, rendered)
+    except OSError as exc:
+        if exc.errno != EBUSY:
+            raise
+        msg = (
+            f"Automatic access migration cannot atomically replace {path} because a single-file bind mount cannot "
+            "be replaced atomically. Run 'mindroom config migrate --path <host-config.yaml>' on the host before "
+            "starting MindRoom"
+        )
+        raise AccessMigrationError(msg) from exc
     return rendered.encode("utf-8")
 
 

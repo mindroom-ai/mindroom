@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import pytest
@@ -396,6 +397,34 @@ def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> No
     assert config.administrators == ["@owner:example.com"]
     backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
     assert backup_path.read_text(encoding="utf-8") == original
+
+
+def test_load_config_directs_bind_mount_migration_to_the_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreplaceable bind-mounted config must identify the host-side remedy."""
+    from mindroom import yaml_io  # noqa: PLC0415
+    from mindroom.config.access_migration import AccessMigrationError  # noqa: PLC0415
+    from mindroom.config.main import load_config  # noqa: PLC0415
+    from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
+
+    config_path = Path(tmp_path) / "config.yaml"
+    original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
+    config_path.write_text(original, encoding="utf-8")
+
+    def reject_replacement(_path: Path, _content: str) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(yaml_io, "write_text_atomic", reject_replacement)
+
+    with pytest.raises(
+        AccessMigrationError,
+        match=r"single-file bind mount.*mindroom config migrate --path <host-config\.yaml>",
+    ):
+        load_config(resolve_runtime_paths(config_path=config_path))
+
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_load_config_rejects_access_migration_with_include(tmp_path: Path) -> None:

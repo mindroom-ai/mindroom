@@ -17462,6 +17462,8 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
+Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+
 See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/) for the full single-container setup.
 
 ### Kubernetes
@@ -18135,6 +18137,10 @@ MindRoom ships as a single runtime container that serves:
 - the dashboard API at `http://localhost:8765/api`
 - the OpenAI-compatible API at `http://localhost:8765/v1`
 
+MindRoom may atomically rewrite `config.yaml` at startup when an automatic configuration migration is required.
+Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
+Current configs can remain read-only as shown below.
+
 Run it with:
 
 ```bash
@@ -18336,6 +18342,8 @@ Each agent stores all its persistent data (context files, workspace files, memor
 This directory is shared across all worker scopes — switching `worker_scope` changes how tool runtimes are isolated, not where agent data lives.
 Worker runtimes may keep their own virtualenvs, caches, and scratch files, but those are not agent data.
 Multiple runtimes may access the same agent directory concurrently, so files and databases there must tolerate concurrent access.
+
+Before using the read-only single-file config mounts below with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
 
 ## Deployment modes
 

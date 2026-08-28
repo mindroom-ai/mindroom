@@ -40,6 +40,8 @@ This directory is shared across all worker scopes — switching `worker_scope` c
 Worker runtimes may keep their own virtualenvs, caches, and scratch files, but those are not agent data.
 Multiple runtimes may access the same agent directory concurrently, so files and databases there must tolerate concurrent access.
 
+Before using the read-only single-file config mounts below with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+
 ## Deployment modes
 
 ### Docker Compose (`static_runner`)
