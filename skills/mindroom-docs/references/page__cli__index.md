@@ -983,13 +983,13 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Apply safe, text-preserving migrations to config.yaml.                │
+│ init       Create a starter config.yaml with a personal agent and model.               │
+│ show       Display the current config file with syntax highlighting.                   │
+│ edit       Open config.yaml in your default editor.                                    │
+│ validate   Validate config.yaml and check for common issues.                           │
+│ resolve    Print the fully merged config YAML with all !include tags resolved.         │
+│ path       Show the resolved config file path and search locations.                    │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
