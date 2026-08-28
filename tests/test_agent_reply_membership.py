@@ -44,6 +44,13 @@ def _runtime_config(
                     "assistant": {"joined_rooms": joined_rooms},
                 },
             },
+            "router": {
+                "access": {
+                    "current_room_members": False,
+                    "members_of_rooms": [],
+                    "users": [],
+                },
+            },
         },
         runtime_paths,
     )
@@ -59,7 +66,6 @@ def _current_room_runtime_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     )
     config = Config.validate_with_runtime(
         {
-            "access_model": "room_membership",
             "agents": {
                 "assistant": {
                     "display_name": "Assistant",
@@ -68,6 +74,13 @@ def _current_room_runtime_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
                         "current_room_members": True,
                         "members_of_rooms": [],
                     },
+                },
+            },
+            "router": {
+                "access": {
+                    "current_room_members": False,
+                    "members_of_rooms": [],
+                    "users": [],
                 },
             },
         },
@@ -525,6 +538,46 @@ async def test_new_current_room_transition_requests_authoritative_refresh(tmp_pa
     assert changed
     assert index.needs_refresh(config)
     assert not index.is_current_room_member(control_user_id, room_id, config)
+
+
+@pytest.mark.asyncio
+async def test_current_room_refresh_reuses_ready_room_snapshots(tmp_path: Path) -> None:
+    """One newly relevant room must not re-query every ready current-room snapshot."""
+    config, runtime_paths = _current_room_runtime_config(tmp_path)
+    first_room_id = "!first:example.com"
+    second_room_id = "!second:example.com"
+    new_room_id = "!new:example.com"
+    control_user_id = "@mindroom_router:example.com"
+    client = AsyncMock()
+    client.joined_rooms.side_effect = [
+        nio.JoinedRoomsResponse(rooms=[first_room_id, second_room_id]),
+        nio.JoinedRoomsResponse(rooms=[first_room_id, second_room_id, new_room_id]),
+    ]
+    client.joined_members.side_effect = [
+        _joined_members(first_room_id, "@alice:example.com"),
+        _joined_members(second_room_id, "@bob:example.com"),
+        _joined_members(new_room_id, control_user_id),
+    ]
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, runtime_paths, client)
+
+    index.apply_member_event(
+        config,
+        runtime_paths,
+        new_room_id,
+        _member_event(control_user_id, "join"),
+        control_user_id=control_user_id,
+    )
+    await index.refresh(config, runtime_paths, client)
+
+    assert [call.args[0] for call in client.joined_members.await_args_list] == [
+        first_room_id,
+        second_room_id,
+        new_room_id,
+    ]
+    assert index.is_current_room_member("@alice:example.com", first_room_id, config)
+    assert index.is_current_room_member("@bob:example.com", second_room_id, config)
+    assert index.is_current_room_member(control_user_id, new_room_id, config)
 
 
 @pytest.mark.asyncio

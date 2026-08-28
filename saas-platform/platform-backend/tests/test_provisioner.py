@@ -672,6 +672,8 @@ class TestProvisionerEndpoints:
         assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "analysis"
         assert set_string_args["matrixAutoJoinRoomKeys[9]"] == "lobby"
         assert set_string_args["administrators[0]"] == "@owner.user+test:123.mindroom.test"
+        assert set_string_args["roomDefaults.inviteUsers[0]"] == "@owner.user+test:123.mindroom.test"
+        assert set_string_args["roomDefaults.admins[0]"] == "@owner.user+test:123.mindroom.test"
         _assert_helm_uses_external_instance_secret(helm_args)
 
     def test_provision_re_provision_existing(

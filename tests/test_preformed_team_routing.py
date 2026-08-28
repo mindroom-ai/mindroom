@@ -16,7 +16,6 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
@@ -25,6 +24,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -84,7 +84,7 @@ def config_with_team() -> Config:
             ),
         },
         router=RouterConfig(model="default"),
-        authorization=AuthorizationConfig(default_room_access=True),
+        authorization=retired_authorization(default_room_access=True),
     )
 
 

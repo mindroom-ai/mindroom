@@ -26,7 +26,6 @@ import mindroom.constants as constants_module
 import mindroom.google_adc as google_adc_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
-from mindroom.cli import migrate as migrate_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
@@ -172,35 +171,6 @@ def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> No
     assert structlog.is_configured() is False
 
 
-def test_config_explain_access_is_read_only_and_separates_capabilities(tmp_path: Path) -> None:
-    """The migration report must expose distinct decisions without rewriting legacy config."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-        "agents:\n  general:\n    display_name: General Agent\n    model: default\n    rooms: [general]\n"
-        "router:\n  model: default\n"
-        "matrix_space:\n  enabled: false\n"
-        "authorization:\n"
-        "  global_users: ['@owner:example.com']\n"
-        "  room_permissions:\n    general: ['@member:example.com']\n"
-        "  agent_reply_permissions:\n    general: ['@speaker:example.com']\n",
-        encoding="utf-8",
-    )
-    original = config_path.read_text(encoding="utf-8")
-
-    result = _invoke_with_runtime(["config", "explain-access"], config_path)
-
-    assert result.exit_code == 0
-    assert "Invitation intent" in result.output
-    assert "Conversation access" in result.output
-    assert "Matrix power" in result.output
-    assert "Credential authority" in result.output
-    assert "administrators: []" in result.output
-    assert "@owner:example.com" in result.output
-    assert "not automatically assigned" in result.output
-    assert config_path.read_text(encoding="utf-8") == original
-
-
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -308,7 +278,7 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "models:" in content
-        assert "access_model: room_membership" in content
+        assert "access_model" not in content
         assert "authorization:" in content
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
@@ -1246,7 +1216,7 @@ class TestConfigInit:
         assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
-        assert config["access_model"] == "room_membership"
+        assert "access_model" not in config
         assert config["administrators"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
         assert config["room_defaults"] == {
             "join_policy": "invite",
@@ -1505,8 +1475,9 @@ router:
   model: default
   accept_invites: true
 
-matrix_room_access:
-  mode: single_user_private
+room_defaults:
+  join_policy: invite
+  listed: false
 
 knowledge_bases:
   mind_memory:
@@ -1595,8 +1566,9 @@ router:
   model: default
   accept_invites: true
 
-matrix_room_access:
-  mode: single_user_private
+room_defaults:
+  join_policy: invite
+  listed: false
 
 # File-based memory requires no external LLM.
 memory:
@@ -1681,6 +1653,40 @@ class TestConfigMigrate:
         assert "No migrations applied" in normalize_console_output(result.output)
         assert cfg.read_text(encoding="utf-8") == original
 
+    def test_migrate_applies_access_migration_and_creates_backup(self, tmp_path: Path) -> None:
+        """The explicit command must use the same validated access migration as config loading."""
+        cfg = tmp_path / "config.yaml"
+        original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
+        cfg.write_text(original, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 0
+        assert "membership access schema" in output
+        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert migrated["administrators"] == ["@owner:example.com"]
+        assert "global_users" not in migrated["authorization"]
+        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
+        assert backup.read_text(encoding="utf-8") == original
+
+    def test_migrate_rejects_access_migration_with_include_without_writing(self, tmp_path: Path) -> None:
+        """The explicit command must error on composed access config before any write."""
+        cfg = tmp_path / "config.yaml"
+        authorization = tmp_path / "authorization.yaml"
+        config_text = "authorization: !include authorization.yaml\n"
+        authorization_text = "global_users:\n  - '@owner:example.com'\n"
+        cfg.write_text(config_text, encoding="utf-8")
+        authorization.write_text(authorization_text, encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "does not support !include" in normalize_console_output(result.output)
+        assert cfg.read_text(encoding="utf-8") == config_text
+        assert authorization.read_text(encoding="utf-8") == authorization_text
+        assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
+
     def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
         """Config migrate should fail cleanly when no config exists."""
         missing = tmp_path / "config.yaml"
@@ -1696,7 +1702,7 @@ class TestConfigMigrate:
         original = _old_config_init_mind_memory_config("${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory")
         cfg.write_text(original, encoding="utf-8")
 
-        with patch.object(migrate_cli, "_write_text_atomic", side_effect=OSError("disk full")):
+        with patch("mindroom.config.access_migration.write_text_atomic", side_effect=OSError("disk full")):
             result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
 
         output = normalize_console_output(result.output)

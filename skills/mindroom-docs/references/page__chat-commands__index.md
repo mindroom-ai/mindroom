@@ -34,8 +34,7 @@ Voice transcription is not rewritten into chat-command syntax; commands must arr
 ## Permission Behavior
 
 Commands are subject to the same authorization rules as normal messages.
-In membership mode, the responder's `access` policy authorizes the sender.
-In legacy mode, room authorization and `authorization.agent_reply_permissions` remain unchanged.
+The responder's `access` policy authorizes the sender.
 See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
 `!config` is disabled by default.
@@ -269,7 +268,7 @@ Enable Matrix end-to-end encryption for the current room.
 `!encrypt` reviews what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
 Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
-Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`, while legacy configurations may use `matrix_room_access.encrypt_managed_rooms: true`.
+Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`.
 
 ### `!e2ee`
 

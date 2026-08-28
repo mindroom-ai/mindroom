@@ -19,7 +19,6 @@ from agno.team import Team
 
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -47,6 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -79,7 +79,7 @@ def _config(tmp_path: Path) -> Config:
                 ),
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         runtime_paths,
     )

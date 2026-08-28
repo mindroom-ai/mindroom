@@ -26,6 +26,7 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
@@ -454,7 +455,7 @@ class RoomConfig(BaseModel):
         default=None,
         description=(
             "Whether this managed room should have Matrix end-to-end encryption enabled. "
-            "Unset inherits matrix_room_access.encrypt_managed_rooms. "
+            "Unset inherits room_defaults.encrypted. "
             "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
         ),
     )
@@ -464,14 +465,15 @@ class RoomConfig(BaseModel):
     @field_validator("invite_users", "admins")
     @classmethod
     def validate_unique_access_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
-        """Reject duplicate room access entries while preserving omitted versus empty lists."""
+        """Require concrete room-policy identities while preserving omitted lists."""
         if values is None:
             return None
-        duplicates = duplicate_items(values)
-        if duplicates:
-            msg = f"Duplicate {info.field_name} are not allowed: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return values
+        assert info.field_name is not None
+        return validate_concrete_matrix_user_ids(
+            values,
+            field_name=info.field_name,
+            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
+        )
 
     @field_validator("display_name")
     @classmethod

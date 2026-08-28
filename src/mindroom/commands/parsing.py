@@ -454,8 +454,8 @@ Usage: `!encrypt [confirm]` - Enable end-to-end encryption for the current room
 How it works:
 - Enabling encryption is **irreversible**; a room can never go back to unencrypted
 - People joining later cannot read messages sent before they joined
-- Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true`
-  or `matrix_room_access.encrypt_managed_rooms: true`"""
+- Managed rooms can also be encrypted from config via `room_defaults.encrypted: true`
+  or `rooms.<key>.encrypted: true`"""
 
     if topic in {"thread_mode", "thread-mode", "threadmode"}:
         return """**Thread Mode Command**

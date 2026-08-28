@@ -25,7 +25,6 @@ from mindroom.coalescing_batch import (
     build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import (
@@ -87,6 +86,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -135,7 +135,7 @@ def _make_config(
                     "debounce_ms": debounce_ms,
                 },
             ),
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )

@@ -27,7 +27,6 @@ from mindroom.approval_manager import (
     get_approval_store,
     initialize_approval_store,
 )
-from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -1372,23 +1371,27 @@ class TestMultiAgentOrchestrator:
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
-        """Global users and room-permitted users should be invited to managed rooms."""
+        """Default and room-specific invite users should be invited to managed rooms."""
         config = _runtime_bound_config(
             Config(
+                room_defaults={"invite_users": ["@alice:localhost"]},
+                rooms={
+                    "room1": {"invite_users": ["@alice:localhost", "@bob:localhost"]},
+                    "room2": {},
+                },
                 agents={
                     "general": AgentConfig(
                         display_name="GeneralAgent",
-                        rooms=["!room1:localhost", "!room2:localhost"],
+                        rooms=["room1", "room2"],
                     ),
-                },
-                authorization={
-                    "global_users": ["@alice:localhost"],
-                    "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
-                    "default_room_access": False,
                 },
             ),
             tmp_path,
         )
+        state = MatrixState.load(runtime_paths=runtime_paths_for(config))
+        state.add_room("room1", "!room1:localhost", "#room1:localhost", "Room 1")
+        state.add_room("room2", "!room2:localhost", "#room2:localhost", "Room 2")
+        state.save(runtime_paths=runtime_paths_for(config))
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
@@ -1408,7 +1411,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
@@ -1428,7 +1430,6 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(
             Config.model_validate(
                 {
-                    "access_model": "room_membership",
                     "administrators": ["@platform-admin:localhost"],
                     "room_defaults": {"invite_users": ["@default:localhost"]},
                     "rooms": {
@@ -1489,7 +1490,6 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(
             Config.model_validate(
                 {
-                    "access_model": "room_membership",
                     "rooms": {"one": {"invite_users": ["@member:localhost"]}},
                 },
             ),
@@ -1513,23 +1513,21 @@ class TestMultiAgentOrchestrator:
         assert invite.await_args.args[1] == "@member:localhost"
 
     @pytest.mark.asyncio
-    async def test_ensure_room_invitations_does_not_expand_room_grants_via_default_access(
+    async def test_ensure_room_invitations_does_not_expand_responder_access_grants(
         self,
         tmp_path: Path,
     ) -> None:
-        """A user explicitly granted one room must not become an invite candidate elsewhere."""
+        """Responder access users must not become room invitation candidates."""
         config = _runtime_bound_config(
             Config(
+                room_defaults={"invite_users": ["@alice:localhost"]},
+                rooms={"room1": {}, "room2": {}},
                 agents={
                     "general": AgentConfig(
                         display_name="GeneralAgent",
-                        rooms=["!room1:localhost", "!room2:localhost"],
+                        rooms=["room1", "room2"],
+                        access={"users": ["@bob:localhost"]},
                     ),
-                },
-                authorization={
-                    "global_users": ["@alice:localhost"],
-                    "room_permissions": {"room1": ["@bob:localhost"]},
-                    "default_room_access": True,
                 },
             ),
             tmp_path,
@@ -1557,7 +1555,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
@@ -1568,7 +1565,6 @@ class TestMultiAgentOrchestrator:
         assert invited_users_by_room == {
             ("!room1:localhost", "@alice:localhost"),
             ("!room2:localhost", "@alice:localhost"),
-            ("!room1:localhost", "@bob:localhost"),
         }
 
     @pytest.mark.asyncio
@@ -1576,15 +1572,13 @@ class TestMultiAgentOrchestrator:
         """A failed membership fetch must skip that room instead of inviting everyone into it."""
         config = _runtime_bound_config(
             Config(
+                room_defaults={"invite_users": ["@alice:localhost"]},
+                rooms={"room1": {}, "room2": {}},
                 agents={
                     "general": AgentConfig(
                         display_name="GeneralAgent",
-                        rooms=["!room1:localhost", "!room2:localhost"],
+                        rooms=["room1", "room2"],
                     ),
-                },
-                authorization={
-                    "global_users": ["@alice:localhost"],
-                    "default_room_access": False,
                 },
                 mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
             ),
@@ -1599,6 +1593,8 @@ class TestMultiAgentOrchestrator:
 
         state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, "mindroom_user", "internal-password")
+        state.add_room("room1", "!room1:localhost", "#room1:localhost", "Room 1")
+        state.add_room("room2", "!room2:localhost", "#room2:localhost", "Room 2")
         state.save(runtime_paths=orchestrator.runtime_paths)
 
         room_members: dict[str, set[str] | None] = {
@@ -1613,7 +1609,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
@@ -1635,10 +1630,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(
             Config(
                 rooms={"lobby": {"display_name": "Lobby"}},
-                authorization={
-                    "global_users": ["@alice:localhost"],
-                    "default_room_access": False,
-                },
+                room_defaults={"invite_users": ["@alice:localhost"]},
             ),
             tmp_path,
         )
@@ -1659,7 +1651,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
@@ -1668,48 +1659,6 @@ class TestMultiAgentOrchestrator:
             await orchestrator._ensure_room_invitations()
 
         mock_invite.assert_awaited_once_with(router_bot.client, "!room1:localhost", "@alice:localhost")
-
-    @pytest.mark.asyncio
-    async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
-        """Only concrete Matrix user IDs should be invited from authorization lists."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(
-                        display_name="GeneralAgent",
-                        rooms=["!room1:localhost"],
-                    ),
-                },
-                authorization={
-                    "global_users": ["@alice:localhost", "@admin:*", "alice"],
-                    "default_room_access": False,
-                },
-            ),
-            tmp_path,
-        )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-        orchestrator.config = config
-
-        router_bot = MagicMock()
-        router_bot.client = AsyncMock()
-        orchestrator.agent_bots = {"router": router_bot}
-
-        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
-            return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
-
-        mock_invite = AsyncMock(return_value=True)
-
-        with (
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
-            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
-            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
-            patch("mindroom.orchestrator.invite_to_room", mock_invite),
-        ):
-            await orchestrator._ensure_room_invitations()
-
-        invited_users = [call.args[2] for call in mock_invite.await_args_list]
-        assert invited_users == ["@alice:localhost"]
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_skips_internal_user_when_unconfigured(self, tmp_path: Path) -> None:
@@ -1722,7 +1671,6 @@ class TestMultiAgentOrchestrator:
                         rooms=["!room1:localhost"],
                     ),
                 },
-                authorization={"default_room_access": False},
             ),
             tmp_path,
         )
@@ -1950,7 +1898,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
             room_metadata_changed=True,
@@ -1992,7 +1940,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
             entities_to_reconcile_rooms={ROUTER_AGENT_NAME, "general"},
@@ -2023,7 +1971,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
             entities_to_reconcile_rooms={ROUTER_AGENT_NAME},
@@ -3557,7 +3505,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -3593,7 +3541,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -3629,7 +3577,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -3686,7 +3634,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -3737,7 +3685,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -3989,7 +3937,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -4273,7 +4221,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -4377,7 +4325,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )
@@ -4448,7 +4396,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             removed_entities=set(),
             mindroom_user_changed=False,
-            matrix_room_access_changed=False,
+            room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
         )

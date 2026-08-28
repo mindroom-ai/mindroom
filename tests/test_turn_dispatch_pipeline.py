@@ -14,7 +14,6 @@ import pytest
 from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -65,6 +64,7 @@ from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -2543,7 +2543,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
@@ -2754,7 +2754,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 },
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization=AuthorizationConfig(default_room_access=True),
+                authorization=retired_authorization(default_room_access=True),
             ),
             tmp_path,
         )

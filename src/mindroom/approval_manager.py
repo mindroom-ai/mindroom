@@ -68,11 +68,9 @@ logger = get_logger(__name__)
 def _approval_action_authorized(
     pending: PendingApproval,
     stored: StoredApprovalCard,
-    authorize_responder: Callable[[str], bool] | None,
+    authorize_responder: Callable[[str], bool],
 ) -> bool:
     """Authorize an actionable card against its trusted originating responder."""
-    if authorize_responder is None:
-        return True
     entity_name = stored.continuation_entity_name if stored.target_kind == "continuation" else pending.agent_name
     return entity_name is not None and authorize_responder(entity_name)
 
@@ -497,8 +495,8 @@ class _ApprovalManager:
         card_event_id: str,
         status: _ResolutionStatus,
         reason: str | None,
+        authorize_responder: Callable[[str], bool],
         before_consume: Callable[[], Awaitable[None]] | None = None,
-        authorize_responder: Callable[[str], bool] | None = None,
     ) -> ApprovalActionResult:
         """Atomically choose the exact-call winner and enqueue its terminal edit."""
         if self.has_active_in_memory_approval_card(card_event_id):

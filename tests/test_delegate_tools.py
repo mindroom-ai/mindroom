@@ -13,7 +13,6 @@ import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent, describe_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -28,6 +27,7 @@ from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_migration_support import apply_retired_authorization, retired_authorization, retired_reply_permission
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -39,9 +39,11 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
@@ -63,6 +65,36 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
     return bind_runtime_paths(config, _runtime_paths(storage_path))
+
+
+def _delegate_runtime_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> ToolRuntimeContext:
+    """Build the requester context every successful delegation requires."""
+    room_id = execution_identity.room_id if execution_identity is not None else "!room:example.org"
+    source_thread_id = execution_identity.thread_id if execution_identity is not None else None
+    resolved_thread_id = execution_identity.resolved_thread_id if execution_identity is not None else None
+    session_id = execution_identity.session_id if execution_identity is not None else room_id
+    requester_id = execution_identity.requester_id if execution_identity is not None else "@alice:example.org"
+    return make_test_tool_runtime_context(
+        agent_name="leader",
+        target=MessageTarget(
+            room_id=room_id,
+            source_thread_id=source_thread_id,
+            resolved_thread_id=resolved_thread_id,
+            reply_to_event_id=None,
+            session_id=session_id,
+        ),
+        requester_id=requester_id,
+        client=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
 
 
 def _fake_indexing_settings(base_id: str) -> IndexingSettings:
@@ -122,19 +154,20 @@ class TestDelegateTools:
         )
 
     @pytest.fixture
-    def tools(self, storage_path: Path, config: Config) -> DelegateTools:
+    def tools(self, storage_path: Path, config: Config) -> Iterator[DelegateTools]:
         """Create a DelegateTools instance for testing."""
         runtime_paths = resolve_runtime_paths(
             config_path=storage_path / "config.yaml",
             storage_path=storage_path,
         )
-        return DelegateTools(
-            agent_name="leader",
-            delegate_to=["code", "research"],
-            runtime_paths=runtime_paths,
-            config=config,
-            delegation_depth=0,
-        )
+        with tool_runtime_context(_delegate_runtime_context(config, runtime_paths)):
+            yield DelegateTools(
+                agent_name="leader",
+                delegate_to=["code", "research"],
+                runtime_paths=runtime_paths,
+                config=config,
+                delegation_depth=0,
+            )
 
     def test_toolkit_name(self, tools: DelegateTools) -> None:
         """Test that the toolkit is registered with the correct name."""
@@ -199,9 +232,10 @@ class TestDelegateTools:
         config: Config,
     ) -> None:
         """A restricted target cannot be delegated without requester authorization state."""
-        config.authorization = AuthorizationConfig(
+        config.authorization = apply_retired_authorization(
+            config,
             agent_reply_permissions={
-                "code": AgentReplyPermission(users=["@alice:example.org"]),
+                "code": retired_reply_permission(users=["@alice:example.org"]),
             },
         )
         tools = DelegateTools(
@@ -222,6 +256,7 @@ class TestDelegateTools:
         mock_ai_response.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_delegation_uses_live_runtime_authorization_after_config_reload(
         self,
         storage_path: Path,
@@ -240,8 +275,9 @@ class TestDelegateTools:
             delegation_depth=0,
         )
         replacement_config = config.model_copy(deep=True)
-        replacement_config.authorization = AuthorizationConfig(
-            agent_reply_permissions={"code": AgentReplyPermission(users=[])},
+        replacement_config.authorization = apply_retired_authorization(
+            replacement_config,
+            agent_reply_permissions={"code": retired_reply_permission(users=[])},
         )
         runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
@@ -312,9 +348,9 @@ class TestDelegateTools:
                     rooms=["grant"],
                 ),
             },
-            authorization=AuthorizationConfig(
+            authorization=retired_authorization(
                 agent_reply_permissions={
-                    "worker": AgentReplyPermission(joined_rooms=["grant"]),
+                    "worker": retired_reply_permission(joined_rooms=["grant"]),
                 },
             ),
             models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
@@ -408,11 +444,14 @@ class TestDelegateTools:
             delegation_depth=1,
         )
 
-        with patch(
-            "mindroom.custom_tools.delegate.ai_response",
-            new_callable=AsyncMock,
-            return_value="done",
-        ) as mock_ai_response:
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="done",
+            ) as mock_ai_response,
+        ):
             await tools.delegate_task("code", "task")
             assert mock_ai_response.await_args.kwargs["delegation_depth"] == 2
 
@@ -435,11 +474,14 @@ class TestDelegateTools:
             delegation_depth=0,
         )
 
-        with patch(
-            "mindroom.custom_tools.delegate.ai_response",
-            new_callable=AsyncMock,
-            return_value="done",
-        ) as mock_ai_response:
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="done",
+            ) as mock_ai_response,
+        ):
             await tools.delegate_task("code", "update yourself")
             assert mock_ai_response.await_args.kwargs["runtime_paths"] == runtime_paths
 
@@ -478,6 +520,7 @@ class TestDelegateKnowledge:
 
         mock_knowledge = MagicMock()
         with (
+            tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
                 "mindroom.custom_tools.delegate.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
@@ -571,6 +614,7 @@ class TestDelegateKnowledge:
         delegate_tool = next(tool for tool in agent.tools if tool.name == "delegate")
 
         with (
+            tool_runtime_context(_delegate_runtime_context(config, runtime_paths_for(config))),
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
@@ -606,11 +650,14 @@ class TestDelegateKnowledge:
             delegation_depth=0,
         )
 
-        with patch(
-            "mindroom.custom_tools.delegate.ai_response",
-            new_callable=AsyncMock,
-            return_value="done",
-        ) as mock_ai_response:
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="done",
+            ) as mock_ai_response,
+        ):
             await tools.delegate_task("worker", "do work")
             assert mock_ai_response.await_args.args[0].entity_label == "worker"
             assert mock_ai_response.await_args.kwargs["knowledge"] is None
@@ -651,11 +698,20 @@ class TestDelegateKnowledge:
             execution_identity=execution_identity,
             delegation_depth=0,
         )
-        with patch(
-            "mindroom.custom_tools.delegate.ai_response",
-            new_callable=AsyncMock,
-            return_value="done",
-        ) as mock_ai_response:
+        with (
+            tool_runtime_context(
+                _delegate_runtime_context(
+                    config,
+                    runtime_paths,
+                    execution_identity=execution_identity,
+                ),
+            ),
+            patch(
+                "mindroom.custom_tools.delegate.ai_response",
+                new_callable=AsyncMock,
+                return_value="done",
+            ) as mock_ai_response,
+        ):
             await tools.delegate_task("worker", "do work")
 
         call_kwargs = mock_ai_response.await_args.kwargs

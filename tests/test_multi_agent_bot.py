@@ -13,8 +13,8 @@ from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
@@ -34,6 +34,7 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
+from tests.access_migration_support import apply_retired_authorization, retired_authorization, retired_reply_permission
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
@@ -78,7 +79,7 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
         Config(
             agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
             models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         tmp_path,
     )
@@ -263,6 +264,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.config.main.load_config")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_decrypt_failure_ingress_applies_sender_authorization(
         self,
         mock_load_config: MagicMock,
@@ -273,12 +275,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
         sender_id = "@stranger:localhost"
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
-            },
-        )
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
@@ -291,7 +288,7 @@ class TestAgentBot(AgentBotTestBase):
 
         handler.assert_not_awaited()
 
-        config.authorization.agent_reply_permissions[mock_agent_user.agent_name].users = [sender_id]
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         with patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler:
             await bot._on_decryption_failure(room, event)
 
@@ -309,10 +306,11 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
         sender_id = "@user:localhost"
-        config.authorization = AuthorizationConfig(
+        config.authorization = apply_retired_authorization(
+            config,
             default_room_access=True,
             agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
+                mock_agent_user.agent_name: retired_reply_permission(users=[sender_id]),
             },
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -560,7 +558,7 @@ class TestAgentBot(AgentBotTestBase):
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
-            patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
+            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),
         ):
             await bot._on_invite(mock_room, mock_event)
@@ -1007,7 +1005,7 @@ class TestAgentBot(AgentBotTestBase):
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
 
-        with patch("mindroom.authorization.is_authorized_sender", return_value=False):
+        with patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
@@ -1070,7 +1068,7 @@ class TestAgentBot(AgentBotTestBase):
 
         wrap_extracted_collaborators(bot, "_turn_policy")
         with (
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
                 bot._turn_controller.deps.turn_policy,

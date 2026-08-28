@@ -14,8 +14,8 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AgentReplyPermission
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -409,9 +409,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
     second_room_id = "!second-grant:localhost"
     sender_id = "@alice:localhost"
     bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant", "second-grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant", "second-grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.add_room("second-grant", second_room_id, "#second-grant:localhost", "Second Grant")
@@ -451,9 +449,7 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
 async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tmp_path: Path) -> None:
     """An unavailable grant room must not cause one Matrix API refresh for every incoming message."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
@@ -467,9 +463,7 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
 async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_path: Path) -> None:
     """Repeated uncertain responses must not bypass the bounded refresh retry delay."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
@@ -491,9 +485,7 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     sender_id = "@alice:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -552,9 +544,7 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     sender_id = "@alice:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -622,9 +612,7 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
     room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -667,9 +655,7 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
     orchestrator.reconcile_reply_authorized_calls = AsyncMock()
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -756,9 +742,7 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     sender_id = "@bob:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -816,9 +800,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     room_id = "!grant:localhost"
     sender_id = "@bob:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    bot.config.authorization.agent_reply_permissions = {
-        "router": AgentReplyPermission(joined_rooms=["grant"]),
-    }
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     state.save(runtime_paths=bot.runtime_paths)
@@ -1466,6 +1448,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     bot = _agent_bot(tmp_path, agent_name="router")
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = bot.config
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
 

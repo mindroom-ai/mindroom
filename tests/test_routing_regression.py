@@ -20,6 +20,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -876,6 +877,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_responder: AsyncMock,
@@ -890,22 +892,18 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
                 router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                    },
-                },
             ),
             tmp_path,
         )
@@ -1462,6 +1460,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1477,27 +1476,26 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                     "facts": AgentConfig(
                         display_name="MindRoomFacts",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                        "facts": ["@bob:localhost"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@bob:localhost"]),
+                ),
             ),
             tmp_path,
         )
@@ -1549,6 +1547,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_reply_permissions_block_router_response(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1564,24 +1563,21 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["*"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["*"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "router": ["@alice:localhost"],
-                        "research": ["*"],
-                        "news": ["*"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:localhost"]),
+                ),
             ),
             tmp_path,
         )
@@ -1627,6 +1623,7 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.router_relay.suggest_responder_for_message")
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
         mock_suggest_responder: AsyncMock,
@@ -1642,28 +1639,26 @@ class TestRoutingRegression:
                     "research": AgentConfig(
                         display_name="MindRoomResearch",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                     "news": AgentConfig(
                         display_name="MindRoomNews",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
                     ),
                     "facts": AgentConfig(
                         display_name="MindRoomFacts",
                         rooms=[test_room_id],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "research": ["@alice:localhost"],
-                        "news": ["@bob:localhost"],
-                        "facts": ["@alice:localhost"],
-                    },
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:localhost"]),
+                ),
             ),
             tmp_path,
         )

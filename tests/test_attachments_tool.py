@@ -1078,7 +1078,7 @@ async def test_send_context_attachments_cross_room_send_requires_authorization(t
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
     with (
-        patch("mindroom.custom_tools.attachment_helpers.is_authorized_sender", return_value=False),
+        patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
         result, send_error = await send_context_attachments(

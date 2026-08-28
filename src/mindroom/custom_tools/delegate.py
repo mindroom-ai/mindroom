@@ -113,15 +113,12 @@ class DelegateTools(Toolkit):
 
         runtime_context = get_tool_runtime_context()
         active_config = runtime_context.current_config if runtime_context is not None else self._config
-        policy = active_config.authorization.agent_reply_policy(agent_name)
-        if runtime_context is None and (
-            active_config.access_model == "room_membership" or (policy is not None and "*" not in policy.users)
-        ):
+        if runtime_context is None:
             return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
-        if runtime_context is not None and not is_sender_allowed_for_responder(
+        if not is_sender_allowed_for_responder(
             runtime_context.requester_id,
             agent_name,
-            runtime_context.room_id if active_config.access_model == "room_membership" else None,
+            runtime_context.room_id,
             active_config,
             self._runtime_paths,
             runtime_context.require_agent_reply_memberships(),

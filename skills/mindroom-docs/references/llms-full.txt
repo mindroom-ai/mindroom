@@ -119,7 +119,6 @@ defaults:
   tools: [scheduler]
   markdown: true
 
-access_model: room_membership
 administrators:
   - "@alice:matrix.example.com"
 room_defaults:
@@ -463,7 +462,6 @@ defaults:
   tools: [scheduler]
   markdown: true
 
-access_model: room_membership
 administrators:
   - "@alice:matrix.example.com"
 room_defaults:
@@ -809,9 +807,8 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
-In membership mode, agent-scoped credential routes require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Agent-scoped credential routes require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
 Responder access and room membership never grant credential-management access.
-Legacy mode continues to authorize the static `users` field of `authorization.agent_reply_permissions` for the agent.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
@@ -1455,8 +1452,7 @@ mindroom_user:
   username: mindroom_user          # Set before first startup (account-creation request localpart only)
   display_name: MindRoomUser       # Can be changed later
 
-# Membership-based access (recommended opt-in)
-access_model: room_membership
+# Access
 administrators: []                 # Concrete Matrix IDs with platform and credential authority
 room_defaults:
   join_policy: invite              # invite, knock, or public
@@ -1525,16 +1521,13 @@ matrix_sync:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
-Omit `access_model` to keep the legacy `authorization` and `matrix_room_access` fields unchanged.
-Membership mode rejects non-default overlapping legacy fields because invitation, conversation, Matrix power, platform, and credential authority require separate operator decisions.
-Run `mindroom config explain-access` for a read-only migration report and see [Authorization](https://docs.mindroom.chat/authorization/) for the manual migration table.
+Retired access fields in a monolithic configuration are migrated automatically when the file loads.
+MindRoom validates the result, saves the original file once as `config.yaml.pre-membership-access`, and atomically writes the new schema.
+Access migration fails without changing files or creating a backup when any `!include` is present.
+See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 
-In membership mode, the root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
-In legacy mode, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
-If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
-Legacy room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a legacy user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 ## Credential Seeds
@@ -1695,15 +1688,14 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
-- `access_model: room_membership` separates `administrators`, room invitations, responder access, Matrix power, and `credential_managers`
+- `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
 - Responder access and room membership never grant dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
-- Membership-mode `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
-- Omit `access_model` to retain legacy `authorization` and `matrix_room_access` behavior unchanged
-- Run `mindroom config explain-access` before manually migrating overloaded legacy fields
-- Membership mode also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
+- `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
+- Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually
+- Room reconciliation also updates managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider
@@ -9725,7 +9717,7 @@ The browser page is the human approval boundary: its GET only displays the actio
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.
 Both link issuance and confirmation apply the current agent's credential-management policy, including configured sender aliases.
-Membership mode accepts platform `administrators` and `agents.<name>.credential_managers`, while legacy mode retains static `authorization.agent_reply_permissions` users.
+Credential management accepts platform `administrators` and `agents.<name>.credential_managers`.
 The resolved credential scope must be `user` or `user_agent`; shared and unscoped credentials are refused.
 Use the authenticated dashboard connection controls to disconnect and reconnect shared or installation-level credentials.
 A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
@@ -9769,7 +9761,6 @@ Configure an admin agent with the per-agent `admin_scope` override to make `get_
 Admin access requires both `admin_scope: true` and platform-administrator authority.
 
 ```yaml
-access_model: room_membership
 administrators:
   - "@usage-admin:example.com"
 
@@ -12729,8 +12720,7 @@ If you need to force a reload, for example because the watcher missed something 
 ```
 
 The bot replies with the active plugin set and the count of cancelled background tasks.
-In membership mode, admin gating uses `administrators` from `config.yaml`.
-Legacy configurations that omit `access_model` continue to use `authorization.global_users`.
+Admin gating uses `administrators` from `config.yaml`.
 
 ### Caveats and tradeoffs
 
@@ -13624,9 +13614,8 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, membership mode requires the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+When an OAuth request targets an agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
 Responder access and room membership never grant OAuth-management access.
-Legacy mode continues to authorize the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
@@ -15283,8 +15272,7 @@ Voice transcription is not rewritten into chat-command syntax; commands must arr
 ## Permission Behavior
 
 Commands are subject to the same authorization rules as normal messages.
-In membership mode, the responder's `access` policy authorizes the sender.
-In legacy mode, room authorization and `authorization.agent_reply_permissions` remain unchanged.
+The responder's `access` policy authorizes the sender.
 See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
 `!config` is disabled by default.
@@ -15518,7 +15506,7 @@ Enable Matrix end-to-end encryption for the current room.
 `!encrypt` reviews what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
 Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
-Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`, while legacy configurations may use `matrix_room_access.encrypt_managed_rooms: true`.
+Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`.
 
 ### `!e2ee`
 
@@ -16380,15 +16368,11 @@ Use [External Triggers](https://docs.mindroom.chat/external-triggers/) directly 
 
 # Authorization
 
-MindRoom supports a membership-based access model that keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
+MindRoom keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
 
-Set `access_model: room_membership` to opt in.
-
-## Membership-based configuration
+## Configuration
 
 ```yaml
-access_model: room_membership
-
 administrators:
   - "@owner:example.com"
 
@@ -16461,14 +16445,14 @@ List overrides replace the whole default list instead of merging with it.
 An explicit empty list therefore disables the inherited invitations or admins for that room.
 
 `join_policy` accepts `invite`, `knock`, or `public`.
-MindRoom reconciles membership-mode join policy, directory visibility, invitations, and power levels for existing managed rooms without consulting the legacy `reconcile_existing_rooms` flag.
+MindRoom reconciles join policy, directory visibility, invitations, and power levels for existing managed rooms.
 Encryption can be enabled but never disabled because enabling Matrix room encryption is irreversible.
 
 `invite_users` is declarative desired invitation state.
 A listed user who leaves or is kicked is invited again during reconciliation, so remove the user from configuration before intentionally removing access.
 
 The root Matrix Space receives the union of managed-room `invite_users` as invitations.
-Membership-mode invitees do not automatically receive root Space admin power.
+Invitees do not automatically receive root Space admin power.
 
 ## Responder access
 
@@ -16486,6 +16470,8 @@ MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
+The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
 
@@ -16505,7 +16491,7 @@ When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a
 
 ## Bridge aliases
 
-`authorization.aliases` remains available in both access models.
+`authorization.aliases` maps bridge-created identities before access checks.
 It maps bridge-created Matrix IDs to a canonical Matrix user before access, administration, or credential checks.
 
 ```yaml
@@ -16516,30 +16502,15 @@ authorization:
       - "@signal_456:example.com"
 ```
 
-## Legacy compatibility
+## Automatic migration
 
-Omitting `access_model` preserves the existing authorization behavior unchanged.
+Loading a monolithic configuration with retired access fields automatically converts it to this schema.
+MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
+The migration preserves explicit new-schema values and removes the retired fields.
 
-Legacy mode continues to use `authorization.global_users`, `authorization.room_permissions`, `authorization.default_room_access`, `authorization.agent_reply_permissions`, and `matrix_room_access`.
-Legacy static `agent_reply_permissions.<entity>.users` entries continue to authorize credential management for that agent.
-Legacy `joined_rooms` grants conversation access only.
-
-Membership mode rejects non-default values in overlapping legacy fields because their old meanings combined capabilities that now require separate operator decisions.
-
-| Legacy field | Manual membership-mode decision |
-| --- | --- |
-| `authorization.global_users` | Decide separately among `administrators`, room `invite_users`, responder `access.users`, and `credential_managers` |
-| `authorization.room_permissions.<room>` | Decide separately between `rooms.<room>.invite_users` and responder access |
-| `authorization.default_room_access` | Choose explicit responder access, usually `current_room_members` |
-| `authorization.agent_reply_permissions.<entity>` | Move conversation grants to responder `access` and separately choose credential managers |
-| `matrix_room_access.mode` and `multi_user_join_rule` | Move the desired join policy to `room_defaults` or a room override |
-| `matrix_room_access.publish_to_room_directory` | Move visibility to `room_defaults.listed` or `rooms.<key>.listed` |
-| `matrix_room_access.invite_only_rooms` | Use per-room `join_policy`, `listed`, and `invite_users` overrides |
-| `matrix_room_access.encrypt_managed_rooms` | Move encryption intent to `room_defaults.encrypted` or `rooms.<key>.encrypted` |
-| `matrix_room_access.room_admins` | Move Matrix power to `room_defaults.admins` or `rooms.<key>.admins` |
-
-Run `mindroom config explain-access` to print the effective legacy inputs and a conservative membership-mode skeleton.
-The command is read-only and never assumes that legacy global users should become platform administrators.
+Access migration does not support configurations that use `!include`.
+If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.
+Remove the includes or migrate the combined configuration manually before retrying.
 
 ## Bot accounts
 
@@ -16574,13 +16545,9 @@ matrix_space:
 
 When `enabled` is `true`, MindRoom creates a Space on startup and adds all managed rooms as children.
 Rooms created later (by agents joining new rooms or config changes) are automatically added to the Space.
-In membership mode, MindRoom invites the union of managed-room `invite_users` to the root Space without granting those users root Space admin power.
-In legacy mode, MindRoom grants root Space admin power to concrete Matrix users in `authorization.global_users`.
-MindRoom also grants root Space admin power to the configured `mindroom_user` when that internal account exists.
-Legacy room-specific users in `authorization.room_permissions` are not root Space admins unless they are also listed in `authorization.global_users`.
+MindRoom invites the union of managed-room `invite_users` to the root Space without granting those users root Space admin power.
 This lets owners add, remove, and reorder Space children in Matrix clients while keeping room-specific collaborators scoped to their rooms.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a legacy user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
@@ -17130,10 +17097,9 @@ matrix_space:
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
 Root Space admin power is granted before child links are written.
-In membership mode, concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
+Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
 Platform `administrators`, room `admins`, responder users, and credential managers are not root Space invitation sources.
-In legacy mode, concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` are invited and granted Space admin power.
-MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from a legacy `authorization.global_users` list.
+MindRoom does not remove existing Space admins during reconciliation.
 
 ## Delivery Policy
 
@@ -17150,7 +17116,6 @@ If the window expires the delivery is reported as failed, the placeholder settle
 
 Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
 Managed rooms can be created encrypted through `room_defaults.encrypted: true` or `rooms.<key>.encrypted: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
-Legacy configurations that omit `access_model` may instead use `matrix_room_access.encrypt_managed_rooms: true`.
 Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
 Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
 
@@ -17729,7 +17694,6 @@ Register the bridge bot as a bot account when it can originate events, and use r
 bot_accounts:
   - "@telegrambot:matrix.example.com"
 
-access_model: room_membership
 administrators:
   - "@owner:matrix.example.com"
 room_defaults:
@@ -20496,8 +20460,6 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ edit             Open config.yaml in your default editor.                              │
 │ validate         Validate config.yaml and check for common issues.                     │
 │ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ explain-access   Explain access capabilities and print a read-only membership          │
-│                  migration skeleton.                                                   │
 │ path             Show the resolved config file path and search locations.              │
 │ migrate          Apply safe, text-preserving migrations to config.yaml.                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯

@@ -619,8 +619,7 @@ If you need to force a reload, for example because the watcher missed something 
 ```
 
 The bot replies with the active plugin set and the count of cancelled background tasks.
-In membership mode, admin gating uses `administrators` from `config.yaml`.
-Legacy configurations that omit `access_model` continue to use `authorization.global_users`.
+Admin gating uses `administrators` from `config.yaml`.
 
 ### Caveats and tradeoffs
 

@@ -78,7 +78,7 @@ The browser page is the human approval boundary: its GET only displays the actio
 The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
 Only the original authenticated human requester can open and confirm the link.
 Both link issuance and confirmation apply the current agent's credential-management policy, including configured sender aliases.
-Membership mode accepts platform `administrators` and `agents.<name>.credential_managers`, while legacy mode retains static `authorization.agent_reply_permissions` users.
+Credential management accepts platform `administrators` and `agents.<name>.credential_managers`.
 The resolved credential scope must be `user` or `user_agent`; shared and unscoped credentials are refused.
 Use the authenticated dashboard connection controls to disconnect and reconnect shared or installation-level credentials.
 A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
@@ -122,7 +122,6 @@ Configure an admin agent with the per-agent `admin_scope` override to make `get_
 Admin access requires both `admin_scope: true` and platform-administrator authority.
 
 ```yaml
-access_model: room_membership
 administrators:
   - "@usage-admin:example.com"
 

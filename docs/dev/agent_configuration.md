@@ -22,7 +22,7 @@ The configuration file has these common top-level sections; see the exhaustive [
 7. **knowledge_bases** - File-backed RAG knowledge bases
 8. **router** - Agent routing system configuration
 9. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
-10. **access_model**, **administrators**, and **authorization** - Membership-mode platform authority or legacy access policy
+10. **administrators** and **authorization** - Platform authority and identity aliases
 11. **room_defaults** and **rooms** - Managed room state, invitations, and Matrix power
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
 13. **mindroom_user** - Internal MindRoom user account settings
@@ -306,10 +306,9 @@ voice:
 
 ## Authorization Configuration
 
-Membership mode separates platform, room, responder, and credential authority:
+MindRoom separates platform, room, responder, and credential authority:
 
 ```yaml
-access_model: room_membership
 administrators:
   - "@owner:example.com"
 room_defaults:
@@ -346,22 +345,8 @@ authorization:
 - **credential_managers**: Concrete Matrix users who may manage one agent's credentials and OAuth connections
 - **aliases**: Map canonical Matrix user IDs to bridge aliases
 
-Omit `access_model` to retain the legacy `authorization` and `matrix_room_access` fields unchanged.
-Run `mindroom config explain-access` for a read-only migration report.
-
-## Legacy Matrix Room Access Configuration
-
-Legacy configurations that omit `access_model` can continue to control managed rooms with `matrix_room_access`:
-
-```yaml
-matrix_room_access:
-  mode: single_user_private  # "single_user_private" or "multi_user"
-  multi_user_join_rule: public  # "public" or "knock" (for multi_user mode)
-  publish_to_room_directory: false
-  invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
-  reconcile_existing_rooms: false  # Reconcile existing rooms on startup
-  room_admins: []  # Matrix user IDs granted admin power (100) in every managed room
-```
+Retired access fields in a monolithic configuration are migrated automatically when the file loads.
+Access migration fails without writing or creating a backup when any `!include` is present.
 
 ## Matrix Space Configuration
 
@@ -373,12 +358,8 @@ matrix_space:
   name: "MindRoom"  # Display name for the root Space
 ```
 
-In membership mode, managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
-In legacy mode, concrete Matrix users in `authorization.global_users` receive root Space admin power.
-The configured `mindroom_user` also receives root Space admin power when the internal account exists.
-Legacy room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
+Managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a legacy user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 
 ## Defaults Configuration
 
@@ -705,8 +686,7 @@ router:
   model: "default"
   accept_invites: true
 
-# Membership access
-access_model: room_membership
+# Access
 administrators:
   - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 room_defaults:

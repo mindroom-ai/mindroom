@@ -565,8 +565,10 @@ class DockerProjectionManager:
         config_data["calls"] = {}
         config_data["room_models"] = {}
         config_data["bot_accounts"] = []
+        config_data["administrators"] = []
+        config_data["room_defaults"] = {}
+        config_data["rooms"] = {}
         config_data["authorization"] = {}
-        config_data["matrix_room_access"] = {}
         config_data["matrix_space"] = {}
         config_data["mindroom_user"] = None
 

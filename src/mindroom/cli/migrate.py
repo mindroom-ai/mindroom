@@ -7,8 +7,7 @@ from pathlib import Path  # noqa: TC003
 import typer
 
 from mindroom import constants
-from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors
-from mindroom.config.access_migration import write_text_atomic as _write_text_atomic
+from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors, load_config_quiet
 
 _OLD_CONFIG_INIT_MIND_MEMORY_TOOL_BLOCK = """\
     knowledge_bases:
@@ -131,16 +130,36 @@ def config_migrate(
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
-    migrated, migrated_mind_memory = _migrate_old_config_init_mind_memory(content)
-    if not migrated_mind_memory:
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_file,
+        process_env=constants.exported_process_env(),
+    )
+    from yaml import YAMLError  # noqa: PLC0415
+
+    try:
+        load_config_quiet(runtime_paths, tolerate_plugin_load_errors=True)
+        access_migrated_content = config_file.read_text(encoding="utf-8")
+    except (ValueError, YAMLError, OSError) as exc:
+        format_validation_errors(exc, config_path=config_file)
+        raise typer.Exit(1) from None
+
+    migrated_access = access_migrated_content != content
+    migrated, migrated_mind_memory = _migrate_old_config_init_mind_memory(access_migrated_content)
+    if not migrated_access and not migrated_mind_memory:
         console.print("[green]No migrations applied.[/green]")
         return
 
-    try:
-        _write_text_atomic(config_file, migrated)
-    except OSError as exc:
-        console.print(f"[red]Error:[/red] Could not write migrated configuration to {config_file}: {exc}")
-        raise typer.Exit(1) from None
+    if migrated_mind_memory:
+        from mindroom.config.access_migration import write_text_atomic  # noqa: PLC0415
 
-    console.print("[green]Applied migration:[/green] starter Mind file-memory semantic search")
+        try:
+            write_text_atomic(config_file, migrated)
+        except OSError as exc:
+            console.print(f"[red]Error:[/red] Could not write migrated configuration to {config_file}: {exc}")
+            raise typer.Exit(1) from None
+
+    if migrated_access:
+        console.print("[green]Applied migration:[/green] membership access schema")
+    if migrated_mind_memory:
+        console.print("[green]Applied migration:[/green] starter Mind file-memory semantic search")
     console.print(f"[green]Config updated:[/green] {config_file}")

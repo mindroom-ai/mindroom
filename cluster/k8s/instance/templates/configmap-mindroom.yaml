@@ -1,5 +1,4 @@
 {{- $config := .Files.Get "default-config.yaml" | fromYaml -}}
-{{- $_ := set $config "access_model" "room_membership" -}}
 {{- $_ := set $config "administrators" (.Values.administrators | default (list)) -}}
 {{- $roomDefaultValues := .Values.roomDefaults | default (dict) -}}
 {{- $roomDefaults := dict -}}

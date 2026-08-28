@@ -14,7 +14,6 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
@@ -24,6 +23,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from tests.access_migration_support import retired_authorization
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -323,12 +323,13 @@ async def test_dm_room_with_multiple_agents_forms_auto_team(config: Config) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_unauthorized_sender_is_ignored_even_when_mentioned(tmp_path: Path) -> None:
     """A sender outside the per-agent reply allowlist never gets a response."""
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": ["@owner:localhost"]}),
+            authorization=retired_authorization(agent_reply_permissions={"general": ["@owner:localhost"]}),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -349,7 +350,7 @@ def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
                 "general": AgentConfig(display_name="General"),
                 "research": AgentConfig(display_name="Research"),
             },
-            authorization=AuthorizationConfig(agent_reply_permissions={"general": ["@owner:localhost"]}),
+            authorization=retired_authorization(agent_reply_permissions={"general": ["@owner:localhost"]}),
         ),
         test_runtime_paths(tmp_path),
     )

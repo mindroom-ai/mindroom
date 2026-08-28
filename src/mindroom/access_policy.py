@@ -71,7 +71,9 @@ def _resolved_access(
             users=(),
         )
     return _EffectiveResponderAccess(
-        current_room_members=authored.current_room_members,
+        current_room_members=(
+            default_current_room_members if authored.current_room_members is None else authored.current_room_members
+        ),
         members_of_rooms=(
             default_room_grants if authored.members_of_rooms is None else tuple(authored.members_of_rooms)
         ),
@@ -86,14 +88,14 @@ def resolve_responder_access(config: Config, entity_name: str) -> _EffectiveResp
         return _resolved_access(
             entity.access,
             default_current_room_members=False,
-            default_room_grants=tuple(entity.rooms),
+            default_room_grants=tuple(room for room in entity.rooms if not room.startswith(("!", "#"))),
         )
     if entity_name in config.teams:
         entity = config.teams[entity_name]
         return _resolved_access(
             entity.access,
             default_current_room_members=False,
-            default_room_grants=tuple(entity.rooms),
+            default_room_grants=tuple(room for room in entity.rooms if not room.startswith(("!", "#"))),
         )
     if entity_name == ROUTER_AGENT_NAME:
         return _resolved_access(

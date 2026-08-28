@@ -205,6 +205,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             card_event_id="$approval",
             status="approved",
             reason=None,
+            authorize_responder=lambda _entity_name: True,
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
@@ -215,6 +216,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             card_event_id="$approval",
             status=status,
             reason="operator decision",
+            authorize_responder=lambda _entity_name: True,
         )
         assert result.consumed is True
         assert result.resolved is True
@@ -231,6 +233,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             card_event_id="$approval",
             status="denied" if status == "approved" else "approved",
             reason="late conflicting decision",
+            authorize_responder=lambda _entity_name: True,
         )
         assert repeated.consumed is True
         assert repeated.resolved is False

@@ -566,8 +566,7 @@ mindroom_user:
   username: mindroom_user          # Set before first startup (account-creation request localpart only)
   display_name: MindRoomUser       # Can be changed later
 
-# Membership-based access (recommended opt-in)
-access_model: room_membership
+# Access
 administrators: []                 # Concrete Matrix IDs with platform and credential authority
 room_defaults:
   join_policy: invite              # invite, knock, or public
@@ -636,16 +635,13 @@ matrix_sync:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
-Omit `access_model` to keep the legacy `authorization` and `matrix_room_access` fields unchanged.
-Membership mode rejects non-default overlapping legacy fields because invitation, conversation, Matrix power, platform, and credential authority require separate operator decisions.
-Run `mindroom config explain-access` for a read-only migration report and see [Authorization](https://docs.mindroom.chat/authorization/) for the manual migration table.
+Retired access fields in a monolithic configuration are migrated automatically when the file loads.
+MindRoom validates the result, saves the original file once as `config.yaml.pre-membership-access`, and atomically writes the new schema.
+Access migration fails without changing files or creating a backup when any `!include` is present.
+See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 
-In membership mode, the root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
-In legacy mode, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
-If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
-Legacy room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
-Removing a legacy user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 ## Credential Seeds
@@ -806,15 +802,14 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
-- `access_model: room_membership` separates `administrators`, room invitations, responder access, Matrix power, and `credential_managers`
+- `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
 - Responder access and room membership never grant dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
-- Membership-mode `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
-- Omit `access_model` to retain legacy `authorization` and `matrix_room_access` behavior unchanged
-- Run `mindroom config explain-access` before manually migrating overloaded legacy fields
-- Membership mode also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
+- `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
+- Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually
+- Room reconciliation also updates managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`
 - The `memory` system works out of the box with OpenAI; use `memory.llm` for memory summarization with a different provider

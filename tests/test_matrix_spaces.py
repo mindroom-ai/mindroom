@@ -17,7 +17,7 @@ from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, managed_space_alias_localpart
+from mindroom.matrix_identifiers import managed_space_alias_localpart, room_alias_identifier_candidates
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
@@ -146,7 +146,7 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     """Managed room keys must not map to the reserved root Space alias."""
     runtime_paths = constants.resolve_runtime_paths()
     reserved_alias = managed_space_alias_localpart(runtime_paths)
-    colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
+    colliding_room_key = room_alias_identifier_candidates(f"#{reserved_alias}:example.com", runtime_paths)[-1]
 
     with pytest.raises(ValueError, match="reserved root Space alias"):
         Config.model_validate(
@@ -162,7 +162,7 @@ def test_config_allows_colliding_room_key_when_space_disabled() -> None:
     """Colliding room keys should be accepted when the space feature is disabled."""
     runtime_paths = constants.resolve_runtime_paths()
     reserved_alias = managed_space_alias_localpart(runtime_paths)
-    colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
+    colliding_room_key = room_alias_identifier_candidates(f"#{reserved_alias}:example.com", runtime_paths)[-1]
 
     config = Config.model_validate(
         {
@@ -640,17 +640,17 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_users(tmp_path) -> None:  # noqa: ANN001
-    """The orchestrator should invite both the internal user and authorized users to the root Space."""
+async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(tmp_path) -> None:  # noqa: ANN001
+    """The root Space should use effective room invitations without implicit users."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        authorization={
-            "global_users": ["@owner:example.com"],
-            "room_permissions": {"lobby": ["@collaborator:example.com"]},
+        room_defaults={"invite_users": ["@owner:example.com"]},
+        rooms={
+            "lobby": {"invite_users": ["@collaborator:example.com"]},
         },
     )
     router_bot = MagicMock()
@@ -669,16 +669,10 @@ async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_us
         orchestrator.config,
         orchestrator.runtime_paths,
         {"lobby": "!lobby:localhost"},
-        admin_user_ids={
-            mindroom_user_id(orchestrator.config, orchestrator.runtime_paths),
-            "@owner:example.com",
-        },
+        admin_user_ids=set(),
     )
-    # Should have invited both the internal user and the authorized owner
     invited_user_ids = {c.args[2] for c in mock_invite.await_args_list}
-    assert mindroom_user_id(orchestrator.config, orchestrator.runtime_paths) in invited_user_ids
-    assert "@owner:example.com" in invited_user_ids
-    assert "@collaborator:example.com" not in invited_user_ids
+    assert invited_user_ids == {"@collaborator:example.com"}
 
 
 @pytest.mark.asyncio
@@ -688,7 +682,7 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
     orchestrator.config = Config(
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
-        authorization={"global_users": ["@owner:example.com"]},
+        room_defaults={"invite_users": ["@owner:example.com"]},
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -706,7 +700,7 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
         orchestrator.config,
         orchestrator.runtime_paths,
         {"lobby": "!lobby:localhost"},
-        admin_user_ids={"@owner:example.com"},
+        admin_user_ids=set(),
     )
     mock_invite.assert_awaited_once_with(
         router_bot.client,

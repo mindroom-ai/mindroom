@@ -13,10 +13,10 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -83,7 +83,7 @@ class TestRoutingIntegration:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
-                authorization=AuthorizationConfig(default_room_access=True),
+                authorization=retired_authorization(default_room_access=True),
             ),
             test_runtime_paths(tmp_path),
         )

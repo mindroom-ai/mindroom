@@ -777,6 +777,7 @@ class TestCommandHandling:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_command_blocked_by_reply_permissions(self) -> None:
         """Router should ignore commands from senders disallowed by router reply rules."""
         agent_user = AgentMatrixUser(

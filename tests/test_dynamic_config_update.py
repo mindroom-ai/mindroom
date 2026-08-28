@@ -11,7 +11,7 @@ import nio
 import pytest
 import pytest_asyncio
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex, _agent_reply_membership_policy_signature
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
@@ -400,11 +400,11 @@ class TestDynamicConfigUpdate:
         assert router_bot.config.defaults.thread_summary_subsequent_interval == 3
 
     @pytest.mark.asyncio
-    async def test_matrix_room_access_change_reconciles_rooms_without_restarts(
+    async def test_room_access_change_reconciles_rooms_without_restarts(
         self,
         orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
-        """Changing matrix_room_access should trigger room/invitation reconciliation on config reload."""
+        """Changing room defaults should trigger room and invitation reconciliation without restarts."""
         initial_config = Config(
             agents={
                 "general": {
@@ -415,7 +415,7 @@ class TestDynamicConfigUpdate:
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            matrix_room_access={"mode": "single_user_private"},
+            room_defaults={"join_policy": "invite", "listed": False},
         )
         updated_config = Config(
             agents={
@@ -427,10 +427,7 @@ class TestDynamicConfigUpdate:
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            matrix_room_access={
-                "mode": "multi_user",
-                "reconcile_existing_rooms": True,
-            },
+            room_defaults={"join_policy": "public", "listed": True},
         )
 
         orchestrator = orchestrator_factory()
@@ -454,11 +451,11 @@ class TestDynamicConfigUpdate:
         mock_setup.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
-    async def test_authorization_change_reconciles_invitations_without_restarts(
+    async def test_access_change_reconciles_invitations_without_restarts(
         self,
         orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
-        """Changing authorization should trigger room/invitation reconciliation on config reload."""
+        """Changing membership access should reconcile rooms and invalidate stale grants."""
         initial_config = Config(
             agents={
                 "general": {
@@ -469,7 +466,7 @@ class TestDynamicConfigUpdate:
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization={"global_users": []},
+            room_defaults={"invite_users": []},
         )
         updated_config = Config(
             agents={
@@ -478,15 +475,11 @@ class TestDynamicConfigUpdate:
                     "role": "General assistant",
                     "model": "default",
                     "rooms": ["lobby"],
+                    "access": {"members_of_rooms": ["lobby"]},
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization={
-                "global_users": ["@alice:example.com"],
-                "agent_reply_permissions": {
-                    "general": {"joined_rooms": ["lobby"]},
-                },
-            },
+            room_defaults={"invite_users": ["@alice:example.com"]},
         )
 
         orchestrator = orchestrator_factory()
@@ -508,9 +501,7 @@ class TestDynamicConfigUpdate:
         assert general_bot.config == updated_config
         assert router_bot.config == updated_config
         mock_setup.assert_awaited_once_with([])
-        assert orchestrator.agent_reply_memberships.snapshot.policy_signature == (
-            _agent_reply_membership_policy_signature(updated_config)
-        )
+        assert orchestrator.agent_reply_memberships.snapshot.policy_signature is None
         assert orchestrator.agent_reply_memberships.needs_refresh(updated_config)
 
     @pytest.mark.asyncio

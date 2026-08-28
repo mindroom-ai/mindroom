@@ -235,7 +235,6 @@ mindroom_user:
   username: mindroom_user  # Immutable once the account is created on first run
   display_name: MindRoomUser
 
-access_model: room_membership
 administrators: ["@alice:example.com"]
 room_defaults:
   invite_users: ["@alice:example.com"]

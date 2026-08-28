@@ -120,7 +120,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
@@ -265,7 +265,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
@@ -567,7 +567,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
                     entity_ids(config, runtime_paths_for(config))["general"],
                 ],
             ),
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -912,7 +912,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             ),
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -963,7 +963,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         with (
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
         ):
             await bot._on_message(room, event)
@@ -1025,7 +1025,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),

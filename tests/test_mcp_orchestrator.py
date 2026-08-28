@@ -745,7 +745,7 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -798,7 +798,7 @@ async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: P
         new_entities=set(),
         removed_entities={"code"},
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -846,7 +846,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -911,7 +911,7 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -997,7 +997,7 @@ async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Pa
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -1189,7 +1189,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -1241,7 +1241,7 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -1283,7 +1283,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )

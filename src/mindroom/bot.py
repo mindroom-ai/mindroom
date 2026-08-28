@@ -883,6 +883,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 journal_dispatcher=self._journal_dispatcher,
+                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
                 turn_policy=self._turn_policy,
                 turn_store=self._turn_store,
                 stop_manager=self.stop_manager,

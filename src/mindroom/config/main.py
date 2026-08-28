@@ -46,7 +46,6 @@ from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     EventJournalConfig,
-    MatrixRoomAccessConfig,
     MatrixSpaceConfig,
     MatrixSyncConfig,
     MindRoomUserConfig,
@@ -163,7 +162,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "knowledge_bases",
     "mcp_servers",
     "prompts",
-    "matrix_room_access",
     "matrix_space",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
@@ -194,7 +192,7 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 
 
 def iter_config_validation_messages(
-    exc: ConfigLoadUserError,
+    exc: Exception,
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
@@ -410,17 +408,13 @@ class Config(BaseModel):
         "matrix_message": ("attachments", "matrix_room"),
     }
 
-    access_model: Literal["room_membership"] | None = Field(
-        default=None,
-        description="Opt-in access-policy model",
-    )
     administrators: list[str] = Field(
         default_factory=list,
         description="Concrete Matrix user IDs with platform-wide administrative authority",
     )
     room_defaults: RoomDefaultsConfig = Field(
         default_factory=RoomDefaultsConfig,
-        description="Desired Matrix state inherited by managed rooms in membership mode",
+        description="Desired Matrix state inherited by managed rooms",
     )
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
@@ -475,10 +469,6 @@ class Config(BaseModel):
         default=None,
         description="Configuration for the internal MindRoom user account (omit for hosted/public profiles)",
     )
-    matrix_room_access: MatrixRoomAccessConfig = Field(
-        default_factory=MatrixRoomAccessConfig,
-        description="Managed Matrix room access/discoverability behavior",
-    )
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
@@ -531,6 +521,7 @@ class Config(BaseModel):
         normalized = normalized_config_data(data)
         if not isinstance(normalized, dict):
             return normalized
+        normalized = migrate_access_config_data(cast("dict[str, Any]", normalized)).data
 
         raw_data = cast("dict[object, object]", normalized)
         for entry in raw_tools_entries(raw_data, "defaults"):
@@ -672,37 +663,8 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_agent_reply_permissions(self) -> Config:
-        """Ensure reply policies reference known entities and managed room keys."""
-        known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
-        known_entities.add("*")
-        unknown_entities = sorted(set(self.authorization.agent_reply_permissions) - known_entities)
-        if unknown_entities:
-            msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
-            raise ValueError(msg)
-
-        configured_managed_room_keys = {
-            room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
-        }
-        invalid_room_references = sorted(
-            f"{entity_name} -> {room_key}"
-            for entity_name, policy in self.authorization.agent_reply_permissions.items()
-            for room_key in policy.joined_rooms
-            if room_key not in configured_managed_room_keys
-        )
-        if invalid_room_references:
-            msg = (
-                "authorization.agent_reply_permissions joined_rooms must reference configured managed room keys: "
-                + ", ".join(invalid_room_references)
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
         """Require membership grants to reference configured managed-room keys."""
-        if self.access_model != "room_membership":
-            return self
         configured_managed_room_keys = {
             room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
         }
@@ -717,65 +679,6 @@ class Config(BaseModel):
             msg = "Responder access members_of_rooms must reference configured managed room keys: " + ", ".join(
                 invalid_room_references,
             )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def validate_membership_access_compatibility(self) -> Config:
-        """Reject legacy fields whose overloaded meaning conflicts with membership mode."""
-        if self.access_model != "room_membership":
-            return self
-
-        conflicts: list[str] = []
-        authorization = self.authorization
-        if authorization.global_users:
-            conflicts.append(
-                "authorization.global_users must be split among administrators, room invite_users, responder "
-                "access, and credential_managers; MindRoom cannot infer which capabilities each user should receive",
-            )
-        conflicts.extend(
-            f"authorization.room_permissions.{room_key} must be split into rooms.{room_key}.invite_users and "
-            "responder access; MindRoom cannot infer whether every listed user should receive both capabilities"
-            for room_key in sorted(authorization.room_permissions)
-        )
-        if authorization.default_room_access:
-            conflicts.append(
-                "authorization.default_room_access must be replaced with explicit responder access; "
-                "an operator must choose which responders accept current-room members",
-            )
-        conflicts.extend(
-            f"authorization.agent_reply_permissions.{entity_name} must be split into responder access and, when "
-            "needed, agents.<name>.credential_managers; MindRoom cannot infer credential authority"
-            for entity_name in sorted(authorization.agent_reply_permissions)
-        )
-
-        matrix_access = self.matrix_room_access
-        matrix_defaults = MatrixRoomAccessConfig()
-        matrix_fields = (
-            ("mode", matrix_access.mode, matrix_defaults.mode),
-            ("multi_user_join_rule", matrix_access.multi_user_join_rule, matrix_defaults.multi_user_join_rule),
-            (
-                "publish_to_room_directory",
-                matrix_access.publish_to_room_directory,
-                matrix_defaults.publish_to_room_directory,
-            ),
-            ("invite_only_rooms", matrix_access.invite_only_rooms, matrix_defaults.invite_only_rooms),
-            (
-                "encrypt_managed_rooms",
-                matrix_access.encrypt_managed_rooms,
-                matrix_defaults.encrypt_managed_rooms,
-            ),
-            ("room_admins", matrix_access.room_admins, matrix_defaults.room_admins),
-        )
-        conflicts.extend(
-            f"matrix_room_access.{field_name} must be migrated to room_defaults or rooms.<key>; "
-            "an operator must choose the intended policy for each managed room"
-            for field_name, value, default in matrix_fields
-            if value != default
-        )
-
-        if conflicts:
-            msg = "Membership access conflicts with overlapping legacy fields:\n- " + "\n- ".join(conflicts)
             raise ValueError(msg)
         return self
 

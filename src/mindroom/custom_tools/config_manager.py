@@ -733,29 +733,24 @@ class ConfigManagerTools(Toolkit):
             Success message or error details
 
         """
-        if operation in {"create", "update"}:
-            authorization_error = self._load_configuration_mutation_authorization_error()
-            if authorization_error is not None:
-                return authorization_error
-        if operation == "create":
-            if not display_name:
-                return "Error: display_name is required for create operation"
-            if role is None:
-                role = ""
-            return self._create_agent_config(
-                agent_name=agent_name,
-                display_name=display_name,
-                role=role,
-                tools=tools or [],
-                instructions=instructions or [],
-                model=model or "default",
-                rooms=rooms or [],
-                knowledge_bases=knowledge_bases or [],
-                include_default_tools=include_default_tools,
-                markdown=markdown,
-                learning=learning,
-                learning_mode=learning_mode,
+        if operation not in {"create", "update"}:
+            return (
+                self._validate_agent_config(agent_name)
+                if operation == "validate"
+                else f"Error: Unknown operation '{operation}'. Valid options: create, update, validate"
             )
+
+        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
+            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
+        )
+        if load_error is not None:
+            return load_error
+        assert config is not None
+        assert tool_metadata is not None
+        authorization_error = self._configuration_mutation_authorization_error(config)
+        if authorization_error is not None:
+            return authorization_error
+
         if operation == "update":
             return self._update_agent_config(
                 agent_name=agent_name,
@@ -770,10 +765,27 @@ class ConfigManagerTools(Toolkit):
                 markdown=markdown,
                 learning=learning,
                 learning_mode=learning_mode,
+                config=config,
+                tool_metadata=tool_metadata,
             )
-        if operation == "validate":
-            return self._validate_agent_config(agent_name)
-        return f"Error: Unknown operation '{operation}'. Valid options: create, update, validate"
+        if not display_name:
+            return "Error: display_name is required for create operation"
+        return self._create_agent_config(
+            agent_name=agent_name,
+            display_name=display_name,
+            role=role or "",
+            tools=tools or [],
+            instructions=instructions or [],
+            model=model or "default",
+            rooms=rooms or [],
+            knowledge_bases=knowledge_bases or [],
+            include_default_tools=include_default_tools,
+            markdown=markdown,
+            learning=learning,
+            learning_mode=learning_mode,
+            config=config,
+            tool_metadata=tool_metadata,
+        )
 
     def manage_team(
         self,
@@ -796,10 +808,14 @@ class ConfigManagerTools(Toolkit):
             Success message or error details
 
         """
-        authorization_error = self._load_configuration_mutation_authorization_error()
+        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error is not None:
+            return load_error
+        assert config is not None
+        authorization_error = self._configuration_mutation_authorization_error(config)
         if authorization_error is not None:
             return authorization_error
-        return self._create_team_config(team_name, display_name, role, agents, mode)
+        return self._create_team_config(team_name, display_name, role, agents, mode, config=config)
 
     # ===== Internal helper methods (not exposed as tools) =====
 
@@ -840,14 +856,6 @@ class ConfigManagerTools(Toolkit):
         if runtime_context is not None and is_platform_administrator(runtime_context.requester_id, config):
             return None
         return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
-
-    def _load_configuration_mutation_authorization_error(self) -> str | None:
-        """Load the current config and authorize one full-configuration write."""
-        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
-        if load_error is not None:
-            return load_error
-        assert config is not None
-        return self._configuration_mutation_authorization_error(config)
 
     def _load_config_and_tool_metadata_or_error(
         self,
@@ -1140,19 +1148,13 @@ class ConfigManagerTools(Toolkit):
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
+        config: Config,
+        tool_metadata: dict[str, ToolMetadata],
     ) -> str:
         """Create a new agent configuration."""
         # Validate agent name
         if not re.match(r"^[a-z0-9_]+$", agent_name):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
-
-        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
-            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
-        )
-        if load_error:
-            return load_error
-        assert config is not None
-        assert tool_metadata is not None
 
         invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
         if invalid_tools:
@@ -1233,16 +1235,10 @@ class ConfigManagerTools(Toolkit):
         markdown: bool | None,
         learning: bool | None,
         learning_mode: AgentLearningMode | None,
+        config: Config,
+        tool_metadata: dict[str, ToolMetadata],
     ) -> str:
         """Update an existing agent configuration."""
-        config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
-            footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
-        )
-        if load_error:
-            return load_error
-        assert config is not None
-        assert tool_metadata is not None
-
         try:
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
@@ -1339,22 +1335,19 @@ class ConfigManagerTools(Toolkit):
             logger.exception("Failed to update agent")
             return f"Error updating agent: {e}"
 
-    def _create_team_config(  # noqa: PLR0911
+    def _create_team_config(
         self,
         team_name: str,
         display_name: str,
         role: str,
         agents: list[str],
         mode: str = "coordinate",
+        *,
+        config: Config,
     ) -> str:
         """Create a new team configuration."""
         if mode not in ["coordinate", "collaborate"]:
             return "Error: Team mode must be 'coordinate' or 'collaborate'"
-
-        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
-        if load_error:
-            return load_error
-        assert config is not None
 
         try:
             if team_name in config.teams:

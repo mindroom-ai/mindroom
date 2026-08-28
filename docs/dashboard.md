@@ -234,9 +234,8 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
-In membership mode, agent-scoped credential routes require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Agent-scoped credential routes require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
 Responder access and room membership never grant credential-management access.
-Legacy mode continues to authorize the static `users` field of `authorization.agent_reply_permissions` for the agent.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.

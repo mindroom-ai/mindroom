@@ -326,7 +326,7 @@ Expected: FAIL because `room_defaults`, responder `access`, and `credential_mana
 class ResponderAccessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    current_room_members: bool = False
+    current_room_members: bool | None = None
     members_of_rooms: list[str] | None = None
     users: list[str] = Field(default_factory=list)
 

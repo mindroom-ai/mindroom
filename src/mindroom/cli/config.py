@@ -45,7 +45,7 @@ from mindroom.runtime_env_policy import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.main import Config, ConfigLoadUserError
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -385,7 +385,7 @@ def _get_editor() -> str:
 
 
 def format_validation_errors(
-    exc: ConfigLoadUserError,
+    exc: Exception,
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""
@@ -672,177 +672,6 @@ def config_resolve(
         yaml_io.safe_dump(data, default_flow_style=False, sort_keys=True, allow_unicode=True),
         end="",
     )
-
-
-def _membership_access_skeleton(config: Config) -> dict[str, object]:
-    """Return a conservative membership-mode skeleton that grants no inferred human authority."""
-    room_keys = sorted(
-        room_key for room_key in config.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
-    )
-    agents = {
-        agent_name: {
-            "access": {
-                "current_room_members": False,
-                "members_of_rooms": [],
-                "users": [],
-            },
-            "credential_managers": [],
-        }
-        for agent_name in sorted(config.agents)
-    }
-    teams = {
-        team_name: {
-            "access": {
-                "current_room_members": False,
-                "members_of_rooms": [],
-                "users": [],
-            },
-        }
-        for team_name in sorted(config.teams)
-    }
-    skeleton: dict[str, object] = {
-        "access_model": "room_membership",
-        "administrators": [],
-        "room_defaults": {
-            "join_policy": "invite",
-            "listed": False,
-            "encrypted": False,
-            "invite_users": [],
-            "admins": [],
-        },
-        "rooms": {
-            room_key: {
-                "invite_users": [],
-                "admins": [],
-            }
-            for room_key in room_keys
-        },
-        "router": {
-            "access": {
-                "current_room_members": True,
-                "members_of_rooms": [],
-                "users": [],
-            },
-        },
-    }
-    if agents:
-        skeleton["agents"] = agents
-    if teams:
-        skeleton["teams"] = teams
-    return skeleton
-
-
-def _format_access_explanation(config: Config) -> str:
-    """Render the active access semantics and a deliberately non-authoritative migration skeleton."""
-    from mindroom import yaml_io  # noqa: PLC0415
-    from mindroom.access_policy import resolve_responder_access, resolve_room_policy  # noqa: PLC0415
-
-    if config.access_model == "room_membership":
-        room_keys = sorted(
-            room_key for room_key in config.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
-        )
-        room_policies = {
-            room_key: {
-                "join_policy": policy.join_policy,
-                "listed": policy.listed,
-                "encrypted": policy.encrypted,
-                "invite_users": list(policy.invite_users),
-                "admins": list(policy.admins),
-            }
-            for room_key in room_keys
-            for policy in (resolve_room_policy(config, room_key),)
-        }
-        entity_names = [*sorted(config.agents), *sorted(config.teams), "router"]
-        responder_policies = {
-            entity_name: {
-                "current_room_members": policy.current_room_members,
-                "members_of_rooms": list(policy.members_of_rooms),
-                "users": list(policy.users),
-            }
-            for entity_name in entity_names
-            for policy in (resolve_responder_access(config, entity_name),)
-        }
-        credential_managers = {
-            agent_name: list(agent.credential_managers) for agent_name, agent in sorted(config.agents.items())
-        }
-        return (
-            "Access model: room_membership\n\n"
-            "Invitation intent\n"
-            f"{yaml_io.safe_dump(room_policies, sort_keys=False).rstrip()}\n\n"
-            "Conversation access\n"
-            f"{yaml_io.safe_dump(responder_policies, sort_keys=False).rstrip()}\n\n"
-            "Matrix power\n"
-            "- Managed-room admins are listed independently under each effective room policy.\n"
-            "- Root Space invitees do not automatically receive admin power.\n\n"
-            "Credential authority\n"
-            f"administrators: {list(config.administrators)}\n"
-            f"credential_managers: {credential_managers}\n"
-        )
-
-    authorization = config.authorization
-    matrix_access = config.matrix_room_access
-    global_users = ", ".join(authorization.global_users) or "none"
-    room_permissions = (
-        "; ".join(
-            f"{room_key}: {', '.join(users) or 'none'}"
-            for room_key, users in sorted(authorization.room_permissions.items())
-        )
-        or "none"
-    )
-    reply_permissions = (
-        "; ".join(
-            f"{entity_name}: users={', '.join(policy.users) or 'none'}, "
-            f"joined_rooms={', '.join(policy.joined_rooms) or 'none'}"
-            for entity_name, policy in sorted(authorization.agent_reply_permissions.items())
-        )
-        or "none"
-    )
-    room_admins = ", ".join(matrix_access.room_admins) or "none"
-    skeleton = yaml_io.safe_dump(
-        _membership_access_skeleton(config),
-        default_flow_style=False,
-        sort_keys=False,
-        allow_unicode=True,
-    ).rstrip()
-    return (
-        "Access model: legacy\n\n"
-        "Invitation intent\n"
-        f"- Global invitation candidates: {global_users}\n"
-        f"- Room-specific invitation candidates: {room_permissions}\n\n"
-        "Conversation access\n"
-        f"- Default room access: {authorization.default_room_access}\n"
-        f"- Responder policies: {reply_permissions}\n\n"
-        "Matrix power\n"
-        f"- Global managed-room admins: {room_admins}\n"
-        f"- Legacy room mode: {matrix_access.mode}\n\n"
-        "Credential authority\n"
-        "- Legacy static responder users may also manage that agent's credentials.\n"
-        "- Platform administrators are not automatically assigned from legacy global users.\n\n"
-        "Membership-mode skeleton (manual review required; not applied)\n"
-        f"{skeleton}\n"
-    )
-
-
-@config_app.command("explain-access")
-def config_explain_access(
-    path: Path | None = CONFIG_PATH_OPTION,
-) -> None:
-    """Explain access capabilities and print a read-only membership migration skeleton."""
-    runtime_paths = activate_cli_runtime(path)
-    config_path = runtime_paths.config_path
-    if not config_path.exists():
-        console.print(f"[red]Error:[/red] Configuration file not found: {config_path}")
-        raise typer.Exit(1)
-
-    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
-
-    try:
-        config = load_config_quiet(runtime_paths=runtime_paths)
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        format_validation_errors(exc, config_path)
-        raise typer.Exit(1) from None
-
-    print(_format_access_explanation(config), end="")
 
 
 @config_app.command("path")
@@ -1171,7 +1000,6 @@ router:
   model: default
   accept_invites: true
 {mindroom_user_block}
-access_model: room_membership
 administrators:
   # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
   - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}

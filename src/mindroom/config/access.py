@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from mindroom.config.validation import duplicate_items
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
 
 RoomJoinPolicy = Literal["invite", "knock", "public"]
@@ -40,7 +41,7 @@ class ResponderAccessConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    current_room_members: bool = False
+    current_room_members: bool | None = None
     members_of_rooms: list[str] | None = None
     users: list[str] = Field(default_factory=list)
 
@@ -68,6 +69,10 @@ class RoomDefaultsConfig(BaseModel):
     @field_validator("invite_users", "admins")
     @classmethod
     def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
-        """Reject duplicate room-policy entries."""
+        """Require unique, concrete room-policy identities."""
         assert info.field_name is not None
-        return _validate_unique_entries(values, field_name=info.field_name)
+        return validate_concrete_matrix_user_ids(
+            values,
+            field_name=info.field_name,
+            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
+        )

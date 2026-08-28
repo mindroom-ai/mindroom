@@ -25,11 +25,12 @@ from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_ru
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
-    authorization: dict[str, object] | None = None,
+    credential_managers: list[str] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "administrators": ["@alice:example.org"],
         "agents": {
             "general": {
                 "display_name": "General",
@@ -37,6 +38,7 @@ def _config_with_worker_scope(
                 "tools": ["calculator"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "credential_managers": credential_managers or ["@alice:example.org"],
             },
         },
         "defaults": {
@@ -44,8 +46,6 @@ def _config_with_worker_scope(
             "worker_grantable_credentials": worker_grantable_credentials,
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -78,7 +78,7 @@ def client(tmp_path: Path) -> TestClient:
         constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path / "mindroom_data",
-            process_env={},
+            process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
     return TestClient(app)
@@ -1521,12 +1521,20 @@ class TestCredentialsAPI:
         runtime_a = constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "first.yaml",
             storage_path=tmp_path / "first-store",
-            process_env={"CUSTOMER_ID": "tenant-a", "ACCOUNT_ID": "account-a"},
+            process_env={
+                "CUSTOMER_ID": "tenant-a",
+                "ACCOUNT_ID": "account-a",
+                constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            },
         )
         runtime_b = constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "second.yaml",
             storage_path=tmp_path / "second-store",
-            process_env={"CUSTOMER_ID": "tenant-b", "ACCOUNT_ID": "account-b"},
+            process_env={
+                "CUSTOMER_ID": "tenant-b",
+                "ACCOUNT_ID": "account-b",
+                constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            },
         )
         initialize_api_app(app, runtime_a)
         request = Request(
@@ -1591,7 +1599,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(
@@ -1618,7 +1626,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(
@@ -1647,7 +1655,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(
@@ -1685,7 +1693,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(

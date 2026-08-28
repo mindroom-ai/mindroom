@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 
 from mindroom import approval_manager
+from mindroom.access_policy import resolve_responder_access
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
@@ -74,6 +75,17 @@ logger = get_logger(__name__)
 
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+
+
+def _agent_reply_authorization_changed(current: Config, replacement: Config) -> bool:
+    """Return whether a continuing script owner's reply authority may change."""
+    if current.authorization != replacement.authorization or current.administrators != replacement.administrators:
+        return True
+    continuing_agents = set(current.agents) & set(replacement.agents)
+    return any(
+        resolve_responder_access(current, agent_name) != resolve_responder_access(replacement, agent_name)
+        for agent_name in continuing_agents
+    )
 
 
 class _ScriptRuntimeUnavailableError(RuntimeError):
@@ -635,7 +647,7 @@ class ScriptRuntimeLifecycle:
             if _agent_has_script_tool(current_config, agent_name)
             and not _agent_has_script_tool(plan.new_config, agent_name)
         }
-        authorization_changed = current_config.authorization != plan.new_config.authorization
+        authorization_changed = _agent_reply_authorization_changed(current_config, plan.new_config)
         if (
             not removed_agents
             and not isolation_changes

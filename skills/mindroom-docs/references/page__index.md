@@ -113,7 +113,6 @@ defaults:
   tools: [scheduler]
   markdown: true
 
-access_model: room_membership
 administrators:
   - "@alice:matrix.example.com"
 room_defaults:

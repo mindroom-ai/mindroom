@@ -37,7 +37,6 @@ Register the bridge bot as a bot account when it can originate events, and use r
 bot_accounts:
   - "@telegrambot:matrix.example.com"
 
-access_model: room_membership
 administrators:
   - "@owner:matrix.example.com"
 room_defaults:

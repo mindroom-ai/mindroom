@@ -22,24 +22,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 type _ResponderMembershipPolicySignature = tuple[str, bool, tuple[str, ...]]
-type _AgentReplyMembershipPolicySignature = tuple[str, tuple[_ResponderMembershipPolicySignature, ...]]
+type _AgentReplyMembershipPolicySignature = tuple[_ResponderMembershipPolicySignature, ...]
 
 
 def _agent_reply_membership_policy_signature(
     config: Config,
 ) -> _AgentReplyMembershipPolicySignature:
     """Return the configured room grants that determine membership snapshots."""
-    if config.access_model != "room_membership":
-        policies = tuple(
-            sorted(
-                (entity_name, False, tuple(sorted(policy.joined_rooms)))
-                for entity_name, policy in config.authorization.agent_reply_permissions.items()
-            ),
-        )
-        return ("legacy", policies)
-
     entity_names = (*config.agents, *config.teams, ROUTER_AGENT_NAME)
-    policies = tuple(
+    return tuple(
         sorted(
             (
                 entity_name,
@@ -50,7 +41,6 @@ def _agent_reply_membership_policy_signature(
             for access in (resolve_responder_access(config, entity_name),)
         ),
     )
-    return ("room_membership", policies)
 
 
 def agent_reply_membership_policy_changed(
@@ -64,14 +54,12 @@ def agent_reply_membership_policy_changed(
 def _referenced_room_keys(config: Config) -> tuple[str, ...]:
     """Return distinct managed grant-room keys in deterministic order."""
     signature = _agent_reply_membership_policy_signature(config)
-    return tuple(sorted({room_key for _, _, room_keys in signature[1] for room_key in room_keys}))
+    return tuple(sorted({room_key for _, _, room_keys in signature for room_key in room_keys}))
 
 
 def _requires_current_room_memberships(config: Config) -> bool:
     """Return whether any active responder policy reads current-room membership."""
-    return any(
-        current_room_members for _, current_room_members, _ in _agent_reply_membership_policy_signature(config)[1]
-    )
+    return any(current_room_members for _, current_room_members, _ in _agent_reply_membership_policy_signature(config))
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,11 +241,19 @@ class AgentReplyMembershipIndex:
             self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
             expected_epoch = self._epoch
+            previous_rooms = (
+                self._snapshot.rooms
+                if self._snapshot.policy_signature == signature
+                and self._snapshot.refresh_required
+                and any(not room.ready for room in self._snapshot.rooms)
+                else ()
+            )
             candidate = await _build_authoritative_snapshot(
                 config,
                 runtime_paths,
                 client,
                 signature=signature,
+                previous_rooms=previous_rooms,
             )
             if self._desired_signature != signature or self._epoch != expected_epoch:
                 return
@@ -370,6 +366,7 @@ async def _build_authoritative_snapshot(
     client: nio.AsyncClient,
     *,
     signature: _AgentReplyMembershipPolicySignature,
+    previous_rooms: tuple[_GrantRoomMembership, ...],
 ) -> _AgentReplyMembershipSnapshot:
     """Build one complete candidate without exposing partially refreshed rooms."""
     room_keys = _referenced_room_keys(config)
@@ -381,13 +378,25 @@ async def _build_authoritative_snapshot(
     joined_room_ids = await _authoritative_joined_room_ids(client)
     memberships_by_room_id: dict[str, frozenset[str] | None] = {}
     rooms: list[_GrantRoomMembership] = []
+    previous_grant_rooms = {room.room_key: room for room in previous_rooms if room.room_key is not None}
     for room_key in room_keys:
         managed_room = state.rooms.get(room_key)
+        room_id = managed_room.room_id if managed_room is not None else None
+        previous_room = previous_grant_rooms.get(room_key)
+        if (
+            previous_room is not None
+            and previous_room.ready
+            and previous_room.room_id == room_id
+            and joined_room_ids is not None
+            and room_id in joined_room_ids
+        ):
+            rooms.append(previous_room)
+            continue
         rooms.append(
             await _build_grant_room_membership(
                 client,
                 room_key=room_key,
-                room_id=managed_room.room_id if managed_room is not None else None,
+                room_id=room_id,
                 joined_room_ids=joined_room_ids,
                 memberships_by_room_id=memberships_by_room_id,
             ),
@@ -398,6 +407,7 @@ async def _build_authoritative_snapshot(
             await _build_current_room_memberships(
                 client,
                 joined_room_ids - grant_room_ids,
+                previous_rooms=previous_rooms,
             ),
         )
     frozen_rooms = tuple(rooms)
@@ -450,10 +460,20 @@ async def _build_grant_room_membership(
 async def _build_current_room_memberships(
     client: nio.AsyncClient,
     room_ids: frozenset[str],
+    *,
+    previous_rooms: tuple[_GrantRoomMembership, ...],
 ) -> list[_GrantRoomMembership]:
     """Build authoritative snapshots for joined rooms used by current-room grants."""
+    previous_by_room_id = {
+        room.room_id: room
+        for room in previous_rooms
+        if room.room_key is None and room.room_id is not None and room.ready
+    }
     rooms: list[_GrantRoomMembership] = []
     for room_id in sorted(room_ids):
+        if previous_room := previous_by_room_id.get(room_id):
+            rooms.append(previous_room)
+            continue
         raw_joined_user_ids = await _authoritative_room_members(
             client,
             room_key=room_id,

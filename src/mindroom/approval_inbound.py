@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_responder
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
@@ -84,17 +84,13 @@ async def handle_tool_approval_action(
         return False
 
     def authorize_responder(entity_name: str) -> bool:
-        allowed = (
-            is_sender_allowed_for_responder(
-                sender_id,
-                entity_name,
-                room.room_id,
-                config,
-                runtime_paths,
-                membership_index,
-            )
-            if config.access_model == "room_membership"
-            else is_authorized_sender(sender_id, config, room.room_id, runtime_paths)
+        allowed = is_sender_allowed_for_responder(
+            sender_id,
+            entity_name,
+            room.room_id,
+            config,
+            runtime_paths,
+            membership_index,
         )
         if not allowed:
             logger.debug(

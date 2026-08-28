@@ -2887,6 +2887,7 @@ async def test_matrix_message_react_requires_target() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_matrix_message_explicit_room_target_requires_authorization() -> None:
     """Explicit room targeting should enforce authorization checks."""
     tool = MatrixMessageTools()

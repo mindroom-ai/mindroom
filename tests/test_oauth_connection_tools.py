@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import (
@@ -60,6 +60,7 @@ def _tool_and_context(
                 role="Research",
                 tools=["oauth_connections", "google_drive"],
                 worker_scope=worker_scope,
+                credential_managers=["@alice:example.org"],
             ),
         },
         teams={
@@ -69,10 +70,7 @@ def _tool_and_context(
                 agents=["research"],
             ),
         },
-        authorization=AuthorizationConfig(
-            aliases=aliases or {},
-            agent_reply_permissions={"research": ["@alice:example.org"]},
-        ),
+        authorization=AuthorizationConfig(aliases=aliases or {}),
         models={"default": {"provider": "openai", "id": "gpt-5.6"}},
     )
     config_path = tmp_path / "config.yaml"
@@ -261,9 +259,7 @@ async def test_reset_oauth_connection_refuses_shared_scope(tmp_path: Path) -> No
 async def test_reset_oauth_connection_denies_unauthorized_requester(tmp_path: Path) -> None:
     """Current authorization should be checked before issuing the browser action."""
     tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
-    context.config.authorization.agent_reply_permissions = {
-        "research": AgentReplyPermission(users=["@bob:example.org"]),
-    }
+    context.config.agents["research"].credential_managers = ["@bob:example.org"]
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection("google_drive")

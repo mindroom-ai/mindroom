@@ -219,10 +219,9 @@ matrix_space:
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
 Root Space admin power is granted before child links are written.
-In membership mode, concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
+Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
 Platform `administrators`, room `admins`, responder users, and credential managers are not root Space invitation sources.
-In legacy mode, concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` are invited and granted Space admin power.
-MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from a legacy `authorization.global_users` list.
+MindRoom does not remove existing Space admins during reconciliation.
 
 ## Delivery Policy
 
@@ -239,7 +238,6 @@ If the window expires the delivery is reported as failed, the placeholder settle
 
 Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
 Managed rooms can be created encrypted through `room_defaults.encrypted: true` or `rooms.<key>.encrypted: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
-Legacy configurations that omit `access_model` may instead use `matrix_room_access.encrypt_managed_rooms: true`.
 Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
 Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
 

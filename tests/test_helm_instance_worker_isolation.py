@@ -250,6 +250,8 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         "roomDefaults.listed=false",
         set_string_args=(
             "administrators[0]=@owner:42.example.test",
+            "roomDefaults.inviteUsers[0]=@owner:42.example.test",
+            "roomDefaults.admins[0]=@owner:42.example.test",
             "matrixAutoJoinRoomKeys[0]=lobby",
             "matrixAutoJoinRoomKeys[1]=dev",
         ),
@@ -257,14 +259,14 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-42")["data"]["config.yaml"])
     synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-42")["data"]["homeserver.yaml"])
 
-    assert mindroom_config["access_model"] == "room_membership"
+    assert "access_model" not in mindroom_config
     assert mindroom_config["administrators"] == ["@owner:42.example.test"]
     assert mindroom_config["room_defaults"] == {
         "join_policy": "public",
         "listed": False,
         "encrypted": False,
-        "invite_users": [],
-        "admins": [],
+        "invite_users": ["@owner:42.example.test"],
+        "admins": ["@owner:42.example.test"],
     }
     Config.model_validate(mindroom_config)
     assert synapse_config["auto_join_rooms"] == [

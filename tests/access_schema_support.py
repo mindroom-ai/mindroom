@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -16,9 +14,11 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 
 def membership_config(
+    tmp_path: Path,
     *,
     administrators: Sequence[str] = (),
     room_defaults: Mapping[str, object] | None = None,
@@ -37,7 +37,6 @@ def membership_config(
     if access is not None:
         agent["access"] = dict(access)
     data: dict[str, object] = {
-        "access_model": "room_membership",
         "administrators": list(administrators),
         "agents": {"talent": agent},
     }
@@ -46,8 +45,7 @@ def membership_config(
     if rooms is not None:
         data["rooms"] = {room_key: dict(room) for room_key, room in rooms.items()}
     config = Config.model_validate(data)
-    runtime_root = Path(tempfile.mkdtemp(prefix="mindroom-membership-access-test-"))
-    return bind_runtime_paths(config, test_runtime_paths(runtime_root))
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 def _joined_members(room_id: str, user_ids: Sequence[str]) -> nio.JoinedMembersResponse:
@@ -82,9 +80,8 @@ async def membership_index(
     return index
 
 
-def unresolved_membership_index(config: Config, room_key: str) -> AgentReplyMembershipIndex:
+def unresolved_membership_index(config: Config) -> AgentReplyMembershipIndex:
     """Build an index whose configured grant room has no authoritative identity."""
-    del room_key
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="test_unresolved_room")
     return index

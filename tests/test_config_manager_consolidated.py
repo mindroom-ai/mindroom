@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
@@ -157,7 +157,6 @@ def test_membership_config_mutations_require_platform_administrator(
     config_path = tmp_path / "config.yaml"
     config = Config.model_validate(
         {
-            "access_model": "room_membership",
             "administrators": ["@admin:example.org"],
             "agents": {
                 "talent": {
@@ -197,7 +196,6 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     config_path = tmp_path / "config.yaml"
     config = Config.model_validate(
         {
-            "access_model": "room_membership",
             "administrators": ["@admin:example.org"],
             "agents": {
                 "talent": {
@@ -240,7 +238,6 @@ def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) 
     write_config_yaml(
         Config.model_validate(
             {
-                "access_model": "room_membership",
                 "administrators": ["@admin:example.org"],
                 "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
             },
@@ -348,11 +345,11 @@ class TestConsolidatedConfigManager:
         result = cm.manage_config(
             operation="patch",
             changes=[
-                {"op": "add", "path": "/authorization", "value": {"room_permissions": {}}},
+                {"op": "add", "path": "/rooms", "value": {}},
                 {
                     "op": "add",
-                    "path": "/authorization/room_permissions/room~1a~0b",
-                    "value": ["@user:example.org"],
+                    "path": "/rooms/room~1a~0b",
+                    "value": {"invite_users": ["@user:example.org"]},
                 },
                 {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
                 {"op": "add", "path": "/tool_approval", "value": {"default": "require_approval"}},
@@ -364,7 +361,7 @@ class TestConsolidatedConfigManager:
         assert "/tool_approval" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["models"]["default"]["id"] == "gpt-5"
-        assert saved["authorization"]["room_permissions"]["room/a~b"] == ["@user:example.org"]
+        assert saved["rooms"]["room/a~b"]["invite_users"] == ["@user:example.org"]
         assert saved["tool_approval"]["default"] == "require_approval"
 
     def test_manage_config_appends_and_preserves_explicit_null(self, tmp_path: Path) -> None:
@@ -601,13 +598,26 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_get_info_agents_defaults_to_sender_visible_configured_room_candidates(self, tmp_path: Path) -> None:
         """Current-room agent listing should use configured-room responder candidates."""
         room_id = "!room:localhost"
         config = Config(
             agents={
-                "present": AgentConfig(display_name="Present Agent", role="Here", model="default", rooms=[room_id]),
-                "blocked": AgentConfig(display_name="Blocked Agent", role="Blocked", model="default", rooms=[room_id]),
+                "present": AgentConfig(
+                    display_name="Present Agent",
+                    role="Here",
+                    model="default",
+                    rooms=[room_id],
+                    access={"users": ["@user:localhost"]},
+                ),
+                "blocked": AgentConfig(
+                    display_name="Blocked Agent",
+                    role="Blocked",
+                    model="default",
+                    rooms=[room_id],
+                    access={"users": ["@other:localhost"]},
+                ),
                 "unconfigured_present": AgentConfig(
                     display_name="Unconfigured Present",
                     role="Present but not configured",
@@ -616,12 +626,6 @@ class TestConsolidatedConfigManager:
                 "elsewhere": AgentConfig(display_name="Elsewhere Agent", role="Not here", model="default"),
             },
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "blocked": ["@other:localhost"],
-                },
-            },
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -799,6 +803,41 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_configuration_mutations_load_one_authoritative_snapshot(self, tmp_path: Path) -> None:
+        """Authorization and mutation must use the same single loaded configuration."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                agents={"agent1": AgentConfig(display_name="Agent 1", role="Original")},
+            ),
+            config_path,
+        )
+        config_manager = _config_manager(config_path)
+
+        with patch(
+            "mindroom.custom_tools.config_manager.load_config_or_user_error",
+            wraps=load_config_or_user_error,
+        ) as load_config:
+            agent_result = config_manager.manage_agent(
+                operation="update",
+                agent_name="agent1",
+                role="Updated",
+            )
+
+            assert "Successfully updated agent" in agent_result
+            assert load_config.call_count == 1
+
+            load_config.reset_mock()
+            team_result = config_manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["agent1"],
+            )
+
+            assert "Successfully created team" in team_result
+            assert load_config.call_count == 1
+
     @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
     def test_manage_agent_create_returns_updated_agent_oauth_target(
         self,
@@ -807,6 +846,7 @@ class TestConsolidatedConfigManager:
     ) -> None:
         """Create links should use the new agent and requester's effective execution scope."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope=worker_scope),
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
@@ -872,6 +912,7 @@ class TestConsolidatedConfigManager:
     ) -> None:
         """Updating another private agent should mint only that agent's requester-bound link."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(
@@ -916,11 +957,14 @@ class TestConsolidatedConfigManager:
         config = Config(
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
-                "research": AgentConfig(display_name="Research", role="Research"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    credential_managers=["@bob:example.org"],
+                ),
             },
             defaults=DefaultsConfig(tools=[]),
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            authorization={"agent_reply_permissions": {"research": ["@bob:example.org"]}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -944,6 +988,7 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_self_update_does_not_promise_same_run_tool_use(self, tmp_path: Path) -> None:
         """Self-update should return the scoped link without claiming the new schema is callable now."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"research": AgentConfig(display_name="Research", role="Research", worker_scope="user_agent")},
             defaults=DefaultsConfig(tools=[]),
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
@@ -966,6 +1011,7 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_oauth_guidance_respects_inherited_default_tools(self, tmp_path: Path) -> None:
         """Effective default-tool changes should produce links only for agents that inherit them."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(
@@ -1012,6 +1058,7 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_excludes_setup_type_oauth_without_auth_provider(self, tmp_path: Path) -> None:
         """SetupType.OAUTH alone should not claim the structured generic-provider contract."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[]),
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
@@ -1047,6 +1094,7 @@ class TestConsolidatedConfigManager:
             },
         )
         config = Config(
+            administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope="user_agent"),
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
@@ -1073,6 +1121,7 @@ class TestConsolidatedConfigManager:
     def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:
         """Optional link generation must not report a persisted config change as failed."""
         config = Config(
+            administrators=["@alice:example.org"],
             agents={
                 "admin": AgentConfig(display_name="Admin", role="Configure agents"),
                 "research": AgentConfig(display_name="Research", role="Research"),

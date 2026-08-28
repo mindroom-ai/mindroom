@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
@@ -403,22 +403,14 @@ class BotRoomLifecycle:
             return
 
         config = self._config()
-        if config.access_model == "room_membership":
-            invite_allowed = is_sender_allowed_for_agent_reply_in_room(
-                event.sender,
-                self.deps.agent_name,
-                config,
-                room.room_id,
-                self.deps.runtime_paths,
-                self.deps.runtime.agent_reply_memberships,
-            )
-        else:
-            invite_allowed = is_authorized_sender(
-                event.sender,
-                config,
-                room.room_id,
-                self.deps.runtime_paths,
-            )
+        invite_allowed = is_sender_allowed_for_agent_reply_in_room(
+            event.sender,
+            self.deps.agent_name,
+            config,
+            room.room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        )
         if not invite_allowed:
             self._logger().debug(
                 "ignoring_invite_from_unauthorized_sender",

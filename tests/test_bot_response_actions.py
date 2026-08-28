@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -191,6 +192,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_resolve_response_action_rejects_when_explicit_mentions_include_hidden_agent(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -200,15 +202,16 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": ["@alice:localhost"],
-                        "general": ["@bob:localhost"],
-                    },
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
                 },
             ),
             tmp_path,
@@ -368,6 +371,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_resolve_response_action_skips_when_explicit_mentions_are_all_hidden(
         self,
         mock_agent_user: AgentMatrixUser,

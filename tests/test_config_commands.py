@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -44,6 +45,7 @@ from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
+from tests.access_migration_support import retired_authorization
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -60,10 +62,13 @@ def _handler_authorization(
     global_users: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
 ) -> AuthorizationConfig:
-    return AuthorizationConfig(
-        config_command_enabled=config_command_enabled,
-        global_users=global_users or [],
-        aliases=aliases or {},
+    return cast(
+        "AuthorizationConfig",
+        retired_authorization(
+            config_command_enabled=config_command_enabled,
+            global_users=global_users or [],
+            aliases=aliases or {},
+        ),
     )
 
 
@@ -599,7 +604,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
 
     admin_context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=Config(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(authorization=retired_authorization(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -621,7 +626,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
     user_context = make_test_command_handler_context(
-        **{**admin_context.__dict__, "config": Config(authorization=AuthorizationConfig(global_users=[]))},
+        **{**admin_context.__dict__, "config": Config(authorization=retired_authorization(global_users=[]))},
     )
     await handle_command(
         context=user_context,
@@ -651,7 +656,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=AuthorizationConfig(
+            authorization=retired_authorization(
                 global_users=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
@@ -691,7 +696,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
     reload_plugins = AsyncMock(side_effect=RuntimeError("Plugin hooks module not found: /tmp/demo/hooks.py"))
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=Config(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(authorization=retired_authorization(global_users=["@admin:example.org"])),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -921,10 +926,8 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
     pending_change = _pending_config_change()
     confirmation_context = _confirmation_context(bot)
-    bot.config.authorization = _handler_authorization(
-        config_command_enabled=True,
-        global_users=["@other-admin:example.org"],
-    )
+    bot.config.administrators = ["@other-admin:example.org"]
+    bot.config.authorization = AuthorizationConfig(config_command_enabled=True)
 
     with (
         patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),

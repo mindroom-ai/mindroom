@@ -100,6 +100,7 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
             status="approved",
             reason=None,
         ),
+        authorize_responder=lambda _entity_name: True,
         before_consume=before_consume,
     )
 
@@ -125,6 +126,7 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
                 status="denied",
                 reason=None,
             ),
+            authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
         )
     finally:
@@ -195,6 +197,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
             card_event_id="$approval",
             status="approved",
             reason=None,
+            authorize_responder=lambda _entity_name: True,
             before_consume=before_consume,
         )
     finally:
@@ -386,6 +389,7 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -442,6 +446,7 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -494,6 +499,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
                 card_event_id="$approval",
                 status="denied",
                 reason="No",
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:
@@ -558,6 +564,7 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
                 card_event_id="$approval",
                 status="approved",
                 reason=None,
+                authorize_responder=lambda _entity_name: True,
                 before_consume=before_consume,
             )
     finally:

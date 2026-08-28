@@ -14,7 +14,6 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
@@ -27,6 +26,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.turn_policy import PreparedDispatch
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -54,7 +54,7 @@ def _config(tmp_path: Path) -> Config:
             agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
             teams={},
             models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )

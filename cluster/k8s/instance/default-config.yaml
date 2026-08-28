@@ -352,7 +352,6 @@ agents:
     - docs
     skills: []
     tools: []
-access_model: room_membership
 administrators:
 - '@test:m-test-4.mindroom.chat'
 room_defaults:

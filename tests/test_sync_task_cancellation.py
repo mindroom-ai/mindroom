@@ -28,8 +28,9 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_message_for_source,
 )
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -108,6 +109,23 @@ def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
         storage_root=fake / "data",
         process_env={"MATRIX_HOMESERVER": "http://localhost:8008", **env_overrides},
     )
+
+
+def _configure_mock_access(
+    config: MagicMock,
+    *,
+    members_of_rooms: dict[str, list[str]] | None = None,
+) -> None:
+    """Give a narrow Config mock concrete membership-schema fields."""
+    grants = members_of_rooms or {}
+    config.authorization = AuthorizationConfig()
+    config.administrators = []
+    config.router = SimpleNamespace(
+        access=ResponderAccessConfig(current_room_members=False, members_of_rooms=[]),
+    )
+    for agent_name, agent in config.agents.items():
+        agent.rooms = []
+        agent.access = ResponderAccessConfig(members_of_rooms=grants.get(agent_name, []))
 
 
 class _FakeBot:
@@ -2449,9 +2467,8 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         # Create config with one agent
         config = MagicMock(spec=Config)
-        config.access_model = None
-        config.authorization = AuthorizationConfig()
         config.agents = {"test_agent": MagicMock()}
+        _configure_mock_access(config)
         config.teams = {}
         config.mcp_servers = {}
         config.plugins = []
@@ -2501,9 +2518,8 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
-    config.access_model = None
-    config.authorization = AuthorizationConfig()
     config.agents = {"general": MagicMock()}
+    _configure_mock_access(config)
     config.teams = {}
     config.mcp_servers = {}
     config.event_journal = MagicMock()
@@ -2572,13 +2588,8 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
-    config.access_model = None
-    config.authorization = AuthorizationConfig(
-        agent_reply_permissions={
-            "general": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
     config.agents = {"general": MagicMock()}
+    _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
     config.mcp_servers = {}
     config.event_journal = MagicMock()
@@ -2675,13 +2686,8 @@ def _orchestrator_with_membership_startup_bots(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     config = MagicMock(spec=Config)
-    config.access_model = None
-    config.authorization = AuthorizationConfig(
-        agent_reply_permissions={
-            "general": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
     config.agents = {"general": MagicMock()}
+    _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
     config.mcp_servers = {}
     config.event_journal = MagicMock()
@@ -2798,7 +2804,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -2914,13 +2920,11 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
 
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
-        old_config.authorization = AuthorizationConfig()
         old_config.agents = {"agent1": MagicMock()}
+        _configure_mock_access(old_config)
         old_config.teams = {}
         old_config.mcp_servers = {}
         old_config.event_journal = MagicMock()
-        old_config.authorization = MagicMock()
-        old_config.authorization.global_users = []
         orchestrator.config = old_config
 
         mock_existing_bot = AsyncMock()
@@ -2933,13 +2937,11 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
 
         # Setup new config (agent1 needs restart)
         new_config = MagicMock(spec=Config)
-        new_config.authorization = AuthorizationConfig()
         new_config.agents = {"agent1": MagicMock()}
+        _configure_mock_access(new_config)
         new_config.teams = {}
         new_config.mcp_servers = {}
         new_config.event_journal = MagicMock()
-        new_config.authorization = MagicMock()
-        new_config.authorization.global_users = []  # Add this for the logging
         mock_load_config.return_value = new_config
 
         # Agent1 needs to be restarted

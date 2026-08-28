@@ -50,6 +50,7 @@ import certifi
 import httpx
 import nio
 
+from tests.access_migration_support import retired_authorization
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -62,7 +63,6 @@ from livekit import rtc  # noqa: E402
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: E402
 from mindroom.config.agent import AgentConfig  # noqa: E402
-from mindroom.config.auth import AuthorizationConfig  # noqa: E402
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile  # noqa: E402
 from mindroom.config.main import Config  # noqa: E402
 from mindroom.config.memory import MemoryConfig  # noqa: E402
@@ -530,7 +530,7 @@ async def main() -> int:  # noqa: C901, PLR0915
             state.save(paths)
 
             config = Config(
-                authorization=AuthorizationConfig(room_permissions={room_id: [caller.user_id]}),
+                authorization=retired_authorization(room_permissions={room_id: [caller.user_id]}),
                 agents={
                     AGENT: AgentConfig(
                         display_name="Assistant",

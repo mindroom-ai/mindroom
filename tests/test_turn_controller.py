@@ -489,7 +489,7 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
     )
 
     with (
-        patch("mindroom.authorization.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
         patch.object(
             bot._conversation_resolver,
@@ -601,7 +601,7 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
     )
 
     with (
-        patch("mindroom.authorization.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
         patch.object(
             bot._conversation_resolver,
