@@ -710,6 +710,33 @@ async def test_prepare_edit_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_text_edit_with_file_sidecar_keeps_parseable_fallback() -> None:
+    """Sidecar conversion must leave the edit fallback parseable by nio."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/edit-sidecar"))
+    text = "sidecar-backed edit " * 2000
+    edit_content = {
+        "body": f"* {text}",
+        "m.new_content": {"body": text, "msgtype": "m.text"},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        "msgtype": "m.text",
+    }
+
+    prepared = await prepare_large_message(client, "!room:server", edit_content)
+    parsed = nio.Event.parse_event(
+        {
+            "content": prepared,
+            "event_id": "$replacement",
+            "sender": "@agent:server",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+        },
+    )
+
+    assert prepared["m.new_content"]["msgtype"] == "m.file"
+    assert isinstance(parsed, nio.Event)
+
+
+@pytest.mark.asyncio
 async def test_prepare_terminal_edit_keeps_local_recovery_data_off_the_wire() -> None:
     """Local recovery facts belong in the outbox, not its event or sidecar."""
     client = _UploadClient(nio.UploadResponse("mxc://server/final-edit"))
