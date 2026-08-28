@@ -254,6 +254,7 @@ async def test_set_thread_summary_requires_explicit_thread_context_for_room_repl
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_set_thread_summary_cross_room_requires_authorization() -> None:
     """Explicit room targeting should enforce the same room access checks as other Matrix tools."""
     tool = ThreadSummaryTools()

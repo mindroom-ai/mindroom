@@ -235,37 +235,26 @@ agents:
     - newspaper
   openclaw:
     display_name: OpenClawAgent
-    # Drop-in OpenClaw workspace import.
-    # Place your files under ./openclaw_data/ (SOUL.md, AGENTS.md, USER.md, MEMORY.md, memory/*.md, etc).
     instructions:
-    - >-
-      You wake up fresh each session with no memory of previous conversations.
-      Your context files (SOUL.md, USER.md, MEMORY.md, etc.) are already loaded
-      into your system prompt. Do not re-read them unless you need to verify
-      specific details.
-    - >-
-      Important long-term context is persisted by the configured MindRoom
-      memory backend. If something must be preserved exactly, write/update the
-      relevant file directly.
-    - >-
-      IMPORTANT: You have no persistent memory between sessions. If you want to
-      remember something, you MUST write it to a file. Mental notes do not
-      survive. When someone says "remember this", when you learn something
-      important, or when you make a decision worth tracking, write it to
-      ./openclaw_data/memory/YYYY-MM-DD.md using today's date. Append, never
-      overwrite.
-    - >-
-      MEMORY.md is your curated long-term memory: distilled insights, not raw
-      logs. Periodically review recent daily files and update MEMORY.md with
-      what is worth keeping long-term. Remove outdated information.
-    - >-
-      Ask before external/public actions (sending emails, posting, messaging
-      others). Ask before destructive operations (rm, overwriting files). Read
-      files and explore freely without asking.
-    - >-
-      Before answering questions about prior conversations, decisions, people,
-      or preferences, use search_memories to search memory files. Do not guess
-      from incomplete context; search first.
+    - You wake up fresh each session with no memory of previous conversations. Your
+      context files (SOUL.md, USER.md, MEMORY.md, etc.) are already loaded into your
+      system prompt. Do not re-read them unless you need to verify specific details.
+    - Important long-term context is persisted by the configured MindRoom memory backend.
+      If something must be preserved exactly, write/update the relevant file directly.
+    - 'IMPORTANT: You have no persistent memory between sessions. If you want to remember
+      something, you MUST write it to a file. Mental notes do not survive. When someone
+      says "remember this", when you learn something important, or when you make a
+      decision worth tracking, write it to ./openclaw_data/memory/YYYY-MM-DD.md using
+      today''s date. Append, never overwrite.'
+    - 'MEMORY.md is your curated long-term memory: distilled insights, not raw logs.
+      Periodically review recent daily files and update MEMORY.md with what is worth
+      keeping long-term. Remove outdated information.'
+    - Ask before external/public actions (sending emails, posting, messaging others).
+      Ask before destructive operations (rm, overwriting files). Read files and explore
+      freely without asking.
+    - Before answering questions about prior conversations, decisions, people, or
+      preferences, use search_memories to search memory files. Do not guess from incomplete
+      context; search first.
     include_default_tools: false
     learning: false
     context_files:
@@ -277,8 +266,8 @@ agents:
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
     model: opus
-    role: OpenClaw-style personal assistant with persistent file-based identity
-      and memory.
+    role: OpenClaw-style personal assistant with persistent file-based identity and
+      memory.
     rooms:
     - personal
     skills:
@@ -354,7 +343,7 @@ agents:
     tools:
     - shell
   sleepy_paws:
-    display_name: Sleepy Paws 🐾
+    display_name: "Sleepy Paws \U0001F43E"
     instructions:
     - Vertel altijd verhalen in het Nederlands
     - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo
@@ -408,12 +397,13 @@ agents:
     - docs
     skills: []
     tools: []
-authorization:
-  default_room_access: false
-  config_command_enabled: false
-  global_users:
+administrators:
+- '@test:m-test-4.mindroom.chat'
+room_defaults:
+  invite_users:
   - '@test:m-test-4.mindroom.chat'
-  room_permissions: {}
+authorization:
+  config_command_enabled: false
 bot_accounts: []
 mindroom_user:
   display_name: MindRoomUser
@@ -439,11 +429,9 @@ memory:
   search:
     mode: semantic
     include:
-      - memory/**/*.md
+    - memory/**/*.md
     include_entrypoint: false
 models:
-  # --- Local (llama.local) ---
-  # llama-swap + llama.cpp, see https://github.com/basnijholt/dotfiles/blob/main/configs/nixos/hosts/pc/ai.nix
   default:
     extra_kwargs:
       base_url: http://llama.local/v1
@@ -459,12 +447,10 @@ models:
       base_url: http://llama.local/v1
     id: glm-4.7-flash:q4
     provider: openai
-  # --- Local (ollama) ---
   ollama:
     host: http://192.168.1.143:11434
     id: devstral-2:24b-q8
     provider: ollama
-  # --- Anthropic ---
   haiku:
     id: claude-haiku-4-5
     provider: anthropic
@@ -477,18 +463,15 @@ models:
   sonnet:
     id: claude-sonnet-5
     provider: anthropic
-  # --- OpenAI ---
   gpt56:
     id: gpt-5.6
     provider: openai
   gpt5terra:
     id: gpt-5.6-terra
     provider: openai
-  # --- Google ---
   gemini_flash:
     id: gemini-3.6-flash
     provider: google
-  # --- OpenRouter ---
   deepseek:
     id: deepseek/deepseek-v4-pro
     provider: openrouter

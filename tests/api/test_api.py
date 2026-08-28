@@ -96,6 +96,7 @@ def _config_with_worker_scope(
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, Any] = {
+        "administrators": ["@owner:example.org"],
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
             "general": {
@@ -1865,7 +1866,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=app_runtime_paths.config_path,
         storage_path=app_runtime_paths.storage_root,
-        process_env={},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -2047,6 +2048,7 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
         storage_path=app_runtime_paths.storage_root,
         process_env={
             "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
         },
     )
     tools = [
@@ -4145,7 +4147,10 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,

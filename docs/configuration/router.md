@@ -92,7 +92,7 @@ The router creates and manages rooms:
 
 - Creates configured rooms that don't exist yet
 - Invites configured agents, teams, and users to their rooms
-- Applies `matrix_room_access` policy for managed rooms (when enabled)
+- Applies effective `room_defaults` and per-room policy for managed rooms
 - Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
 - Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
@@ -104,8 +104,9 @@ The router treats the configured agent identity as an authorized internal sender
 The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 
-By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
-In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
+By default, `room_defaults.join_policy: invite` and `room_defaults.listed: false` keep managed rooms private.
+Set `room_defaults.join_policy` to `public` or `knock`, and use `room_defaults.listed` to control room-directory visibility.
+Per-room values replace these defaults when configured under `rooms.<key>`.
 That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
 
 ### Voice Message Processing

@@ -910,7 +910,7 @@ async def test_update_config_plugin_changes_restart_all_bots(
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )

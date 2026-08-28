@@ -53,7 +53,7 @@ class ConfigUpdatePlan:
     new_entities: set[str]
     removed_entities: set[str]
     mindroom_user_changed: bool
-    matrix_room_access_changed: bool
+    room_access_changed: bool
     matrix_space_changed: bool
     authorization_changed: bool
     room_metadata_changed: bool = False
@@ -73,7 +73,7 @@ class ConfigUpdatePlan:
         return not (
             self._has_entity_changes
             or self.mindroom_user_changed
-            or self.matrix_room_access_changed
+            or self.room_access_changed
             or self.matrix_space_changed
             or self.authorization_changed
             or self.room_metadata_changed
@@ -360,7 +360,8 @@ def build_config_update_plan(
         new_entities=new_entities,
         removed_entities=existing_entities - configured_entities,
         mindroom_user_changed=current_config.mindroom_user != new_config.mindroom_user,
-        matrix_room_access_changed=current_config.matrix_room_access != new_config.matrix_room_access,
+        room_access_changed=current_config.room_defaults != new_config.room_defaults
+        or current_config.rooms != new_config.rooms,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
         room_metadata_changed=_room_metadata_changed(current_config, new_config),

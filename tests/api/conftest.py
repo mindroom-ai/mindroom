@@ -55,6 +55,7 @@ def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     config_dir = tmp_path / "api-runtime"
     config_dir.mkdir()
     config_data = {
+        "administrators": ["@owner:example.org"],
         "models": {"default": {"provider": "ollama", "id": "test-model"}},
         "agents": {
             "test_agent": {
@@ -82,7 +83,10 @@ def test_client(temp_config_file: Path) -> TestClient:
     from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
 
     # Force reload of config

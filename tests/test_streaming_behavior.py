@@ -21,7 +21,6 @@ from pydantic import ValidationError
 from mindroom import interactive
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
@@ -70,6 +69,7 @@ from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -144,7 +144,7 @@ def _make_bot_with_shared_knowledge(
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
             knowledge_bases={base_id: {"path": f"./{base_id}"}},
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         runtime_paths,
     )
@@ -285,7 +285,7 @@ class TestStreamingBehavior:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
-                authorization=AuthorizationConfig(default_room_access=True),
+                authorization=retired_authorization(default_room_access=True),
             ),
             runtime_paths,
         )

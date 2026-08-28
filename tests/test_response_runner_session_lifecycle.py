@@ -29,7 +29,6 @@ from mindroom.ai import (
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -62,6 +61,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
 )
+from tests.access_migration_support import retired_authorization
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -1316,7 +1316,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
                 ),
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+            authorization=retired_authorization(default_room_access=True),
         ),
         runtime_paths,
     )

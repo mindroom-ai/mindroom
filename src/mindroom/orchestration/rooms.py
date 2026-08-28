@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import explicit_room_permission_user_ids
-from mindroom.entity_resolution import mindroom_user_id
+from mindroom.access_policy import resolve_room_policy
 from mindroom.logging_config import get_logger
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
 
 if TYPE_CHECKING:
@@ -24,29 +24,38 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return set(concrete_user_ids)
 
 
-def get_authorized_user_ids_to_invite(
+def get_room_user_ids_to_invite(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
 ) -> set[str]:
-    """Collect Matrix users explicitly eligible for invitation to one room."""
-    user_ids = set(config.authorization.global_users)
-    room_users = explicit_room_permission_user_ids(config, room_id, runtime_paths)
-    if room_users is not None:
-        user_ids.update(room_users)
+    """Return the membership invitation roster for one room."""
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    room_keys = sorted(room_key for room_key, room in state.rooms.items() if room.room_id == room_id)
+    if len(room_keys) != 1:
+        logger.warning(
+            "membership_room_invites_skipped_unresolved_room",
+            room_id=room_id,
+            matching_room_keys=room_keys,
+        )
+        return set()
+    policy = resolve_room_policy(config, room_keys[0])
     return _filter_concrete_matrix_user_ids(
-        user_ids,
-        warning_message="Skipping non-concrete authorization user IDs for invites",
+        set(policy.invite_users),
+        warning_message="Skipping non-concrete membership invite user IDs",
     )
 
 
 def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
-    user_ids = _filter_concrete_matrix_user_ids(
-        set(config.authorization.global_users),
-        warning_message="Skipping non-concrete global user IDs for root space invites",
+    del runtime_paths
+    configured_room_keys = sorted(
+        room_key for room_key in config.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
     )
-    internal_user_id = mindroom_user_id(config, runtime_paths)
-    if internal_user_id is not None:
-        user_ids.add(internal_user_id)
-    return user_ids
+    user_ids = {
+        user_id for room_key in configured_room_keys for user_id in resolve_room_policy(config, room_key).invite_users
+    }
+    return _filter_concrete_matrix_user_ids(
+        user_ids,
+        warning_message="Skipping non-concrete membership root-space invite user IDs",
+    )

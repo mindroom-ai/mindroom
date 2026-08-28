@@ -214,6 +214,7 @@ async def evaluate_tool_approval(
 async def handle_matrix_approval_action(
     action: MatrixApprovalAction,
     *,
+    authorize_responder: Callable[[str], bool],
     before_consume: Callable[[], Awaitable[None]] | None = None,
 ) -> ApprovalActionResult:
     """Resolve a durable continuation card anchored to its Matrix event."""
@@ -230,6 +231,7 @@ async def handle_matrix_approval_action(
         status=action.status,
         reason=sanitized_reason,
         before_consume=before_consume,
+        authorize_responder=authorize_responder,
     )
 
 

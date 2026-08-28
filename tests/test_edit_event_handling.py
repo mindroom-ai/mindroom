@@ -10,11 +10,11 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
+from tests.access_migration_support import apply_retired_authorization, retired_reply_permission
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -235,14 +235,16 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         tmp_path,
         usernames={ROUTER_AGENT_NAME: "router"},
     )
-    config.authorization = AuthorizationConfig(
+    config.authorization = apply_retired_authorization(
+        config,
         default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: AgentReplyPermission(users=[sender_id])},
+        agent_reply_permissions={ROUTER_AGENT_NAME: retired_reply_permission(users=[sender_id])},
     )
     replacement_config = config.model_copy(deep=True)
-    replacement_config.authorization = AuthorizationConfig(
+    replacement_config.authorization = apply_retired_authorization(
+        replacement_config,
         default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: AgentReplyPermission(users=[])},
+        agent_reply_permissions={ROUTER_AGENT_NAME: retired_reply_permission(users=[])},
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,

@@ -230,12 +230,11 @@ defaults:
   tools: [scheduler]
   markdown: true
 
-authorization:
-  global_users:
+administrators:
+  - "@alice:matrix.example.com"
+room_defaults:
+  invite_users:
     - "@alice:matrix.example.com"
-  agent_reply_permissions:
-    "*":
-      - "@alice:matrix.example.com"
 
 timezone: America/Los_Angeles
 ```

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.authorization import is_authorized_sender
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -76,19 +77,29 @@ async def handle_tool_approval_action(
     status: Literal["approved", "denied"],
     reason: str | None,
     before_consume: Callable[[], Awaitable[None]] | None = None,
-    authorization_prevalidated: bool = False,
+    membership_index: AgentReplyMembershipIndex,
 ) -> bool:
     """Resolve one approval action only when the sender still has access."""
     if approval_event_id is None:
         return False
-    if not authorization_prevalidated and not is_authorized_sender(
-        sender_id,
-        config,
-        room.room_id,
-        runtime_paths,
-    ):
-        logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
-        return False
+
+    def authorize_responder(entity_name: str) -> bool:
+        allowed = is_sender_allowed_for_responder(
+            sender_id,
+            entity_name,
+            room.room_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        if not allowed:
+            logger.debug(
+                "ignoring_tool_approval_action_from_unauthorized_sender",
+                user_id=sender_id,
+                entity_name=entity_name,
+            )
+        return allowed
+
     action = MatrixApprovalAction(
         room_id=room.room_id,
         sender_id=sender_id,
@@ -96,7 +107,11 @@ async def handle_tool_approval_action(
         status=status,
         reason=reason,
     )
-    result = await handle_matrix_approval_action(action, before_consume=before_consume)
+    result = await handle_matrix_approval_action(
+        action,
+        before_consume=before_consume,
+        authorize_responder=authorize_responder,
+    )
     notice_event_id = approval_event_id
     if notice_event_id is not None and result.error_reason is not None and orchestrator is not None:
         await orchestrator.send_approval_notice(
@@ -117,7 +132,7 @@ async def maybe_handle_tool_approval_reply(
     orchestrator: OrchestratorRuntime | None,
     logger: structlog.stdlib.BoundLogger,
     before_consume: Callable[[], Awaitable[None]] | None = None,
-    authorization_prevalidated: bool = False,
+    membership_index: AgentReplyMembershipIndex,
 ) -> bool:
     """Deny live approvals or expire detached approval cards targeted by replies."""
     event_info = EventInfo.from_event(event.source)
@@ -139,5 +154,5 @@ async def maybe_handle_tool_approval_reply(
         status="denied",
         reason=strip_matrix_rich_reply_fallback(event.body),
         before_consume=before_consume,
-        authorization_prevalidated=authorization_prevalidated,
+        membership_index=membership_index,
     )

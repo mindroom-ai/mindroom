@@ -1380,18 +1380,20 @@ async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pend
     assert reconciliation_owners == 0
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Path) -> None:
     """Run authority includes the bot's current grant-room membership index."""
     runtime_paths = _runtime_paths(tmp_path)
     config = Config(
-        agents={"watcher": {"display_name": "Watcher", "tools": ["script"], "rooms": ["trusted"]}},
-        defaults={"tools": []},
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "watcher": {"users": [], "joined_rooms": ["trusted"]},
+        agents={
+            "watcher": {
+                "display_name": "Watcher",
+                "tools": ["script"],
+                "rooms": ["trusted"],
+                "access": {"members_of_rooms": ["trusted"]},
             },
         },
+        defaults={"tools": []},
     )
     memberships = MagicMock()
     memberships.is_allowed.return_value = False
@@ -1534,6 +1536,7 @@ async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(
 
 @pytest.mark.parametrize("authorization_result", [False, None])
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_authorization_config_change_interrupts_unconfirmed_owner_before_commit(
     tmp_path: Path,
     *,
@@ -1544,12 +1547,23 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
     current = Config(
-        agents={"watcher": {"display_name": "Watcher", "tools": ["script"]}},
+        agents={
+            "watcher": {
+                "display_name": "Watcher",
+                "tools": ["script"],
+                "access": {"users": ["@alice:example.test"]},
+            },
+        },
         defaults={"tools": []},
-        authorization={"default_room_access": True},
     )
     updated = current.model_copy(
-        update={"authorization": current.authorization.model_copy(update={"default_room_access": False})},
+        update={
+            "agents": {
+                "watcher": current.agents["watcher"].model_copy(
+                    update={"access": current.agents["watcher"].access.model_copy(update={"users": []})},
+                ),
+            },
+        },
     )
 
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:

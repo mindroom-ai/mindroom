@@ -619,7 +619,7 @@ If you need to force a reload, for example because the watcher missed something 
 ```
 
 The bot replies with the active plugin set and the count of cancelled background tasks.
-Admin gating uses `authorization.global_users` from `config.yaml`.
+Admin gating uses `administrators` from `config.yaml`.
 
 ### Caveats and tradeoffs
 

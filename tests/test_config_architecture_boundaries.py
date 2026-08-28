@@ -37,10 +37,9 @@ MATRIX_IDENTIFIER_HELPERS = frozenset(
         "agent_username_localpart",
         "extract_server_name_from_homeserver",
         "managed_room_alias_localpart",
-        "managed_room_key_from_alias_localpart",
         "managed_space_alias_localpart",
         "mindroom_namespace",
-        "room_alias_localpart",
+        "room_alias_identifier_candidates",
     },
 )
 

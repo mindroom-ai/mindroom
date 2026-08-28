@@ -11,13 +11,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from tests.access_migration_support import retired_authorization
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -54,7 +54,7 @@ def _context(
     config = bind_runtime_paths(
         Config(
             agents={"usage": AgentConfig(display_name="Usage")},
-            authorization=AuthorizationConfig(
+            authorization=retired_authorization(
                 global_users=global_users or [],
                 aliases=aliases or {},
             ),

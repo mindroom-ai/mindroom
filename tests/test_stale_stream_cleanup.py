@@ -3426,8 +3426,10 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     def _mark_ready() -> None:
         ready.set()
 
-    def _start_sync_task(_: str, __: object) -> None:
+    def _start_sync_task(entity_name: str, __: object) -> None:
         call_order.append("sync")
+        if entity_name == ROUTER_AGENT_NAME:
+            orchestrator._router_reply_memberships_live_sync_ready.set()
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
@@ -3451,7 +3453,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                     await runtime_task
 
     router_bot.recover_pending_turn_journal_events.assert_not_awaited()
-    assert call_order == ["wait", "sync", "recover", "setup", "recover"]
+    assert call_order == ["wait", "recover", "setup", "sync", "recover"]
 
 
 @pytest.mark.asyncio

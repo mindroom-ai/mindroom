@@ -1792,6 +1792,7 @@ async def test_matrix_api_rejects_non_bool_flags(kwargs: dict[str, object], fiel
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("action", "kwargs"),
     [
@@ -1802,7 +1803,10 @@ async def test_matrix_api_rejects_non_bool_flags(kwargs: dict[str, object], fiel
         ("get_event", {"event_id": "$evt:localhost"}),
     ],
 )
-async def test_matrix_api_cross_room_access_is_denied(action: str, kwargs: dict[str, object]) -> None:
+async def test_matrix_api_cross_room_access_is_denied(
+    action: str,
+    kwargs: dict[str, object],
+) -> None:
     """Every action should enforce room access checks before touching another room."""
     tool = MatrixApiTools()
     ctx = _make_context()

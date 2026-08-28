@@ -19,7 +19,6 @@ from mindroom.ai import (
 )
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -52,6 +51,7 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
+from tests.access_migration_support import retired_authorization
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
@@ -106,7 +106,7 @@ def _config() -> Config:
     return Config(
         agents={"general": AgentConfig(display_name="General")},
         models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=AuthorizationConfig(default_room_access=True),
+        authorization=retired_authorization(default_room_access=True),
     )
 
 
@@ -119,7 +119,7 @@ def _config_with_matrix_message() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=AuthorizationConfig(default_room_access=True),
+        authorization=retired_authorization(default_room_access=True),
     )
 
 
@@ -135,7 +135,7 @@ def _config_with_team() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=AuthorizationConfig(default_room_access=True),
+        authorization=retired_authorization(default_room_access=True),
     )
 
 
@@ -156,7 +156,7 @@ def _config_with_team_matrix_message() -> Config:
             ),
         },
         models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=AuthorizationConfig(default_room_access=True),
+        authorization=retired_authorization(default_room_access=True),
     )
 
 

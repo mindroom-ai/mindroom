@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import pytest
+
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.message_target import MessageTarget
@@ -21,15 +23,18 @@ def _config(tmp_path: Path, *, allowed: bool) -> Config:
     user_id = "@alice:example.org"
     return bind_runtime_paths(
         Config(
-            authorization=AuthorizationConfig(
-                default_room_access=False,
-                room_permissions={"!other:example.org": [user_id] if allowed else []},
-            ),
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access={"users": [user_id] if allowed else []},
+                ),
+            },
         ),
         test_runtime_paths(tmp_path),
     )
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_cross_room_tool_access_uses_current_authorization(tmp_path: Path) -> None:
     """Cross-room tools must not retain room access revoked after context construction."""
     old_config = _config(tmp_path, allowed=True)

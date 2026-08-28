@@ -27,7 +27,11 @@ def _request(auth_user: dict[str, Any] | None = None, query_string: bytes = b"")
     return Request(scope)
 
 
-def _config(worker_scope: str | None = None, authorization: dict[str, object] | None = None) -> Config:
+def _config(
+    worker_scope: str | None = None,
+    *,
+    credential_managers: list[str] | None = None,
+) -> Config:
     payload: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
@@ -37,11 +41,10 @@ def _config(worker_scope: str | None = None, authorization: dict[str, object] | 
                 "tools": ["calculator"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "credential_managers": credential_managers or [],
             },
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -203,7 +206,7 @@ class TestResolveDashboardAgentExecutionScopeRequest:
 class TestRequireAgentCredentialManagementAuthorized:
     """Accept/reject matrix for credential management per caller role."""
 
-    _allowlist: ClassVar[dict[str, object]] = {"agent_reply_permissions": {"*": ["@alice:example.org"]}}
+    _credential_managers: ClassVar[list[str]] = ["@alice:example.org"]
 
     def _runtime_paths(self) -> RuntimePaths:
         return resolve_runtime_paths(process_env={})
@@ -212,7 +215,7 @@ class TestRequireAgentCredentialManagementAuthorized:
         """Return isolated runtime paths with an empty process env."""
         identity = require_agent_credential_management_authorized(
             _request({"user_id": "alice", "auth_source": "trusted_upstream", "matrix_user_id": "@alice:example.org"}),
-            config=_config(authorization=self._allowlist),
+            config=_config(credential_managers=self._credential_managers),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
         )
@@ -230,7 +233,7 @@ class TestRequireAgentCredentialManagementAuthorized:
                         "matrix_user_id": "@mallory:example.org",
                     },
                 ),
-                config=_config(authorization=self._allowlist),
+                config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
             )
@@ -241,21 +244,22 @@ class TestRequireAgentCredentialManagementAuthorized:
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
                 _request({"user_id": "alice"}),
-                config=_config(authorization=self._allowlist),
+                config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
             )
         assert exc_info.value.status_code == 403
 
-    def test_dashboard_user_is_authorized_when_no_allowlist_is_configured(self) -> None:
-        """Without an allowlist any authenticated dashboard user is authorized."""
-        identity = require_agent_credential_management_authorized(
-            _request({"user_id": "alice"}),
-            config=_config(),
-            runtime_paths=self._runtime_paths(),
-            agent_name="general",
-        )
-        assert identity.requester_id == "alice"
+    def test_dashboard_user_is_rejected_when_no_credential_manager_is_configured(self) -> None:
+        """An authenticated dashboard user still needs explicit credential authority."""
+        with pytest.raises(HTTPException) as exc_info:
+            require_agent_credential_management_authorized(
+                _request({"user_id": "alice"}),
+                config=_config(),
+                runtime_paths=self._runtime_paths(),
+                agent_name="general",
+            )
+        assert exc_info.value.status_code == 403
 
     def test_unresolvable_requester_is_rejected(self) -> None:
         """Requests without a resolvable requester identity are rejected with 403."""

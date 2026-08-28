@@ -22,7 +22,6 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, PreparedTurn, RequesterCoalescingOwner
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
@@ -52,6 +51,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
+from tests.access_migration_support import retired_authorization
 from tests.bot_helpers import (
     FencedRoomRecorder,
     _configured_team_test_config,
@@ -101,7 +101,7 @@ def _config(tmp_path: Path, *, authorize_senders: bool = False) -> Config:
         Config(
             agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
             models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=authorize_senders),
+            authorization=retired_authorization(default_room_access=authorize_senders),
         ),
         runtime_paths,
     )

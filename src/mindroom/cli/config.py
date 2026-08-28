@@ -45,10 +45,7 @@ from mindroom.runtime_env_policy import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import yaml  # type: ignore[import-untyped]
-    from pydantic import ValidationError
-
-    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 console = Console()
@@ -388,7 +385,7 @@ def _get_editor() -> str:
 
 
 def format_validation_errors(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: Exception,
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""
@@ -1003,10 +1000,15 @@ router:
   model: default
   accept_invites: true
 {mindroom_user_block}
-matrix_room_access:
-  mode: single_user_private
-  room_admins:
-    # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+administrators:
+  # MindRoom Chat pairing writes the paired owner's Matrix user ID here.
+  - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+room_defaults:
+  join_policy: invite
+  listed: false
+  invite_users:
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
+  admins:
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 matrix_space:
@@ -1031,15 +1033,7 @@ memory:
     enabled: true
 
 authorization:
-  default_room_access: false
   config_command_enabled: false
-  global_users:
-    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
-  agent_reply_permissions:
-    "*":
-      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the

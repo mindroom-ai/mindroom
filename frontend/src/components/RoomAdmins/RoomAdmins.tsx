@@ -16,17 +16,17 @@ import { useConfigStore } from "@/store/configStore";
 import { isConcreteMatrixUserId } from "@/lib/matrixIds";
 
 export function RoomAdmins() {
-  const { config, isLoading, isDirty, saveConfig, updateMatrixRoomAccess } =
+  const { config, isLoading, isDirty, saveConfig, updateRoomDefaults } =
     useConfigStore();
   const { toast } = useToast();
   const [newAdminId, setNewAdminId] = useState("");
 
-  const roomAdmins = config?.matrix_room_access?.room_admins ?? [];
+  const roomAdmins = config?.room_defaults?.admins ?? [];
 
   const setRoomAdmins = (admins: string[]) => {
-    updateMatrixRoomAccess({
-      ...(config?.matrix_room_access ?? {}),
-      room_admins: admins,
+    updateRoomDefaults({
+      ...(config?.room_defaults ?? {}),
+      admins,
     });
   };
 

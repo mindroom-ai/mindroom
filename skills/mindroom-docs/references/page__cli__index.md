@@ -983,13 +983,13 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init       Create a starter config.yaml with a personal agent and model.               │
-│ show       Display the current config file with syntax highlighting.                   │
-│ edit       Open config.yaml in your default editor.                                    │
-│ validate   Validate config.yaml and check for common issues.                           │
-│ resolve    Print the fully merged config YAML with all !include tags resolved.         │
-│ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
+│ init             Create a starter config.yaml with a personal agent and model.         │
+│ show             Display the current config file with syntax highlighting.             │
+│ edit             Open config.yaml in your default editor.                              │
+│ validate         Validate config.yaml and check for common issues.                     │
+│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
+│ path             Show the resolved config file path and search locations.              │
+│ migrate          Apply safe, text-preserving migrations to config.yaml.                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1127,7 +1127,7 @@ On success (default `--persist-env`), this writes to `.env` next to `config.yaml
 - `MINDROOM_LOCAL_CLIENT_SECRET`
 - `MINDROOM_NAMESPACE`
 
-If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in authorization and managed-room admin settings when pairing returns a valid `owner_user_id`.
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in membership access and managed-room policy settings when pairing returns a valid `owner_user_id`.
 
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 

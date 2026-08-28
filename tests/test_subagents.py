@@ -13,8 +13,9 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -75,6 +76,7 @@ def _make_agent_config(
         tools=list(tools) if tools is not None else ["shell"],
         delegate_to=list(delegate_to) if delegate_to is not None else [],
         rooms=list(rooms) if rooms is not None else [],
+        access=ResponderAccessConfig(users=["*"]),
     )
 
 
@@ -95,7 +97,9 @@ def _make_config(
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
+    config.administrators = []
     config.authorization = AuthorizationConfig()
+    config.router = SimpleNamespace(access=ResponderAccessConfig(users=["*"]))
     return config
 
 
@@ -223,15 +227,14 @@ async def test_agents_list_payload_structure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agents_list_uses_current_authorization_after_reload(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_agents_list_uses_current_authorization_after_reload(
+    tmp_path: Path,
+) -> None:
     """A long-lived tool context must not expose agents revoked by a config reload."""
     original_config = _make_config()
     current_config = _make_config()
-    current_config.authorization = AuthorizationConfig(
-        agent_reply_permissions={
-            "research": AgentReplyPermission(users=[]),
-        },
-    )
+    current_config.agents["research"].access = ResponderAccessConfig(users=[])
     ctx = replace(
         _make_context(tmp_path, config=original_config),
         config_provider=lambda: current_config,

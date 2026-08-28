@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.authorization import is_platform_administrator
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -76,8 +77,7 @@ class UsageStatsTools(Toolkit):
                 "Usage statistics admin scope is not enabled for this agent.",
             )
         config = resolved.current_config
-        canonical_requester = config.authorization.resolve_alias(resolved.requester_id)
-        if canonical_requester not in config.authorization.global_users:
+        if not is_platform_administrator(resolved.requester_id, config):
             return self._error(
                 "authorization_error",
                 "Usage statistics admin access is not authorized for this requester.",

@@ -26,7 +26,8 @@ from mindroom.approval_manager import (
 )
 from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
@@ -403,19 +404,9 @@ class TestAgentBot(AgentBotTestBase):
         """A generic hook must not run after a reply-policy reload revokes its sender."""
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         denied_config = config.model_copy(deep=True)
-        denied_config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
-            },
-        )
+        denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         seen: list[str] = []
@@ -464,12 +455,7 @@ class TestAgentBot(AgentBotTestBase):
         """A reload cannot overtake a claimed fresh reaction hook."""
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         hook_started = asyncio.Event()
@@ -507,19 +493,9 @@ class TestAgentBot(AgentBotTestBase):
         """A transient old-policy denial must not terminally discard a fresh reaction."""
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
-            },
-        )
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         allowed_config = config.model_copy(deep=True)
-        allowed_config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        allowed_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         seen = _install_reaction_recorder(bot)
@@ -678,12 +654,7 @@ class TestAgentBot(AgentBotTestBase):
         """An uncommitted config decision must not apply after room access is revoked."""
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                ROUTER_AGENT_NAME: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        config.router.access = ResponderAccessConfig(users=[sender_id])
         router_user = replace(
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
@@ -704,13 +675,7 @@ class TestAgentBot(AgentBotTestBase):
             return pending_change
 
         replacement = config.model_copy(deep=True)
-        replacement.authorization = AuthorizationConfig(
-            default_room_access=False,
-            room_permissions={room.room_id: []},
-            agent_reply_permissions={
-                ROUTER_AGENT_NAME: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        replacement.router.access = ResponderAccessConfig(users=[])
         handler = AsyncMock()
         gate = bot.admission_gate
         with (
@@ -1670,6 +1635,7 @@ class TestAgentBot(AgentBotTestBase):
                         card_event_id="$approval",
                         status="approved",
                         reason=None,
+                        authorize_responder=lambda _entity_name: True,
                     )
                     assert resolved.consumed is True
                     assert resolved.resolved is True
@@ -2030,7 +1996,7 @@ class TestAgentBot(AgentBotTestBase):
 
         approval_handler = AsyncMock(return_value=True)
         with (
-            patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply", return_value=False),
+            patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply_in_room", return_value=False),
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", approval_handler),
             _mock_interactive_claim(bot, None) as interactive_handler,
         ):
@@ -2148,6 +2114,7 @@ class TestAgentBot(AgentBotTestBase):
             router.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_interrupted_approval_reply_replay_cannot_become_ai_input(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -2155,9 +2122,26 @@ class TestAgentBot(AgentBotTestBase):
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A reply claimed by approval handling must retain that owner after a crash."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        legacy_config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(legacy_config)
+        membership_payload = legacy_config.authored_model_dump()
+        membership_payload["authorization"] = {}
+        for agent in cast("dict[str, dict[str, object]]", membership_payload["agents"]).values():
+            agent["access"] = {"members_of_rooms": [], "users": []}
+        membership_payload["router"] = {
+            "access": {
+                "members_of_rooms": [],
+                "users": ["@user:localhost"],
+            },
+        }
+        config = Config.validate_with_runtime(membership_payload, runtime_paths)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _approval_reply_event()
 
@@ -2183,47 +2167,80 @@ class TestAgentBot(AgentBotTestBase):
         pending = await journal.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.APPROVAL_REPLY
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(
+            router_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
         handle_text_event = _install_text_dispatch_mock(monkeypatch, restarted)
+
+        async def reject_revoked_origin(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+            authorize_responder: Callable[[str], bool] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is None
+            assert authorize_responder is not None
+            assert authorize_responder("calculator") is False
+            return ApprovalActionResult(consumed=False, resolved=False)
+
         with patch(
-            "mindroom.bot.maybe_handle_tool_approval_reply",
-            new=AsyncMock(return_value=False),
-        ) as approval_reply:
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(side_effect=reject_revoked_origin),
+        ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
 
-        approval_reply.assert_awaited_once()
-        assert approval_reply.await_args.kwargs["before_consume"] is None
-        assert approval_reply.await_args.kwargs["authorization_prevalidated"] is True
+        approval_action.assert_awaited_once()
         handle_text_event.assert_not_awaited()
         assert await restarted._journal_dispatcher.store.pending() == ()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_interrupted_approval_reaction_replay_cannot_become_hook_input(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """A reaction claimed by approval handling must never fall through to hooks."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        legacy_config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(legacy_config)
+        membership_payload = legacy_config.authored_model_dump()
+        membership_payload["authorization"] = {}
+        for agent in cast("dict[str, dict[str, object]]", membership_payload["agents"]).values():
+            agent["access"] = {"members_of_rooms": [], "users": []}
+        membership_payload["router"] = {
+            "access": {
+                "members_of_rooms": [],
+                "users": ["@user:localhost"],
+            },
+        }
+        config = Config.validate_with_runtime(membership_payload, runtime_paths)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$approval-reaction")
         failure = RuntimeError("crash after approval reaction side effect")
 
-        async def fail_after_claim(
-            _action: MatrixApprovalAction,
-            *,
-            before_consume: Callable[[], Awaitable[None]] | None = None,
-        ) -> ApprovalActionResult:
-            assert before_consume is not None
+        async def fail_after_claim(**kwargs: object) -> bool:
+            before_consume = cast("Callable[[], Awaitable[None]]", kwargs["before_consume"])
             await before_consume()
             raise failure
 
         with (
             patch(
-                "mindroom.approval_inbound.handle_matrix_approval_action",
+                "mindroom.reaction_dispatch.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mindroom.reaction_dispatch.handle_tool_approval_action",
                 new=AsyncMock(side_effect=fail_after_claim),
             ),
         ):
@@ -2233,15 +2250,28 @@ class TestAgentBot(AgentBotTestBase):
             0
         ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
+
+        async def reject_revoked_origin(
+            _action: MatrixApprovalAction,
+            *,
+            before_consume: Callable[[], Awaitable[None]] | None = None,
+            authorize_responder: Callable[[str], bool] | None = None,
+        ) -> ApprovalActionResult:
+            assert before_consume is None
+            assert authorize_responder is not None
+            assert authorize_responder("calculator") is False
+            return ApprovalActionResult(consumed=False, resolved=False)
+
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=False, resolved=False)),
-        ):
+            new=AsyncMock(side_effect=reject_revoked_origin),
+        ) as approval_action:
             await restarted._journal_dispatcher.drain_once()
 
+        approval_action.assert_awaited_once()
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
@@ -2848,12 +2878,7 @@ class TestAgentBot(AgentBotTestBase):
         """A claimed hook must settle without running after its sender is revoked."""
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
-        config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[sender_id]),
-            },
-        )
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
@@ -2879,12 +2904,7 @@ class TestAgentBot(AgentBotTestBase):
         assert pending[0].semantic_consumer is SemanticConsumer.REACTION_HOOKS
 
         denied_config = config.model_copy(deep=True)
-        denied_config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: AgentReplyPermission(users=[]),
-            },
-        )
+        denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         restarted = make_test_agent_bot(
             mock_agent_user,
             tmp_path,

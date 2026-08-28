@@ -274,6 +274,19 @@ export interface Room {
 export interface RoomConfig {
   display_name?: string;
   description?: string;
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
+}
+
+export interface RoomDefaultsConfig {
+  join_policy?: "invite" | "knock" | "public";
+  listed?: boolean;
+  encrypted?: boolean;
+  invite_users?: string[];
+  admins?: string[];
 }
 
 export interface VoiceSTTConfig {
@@ -293,16 +306,6 @@ export interface VoiceConfig {
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;
-}
-
-export interface MatrixRoomAccessConfig {
-  mode?: "single_user_private" | "multi_user";
-  multi_user_join_rule?: "public" | "knock";
-  publish_to_room_directory?: boolean;
-  invite_only_rooms?: string[];
-  reconcile_existing_rooms?: boolean;
-  encrypt_managed_rooms?: boolean;
-  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
 }
 
 export interface Config {
@@ -332,11 +335,11 @@ export interface Config {
     model: string;
   };
   rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
+  room_defaults?: RoomDefaultsConfig; // Defaults for managed Matrix rooms
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
-  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -398,6 +399,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_schedule_validation_respects_sender_reply_permissions() -> None:
     """Explicit mentions should validate against sender-permitted room agents, not raw membership."""
     config = _runtime_bound_config(
@@ -407,15 +409,16 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
                     display_name="Assistant",
                     role="General assistance",
                     rooms=["test_room"],
+                    access=ResponderAccessConfig(users=["@blocked:localhost"]),
                 ),
                 "calculator": AgentConfig(
                     display_name="Calculator",
                     role="Math calculations",
                     rooms=["test_room"],
+                    access=ResponderAccessConfig(users=["@allowed:localhost"]),
                 ),
             },
             router=RouterConfig(model="default"),
-            authorization={"agent_reply_permissions": {"calculator": ["@allowed:localhost"]}},
         ),
     )
 

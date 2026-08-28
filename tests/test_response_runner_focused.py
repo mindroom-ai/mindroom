@@ -35,8 +35,8 @@ from mindroom.agent_storage import get_agent_session
 from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.auth import AgentReplyPermission, AuthorizationConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
@@ -459,17 +459,13 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(tmp_path: Path) -> None:
     """A room-backed grant revoked during lock wait must prevent model execution."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     config = runner.deps.runtime.config
-    config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "general": AgentReplyPermission(joined_rooms=["grant"]),
-        },
-    )
+    config.agents["general"].access = ResponderAccessConfig(members_of_rooms=["grant"])
     grant_room_id = "!grant:localhost"
     state = MatrixState.load(runtime_paths=runner.deps.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
@@ -2122,6 +2118,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoked_layer", ["room", "entity"])
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
     tmp_path: Path,
     revoked_layer: str,
@@ -2146,20 +2143,11 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
     if revoked_layer == "room":
-        runner.deps.runtime.config.authorization = AuthorizationConfig(
-            default_room_access=False,
-            room_permissions={request.room_id: []},
-            agent_reply_permissions={
-                "general": AgentReplyPermission(users=[continuation.requester_id]),
-            },
+        runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
+            current_room_members=True,
         )
     else:
-        runner.deps.runtime.config.authorization = AuthorizationConfig(
-            default_room_access=True,
-            agent_reply_permissions={
-                "general": AgentReplyPermission(users=[]),
-            },
-        )
+        runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(users=[])
     failing = replace(
         continuation,
         state="failing",
@@ -2196,6 +2184,7 @@ async def test_ready_approval_replay_rechecks_current_authorization(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Path) -> None:
     """A ready team continuation must not resume after one member loses access."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -2218,11 +2207,13 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         team_mode="coordinate",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
-    runner.deps.runtime.config.authorization = AuthorizationConfig(
-        default_room_access=True,
-        agent_reply_permissions={
-            "general": AgentReplyPermission(users=[continuation.requester_id]),
-            "worker": AgentReplyPermission(users=[]),
+    runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
+        users=[continuation.requester_id],
+    )
+    runner.deps.runtime.config.agents["worker"] = runner.deps.runtime.config.agents["general"].model_copy(
+        update={
+            "display_name": "Worker",
+            "access": ResponderAccessConfig(users=[]),
         },
     )
     failing = replace(

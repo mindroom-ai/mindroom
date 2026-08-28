@@ -13,7 +13,7 @@ import {
   normalizeAgentUpdates,
   normalizeTeamUpdates,
   VoiceConfig,
-  MatrixRoomAccessConfig,
+  RoomDefaultsConfig,
 } from "@/types/config";
 import * as configService from "@/services/configService";
 import type {
@@ -642,7 +642,7 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: unknown) => void;
   updateVoiceConfig: (voiceConfig: VoiceConfig) => void;
-  updateMatrixRoomAccess: (matrixRoomAccess: MatrixRoomAccessConfig) => void;
+  updateRoomDefaults: (roomDefaults: RoomDefaultsConfig) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -1089,8 +1089,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...(dirtyRootSet.has("models") ? { models: config.models } : {}),
         ...(dirtyRootSet.has("tools") ? { tools: config.tools } : {}),
         ...(dirtyRootSet.has("voice") ? { voice: config.voice } : {}),
-        ...(dirtyRootSet.has("matrix_room_access")
-          ? { matrix_room_access: config.matrix_room_access }
+        ...(dirtyRootSet.has("room_defaults")
+          ? { room_defaults: config.room_defaults }
           : {}),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
@@ -2273,17 +2273,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  updateMatrixRoomAccess: (matrixRoomAccess) => {
+  updateRoomDefaults: (roomDefaults) => {
     set((state) => {
       if (!state.config) return state;
       const nextConfig = {
         ...state.config,
-        matrix_room_access: matrixRoomAccess,
+        room_defaults: roomDefaults,
       };
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
-        ...markDraftDirty(state, {}, [["matrix_room_access"]]),
+        ...markDraftDirty(state, {}, [["room_defaults"]]),
       };
     });
   },

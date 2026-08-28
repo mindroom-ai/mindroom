@@ -2882,13 +2882,25 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
         yield
     else:
         with ExitStack() as stack:
-            stack.enter_context(patch("mindroom.ingress_validation.is_authorized_sender", return_value=True))
             if "enforce_turn_authorization" not in request.fixturenames:
+                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", return_value=True))
                 stack.enter_context(
                     patch(
                         "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
                         return_value=True,
                     ),
+                )
+                stack.enter_context(
+                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", return_value=True),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
+                        return_value=True,
+                    ),
+                )
+                stack.enter_context(
+                    patch("mindroom.custom_tools.delegate.is_sender_allowed_for_responder", return_value=True),
                 )
             yield
 

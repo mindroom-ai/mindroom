@@ -341,10 +341,11 @@ def decide_agent_response(
         agents_in_thread: Optional precomputed agents that have participated in the thread
 
     """
-    if not authorization.is_sender_allowed_for_agent_reply(
+    if not authorization.is_sender_allowed_for_agent_reply_in_room(
         sender_id,
         agent_name,
         config,
+        room.room_id,
         runtime_paths,
         membership_index,
     ):
