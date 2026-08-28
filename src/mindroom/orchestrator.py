@@ -2047,12 +2047,11 @@ class _MultiAgentOrchestrator:
         self,
         config: Config,
         joined_rooms: list[str],
-        authorized_user_ids: set[str],
-    ) -> set[str]:
+    ) -> str | None:
         """Invite the configured internal user to all joined rooms when needed."""
         router_bot = self._router_bot()
         if router_bot is None:
-            return authorized_user_ids
+            return None
         assert router_bot.client is not None
 
         server_name = extract_server_name_from_homeserver(
@@ -2061,9 +2060,8 @@ class _MultiAgentOrchestrator:
         )
         user_id = managed_account_user_id(INTERNAL_USER_ACCOUNT_KEY, server_name, self.runtime_paths)
         if config.mindroom_user is None or user_id is None:
-            return authorized_user_ids
+            return None
 
-        authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
             room_members = await get_room_members(router_bot.client, room_id)
             if room_members is None:
@@ -2076,7 +2074,7 @@ class _MultiAgentOrchestrator:
                 success_message=f"Invited user {user_id} to room {room_id}",
                 failure_message=f"Failed to invite user {user_id} to room {room_id}",
             )
-        return authorized_user_ids
+        return user_id
 
     async def _invite_authorized_users_to_room(
         self,
@@ -2133,12 +2131,7 @@ class _MultiAgentOrchestrator:
         if not joined_rooms:
             return
 
-        authorized_user_ids = get_authorized_user_ids_to_invite(config)
-        authorized_user_ids = await self._invite_internal_user_to_rooms(
-            config,
-            joined_rooms,
-            authorized_user_ids,
-        )
+        internal_user_id = await self._invite_internal_user_to_rooms(config, joined_rooms)
 
         for room_id in joined_rooms:
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
@@ -2149,6 +2142,9 @@ class _MultiAgentOrchestrator:
             if current_members is None:
                 logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
                 continue
+            authorized_user_ids = get_authorized_user_ids_to_invite(config, room_id, self.runtime_paths)
+            if internal_user_id is not None:
+                authorized_user_ids.discard(internal_user_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
             if configured_bots:
                 await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
