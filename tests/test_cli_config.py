@@ -1666,7 +1666,7 @@ class TestConfigMigrate:
         assert "membership access schema" in output
         migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         assert migrated["administrators"] == ["@owner:example.com"]
-        assert "global_users" not in migrated["authorization"]
+        assert "authorization" not in migrated
         backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
         assert backup.read_text(encoding="utf-8") == original
 

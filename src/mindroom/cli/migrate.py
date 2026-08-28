@@ -116,7 +116,7 @@ def _migrate_old_config_init_mind_memory(content: str) -> tuple[str, bool]:
 def config_migrate(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
-    """Apply safe, text-preserving migrations to config.yaml."""
+    """Apply supported migrations to config.yaml."""
     config_file = _resolve_config_path(path)
 
     if not config_file.exists():

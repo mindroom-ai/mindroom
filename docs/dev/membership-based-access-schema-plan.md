@@ -230,6 +230,7 @@ Credential-manager entries must be concrete Matrix user IDs; wildcard credential
 
 One pure migration function runs before nested Pydantic validation, so file loading and programmatic configuration construction reach the same authored schema.
 `load_config` validates the migrated data before it writes anything, preserves the original root file as a one-time sibling backup, atomically writes the normalized YAML, and then publishes the validated configuration.
+Normalized YAML does not preserve comments or hand formatting; the exact backup remains the recovery source for both.
 When migration encounters any `!include`, loading fails before validation or persistence with a clear unsupported-migration error.
 
 The deterministic mapping is:
@@ -246,6 +247,7 @@ The deterministic mapping is:
 
 Existing new-schema values win over migrated scalar defaults, while list-valued grants are combined without duplicates so an authored capability is not silently discarded.
 Unresolvable room IDs or aliases fail closed before validation or persistence.
+The error identifies the retired field and directs the operator to replace the reference with its managed room key before retrying.
 The migration intentionally removes implicit or wildcard credential-management authority because the new field requires concrete identities; platform administrators retain credential authority.
 
 ### Non-goals

@@ -16507,6 +16507,8 @@ authorization:
 Loading a monolithic configuration with retired access fields automatically converts it to this schema.
 MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
 The migration preserves explicit new-schema values and removes the retired fields.
+The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
+Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
 
 Access migration does not support configurations that use `!include`.
 If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.
@@ -20455,13 +20457,13 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Apply safe, text-preserving migrations to config.yaml.                │
+│ init       Create a starter config.yaml with a personal agent and model.               │
+│ show       Display the current config file with syntax highlighting.                   │
+│ edit       Open config.yaml in your default editor.                                    │
+│ validate   Validate config.yaml and check for common issues.                           │
+│ resolve    Print the fully merged config YAML with all !include tags resolved.         │
+│ path       Show the resolved config file path and search locations.                    │
+│ migrate    Apply supported migrations to config.yaml.                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

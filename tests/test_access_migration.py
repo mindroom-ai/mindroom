@@ -24,6 +24,7 @@ def test_access_migration_leaves_current_schema_unchanged() -> None:
     result = migrate_access_config_data(data)
 
     assert result.changed is False
+    assert result.data is data
     assert result.data == data
 
 
@@ -170,7 +171,7 @@ def test_access_migration_maps_room_permissions_and_matrix_defaults() -> None:
         "listed": False,
     }
     assert "matrix_room_access" not in result.data
-    assert "room_permissions" not in result.data["authorization"]
+    assert "authorization" not in result.data
 
 
 def test_access_migration_preserves_explicit_new_schema_grants() -> None:
@@ -239,7 +240,10 @@ def test_access_migration_rejects_unknown_room_permission_key() -> None:
     """A room-scoped grant must never migrate onto an unmanaged room key."""
     from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
-    with pytest.raises(AccessMigrationError, match="unknown managed room key"):
+    with pytest.raises(
+        AccessMigrationError,
+        match=r"authorization\.room_permissions.*managed room key",
+    ):
         migrate_access_config_data(
             {
                 "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
@@ -248,6 +252,57 @@ def test_access_migration_rejects_unknown_room_permission_key() -> None:
                 },
             },
         )
+
+
+def test_access_migration_rejects_unknown_invite_only_room_reference() -> None:
+    """An invite-only reference must identify a configured managed room key."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(
+        AccessMigrationError,
+        match=r"matrix_room_access\.invite_only_rooms.*managed room key",
+    ):
+        migrate_access_config_data(
+            {
+                "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
+                "matrix_room_access": {"invite_only_rooms": ["!opaque-room:example.com"]},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("legacy_config", "field_name"),
+    [
+        (
+            {"authorization": {"global_users": ["*"]}},
+            "authorization.global_users",
+        ),
+        (
+            {
+                "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
+                "authorization": {"room_permissions": {"talent": ["*"]}},
+            },
+            "authorization.room_permissions.talent",
+        ),
+        (
+            {"matrix_room_access": {"room_admins": ["*"]}},
+            "matrix_room_access.room_admins",
+        ),
+    ],
+)
+def test_access_migration_rejects_non_concrete_identity_grants(
+    legacy_config: dict[str, object],
+    field_name: str,
+) -> None:
+    """Legacy grants that require concrete IDs must fail with editing guidance."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(AccessMigrationError) as exc_info:
+        migrate_access_config_data(legacy_config)
+
+    assert field_name in str(exc_info.value)
+    assert "concrete Matrix user IDs" in str(exc_info.value)
+    assert "before retrying" in str(exc_info.value)
 
 
 def test_access_migration_rejects_unknown_reply_policy_entity() -> None:
@@ -311,6 +366,17 @@ def test_access_migration_maps_matrix_access_without_authorization() -> None:
     }
 
 
+def test_access_migration_removes_authorization_emptied_by_migration() -> None:
+    """Removing the last retired field must not leave an empty mapping behind."""
+    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+
+    result = migrate_access_config_data(
+        {"authorization": {"global_users": ["@owner:example.com"]}},
+    )
+
+    assert "authorization" not in result.data
+
+
 def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> None:
     """A valid monolithic legacy config must be backed up and atomically rewritten."""
     from mindroom import yaml_io  # noqa: PLC0415
@@ -326,7 +392,7 @@ def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> No
     migrated = yaml_io.safe_load(config_path.read_text(encoding="utf-8"))
     assert migrated["administrators"] == ["@owner:example.com"]
     assert migrated["room_defaults"]["invite_users"] == ["@owner:example.com"]
-    assert "global_users" not in migrated["authorization"]
+    assert "authorization" not in migrated
     assert config.administrators == ["@owner:example.com"]
     backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
     assert backup_path.read_text(encoding="utf-8") == original
@@ -355,8 +421,7 @@ def test_load_config_rejects_access_migration_with_include(tmp_path: Path) -> No
 
 def test_load_config_does_not_persist_invalid_migration(tmp_path: Path) -> None:
     """Validation failure must leave the original file untouched and create no backup."""
-    from pydantic import ValidationError  # noqa: PLC0415
-
+    from mindroom.config.access_migration import AccessMigrationError  # noqa: PLC0415
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
@@ -364,7 +429,7 @@ def test_load_config_does_not_persist_invalid_migration(tmp_path: Path) -> None:
     original = "authorization:\n  global_users:\n    - not-a-matrix-user\n"
     config_path.write_text(original, encoding="utf-8")
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(AccessMigrationError, match=r"authorization\.global_users"):
         load_config(resolve_runtime_paths(config_path=config_path))
 
     assert config_path.read_text(encoding="utf-8") == original

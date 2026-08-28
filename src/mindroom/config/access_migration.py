@@ -124,6 +124,24 @@ def _stable_union(left: object, right: object) -> list[Any]:
     return list(dict.fromkeys([*left_items, *right_items]))
 
 
+def _validate_concrete_legacy_user_ids(user_ids: object, *, field_name: str) -> None:
+    """Require a retired concrete-identity grant to contain only Matrix user IDs."""
+    if not isinstance(user_ids, list) or any(not isinstance(user_id, str) for user_id in user_ids):
+        msg = (
+            f"Automatic access migration cannot convert {field_name}; replace its value with a list of concrete "
+            "Matrix user IDs before retrying"
+        )
+        raise AccessMigrationError(msg)
+    validated_user_ids = cast("list[str]", user_ids)
+    _concrete_user_ids, invalid_user_ids = split_concrete_matrix_user_ids(validated_user_ids)
+    if invalid_user_ids:
+        msg = (
+            f"Automatic access migration cannot convert {field_name} because it contains values that are not "
+            f"concrete Matrix user IDs: {', '.join(invalid_user_ids)}. Replace them before retrying"
+        )
+        raise AccessMigrationError(msg)
+
+
 def _normalized_reply_policy(raw_policy: object) -> dict[str, Any] | None:
     if isinstance(raw_policy, list):
         return {"users": raw_policy}
@@ -179,7 +197,12 @@ def _managed_room_keys(config: dict[str, Any]) -> set[str]:
     return room_keys
 
 
-def _resolve_managed_room_key(room_reference: object, managed_room_keys: set[str]) -> str:
+def _resolve_managed_room_key(
+    room_reference: object,
+    managed_room_keys: set[str],
+    *,
+    field_name: str,
+) -> str:
     """Resolve one retired room reference when it identifies exactly one managed key."""
     if isinstance(room_reference, str):
         if room_reference in managed_room_keys:
@@ -188,7 +211,10 @@ def _resolve_managed_room_key(room_reference: object, managed_room_keys: set[str
             alias_localpart = room_reference[1:].split(":", 1)[0]
             if alias_localpart in managed_room_keys:
                 return alias_localpart
-    msg = f"Access migration references unknown managed room key: {room_reference}"
+    msg = (
+        f"Automatic access migration cannot resolve {field_name} room reference {room_reference!r} to a configured "
+        "managed room key. Replace the reference with its managed room key before retrying"
+    )
     raise AccessMigrationError(msg)
 
 
@@ -204,6 +230,7 @@ def _apply_default_room_access(entity_data: dict[str, Any]) -> None:
 def _migrate_global_users(migrated: dict[str, Any], global_users: list[Any]) -> None:
     if not global_users:
         return
+    _validate_concrete_legacy_user_ids(global_users, field_name="authorization.global_users")
     migrated["administrators"] = _stable_union(migrated.get("administrators"), global_users)
     room_defaults = migrated.setdefault("room_defaults", {})
     if isinstance(room_defaults, dict):
@@ -269,7 +296,13 @@ def _migrate_room_permissions(
         rooms = migrated.setdefault("rooms", {})
     if isinstance(rooms, dict) and isinstance(room_permissions, dict):
         for room_reference, invite_users in room_permissions.items():
-            room_key = _resolve_managed_room_key(room_reference, managed_room_keys)
+            field_name = f"authorization.room_permissions.{room_reference}"
+            _validate_concrete_legacy_user_ids(invite_users, field_name=field_name)
+            room_key = _resolve_managed_room_key(
+                room_reference,
+                managed_room_keys,
+                field_name="authorization.room_permissions",
+            )
             room = rooms.setdefault(room_key, {})
             if isinstance(room, dict):
                 room["invite_users"] = _stable_union(room.get("invite_users"), invite_users)
@@ -283,8 +316,14 @@ def _migrate_matrix_room_access(
     if not isinstance(matrix_access, dict):
         return
     access = cast("dict[str, Any]", matrix_access)
+    room_admins = access.get("room_admins", [])
+    _validate_concrete_legacy_user_ids(room_admins, field_name="matrix_room_access.room_admins")
     invite_only_rooms = [
-        _resolve_managed_room_key(room_reference, managed_room_keys)
+        _resolve_managed_room_key(
+            room_reference,
+            managed_room_keys,
+            field_name="matrix_room_access.invite_only_rooms",
+        )
         for room_reference in access.get("invite_only_rooms", [])
     ]
     room_defaults = migrated.setdefault("room_defaults", {})
@@ -298,7 +337,7 @@ def _migrate_matrix_room_access(
         room_defaults.setdefault("encrypted", access.get("encrypt_managed_rooms", False))
         room_defaults["admins"] = _stable_union(
             room_defaults.get("admins"),
-            access.get("room_admins"),
+            room_admins,
         )
 
     rooms = migrated.get("rooms")
@@ -314,6 +353,9 @@ def _migrate_matrix_room_access(
 
 def migrate_access_config_data(data: dict[str, Any]) -> _AccessMigrationResult:
     """Split retired access fields into explicit membership capabilities."""
+    if not _access_config_needs_migration(data):
+        return _AccessMigrationResult(data=data, changed=False)
+
     migrated = deepcopy(data)
     migrated.pop("access_model", None)
     matrix_access = migrated.pop("matrix_room_access", None)
@@ -323,6 +365,8 @@ def migrate_access_config_data(data: dict[str, Any]) -> _AccessMigrationResult:
         reply_permissions = authorization.pop("agent_reply_permissions", {})
         room_permissions = authorization.pop("room_permissions", {})
         default_room_access = authorization.pop("default_room_access", False)
+        if not authorization:
+            migrated.pop("authorization")
     else:
         global_users = []
         reply_permissions = {}
