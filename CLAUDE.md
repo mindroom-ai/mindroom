@@ -200,7 +200,6 @@ Matrix sync callback
 | `authorization.py` | Sender and per-agent authorization checks |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
-| `config/access_migration.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
 | `thread_utils.py` | Thread analysis and agent detection |
 | `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |

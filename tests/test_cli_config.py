@@ -88,7 +88,7 @@ def _write_minimal_runtime_config(path: Path) -> None:
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
         "matrix_space:\n  enabled: false\n"
-        "authorization:\n  global_users: []\n",
+        "administrators: []\n",
         encoding="utf-8",
     )
 
@@ -1653,73 +1653,6 @@ class TestConfigMigrate:
         assert "No migrations applied" in normalize_console_output(result.output)
         assert cfg.read_text(encoding="utf-8") == original
 
-    def test_migrate_applies_access_migration_and_creates_backup(self, tmp_path: Path) -> None:
-        """The explicit command must use the same validated access migration as config loading."""
-        cfg = tmp_path / "config.yaml"
-        original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
-        cfg.write_text(original, encoding="utf-8")
-
-        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
-
-        output = normalize_console_output(result.output)
-        assert result.exit_code == 0
-        assert "membership access schema" in output
-        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-        assert migrated["administrators"] == ["@owner:example.com"]
-        assert "authorization" not in migrated
-        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
-        assert backup.read_text(encoding="utf-8") == original
-
-    def test_migrate_applies_access_and_starter_memory_migrations_together(self, tmp_path: Path) -> None:
-        """A prior starter config must not lose either migration when both are required."""
-        cfg = tmp_path / "config.yaml"
-        original = (
-            _old_config_init_mind_memory_config("./mindroom_data/agents/mind/workspace/memory")
-            + """
-authorization:
-  global_users:
-    - '@owner:example.com'
-  default_room_access: false
-matrix_room_access:
-  mode: single_user_private
-"""
-        )
-        cfg.write_text(original, encoding="utf-8")
-
-        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
-
-        output = normalize_console_output(result.output)
-        assert result.exit_code == 0
-        assert "membership access schema" in output
-        assert "starter Mind file-memory semantic search" in output
-        migrated = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-        assert migrated["administrators"] == ["@owner:example.com"]
-        assert migrated["agents"]["mind"]["tools"][2] == "memory"
-        assert "knowledge_bases" not in migrated["agents"]["mind"]
-        assert "knowledge_bases" not in migrated
-        assert migrated["memory"]["search"]["include"] == ["memory/**/*.md"]
-        assert "authorization" not in migrated
-        assert "matrix_room_access" not in migrated
-        backup = cfg.with_name(f"{cfg.name}.pre-membership-access")
-        assert backup.read_text(encoding="utf-8") == original
-
-    def test_migrate_rejects_access_migration_with_include_without_writing(self, tmp_path: Path) -> None:
-        """The explicit command must error on composed access config before any write."""
-        cfg = tmp_path / "config.yaml"
-        authorization = tmp_path / "authorization.yaml"
-        config_text = "authorization: !include authorization.yaml\n"
-        authorization_text = "global_users:\n  - '@owner:example.com'\n"
-        cfg.write_text(config_text, encoding="utf-8")
-        authorization.write_text(authorization_text, encoding="utf-8")
-
-        result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
-
-        assert result.exit_code == 1
-        assert "does not support !include" in normalize_console_output(result.output)
-        assert cfg.read_text(encoding="utf-8") == config_text
-        assert authorization.read_text(encoding="utf-8") == authorization_text
-        assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
-
     def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
         """Config migrate should fail cleanly when no config exists."""
         missing = tmp_path / "config.yaml"
@@ -1735,7 +1668,7 @@ matrix_room_access:
         original = _old_config_init_mind_memory_config("${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory")
         cfg.write_text(original, encoding="utf-8")
 
-        with patch("mindroom.yaml_io.write_text_atomic", side_effect=OSError("disk full")):
+        with patch("mindroom.cli.migrate._write_text_atomic", side_effect=OSError("disk full")):
             result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
 
         output = normalize_console_output(result.output)
@@ -2267,7 +2200,7 @@ class TestRunErrorHandling:
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n"
-            "authorization:\n  global_users: []\n",
+            "administrators: []\n",
         )
 
         with patch(
@@ -3629,16 +3562,13 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "matrix_room_access:\n"
-            "  room_admins:\n"
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+            "room_defaults:\n"
+            "  invite_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "  agent_reply_permissions:\n"
-            '    "*":\n'
-            f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "  admins:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.main.socket.gethostname", lambda: "devbox")
 
@@ -3680,7 +3610,9 @@ class TestConnect:
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
         parsed_config = yaml.safe_load(updated_config)
-        assert parsed_config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
+        assert parsed_config["administrators"] == ["@alice:mindroom.chat"]
+        assert parsed_config["room_defaults"]["invite_users"] == ["@alice:mindroom.chat"]
+        assert parsed_config["room_defaults"]["admins"] == ["@alice:mindroom.chat"]
 
     def test_connect_path_overrides_env_and_config_target(
         self,
@@ -3692,19 +3624,15 @@ class TestConnect:
         default_cfg.parent.mkdir(parents=True, exist_ok=True)
         default_cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         target_cfg = tmp_path / "custom" / "config.yaml"
         target_cfg.parent.mkdir(parents=True, exist_ok=True)
         target_cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr(
             "mindroom.cli.main._httpx_post",
@@ -3868,10 +3796,8 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr(
             "mindroom.cli.main._httpx_post",

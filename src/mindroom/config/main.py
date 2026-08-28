@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -32,12 +31,6 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
-from mindroom.config.access_migration import (
-    AccessMigrationError,
-    migrate_access_config_data,
-    persist_access_migration,
-    validate_access_migration_source,
-)
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -69,11 +62,7 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
-from mindroom.config.yaml_includes import (
-    ConfigIncludeError,
-    attach_partial_source_files,
-    load_yaml_config_source_with_digests,
-)
+from mindroom.config.yaml_includes import ConfigIncludeError, attach_partial_source_files, load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
@@ -177,15 +166,9 @@ class ConfigRuntimeValidationError(ValueError):
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
 
 
-type ConfigLoadUserError = (
-    ValidationError | ConfigRuntimeValidationError | AccessMigrationError | yaml.YAMLError | OSError | UnicodeError
-)
-
-
 CONFIG_LOAD_USER_ERROR_TYPES = (
     ValidationError,
     ConfigRuntimeValidationError,
-    AccessMigrationError,
     yaml.YAMLError,
     OSError,
     UnicodeError,
@@ -210,7 +193,7 @@ def iter_config_validation_messages(
 
 
 def format_invalid_config_message(
-    exc: ConfigLoadUserError,
+    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
     *,
     footer: str | None = None,
 ) -> str:
@@ -522,7 +505,6 @@ class Config(BaseModel):
         normalized = normalized_config_data(data)
         if not isinstance(normalized, dict):
             return normalized
-        normalized = migrate_access_config_data(cast("dict[str, Any]", normalized)).data
 
         raw_data = cast("dict[object, object]", normalized)
         for entry in raw_tools_entries(raw_data, "defaults"):
@@ -1966,38 +1948,6 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
-def validate_loaded_config_source(
-    data: dict[str, Any],
-    source_digests: dict[Path, str],
-    original: bytes,
-    runtime_paths: RuntimePaths,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> tuple[Config, dict[Path, str]]:
-    """Validate and, when needed, persist one already-parsed config source."""
-    path = runtime_paths.config_path
-    source_files = frozenset(source_digests)
-
-    try:
-        validate_access_migration_source(data, source_files, path)
-        migration = migrate_access_config_data(data)
-        config = Config.validate_with_runtime(
-            migration.data,
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        if migration.changed:
-            persisted = persist_access_migration(path, original, migration.data)
-            source_digests = {path.resolve(): hashlib.sha256(persisted).hexdigest()}
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        # Parsing succeeded, so the full file set is known; expose it the same
-        # way as parse-time failures so reload watchers keep covering it.
-        attach_partial_source_files(exc, source_files)
-        raise
-    config._source_files = frozenset(source_digests)
-    return config, source_digests
-
-
 def load_config(
     runtime_paths: RuntimePaths,
     *,
@@ -2009,16 +1959,20 @@ def load_config(
         msg = f"Agent configuration file not found: {path}"
         raise FileNotFoundError(msg)
 
-    original = path.read_bytes()
-    data, source_digests = load_yaml_config_source_with_digests(path, source=original)
-    config, source_digests = validate_loaded_config_source(
-        data,
-        source_digests,
-        original,
-        runtime_paths,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    source_files = frozenset(source_digests)
+    data, source_files = load_yaml_config_source(path)
+
+    try:
+        config = Config.validate_with_runtime(
+            data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Parsing succeeded, so the full file set is known; expose it the same
+        # way as parse-time failures so reload watchers keep covering it.
+        attach_partial_source_files(exc, source_files)
+        raise
+    config._source_files = source_files
     logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config

@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
 from mindroom import yaml_io
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _SAMPLE_DOCUMENT = """\
 thread:
@@ -89,19 +85,6 @@ def test_safe_dump_rejects_unsafe_types_like_safe_dump() -> None:
 
     with pytest.raises(yaml.YAMLError):
         yaml_io.safe_dump({"bad": Unrepresentable()})
-
-
-def test_write_text_atomic_replaces_content_and_preserves_mode(tmp_path: Path) -> None:
-    """Atomic text replacement must retain file permissions and leave no temp file."""
-    path = tmp_path / "config.yaml"
-    path.write_text("old\n", encoding="utf-8")
-    path.chmod(0o640)
-
-    yaml_io.write_text_atomic(path, "new\n")
-
-    assert path.read_text(encoding="utf-8") == "new\n"
-    assert path.stat().st_mode & 0o777 == 0o640
-    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_prefers_libyaml_classes_when_available() -> None:

@@ -345,8 +345,8 @@ authorization:
 - **credential_managers**: Concrete Matrix users who may manage one agent's credentials and OAuth connections
 - **aliases**: Map canonical Matrix user IDs to bridge aliases
 
-Retired access fields in a monolithic configuration are migrated automatically when the file loads.
-Access migration fails without writing or creating a backup when any `!include` is present.
+Retired access fields fail validation instead of being migrated.
+Configuration loading does not rewrite the root file or any `!include` source.
 
 ## Matrix Space Configuration
 

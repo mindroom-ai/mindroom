@@ -29,8 +29,8 @@ def test_source_page_reference_preserves_authored_markdown(tmp_path: Path) -> No
 ## Room Access
 
 ```yaml
-matrix_room_access:
-  encrypt_managed_rooms: false
+room_defaults:
+  encrypted: false
 ```
 """
     docs_dir = tmp_path / "docs"
