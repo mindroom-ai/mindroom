@@ -9,7 +9,6 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -62,13 +61,10 @@ def _handler_authorization(
     global_users: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
 ) -> AuthorizationConfig:
-    return cast(
-        "AuthorizationConfig",
-        retired_authorization(
-            config_command_enabled=config_command_enabled,
-            global_users=global_users or [],
-            aliases=aliases or {},
-        ),
+    return retired_authorization(
+        config_command_enabled=config_command_enabled,
+        global_users=global_users or [],
+        aliases=aliases or {},
     )
 
 

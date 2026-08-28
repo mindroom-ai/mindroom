@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -33,9 +34,9 @@ from mindroom.agent_policy import (
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
 from mindroom.config.access_migration import (
     AccessMigrationError,
-    access_config_needs_migration,
     migrate_access_config_data,
     persist_access_migration,
+    validate_access_migration_source,
 )
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
@@ -1965,6 +1966,38 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
+def validate_loaded_config_source(
+    data: dict[str, Any],
+    source_digests: dict[Path, str],
+    original: bytes,
+    runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> tuple[Config, dict[Path, str]]:
+    """Validate and, when needed, persist one already-parsed config source."""
+    path = runtime_paths.config_path
+    source_files = frozenset(source_digests)
+
+    try:
+        validate_access_migration_source(data, source_files, path)
+        migration = migrate_access_config_data(data)
+        config = Config.validate_with_runtime(
+            migration.data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        if migration.changed:
+            persisted = persist_access_migration(path, original, migration.data)
+            source_digests = {path.resolve(): hashlib.sha256(persisted).hexdigest()}
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Parsing succeeded, so the full file set is known; expose it the same
+        # way as parse-time failures so reload watchers keep covering it.
+        attach_partial_source_files(exc, source_files)
+        raise
+    config._source_files = frozenset(source_digests)
+    return config, source_digests
+
+
 def load_config(
     runtime_paths: RuntimePaths,
     *,
@@ -1978,26 +2011,14 @@ def load_config(
 
     original = path.read_bytes()
     data, source_digests = load_yaml_config_source_with_digests(path, source=original)
+    config, source_digests = validate_loaded_config_source(
+        data,
+        source_digests,
+        original,
+        runtime_paths,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
     source_files = frozenset(source_digests)
-
-    try:
-        if access_config_needs_migration(data) and source_files != frozenset({path.resolve()}):
-            msg = "Automatic access migration does not support !include configurations"
-            raise AccessMigrationError(msg)
-        migration = migrate_access_config_data(data)
-        config = Config.validate_with_runtime(
-            migration.data,
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        if migration.changed:
-            persist_access_migration(path, original, migration.data)
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        # Parsing succeeded, so the full file set is known; expose it the same
-        # way as parse-time failures so reload watchers keep covering it.
-        attach_partial_source_files(exc, source_files)
-        raise
-    config._source_files = source_files
     logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config

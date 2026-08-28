@@ -35,12 +35,23 @@ class AccessMigrationError(ValueError):
     """Raised when a retired access value has no safe membership equivalent."""
 
 
-def access_config_needs_migration(data: dict[str, Any]) -> bool:
+def _access_config_needs_migration(data: dict[str, Any]) -> bool:
     """Return whether authored config data contains any retired access field."""
     if "access_model" in data or "matrix_room_access" in data:
         return True
     authorization = data.get("authorization")
     return isinstance(authorization, dict) and bool(_RETIRED_AUTHORIZATION_FIELDS & authorization.keys())
+
+
+def validate_access_migration_source(
+    data: dict[str, Any],
+    source_files: frozenset[Path],
+    config_path: Path,
+) -> None:
+    """Reject a legacy access migration composed from more than one source file."""
+    if _access_config_needs_migration(data) and source_files != frozenset({config_path.resolve()}):
+        msg = "Automatic access migration does not support !include configurations"
+        raise AccessMigrationError(msg)
 
 
 def _access_migration_backup_path(path: Path) -> Path:
@@ -90,7 +101,7 @@ def _create_backup_once(path: Path, content: bytes, *, file_mode: int) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def persist_access_migration(path: Path, original: bytes, migrated: dict[str, Any]) -> None:
+def persist_access_migration(path: Path, original: bytes, migrated: dict[str, Any]) -> bytes:
     """Back up and atomically replace one validated monolithic config."""
     if path.read_bytes() != original:
         msg = "Configuration changed while access migration was being prepared; retry the load"
@@ -104,6 +115,7 @@ def persist_access_migration(path: Path, original: bytes, migrated: dict[str, An
         allow_unicode=True,
     )
     write_text_atomic(path, rendered)
+    return rendered.encode("utf-8")
 
 
 def _stable_union(left: object, right: object) -> list[Any]:
@@ -167,15 +179,17 @@ def _managed_room_keys(config: dict[str, Any]) -> set[str]:
     return room_keys
 
 
-def _validate_room_keys(room_keys: object, managed_room_keys: set[str]) -> None:
-    if isinstance(room_keys, (dict, list)):
-        candidates = room_keys
-    else:
-        return
-    for room_key in candidates:
-        if room_key not in managed_room_keys:
-            msg = f"Access migration references unknown managed room key: {room_key}"
-            raise AccessMigrationError(msg)
+def _resolve_managed_room_key(room_reference: object, managed_room_keys: set[str]) -> str:
+    """Resolve one retired room reference when it identifies exactly one managed key."""
+    if isinstance(room_reference, str):
+        if room_reference in managed_room_keys:
+            return room_reference
+        if room_reference.startswith("#") and ":" in room_reference:
+            alias_localpart = room_reference[1:].split(":", 1)[0]
+            if alias_localpart in managed_room_keys:
+                return alias_localpart
+    msg = f"Access migration references unknown managed room key: {room_reference}"
+    raise AccessMigrationError(msg)
 
 
 def _apply_default_room_access(entity_data: dict[str, Any]) -> None:
@@ -196,6 +210,19 @@ def _migrate_global_users(migrated: dict[str, Any], global_users: list[Any]) -> 
         room_defaults["invite_users"] = _stable_union(room_defaults.get("invite_users"), global_users)
 
 
+def _validate_reply_policy_entities(migrated: dict[str, Any], policies: dict[str, Any]) -> None:
+    """Require every retired responder policy to target a configured entity."""
+    known_entities = {"*", "router"}
+    for section_name in ("agents", "teams"):
+        entities = migrated.get(section_name)
+        if isinstance(entities, dict):
+            known_entities.update(entities)
+    unknown_entities = sorted(str(entity_name) for entity_name in policies if entity_name not in known_entities)
+    if unknown_entities:
+        msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
+        raise AccessMigrationError(msg)
+
+
 def _migrate_reply_permissions(
     migrated: dict[str, Any],
     reply_permissions: object,
@@ -204,6 +231,7 @@ def _migrate_reply_permissions(
 ) -> None:
     if isinstance(reply_permissions, dict):
         policies = cast("dict[str, Any]", reply_permissions)
+        _validate_reply_policy_entities(migrated, policies)
         for section_name in ("agents", "teams"):
             entities = migrated.get(section_name)
             if not isinstance(entities, dict):
@@ -236,12 +264,12 @@ def _migrate_room_permissions(
     room_permissions: object,
     managed_room_keys: set[str],
 ) -> None:
-    _validate_room_keys(room_permissions, managed_room_keys)
     rooms = migrated.get("rooms")
     if room_permissions and not isinstance(rooms, dict):
         rooms = migrated.setdefault("rooms", {})
     if isinstance(rooms, dict) and isinstance(room_permissions, dict):
-        for room_key, invite_users in room_permissions.items():
+        for room_reference, invite_users in room_permissions.items():
+            room_key = _resolve_managed_room_key(room_reference, managed_room_keys)
             room = rooms.setdefault(room_key, {})
             if isinstance(room, dict):
                 room["invite_users"] = _stable_union(room.get("invite_users"), invite_users)
@@ -255,7 +283,10 @@ def _migrate_matrix_room_access(
     if not isinstance(matrix_access, dict):
         return
     access = cast("dict[str, Any]", matrix_access)
-    _validate_room_keys(access.get("invite_only_rooms", []), managed_room_keys)
+    invite_only_rooms = [
+        _resolve_managed_room_key(room_reference, managed_room_keys)
+        for room_reference in access.get("invite_only_rooms", [])
+    ]
     room_defaults = migrated.setdefault("room_defaults", {})
     if isinstance(room_defaults, dict):
         if access.get("mode", "single_user_private") == "multi_user":
@@ -270,7 +301,6 @@ def _migrate_matrix_room_access(
             access.get("room_admins"),
         )
 
-    invite_only_rooms = access.get("invite_only_rooms", [])
     rooms = migrated.get("rooms")
     if invite_only_rooms and not isinstance(rooms, dict):
         rooms = migrated.setdefault("rooms", {})

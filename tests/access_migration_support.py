@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
 
 
-def retired_authorization(**values: object) -> Any:
+def retired_authorization(**values: object) -> AuthorizationConfig:
     """Return raw authorization data so the root config migrator receives it."""
-    return dict(values)
+    return cast("AuthorizationConfig", dict(values))
 
 
 def retired_reply_permission(

@@ -250,6 +250,44 @@ def test_access_migration_rejects_unknown_room_permission_key() -> None:
         )
 
 
+def test_access_migration_rejects_unknown_reply_policy_entity() -> None:
+    """A retired responder policy must not disappear when its entity is unknown."""
+    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+
+    with pytest.raises(AccessMigrationError, match="contains unknown entities: missing"):
+        migrate_access_config_data(
+            {
+                "agents": {"talent": {"display_name": "Talent"}},
+                "authorization": {
+                    "agent_reply_permissions": {"missing": ["@owner:example.com"]},
+                },
+            },
+        )
+
+
+def test_access_migration_resolves_unambiguous_room_alias() -> None:
+    """A full alias whose localpart is a managed key must migrate to that key."""
+    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+
+    result = migrate_access_config_data(
+        {
+            "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
+            "authorization": {
+                "room_permissions": {"#talent:example.com": ["@owner:example.com"]},
+            },
+            "matrix_room_access": {
+                "invite_only_rooms": ["#talent:example.com"],
+            },
+        },
+    )
+
+    assert result.data["rooms"]["talent"] == {
+        "invite_users": ["@owner:example.com"],
+        "join_policy": "invite",
+        "listed": False,
+    }
+
+
 def test_access_migration_maps_matrix_access_without_authorization() -> None:
     """Retired Matrix room settings must migrate without an authorization section."""
     from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
