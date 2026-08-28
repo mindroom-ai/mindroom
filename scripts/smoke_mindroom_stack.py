@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
+from mindroom.config.main import load_config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from scripts.smoke_helpers import (
     error,
@@ -87,6 +89,19 @@ def room_alias_url(homeserver_port: int, matrix_server_name: str, room_name: str
     return f"http://127.0.0.1:{homeserver_port}/_matrix/client/v3/directory/room/{room_alias}"
 
 
+def migrate_stack_config(stack_dir: Path) -> None:
+    """Migrate the host config before Compose bind-mounts it as one file."""
+    config_path = stack_dir / "config" / "config.yaml"
+    if not config_path.is_file():
+        config_path = stack_dir / "config.yaml"
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=stack_dir / "mindroom_data",
+        process_env={},
+    )
+    load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+
 def main() -> int:
     """Run the compose smoke test."""
     if len(sys.argv) < 2:
@@ -138,6 +153,7 @@ def main() -> int:
         exit_code = 0
 
         try:
+            migrate_stack_config(stack_dir)
             log(f"[smoke] Starting mindroom-stack from {stack_dir}")
             run_command(
                 [
