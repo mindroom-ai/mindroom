@@ -31,6 +31,7 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -87,10 +88,12 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = Config(
-        agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:server"]}},
-        authorization={"default_room_access": True},
-        voice={"enabled": True},
+    config = with_current_room_member_access(
+        Config(
+            agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:server"]}},
+            authorization={},
+            voice={"enabled": True},
+        ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
     bot = _agent_bot(agent_user=agent_user, storage_path=tmpdir, config=config, rooms=["!test:server"])

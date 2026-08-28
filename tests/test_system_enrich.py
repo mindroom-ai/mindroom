@@ -46,7 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -69,17 +69,18 @@ if TYPE_CHECKING:
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(display_name="CodeAgent", role="Write code", rooms=["!room:localhost"]),
-                "research": AgentConfig(
-                    display_name="ResearchAgent",
-                    role="Do research",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="CodeAgent", role="Write code", rooms=["!room:localhost"]),
+                    "research": AgentConfig(
+                        display_name="ResearchAgent",
+                        role="Do research",
+                        rooms=["!room:localhost"],
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         ),
         runtime_paths,
     )

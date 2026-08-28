@@ -1,4 +1,7 @@
-"""Pure migration from retired access fields to the membership schema."""
+"""One-shot migration from retired access fields to the membership schema.
+
+Delete this module after pre-membership configuration files are no longer expected to load.
+"""
 
 from __future__ import annotations
 
@@ -76,19 +79,6 @@ def _write_temp_file(path: Path, content: bytes, *, file_mode: int) -> Path:
     return temp_path
 
 
-def write_text_atomic(path: Path, content: str) -> None:
-    """Replace an existing text file after fully writing a sibling temp file."""
-    temp_path = _write_temp_file(
-        path,
-        content.encode("utf-8"),
-        file_mode=path.stat().st_mode & 0o777,
-    )
-    try:
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
 def _create_backup_once(path: Path, content: bytes, *, file_mode: int) -> None:
     """Atomically publish an exact backup without replacing an earlier backup."""
     if path.exists():
@@ -114,7 +104,7 @@ def persist_access_migration(path: Path, original: bytes, migrated: dict[str, An
         sort_keys=False,
         allow_unicode=True,
     )
-    write_text_atomic(path, rendered)
+    yaml_io.write_text_atomic(path, rendered)
     return rendered.encode("utf-8")
 
 

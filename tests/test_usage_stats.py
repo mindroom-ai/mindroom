@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -18,7 +19,6 @@ from mindroom.usage_stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
-from tests.access_migration_support import retired_authorization
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -30,7 +30,7 @@ def _config() -> Config:
     return Config(
         agents={"code": AgentConfig(display_name="Code"), "other": AgentConfig(display_name="Other")},
         teams={"engineering": TeamConfig(display_name="Engineering", role="Team", agents=["code"])},
-        authorization=retired_authorization(
+        authorization=AuthorizationConfig(
             aliases={"@alice:example.test": ["@telegram-alice:example.test"]},
         ),
     )

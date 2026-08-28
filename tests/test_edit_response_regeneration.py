@@ -49,6 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -120,17 +121,19 @@ def _test_config(
     agent_names: tuple[str, ...] = ("test_agent",),
     voice_enabled: bool = False,
 ) -> Config:
-    config = Config(
-        agents={
-            name: {
-                "display_name": name.replace("_", " ").title(),
-                "rooms": ["!test:example.com"],
-            }
-            for name in agent_names
-        },
-        voice={"enabled": voice_enabled},
-        authorization={"default_room_access": True, "agent_reply_permissions": {}},
-        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    config = with_current_room_member_access(
+        Config(
+            agents={
+                name: {
+                    "display_name": name.replace("_", " ").title(),
+                    "rooms": ["!test:example.com"],
+                }
+                for name in agent_names
+            },
+            voice={"enabled": voice_enabled},
+            authorization={},
+            mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+        ),
     )
     return _bind_runtime_paths(config, tmp_path)
 
@@ -246,29 +249,31 @@ def _run_response_context_metadata(
 
 
 def _team_test_config(tmp_path: Path) -> Config:
-    config = Config(
-        agents={
-            "worker": {
-                "display_name": "Worker",
-                "rooms": ["!test:example.com"],
+    config = with_current_room_member_access(
+        Config(
+            agents={
+                "worker": {
+                    "display_name": "Worker",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        teams={
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "Coordinate worker",
-                "agents": ["worker"],
-                "rooms": ["!test:example.com"],
+            teams={
+                "test_team": {
+                    "display_name": "Test Team",
+                    "role": "Coordinate worker",
+                    "agents": ["worker"],
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        models={
-            "default": {
-                "provider": "openai",
-                "id": "test-model",
+            models={
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                },
             },
-        },
-        authorization={"default_room_access": True, "agent_reply_permissions": {}},
-        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+            authorization={},
+            mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+        ),
     )
     return _bind_runtime_paths(config, tmp_path)
 
@@ -4162,7 +4167,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> None:
+async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
     """Disallowed reactions must not consume interactive questions."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -4177,11 +4182,8 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
                 "test_agent": {
                     "display_name": "Test Agent",
                     "rooms": ["!test:example.com"],
+                    "access": {"users": ["@alice:example.com"]},
                 },
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
             },
         ),
         tmp_path,
@@ -4299,10 +4301,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
                     "rooms": ["!test:example.com"],
                 },
             },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-            },
+            router={"access": {"users": ["@alice:example.com"]}},
         ),
         tmp_path,
     )
@@ -4362,7 +4361,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_committed_config_confirmation_resumes_before_changed_reply_permissions(tmp_path: Path) -> None:
+async def test_committed_config_confirmation_resumes_before_changed_responder_access(tmp_path: Path) -> None:
     """A frozen config decision must finish after that decision changes authorization."""
     agent_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -4373,10 +4372,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
     config = _bind_runtime_paths(
         Config(
             agents={"assistant": {"display_name": "Assistant", "rooms": ["!test:example.com"]}},
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-            },
+            router={"access": {"users": ["@alice:example.com"]}},
         ),
         tmp_path,
     )
@@ -4400,7 +4396,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
         requester="@bob:example.com",
         room_id=room.room_id,
         thread_id=None,
-        config_path="authorization.agent_reply_permissions.router",
+        config_path="router.access.users",
         old_value=["@bob:example.com"],
         new_value=["@alice:example.com"],
         decision_event_id=reaction_event_id,

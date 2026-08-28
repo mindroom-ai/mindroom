@@ -84,7 +84,7 @@ from mindroom.response_runner import (
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -147,11 +147,12 @@ class _NoopResponseLifecycle:
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-            teams={},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
+                teams={},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )

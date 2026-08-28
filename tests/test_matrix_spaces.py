@@ -718,7 +718,7 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        authorization={"global_users": ["@owner:example.com"]},
+        room_defaults={"invite_users": ["@owner:example.com"]},
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()

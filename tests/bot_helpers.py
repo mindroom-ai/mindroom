@@ -51,7 +51,7 @@ from mindroom.response_runner import (
     ResponseRequest,
 )
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -490,21 +490,22 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
 def _configured_team_test_config(runtime_root: Path) -> Config:
     """Return a runtime-bound config with one configured team for TeamBot tests."""
     return _runtime_bound_config(
-        Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-            },
-            teams={
-                "support_team": TeamConfig(
-                    display_name="Support Team",
-                    role="Coordinate test responses",
-                    agents=["general"],
-                    rooms=["!test:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                teams={
+                    "support_team": TeamConfig(
+                        display_name="Support Team",
+                        role="Coordinate test responses",
+                        agents=["general"],
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
         ),
         runtime_root,
     )
@@ -879,14 +880,15 @@ class AgentBotTestBase:
     def create_mock_config(runtime_root: Path) -> Config:
         """Create a typed config for tests that do not need a runtime-bound YAML load."""
         return _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                teams={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization=retired_authorization(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    teams={},
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                ),
             ),
             runtime_root,
         )

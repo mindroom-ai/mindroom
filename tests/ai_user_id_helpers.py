@@ -51,7 +51,7 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
@@ -103,60 +103,64 @@ def _entity_alias_for_test(config: Config, runtime_paths: RuntimePaths, matrix_i
 
 
 def _config() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=retired_authorization(default_room_access=True),
+    return with_current_room_member_access(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_matrix_message() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                tools=["matrix_message"],
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=retired_authorization(default_room_access=True),
+    return with_current_room_member_access(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_team() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        teams={
-            "ultimate": TeamConfig(
-                display_name="Ultimate",
-                role="Coordinate the team",
-                agents=["general"],
-                mode="coordinate",
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=retired_authorization(default_room_access=True),
+    return with_current_room_member_access(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate the team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_team_matrix_message() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                tools=["matrix_message"],
-            ),
-        },
-        teams={
-            "ultimate": TeamConfig(
-                display_name="Ultimate",
-                role="Coordinate the team",
-                agents=["general"],
-                mode="coordinate",
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-        authorization=retired_authorization(default_room_access=True),
+    return with_current_room_member_access(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate the team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 

@@ -95,8 +95,8 @@ def test_room_security_helpers_use_only_effective_policy(tmp_path: Path) -> None
     assert matrix_rooms._room_admin_user_ids(policy) == ["@admin:example.com", "@partner:example.com"]
 
 
-def test_managed_room_initial_state_records_configured_admin_ownership() -> None:
-    """Room creation must distinguish configured grants from other power users."""
+def test_managed_room_initial_state_does_not_embed_admin_ownership_metadata() -> None:
+    """Room creation must emit only Matrix power-level schema fields."""
     client = AsyncMock()
     client.user_id = "@router:example.com"
 
@@ -108,7 +108,7 @@ def test_managed_room_initial_state_records_configured_admin_ownership() -> None
     )
 
     power_levels = initial_state[0]["content"]
-    assert power_levels["io.mindroom.managed_room_admins"] == ["@admin:example.com"]
+    assert "io.mindroom.managed_room_admins" not in power_levels
     assert power_levels["users"] == {
         "@power:example.com": 50,
         "@admin:example.com": 100,
@@ -117,8 +117,8 @@ def test_managed_room_initial_state_records_configured_admin_ownership() -> None
 
 
 @pytest.mark.asyncio
-async def test_managed_room_admin_reconciliation_revokes_only_owned_grants() -> None:
-    """Removing a configured admin must preserve creator and manually managed power."""
+async def test_managed_room_admin_reconciliation_preserves_existing_admins() -> None:
+    """Removing a configured admin must not attempt an equal-power demotion."""
     client = AsyncMock()
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={
@@ -150,14 +150,14 @@ async def test_managed_room_admin_reconciliation_revokes_only_owned_grants() -> 
     assert written["users"] == {
         "@router:example.com": 100,
         "@manual:example.com": 100,
+        "@removed:example.com": 100,
         "@kept:example.com": 100,
     }
-    assert written["io.mindroom.managed_room_admins"] == ["@kept:example.com"]
 
 
 @pytest.mark.asyncio
-async def test_managed_room_admin_reconciliation_revokes_all_owned_grants() -> None:
-    """An empty configured list must revoke every grant previously owned by config."""
+async def test_managed_room_admin_reconciliation_with_empty_policy_preserves_admins() -> None:
+    """An empty configured list must leave existing Matrix power levels intact."""
     client = AsyncMock()
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={
@@ -184,8 +184,10 @@ async def test_managed_room_admin_reconciliation_revokes_all_owned_grants() -> N
 
     assert result is True
     written = client.room_put_state.await_args.kwargs["content"]
-    assert written["users"] == {"@router:example.com": 100}
-    assert written["io.mindroom.managed_room_admins"] == []
+    assert written["users"] == {
+        "@router:example.com": 100,
+        "@removed:example.com": 100,
+    }
 
 
 @pytest.mark.asyncio

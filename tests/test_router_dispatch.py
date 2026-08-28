@@ -28,6 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _attachment_record_stub,
@@ -468,12 +469,14 @@ class TestAgentBot(AgentBotTestBase):
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
         """A file event in a multi-responder room should register exactly one attachment."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                        "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -605,12 +608,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -687,12 +692,14 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -777,9 +784,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -826,9 +835,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -870,9 +881,11 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = _runtime_bound_config(
-            Config(
-                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         )

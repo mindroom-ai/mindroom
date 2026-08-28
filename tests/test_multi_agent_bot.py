@@ -34,7 +34,7 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
-from tests.access_migration_support import apply_retired_authorization, retired_authorization, retired_reply_permission
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
@@ -76,10 +76,11 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
         user_id="",
     )
     config = _runtime_bound_config(
-        Config(
-            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
         ),
         tmp_path,
     )
@@ -306,13 +307,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
         sender_id = "@user:localhost"
-        config.authorization = apply_retired_authorization(
-            config,
-            default_room_access=True,
-            agent_reply_permissions={
-                mock_agent_user.agent_name: retired_reply_permission(users=[sender_id]),
-            },
-        )
+        with_responder_access(config, mock_agent_user.agent_name, users=[sender_id])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)

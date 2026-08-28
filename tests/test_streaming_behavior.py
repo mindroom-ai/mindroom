@@ -69,7 +69,7 @@ from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -131,20 +131,21 @@ def _make_bot_with_shared_knowledge(
 ) -> AgentBot:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "helper": AgentConfig(
-                    display_name="HelperAgent",
-                    rooms=["!test:localhost"],
-                    knowledge_bases=[base_id],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            knowledge_bases={base_id: {"path": f"./{base_id}"}},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "helper": AgentConfig(
+                        display_name="HelperAgent",
+                        rooms=["!test:localhost"],
+                        knowledge_bases=[base_id],
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+                knowledge_bases={base_id: {"path": f"./{base_id}"}},
+            ),
         ),
         runtime_paths,
     )
@@ -276,16 +277,17 @@ class TestStreamingBehavior:
         """Set up test config."""
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         self.config = bind_runtime_paths(
-            Config(
-                agents={
-                    "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization=retired_authorization(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    },
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             runtime_paths,
         )

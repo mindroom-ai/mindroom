@@ -515,25 +515,18 @@ class TestDynamicConfigUpdate:
             "role": "General assistant",
             "model": "default",
             "rooms": ["lobby"],
-        }
-        authorization = {
-            "global_users": ["@alice:example.com"],
-            "agent_reply_permissions": {
-                "general": {"joined_rooms": ["lobby"]},
-            },
+            "access": {"members_of_rooms": ["lobby"]},
         }
         initial_config = Config(
             agents={"general": agent},
             rooms={"lobby": {"display_name": "Lobby"}},
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization=authorization,
             matrix_space={"enabled": False},
         )
         updated_config = Config(
             agents={"general": agent},
             rooms={"lobby": {"display_name": "Lobby"}},
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization=authorization,
             matrix_space={"enabled": True},
         )
         orchestrator = orchestrator_factory()
@@ -584,12 +577,6 @@ class TestDynamicConfigUpdate:
         orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Live room reconciliation should preserve grants without replacing the router."""
-        authorization = {
-            "global_users": ["@alice:example.com"],
-            "agent_reply_permissions": {
-                "general": {"joined_rooms": ["lobby"]},
-            },
-        }
         initial_config = Config(
             agents={
                 "general": {
@@ -597,10 +584,10 @@ class TestDynamicConfigUpdate:
                     "role": "General assistant",
                     "model": "default",
                     "rooms": ["lobby", "obsolete"],
+                    "access": {"members_of_rooms": ["lobby"]},
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization=authorization,
         )
         updated_config = Config(
             agents={
@@ -609,10 +596,10 @@ class TestDynamicConfigUpdate:
                     "role": "General assistant",
                     "model": "default",
                     "rooms": ["lobby"],
+                    "access": {"members_of_rooms": ["lobby"]},
                 },
             },
             models={"default": {"provider": "test", "id": "test-model"}},
-            authorization=authorization,
         )
         orchestrator = orchestrator_factory()
         orchestrator.config = initial_config

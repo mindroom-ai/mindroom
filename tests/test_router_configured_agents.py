@@ -16,7 +16,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
-from tests.access_migration_support import retired_authorization, retired_reply_permission
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 from tests.identity_helpers import entity_names_for_ids, persist_entity_accounts
 
@@ -398,14 +397,9 @@ class TestResponderCandidateSelection:
                     "assistant": AgentConfig(
                         display_name="Assistant",
                         rooms=["project"],
+                        access=ResponderAccessConfig(members_of_rooms=["project"]),
                     ),
                 },
-                authorization=retired_authorization(
-                    global_users=["@alice:localhost"],
-                    agent_reply_permissions={
-                        "assistant": retired_reply_permission(joined_rooms=["project"]),
-                    },
-                ),
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
         )

@@ -4022,10 +4022,10 @@ class TestMultiAgentOrchestrator:
         """Hot reload should keep reading the orchestrator's custom config path."""
         config_path = tmp_path / "custom-config.yaml"
         current_config = MagicMock()
-        current_config.authorization.global_users = []
+        current_config.administrators = []
         current_config.event_journal = EventJournalConfig()
         new_config = MagicMock()
-        new_config.authorization.global_users = []
+        new_config.administrators = []
         # The same journal, because a *changed* one is refused before the
         # reload reaches the support-only apply path under test here.
         new_config.event_journal = current_config.event_journal
@@ -4100,10 +4100,10 @@ class TestMultiAgentOrchestrator:
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         current_config = MagicMock()
-        current_config.authorization.global_users = []
+        current_config.administrators = []
         current_config.event_journal = EventJournalConfig()
         new_config = MagicMock()
-        new_config.authorization.global_users = []
+        new_config.administrators = []
         new_config.event_journal = EventJournalConfig(
             backend="postgres",
             database_url="postgresql://journal.invalid/moved",
@@ -4145,10 +4145,10 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
         current_config = MagicMock()
-        current_config.authorization.global_users = []
+        current_config.administrators = []
         current_config.event_journal = MagicMock()
         new_config = MagicMock()
-        new_config.authorization.global_users = []
+        new_config.administrators = []
         # The same journal config object, because a *changed* one is refused
         # outright before the reload reaches the behaviour under test here.
         new_config.event_journal = current_config.event_journal

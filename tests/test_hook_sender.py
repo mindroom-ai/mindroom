@@ -58,7 +58,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
-from tests.access_migration_support import apply_retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -208,7 +208,7 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    config.authorization = apply_retired_authorization(config, default_room_access=True)
+    with_current_room_member_access(config)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,

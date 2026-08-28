@@ -13,6 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import install_runtime_journal_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
@@ -23,10 +24,12 @@ if TYPE_CHECKING:
 
 def _test_config() -> Config:
     """Return one typed config for edit-after-restart tests."""
-    return Config(
-        agents={"test_agent": AgentConfig(display_name="Test Agent")},
-        authorization={"default_room_access": True},
-        mindroom_user={"username": "mindroom"},
+    return with_current_room_member_access(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            authorization={},
+            mindroom_user={"username": "mindroom"},
+        ),
     )
 
 

@@ -28,7 +28,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.access_migration_support import apply_retired_authorization, retired_authorization
+from tests.access_schema_support import with_responder_access
 from tests.bot_helpers import FencedRoomRecorder, make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -808,7 +808,6 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
     config = bind_runtime_paths(
         Config(
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -873,7 +872,6 @@ async def test_router_departure_allows_fresh_reinvite(
     config = bind_runtime_paths(
         Config(
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1086,7 +1084,6 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
     config = bind_runtime_paths(
         Config(
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1140,7 +1137,6 @@ async def test_redelivered_invite_retries_a_failed_welcome(
     config = bind_runtime_paths(
         Config(
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1300,10 +1296,10 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
                 "code": AgentConfig(
                     display_name="Code",
                     role="Writes code",
+                    access=ResponderAccessConfig(current_room_members=True),
                 ),
             },
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(default_room_access=True),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1397,20 +1393,15 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
                 "code": AgentConfig(
                     display_name="Code",
                     role="Writes code",
+                    access=ResponderAccessConfig(users=["@alice:localhost"]),
                 ),
                 "research": AgentConfig(
                     display_name="Research",
                     role="Finds sources",
+                    access=ResponderAccessConfig(users=["@bob:localhost"]),
                 ),
             },
             router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(
-                global_users=["@alice:localhost"],
-                agent_reply_permissions={
-                    "code": ["@alice:localhost"],
-                    "research": ["@bob:localhost"],
-                },
-            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -1509,21 +1500,15 @@ async def test_router_invite_welcome_waits_for_replacement_authorization(
     """Welcome delivery must use the policy published after a closed reload gate."""
     sender_id = "@alice:localhost"
     config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(model="default", accept_invites=True),
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={ROUTER_AGENT_NAME: [sender_id]},
-            ),
+        with_responder_access(
+            Config(router=RouterConfig(model="default", accept_invites=True)),
+            ROUTER_AGENT_NAME,
+            users=[sender_id],
         ),
         test_runtime_paths(tmp_path),
     )
     denied_config = config.model_copy(deep=True)
-    denied_config.authorization = apply_retired_authorization(
-        denied_config,
-        default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: []},
-    )
+    with_responder_access(denied_config, ROUTER_AGENT_NAME, users=[])
     bot = make_test_agent_bot(
         agent_user=_router_user(),
         storage_path=tmp_path,

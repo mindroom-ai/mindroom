@@ -1702,7 +1702,7 @@ class TestConfigMigrate:
         original = _old_config_init_mind_memory_config("${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory")
         cfg.write_text(original, encoding="utf-8")
 
-        with patch("mindroom.config.access_migration.write_text_atomic", side_effect=OSError("disk full")):
+        with patch("mindroom.yaml_io.write_text_atomic", side_effect=OSError("disk full")):
             result = runner.invoke(app, ["config", "migrate", "--path", str(cfg)])
 
         output = normalize_console_output(result.output)

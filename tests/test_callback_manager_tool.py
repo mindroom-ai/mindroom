@@ -42,13 +42,17 @@ def _config(*, enabled: bool = True) -> Config:
     return Config.model_validate(
         {
             "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
-            "agents": {"coder": {"display_name": "Coder", "model": "default", "rooms": ["lobby"]}},
+            "agents": {
+                "coder": {
+                    "display_name": "Coder",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                    "access": {"users": ["@owner:example.org"]},
+                },
+            },
             "rooms": {"lobby": {"display_name": "Lobby"}},
             "external_trigger_policy": {"enabled": enabled},
-            "authorization": {
-                "global_users": ["@owner:example.org"],
-                "agent_reply_permissions": {"*": ["@owner:example.org"]},
-            },
+            "administrators": ["@owner:example.org"],
         },
     )
 

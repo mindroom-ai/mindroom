@@ -11,13 +11,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
-from tests.access_migration_support import retired_authorization
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -48,14 +48,14 @@ def _context(
     tmp_path: Path,
     *,
     requester_id: str = "@alice:example.test",
-    global_users: list[str] | None = None,
+    administrators: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
 ) -> ToolRuntimeContext:
     config = bind_runtime_paths(
         Config(
             agents={"usage": AgentConfig(display_name="Usage")},
-            authorization=retired_authorization(
-                global_users=global_users or [],
+            administrators=administrators or [],
+            authorization=AuthorizationConfig(
                 aliases=aliases or {},
             ),
         ),
@@ -189,7 +189,7 @@ async def test_admin_rejects_non_global_requester_before_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An admin-scoped tool still requires a canonical global user."""
-    context = _context(tmp_path, requester_id="@outsider:example.test", global_users=["@admin:example.test"])
+    context = _context(tmp_path, requester_id="@outsider:example.test", administrators=["@admin:example.test"])
     collect = Mock()
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
@@ -206,7 +206,7 @@ async def test_admin_rejects_a_mismatched_runtime_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An admin-scoped toolkit remains bound to the agent that received the override."""
-    context = _context(tmp_path, requester_id="@admin:example.test", global_users=["@admin:example.test"])
+    context = _context(tmp_path, requester_id="@admin:example.test", administrators=["@admin:example.test"])
     collect = Mock()
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_admin_usage", collect)
@@ -226,7 +226,7 @@ async def test_admin_allows_canonical_global_alias(
     context = _context(
         tmp_path,
         requester_id="@telegram-admin:example.test",
-        global_users=["@admin:example.test"],
+        administrators=["@admin:example.test"],
         aliases={"@admin:example.test": ["@telegram-admin:example.test"]},
     )
     collect = Mock(return_value=_Report("admin"))
@@ -245,11 +245,11 @@ async def test_admin_rejects_alias_only_global_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a canonical ID in global_users grants the established admin role."""
+    """Only a canonical ID in administrators grants the established admin role."""
     context = _context(
         tmp_path,
         requester_id="@admin:example.test",
-        global_users=["@telegram-admin:example.test"],
+        administrators=["@telegram-admin:example.test"],
         aliases={"@admin:example.test": ["@telegram-admin:example.test"]},
     )
     collect = Mock()

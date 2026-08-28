@@ -64,7 +64,7 @@ from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -1332,13 +1332,11 @@ class TestAgentBot(AgentBotTestBase):
                         display_name="CalculatorAgent",
                         rooms=["!room:localhost"],
                         private=AgentPrivateConfig(per="user", root="calculator_data"),
+                        access={"users": ["@owner:localhost"]},
                     ),
                 },
                 models={"default": ModelConfig(provider="openai", id="test-model")},
-                authorization={
-                    "global_users": ["@owner:localhost"],
-                    "agent_reply_permissions": {"calculator": ["@owner:localhost"]},
-                },
+                administrators=["@owner:localhost"],
             ),
             tmp_path,
         )
@@ -1399,15 +1397,11 @@ class TestAgentBot(AgentBotTestBase):
                         display_name="CalculatorAgent",
                         rooms=["!room:localhost"],
                         private=AgentPrivateConfig(per="user", root="calculator_data"),
+                        access={"users": ["@mallory:localhost", "@victim:localhost"]},
                     ),
                 },
                 models={"default": ModelConfig(provider="openai", id="test-model")},
-                authorization={
-                    "global_users": ["@mallory:localhost", "@victim:localhost"],
-                    "agent_reply_permissions": {
-                        "calculator": ["@mallory:localhost", "@victim:localhost"],
-                    },
-                },
+                administrators=["@mallory:localhost", "@victim:localhost"],
             ),
             tmp_path,
         )
@@ -2741,20 +2735,21 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Dispatch setup failures are system replies even when they occur on a team bot."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-                },
-                teams={
-                    "team_bot": TeamConfig(
-                        display_name="Team Bot",
-                        role="Coordinate work",
-                        agents=["general"],
-                        rooms=["!test:localhost"],
-                    ),
-                },
-                models={"default": ModelConfig(provider="test", id="test-model")},
-                authorization=retired_authorization(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                    },
+                    teams={
+                        "team_bot": TeamConfig(
+                            display_name="Team Bot",
+                            role="Coordinate work",
+                            agents=["general"],
+                            rooms=["!test:localhost"],
+                        ),
+                    },
+                    models={"default": ModelConfig(provider="test", id="test-model")},
+                ),
             ),
             tmp_path,
         )

@@ -38,6 +38,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 from mindroom.voice_handler import prepare_voice_message
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -141,7 +142,6 @@ def _make_visible_router_echo_scenario(
     tmp_path: Path,
     *,
     agents: dict | None = None,
-    authorization: dict | None = None,
     router_access: ResponderAccessConfig | None = None,
     voice_enabled: bool = True,
     send_response_return: str | None = "$voice_echo",
@@ -154,15 +154,16 @@ def _make_visible_router_echo_scenario(
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     configured_agents = agents or {"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}}
-    config = _attach_runtime_paths(
+    config = with_current_room_member_access(
         Config(
             agents=configured_agents,
-            authorization=authorization or {"default_room_access": True},
             router=RouterConfig(access=router_access),
             voice={"enabled": voice_enabled, "visible_router_echo": True},
         ),
-        tmp_path,
     )
+    if router_access is not None:
+        config.router.access = router_access
+    config = _attach_runtime_paths(config, tmp_path)
 
     bot = _agent_bot(
         agent_user=agent_user,
@@ -204,7 +205,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
+        config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
@@ -254,7 +255,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
+        config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
@@ -296,9 +297,11 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
-            Config(
-                agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         ),
@@ -373,9 +376,11 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
-            Config(
-                agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
+                    authorization={},
+                ),
             ),
             tmp_path,
         ),
@@ -452,12 +457,14 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
-            Config(
-                agents={
-                    "home": AgentConfig(display_name="Home", rooms=["!test:example.com"], skills=["demo"]),
-                    "research": AgentConfig(display_name="Research", rooms=["!test:example.com"], skills=["demo"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "home": AgentConfig(display_name="Home", rooms=["!test:example.com"], skills=["demo"]),
+                        "research": AgentConfig(display_name="Research", rooms=["!test:example.com"], skills=["demo"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         ),
@@ -527,7 +534,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
+        config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
@@ -578,9 +585,11 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 async def test_prepare_voice_message_includes_original_sender_and_attachment_metadata(tmp_path) -> None:  # noqa: ANN001
     """Audio normalization should preserve sender identity and attachment IDs."""
     config = _attach_runtime_paths(
-        Config(
-            authorization={"default_room_access": True},
-            voice={"enabled": True},
+        with_current_room_member_access(
+            Config(
+                authorization={},
+                voice={"enabled": True},
+            ),
         ),
         tmp_path,
     )
@@ -619,9 +628,11 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
 async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(tmp_path) -> None:  # noqa: ANN001
     """Voice normalization should trust only system-owned internal metadata."""
     config = _attach_runtime_paths(
-        Config(
-            authorization={"default_room_access": True},
-            voice={"enabled": True},
+        with_current_room_member_access(
+            Config(
+                authorization={},
+                voice={"enabled": True},
+            ),
         ),
         tmp_path,
     )
@@ -670,7 +681,7 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
 @pytest.mark.asyncio
 async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_path) -> None:  # noqa: ANN001
     """Fallback normalization should keep thread metadata and the raw-audio flag."""
-    config = _attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path)
+    config = _attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path)
     room = _make_room("@mindroom_home:example.com", "@alice:example.com")
     event = _make_voice_event(
         sender="@alice:example.com",
@@ -716,10 +727,12 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
     config = _attach_runtime_paths(
-        Config(
-            agents={"assistant": {"display_name": "Assistant"}},
-            authorization={"default_room_access": True},
-            voice={"enabled": True},
+        with_current_room_member_access(
+            Config(
+                agents={"assistant": {"display_name": "Assistant"}},
+                authorization={},
+                voice={"enabled": True},
+            ),
         ),
         tmp_path,
     )
@@ -776,9 +789,11 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
-            Config(
-                agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+                    authorization={},
+                ),
             ),
             tmp_path,
         ),
@@ -859,9 +874,11 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
-            Config(
-                agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+                    authorization={},
+                ),
             ),
             tmp_path,
         ),
@@ -900,10 +917,12 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
 async def test_router_and_agent_share_audio_normalization_when_router_is_present(tmp_path) -> None:  # noqa: ANN001
     """Router-present rooms should still normalize one audio event only once."""
     config = _attach_runtime_paths(
-        Config(
-            agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
-            authorization={"default_room_access": True},
-            voice={"enabled": True, "visible_router_echo": False},
+        with_current_room_member_access(
+            Config(
+                agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+                authorization={},
+                voice={"enabled": True, "visible_router_echo": False},
+            ),
         ),
         tmp_path,
     )
@@ -1744,13 +1763,15 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     config = _attach_runtime_paths(
-        Config(
-            agents={
-                "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-            },
-            authorization={"default_room_access": True},
-            voice={"enabled": True, "visible_router_echo": False},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+                },
+                authorization={},
+                voice={"enabled": True, "visible_router_echo": False},
+            ),
         ),
         tmp_path,
     )
@@ -1822,13 +1843,15 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absent(tmp_path) -> None:  # noqa: ANN001
     """A transcript mention should make the mentioned agent respond directly."""
     config = _attach_runtime_paths(
-        Config(
-            agents={
-                "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-            },
-            authorization={"default_room_access": True},
-            voice={"enabled": True},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+                },
+                authorization={},
+                voice={"enabled": True},
+            ),
         ),
         tmp_path,
     )
@@ -1888,13 +1911,15 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
 async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tmp_path) -> None:  # noqa: ANN001
     """Inherited audio-caption mentions should still target the agent when STT omits them."""
     config = _attach_runtime_paths(
-        Config(
-            agents={
-                "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-            },
-            authorization={"default_room_access": True},
-            voice={"enabled": True},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+                },
+                authorization={},
+                voice={"enabled": True},
+            ),
         ),
         tmp_path,
     )

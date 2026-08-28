@@ -150,7 +150,7 @@ def config_migrate(
         return
 
     if migrated_mind_memory:
-        from mindroom.config.access_migration import write_text_atomic  # noqa: PLC0415
+        from mindroom.yaml_io import write_text_atomic  # noqa: PLC0415
 
         try:
             write_text_atomic(config_file, migrated)

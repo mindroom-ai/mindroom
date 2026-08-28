@@ -27,7 +27,7 @@ from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.access_migration_support import apply_retired_authorization, retired_authorization, retired_reply_permission
+from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -232,12 +232,7 @@ class TestDelegateTools:
         config: Config,
     ) -> None:
         """A restricted target cannot be delegated without requester authorization state."""
-        config.authorization = apply_retired_authorization(
-            config,
-            agent_reply_permissions={
-                "code": retired_reply_permission(users=["@alice:example.org"]),
-            },
-        )
+        with_responder_access(config, "code", users=["@alice:example.org"])
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["code"],
@@ -275,10 +270,7 @@ class TestDelegateTools:
             delegation_depth=0,
         )
         replacement_config = config.model_copy(deep=True)
-        replacement_config.authorization = apply_retired_authorization(
-            replacement_config,
-            agent_reply_permissions={"code": retired_reply_permission(users=[])},
-        )
+        with_responder_access(replacement_config, "code", users=[])
         runtime_context = make_test_tool_runtime_context(
             agent_name="leader",
             target=MessageTarget(
@@ -334,26 +326,25 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegation_accepts_requester_authorized_by_grant_room(self, tmp_path: Path) -> None:
         """Direct delegated runs should consume the same shared room-membership reply policy."""
-        config = Config(
-            agents={
-                "leader": AgentConfig(
-                    display_name="Leader",
-                    role="Lead",
-                    rooms=["grant"],
-                    delegate_to=["worker"],
-                ),
-                "worker": AgentConfig(
-                    display_name="Worker",
-                    role="Work",
-                    rooms=["grant"],
-                ),
-            },
-            authorization=retired_authorization(
-                agent_reply_permissions={
-                    "worker": retired_reply_permission(joined_rooms=["grant"]),
+        config = with_responder_access(
+            Config(
+                agents={
+                    "leader": AgentConfig(
+                        display_name="Leader",
+                        role="Lead",
+                        rooms=["grant"],
+                        delegate_to=["worker"],
+                    ),
+                    "worker": AgentConfig(
+                        display_name="Worker",
+                        role="Work",
+                        rooms=["grant"],
+                    ),
                 },
+                models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
             ),
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            "worker",
+            members_of_rooms=["grant"],
         )
         config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = runtime_paths_for(config)

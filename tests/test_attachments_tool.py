@@ -30,6 +30,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -53,9 +54,11 @@ def _tool_context(
         process_env=process_env or {},
     )
     config = bind_runtime_paths(
-        Config(
-            agents={"openclaw": AgentConfig(display_name="OpenClaw")},
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={"openclaw": AgentConfig(display_name="OpenClaw")},
+                authorization={},
+            ),
         ),
         runtime_paths,
     )

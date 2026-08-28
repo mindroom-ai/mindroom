@@ -100,7 +100,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
@@ -1618,9 +1618,10 @@ async def test_managed_primary_cannot_settle_human_source_in_mixed_follow_up_bat
 async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: Path) -> None:
     """An unauthorized sender is filtered at precheck and the turn gets a terminal record."""
     config = bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(agent_reply_permissions={"general": ["@owner:localhost"]}),
+        with_responder_access(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            "general",
+            users=["@owner:localhost"],
         ),
         test_runtime_paths(tmp_path / "runtime"),
     )
@@ -1721,11 +1722,12 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
     old_config = bind_runtime_paths(
         Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={"general": [_SENDER]},
-            ),
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[_SENDER]),
+                ),
+            },
         ),
         runtime_paths,
     )
@@ -1783,11 +1785,12 @@ async def test_ingress_denial_waits_for_config_replacement_before_settling(
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
     old_config = bind_runtime_paths(
         Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={"general": []},
-            ),
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[]),
+                ),
+            },
         ),
         runtime_paths,
     )
@@ -1838,22 +1841,18 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     """A command prechecked before reload must not execute under a replacement deny policy."""
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
     old_config = bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={ROUTER_AGENT_NAME: [_SENDER]},
-            ),
+        with_responder_access(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            ROUTER_AGENT_NAME,
+            users=[_SENDER],
         ),
         runtime_paths,
     )
     new_config = bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={ROUTER_AGENT_NAME: []},
-            ),
+        with_responder_access(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            ROUTER_AGENT_NAME,
+            users=[],
         ),
         runtime_paths,
     )
@@ -3366,21 +3365,23 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
     old_config = bind_runtime_paths(
         Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={"general": [_SENDER]},
-            ),
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[_SENDER]),
+                ),
+            },
         ),
         runtime_paths,
     )
     new_config = bind_runtime_paths(
         Config(
-            agents={"general": AgentConfig(display_name="General")},
-            authorization=retired_authorization(
-                default_room_access=True,
-                agent_reply_permissions={"general": []},
-            ),
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[]),
+                ),
+            },
         ),
         runtime_paths,
     )

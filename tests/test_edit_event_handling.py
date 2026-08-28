@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
-from tests.access_migration_support import apply_retired_authorization, retired_reply_permission
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -38,7 +38,7 @@ def _runtime_config_and_paths(
         process_env={"MATRIX_HOMESERVER": "http://example.com"},
     )
     config = bind_runtime_paths(
-        Config(agents=agents or {}, authorization={"default_room_access": True}),
+        with_current_room_member_access(Config(agents=agents or {})),
         runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths, usernames=usernames)
@@ -235,17 +235,9 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         tmp_path,
         usernames={ROUTER_AGENT_NAME: "router"},
     )
-    config.authorization = apply_retired_authorization(
-        config,
-        default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: retired_reply_permission(users=[sender_id])},
-    )
+    with_responder_access(config, ROUTER_AGENT_NAME, users=[sender_id])
     replacement_config = config.model_copy(deep=True)
-    replacement_config.authorization = apply_retired_authorization(
-        replacement_config,
-        default_room_access=True,
-        agent_reply_permissions={ROUTER_AGENT_NAME: retired_reply_permission(users=[])},
-    )
+    with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,

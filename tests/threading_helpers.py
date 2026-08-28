@@ -28,7 +28,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -552,13 +552,14 @@ class ThreadingBehaviorTestBase:
         )
 
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-                authorization=retired_authorization(default_room_access=True),
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             tmp_path,
         )

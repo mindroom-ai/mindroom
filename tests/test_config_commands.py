@@ -44,7 +44,6 @@ from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
-from tests.access_migration_support import retired_authorization
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -55,17 +54,19 @@ def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _handler_authorization(
+def _handler_config_fields(
     *,
     config_command_enabled: bool,
-    global_users: list[str] | None = None,
+    administrators: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
-) -> AuthorizationConfig:
-    return retired_authorization(
-        config_command_enabled=config_command_enabled,
-        global_users=global_users or [],
-        aliases=aliases or {},
-    )
+) -> dict[str, object]:
+    return {
+        "administrators": administrators or [],
+        "authorization": AuthorizationConfig(
+            config_command_enabled=config_command_enabled,
+            aliases=aliases or {},
+        ),
+    }
 
 
 def _pending_config_change(
@@ -424,9 +425,9 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
@@ -466,9 +467,9 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -509,9 +510,9 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -600,7 +601,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
 
     admin_context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=Config(authorization=retired_authorization(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -622,7 +623,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
     user_context = make_test_command_handler_context(
-        **{**admin_context.__dict__, "config": Config(authorization=retired_authorization(global_users=[]))},
+        **{**admin_context.__dict__, "config": Config(administrators=[])},
     )
     await handle_command(
         context=user_context,
@@ -652,8 +653,8 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=retired_authorization(
-                global_users=["@admin:example.org"],
+            administrators=["@admin:example.org"],
+            authorization=AuthorizationConfig(
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
@@ -692,7 +693,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
     reload_plugins = AsyncMock(side_effect=RuntimeError("Plugin hooks module not found: /tmp/demo/hooks.py"))
     context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=Config(authorization=retired_authorization(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_reader=make_conversation_reader_mock(),
@@ -723,9 +724,9 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
                 aliases={"@alice:example.org": ["@telegram_alice:example.org"]},
             ),
         ),
@@ -795,9 +796,9 @@ async def test_handle_command_config_set_stays_retryable_after_post_send_failure
     context = make_test_command_handler_context(
         client=AsyncMock(),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -855,9 +856,9 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -907,9 +908,9 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -962,9 +963,9 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
@@ -1034,9 +1035,9 @@ async def test_confirmation_reactions_serialize_one_decision(
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1115,9 +1116,9 @@ async def test_checkpointed_confirmation_ignores_changed_authorization(
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=[],
+                administrators=[],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1220,9 +1221,9 @@ async def test_confirmation_send_failure_keeps_replay_state(
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1283,7 +1284,7 @@ async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=Config(authorization=_handler_authorization(config_command_enabled=True)),
+        config=Config(**_handler_config_fields(config_command_enabled=True)),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(
@@ -1385,9 +1386,9 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=Config(
-            authorization=_handler_authorization(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),

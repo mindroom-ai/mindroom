@@ -24,7 +24,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     bind_runtime_paths,
@@ -69,22 +69,23 @@ def _make_matrix_client_mock() -> AsyncMock:
 @pytest.fixture
 def config_with_team() -> Config:
     """Minimal config with two agents and one predefined team in a room."""
-    return Config(
-        agents={
-            "a1": AgentConfig(display_name="Agent One", role="", rooms=["room_x"]),
-            "a2": AgentConfig(display_name="Agent Two", role="", rooms=["room_x"]),
-        },
-        teams={
-            "t1": TeamConfig(
-                display_name="Team One",
-                role="Test preformed team",
-                agents=["a1", "a2"],
-                rooms=["room_x"],
-                mode="coordinate",
-            ),
-        },
-        router=RouterConfig(model="default"),
-        authorization=retired_authorization(default_room_access=True),
+    return with_current_room_member_access(
+        Config(
+            agents={
+                "a1": AgentConfig(display_name="Agent One", role="", rooms=["room_x"]),
+                "a2": AgentConfig(display_name="Agent Two", role="", rooms=["room_x"]),
+            },
+            teams={
+                "t1": TeamConfig(
+                    display_name="Team One",
+                    role="Test preformed team",
+                    agents=["a1", "a2"],
+                    rooms=["room_x"],
+                    mode="coordinate",
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
 

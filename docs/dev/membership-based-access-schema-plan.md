@@ -210,6 +210,8 @@ Room reconciliation consumes only `EffectiveRoomPolicy`:
 - Invite configured bots through the existing responder-room assignment path.
 
 Neither `administrators`, responder `access.users`, nor `credential_managers` participates in room invitations.
+Room-admin reconciliation is grant-only because the managing Matrix account cannot demote an equal-power administrator.
+Removing an admin from configuration stops future grants but does not lower an existing power level; that requires a Matrix authority with greater power.
 
 The membership schema is declarative for existing managed rooms.
 Reconciliation always applies reversible join-policy, directory-visibility, invitation, and power-level changes.
@@ -723,6 +725,7 @@ Replace the read-only `config explain-access` skeleton with the existing `config
 
 Remove `access_model` from current examples.
 Document the automatic mapping, validation-before-write behavior, backup path, atomic replacement, and multi-source refusal.
+Document that stale `agent_reply_permissions` entity keys must be removed before migration can continue.
 Retired fields may appear only in the migration reference and migration tests.
 
 - [ ] **Step 6: Run CLI, config, authorization, and documentation checks**

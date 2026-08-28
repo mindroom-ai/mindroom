@@ -1109,7 +1109,7 @@ async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_manager_rejects_members_denied_by_agent_reply_permissions(tmp_path: Path) -> None:
+async def test_manager_rejects_members_denied_by_agent_access(tmp_path: Path) -> None:
     """Per-agent reply permissions also gate whole-call admission."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())

@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -46,6 +48,41 @@ def membership_config(
         data["rooms"] = {room_key: dict(room) for room_key, room in rooms.items()}
     config = Config.model_validate(data)
     return bind_runtime_paths(config, test_runtime_paths(tmp_path))
+
+
+def with_current_room_member_access(config: Config, *, enabled: bool = True) -> Config:
+    """Return a config whose responders explicitly allow current-room members."""
+    if not enabled:
+        return config
+    config.router.access = ResponderAccessConfig(current_room_members=True)
+    for agent in config.agents.values():
+        agent.access = ResponderAccessConfig(current_room_members=True)
+    for team in config.teams.values():
+        team.access = ResponderAccessConfig(current_room_members=True)
+    return config
+
+
+def with_responder_access(
+    config: Config,
+    entity_name: str,
+    *,
+    current_room_members: bool = False,
+    members_of_rooms: Sequence[str] = (),
+    users: Sequence[str] = (),
+) -> Config:
+    """Return a config with one named responder assigned an explicit access policy."""
+    access = ResponderAccessConfig(
+        current_room_members=current_room_members,
+        members_of_rooms=list(members_of_rooms),
+        users=list(users),
+    )
+    if entity_name == ROUTER_AGENT_NAME:
+        config.router.access = access
+    elif entity_name in config.agents:
+        config.agents[entity_name].access = access
+    else:
+        config.teams[entity_name].access = access
+    return config
 
 
 def _joined_members(room_id: str, user_ids: Sequence[str]) -> nio.JoinedMembersResponse:

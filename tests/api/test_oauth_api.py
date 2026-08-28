@@ -132,7 +132,8 @@ def _stored_oauth_credentials(
 def _config_payload(
     worker_scope: str | None = "user_agent",
     *,
-    authorization: dict[str, Any] | None = None,
+    allowed_users: list[str] | None = None,
+    aliases: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
@@ -144,13 +145,15 @@ def _config_payload(
                 "tools": ["google_drive"],
                 "worker_scope": worker_scope,
                 "rooms": [],
+                "access": {"users": allowed_users or []},
+                "credential_managers": allowed_users or [],
             },
         },
     }
-    if authorization is None:
+    if allowed_users is None:
         payload["administrators"] = ["@alice:example.org"]
-    else:
-        payload["authorization"] = authorization
+    if aliases is not None:
+        payload["authorization"] = {"aliases": aliases}
     return payload
 
 
@@ -2479,7 +2482,7 @@ def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Pat
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3073,7 +3076,7 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3135,10 +3138,8 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={
-                "aliases": {canonical: [alias]},
-                "agent_reply_permissions": {"general": [canonical]},
-            },
+            allowed_users=[canonical],
+            aliases={canonical: [alias]},
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3773,7 +3774,7 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3815,7 +3816,7 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3879,7 +3880,7 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3897,7 +3898,7 @@ def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) ->
                 runtime_paths,
                 _config_payload(
                     worker_scope="shared",
-                    authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+                    allowed_users=["@bob:example.org"],
                 ),
             )
             _use_runtime_auth_settings(api_app)
@@ -3927,7 +3928,7 @@ def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: 
         runtime_paths,
         _config_payload(
             worker_scope="shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            allowed_users=["@alice:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)
@@ -3955,7 +3956,7 @@ def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> N
         runtime_paths,
         _config_payload(
             worker_scope="user_agent",
-            authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+            allowed_users=["@bob:example.org"],
         ),
     )
     _use_runtime_auth_settings(api_app)

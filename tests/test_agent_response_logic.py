@@ -131,8 +131,8 @@ class TestAgentResponseLogic:
         assert should_respond is False
 
     @pytest.mark.usefixtures("enforce_turn_authorization")
-    def test_mentioned_agent_reply_permissions_honor_aliases(self) -> None:
-        """Bridge aliases should inherit per-agent reply permissions."""
+    def test_mentioned_agent_access_honors_aliases(self) -> None:
+        """Bridge aliases should inherit per-agent access."""
         canonical_user = f"@alice:{self.domain}"
         alias_user = f"@telegram_111:{self.domain}"
         self.config.agents["calculator"].access = ResponderAccessConfig(users=[canonical_user])
@@ -667,7 +667,7 @@ class TestAgentResponseLogic:
         assert effective_action.rejection_message == "Team request includes no available members."
 
     @pytest.mark.usefixtures("enforce_turn_authorization")
-    def test_mentioned_agent_reply_permissions_support_domain_pattern(self) -> None:
+    def test_mentioned_agent_access_supports_domain_pattern(self) -> None:
         """Per-agent reply patterns should allow domain-scoped sender matching."""
         self.config.agents["calculator"].access = ResponderAccessConfig(users=[f"*:{self.domain}"])
         should_respond = agent_response_should_respond(

@@ -24,7 +24,6 @@ _ROOM_ADMIN_POWER_LEVEL = 100
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
-_MANAGED_ROOM_ADMINS_KEY = "io.mindroom.managed_room_admins"
 
 # Element Call membership state event (deployed MSC3401 flavor). Regular room
 # members must be able to publish it to join a call, so it is pinned to PL0 —
@@ -85,7 +84,6 @@ def _create_room_initial_state(
         users.update(dict.fromkeys(power_users, _POWER_USER_POWER_LEVEL))
     if admin_users:
         users.update(dict.fromkeys(admin_users, _ROOM_ADMIN_POWER_LEVEL))
-        power_level_content[_MANAGED_ROOM_ADMINS_KEY] = sorted(set(admin_users))
     if client.user_id:
         users[client.user_id] = _ROOM_ADMIN_POWER_LEVEL
     if users:
@@ -210,7 +208,7 @@ async def ensure_managed_room_power_levels(
     for event_type, power_level in _MANAGED_ROOM_EVENT_POWER_LEVELS.items():
         desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
-    desired_content = _with_managed_room_admin_power_levels(desired_content, concrete_admin_ids)
+    desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
     if desired_content == current_content:
         logger.debug(
             "Managed room power levels already configured",
@@ -255,32 +253,6 @@ def _with_room_admin_power_levels(
         if not isinstance(current_level, int) or current_level < _ROOM_ADMIN_POWER_LEVEL:
             next_users[user_id] = _ROOM_ADMIN_POWER_LEVEL
     next_content["users"] = next_users
-    return next_content
-
-
-def _with_managed_room_admin_power_levels(
-    power_levels_content: dict[str, Any],
-    user_ids: set[str],
-) -> dict[str, Any]:
-    """Reconcile only administrator grants previously owned by managed-room policy."""
-    next_content = dict(power_levels_content)
-    existing_users = power_levels_content.get("users")
-    next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
-    previous_value = power_levels_content.get(_MANAGED_ROOM_ADMINS_KEY)
-    previous_user_ids = (
-        {user_id for user_id in previous_value if isinstance(user_id, str)}
-        if isinstance(previous_value, list)
-        else set()
-    )
-    for user_id in previous_user_ids - user_ids:
-        next_users.pop(user_id, None)
-    for user_id in sorted(user_ids):
-        current_level = next_users.get(user_id)
-        if not isinstance(current_level, int) or current_level < _ROOM_ADMIN_POWER_LEVEL:
-            next_users[user_id] = _ROOM_ADMIN_POWER_LEVEL
-    next_content["users"] = next_users
-    if previous_value is not None or user_ids:
-        next_content[_MANAGED_ROOM_ADMINS_KEY] = sorted(user_ids)
     return next_content
 
 

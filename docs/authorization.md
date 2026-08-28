@@ -79,6 +79,8 @@ Credential managers do not gain responder access.
 An authored field under `rooms.<key>` replaces the corresponding default.
 List overrides replace the whole default list instead of merging with it.
 An explicit empty list therefore disables the inherited invitations or admins for that room.
+MindRoom grants missing room admins but does not demote existing power-level 100 admins when they are removed from configuration, because the managing Matrix account cannot demote an equal-power user.
+Removing an admin from configuration therefore stops future grants; lowering an existing grant requires a Matrix authority with greater power.
 
 `join_policy` accepts `invite`, `knock`, or `public`.
 MindRoom reconciles join policy, directory visibility, invitations, and power levels for existing managed rooms.
@@ -145,6 +147,7 @@ MindRoom validates the converted configuration before replacing `config.yaml` at
 The migration preserves explicit new-schema values and removes the retired fields.
 The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
 Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
+Also remove `authorization.agent_reply_permissions` entries whose agent or team is no longer configured.
 
 Access migration does not support configurations that use `!include`.
 If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.

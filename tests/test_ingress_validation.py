@@ -18,6 +18,7 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.matrix import stale_stream_cleanup
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 
@@ -29,12 +30,14 @@ if TYPE_CHECKING:
 async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_path: Path) -> None:
     """Trusted relays should preserve human requesters without trusting outsiders."""
     config = bind_runtime_paths(
-        Config(
-            agents={"test_agent": {"display_name": "Test Agent"}},
-            bot_accounts=["@bridge_bot:localhost"],
-            mindroom_user=MindRoomUserConfig(),
-            models={"default": {"provider": "test", "id": "test-model"}},
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={"test_agent": {"display_name": "Test Agent"}},
+                bot_accounts=["@bridge_bot:localhost"],
+                mindroom_user=MindRoomUserConfig(),
+                models={"default": {"provider": "test", "id": "test-model"}},
+                authorization={},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )

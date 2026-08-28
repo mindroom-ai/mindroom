@@ -61,7 +61,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_worker_key,
 )
-from tests.access_migration_support import retired_authorization
+from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -1308,15 +1308,16 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
     """Private agent execution identity should use the request owner, not the transport sender."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    private=AgentPrivateConfig(per="user", root="general_data"),
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=retired_authorization(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        private=AgentPrivateConfig(per="user", root="general_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         runtime_paths,
     )
