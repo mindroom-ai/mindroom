@@ -97,7 +97,7 @@ Responder access supports three independent clauses.
 - `users` allows canonical Matrix user IDs or glob patterns.
 
 Agent and team access defaults `members_of_rooms` to that responder's configured `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
-Only managed room keys are inferred this way: raw Matrix room IDs and full aliases listed in `rooms` produce no membership grant, so name them under `members_of_rooms` by their managed room key when they should grant access.
+Only managed room keys are inferred this way: raw Matrix room IDs and full aliases listed in `rooms` produce no membership grant, and explicit `members_of_rooms` entries must also name configured managed room keys.
 The router defaults `current_room_members` to `true`.
 An explicit `members_of_rooms: []` disables inferred room grants.
 
