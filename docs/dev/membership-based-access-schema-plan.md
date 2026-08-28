@@ -198,6 +198,8 @@ Room reconciliation consumes only `EffectiveRoomPolicy`:
 
 Neither `administrators`, responder `access.users`, nor `credential_managers` participates in room invitations.
 
+Membership mode is declarative for existing managed rooms. It does not consult the legacy `matrix_room_access.reconcile_existing_rooms` opt-in before applying reversible join-policy, directory-visibility, invitation, or power-level changes. Encryption remains one-way: reconciliation may enable it but never disable it.
+
 ### Credential management
 
 Agent credential and OAuth endpoints authorize only:
@@ -374,7 +376,7 @@ async def test_membership_schema_invites_only_effective_room_invite_users(tmp_pa
     assert invited == {("one", "@one:localhost")}
 ```
 
-Add assertions proving that administrators, room admins, responder users, and credential managers are not invitation candidates.
+Add assertions proving that administrators, room admins, responder users, and credential managers are not invitation candidates. Add an existing-room regression with legacy `reconcile_existing_rooms: false` that proves membership-mode join policy and visibility are still reconciled.
 
 - [ ] **Step 2: Run the regressions and verify legacy invitation behavior cannot satisfy them**
 
@@ -385,6 +387,8 @@ Expected: FAIL because room reconciliation still consumes `matrix_room_access` a
 - [ ] **Step 3: Route membership-mode reconciliation through `EffectiveRoomPolicy`**
 
 Update `ensure_all_rooms_exist` to resolve each managed room key before applying state. Replace membership-mode calls to `get_authorized_user_ids_to_invite` with the effective `invite_users` tuple for that room. Keep the legacy branch unchanged when `access_model` is omitted.
+
+In membership mode, do not gate existing-room desired state on `matrix_room_access.reconcile_existing_rooms`. Retain the legacy guard only for legacy mode. Preserve the irreversible encryption check in both modes.
 
 Do not call `is_authorized_sender` for membership-mode invitees; the invitation roster is intentionally independent from conversation access.
 
@@ -406,9 +410,27 @@ git commit -m "feat: reconcile membership room policy"
 **Files:**
 - Modify: `src/mindroom/authorization.py:94-230`
 - Modify: `src/mindroom/agent_reply_membership.py:1-410`
+- Modify: `src/mindroom/approval_inbound.py:70-105`
+- Modify: `src/mindroom/reaction_dispatch.py:60-205`
+- Modify: `src/mindroom/api/external_triggers.py:240-265`
+- Modify: `src/mindroom/orchestration/script_runtime.py:175-210`
+- Modify: `src/mindroom/custom_tools/delegate.py:105-130`
+- Modify: `src/mindroom/custom_tools/attachment_helpers.py:25-50`
+- Modify: `src/mindroom/matrix_rtc/call_manager.py:625-650`
+- Modify: `src/mindroom/visible_voice_echo.py:270-310,495-515`
+- Modify: `src/mindroom/bot_room_lifecycle.py:325-415`
+- Modify: `src/mindroom/bot.py:2750-2780`
+- Modify: `src/mindroom/thread_utils.py:330-355`
 - Modify: `src/mindroom/ingress_validation.py:260-325`
 - Modify: `src/mindroom/turn_policy.py`
 - Test: `tests/test_authorization.py`
+- Test: `tests/test_bot_reactions_approvals.py`
+- Test: `tests/api/test_external_triggers_api.py`
+- Test: `tests/test_script_runtime_lifecycle.py`
+- Test: `tests/test_delegate_tools.py`
+- Test: `tests/test_attachments_tool.py`
+- Test: `tests/test_matrix_rtc_call_manager.py`
+- Test: `tests/test_visible_voice_echo.py`
 - Test: `tests/test_turn_policy.py`
 - Test: `tests/test_edit_response_regeneration.py`
 
@@ -447,7 +469,7 @@ def test_membership_mode_fails_closed_when_grant_room_is_unresolved() -> None:
     )
 ```
 
-Cover text, media, reaction, voice, delegation, and scheduled-resume entry points with at least one shared parameterized policy test.
+Cover text, media, approval reactions, Matrix RTC calls, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled-resume entry points with membership-mode regressions. Each regression must prove a current grant-room member is accepted and an unresolved membership snapshot is denied.
 
 - [ ] **Step 2: Run focused tests and confirm the legacy precheck rejects the member**
 
@@ -457,20 +479,22 @@ Expected: FAIL because `is_authorized_sender` remains an independent room gate.
 
 - [ ] **Step 3: Implement one membership-mode responder gate**
 
-Keep `is_authorized_sender` unchanged for legacy mode. In membership mode, remove that legacy room allowlist from ingress and require every selected responder to pass `is_sender_allowed_for_responder`. Reuse the current authoritative membership snapshot; do not issue a Matrix request per candidate or per event.
+Keep `is_authorized_sender` unchanged for legacy mode. In membership mode, remove that legacy room allowlist from ingress and require every selected responder to pass `is_sender_allowed_for_responder`. Make the existing `is_sender_allowed_for_agent_reply` and `is_sender_allowed_for_agent_reply_in_room` entry points delegate to the new resolver in membership mode so secondary callers cannot retain legacy semantics accidentally. Reuse the current authoritative membership snapshot; do not issue a Matrix request per candidate or per event.
 
 Apply aliases before static and administrator matching. Preserve internal-system bypasses. Treat missing, stale, or unresolved membership snapshots as denial for membership clauses.
 
+Replace standalone `is_authorized_sender` calls at approval continuation, attachment, and room-lifecycle boundaries with context-specific membership-mode checks. Tool-approval policy remains unchanged, but the human acting on an approval must still pass the responder policy captured by that continuation before it is consumed.
+
 - [ ] **Step 4: Run authorization and ingress suites**
 
-Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py`
+Run: `uv run pytest -q tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit responder authorization**
 
 ```bash
-git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py
+git add src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/approval_inbound.py src/mindroom/reaction_dispatch.py src/mindroom/api/external_triggers.py src/mindroom/orchestration/script_runtime.py src/mindroom/custom_tools/delegate.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/matrix_rtc/call_manager.py src/mindroom/visible_voice_echo.py src/mindroom/bot_room_lifecycle.py src/mindroom/bot.py src/mindroom/thread_utils.py src/mindroom/ingress_validation.py src/mindroom/turn_policy.py tests/test_authorization.py tests/test_bot_reactions_approvals.py tests/api/test_external_triggers_api.py tests/test_script_runtime_lifecycle.py tests/test_delegate_tools.py tests/test_attachments_tool.py tests/test_matrix_rtc_call_manager.py tests/test_visible_voice_echo.py tests/test_turn_policy.py tests/test_edit_response_regeneration.py tests/test_voice_command_processing.py tests/test_routing_regression.py
 git commit -m "feat: authorize responders by room membership"
 ```
 
@@ -479,13 +503,22 @@ git commit -m "feat: authorize responders by room membership"
 **Files:**
 - Modify: `src/mindroom/authorization.py:210-230`
 - Modify: `src/mindroom/api/dashboard_credential_scope.py:210-250`
+- Modify: `src/mindroom/commands/handler.py:300-425`
+- Modify: `src/mindroom/commands/config_confirmation.py:510-545`
+- Modify: `src/mindroom/commands/parsing.py:325-415`
 - Modify: `src/mindroom/custom_tools/config_manager.py:330-370`
+- Modify: `src/mindroom/custom_tools/usage_stats.py:60-90`
 - Modify: `src/mindroom/oauth/reset.py:70-105`
 - Modify: `src/mindroom/commands/config_commands.py`
+- Modify: `src/mindroom/orchestrator.py:1835-1855`
 - Test: `tests/test_authorization.py`
 - Test: `tests/api/test_dashboard_credential_scope.py`
 - Test: `tests/test_oauth_connection_tools.py`
+- Test: `tests/test_commands.py`
 - Test: `tests/test_config_commands.py`
+- Test: `tests/test_bot_reactions_approvals.py`
+- Test: `tests/test_usage_stats_tool.py`
+- Test: `tests/test_config_reload.py`
 
 **Interfaces:**
 - Consumes: top-level `administrators` and `AgentConfig.credential_managers` from Task 1.
@@ -530,18 +563,18 @@ Expected: FAIL because credential management still reads static reply users.
 
 In membership mode, authorize agent credential management only when the canonical requester is in `administrators` or the target agent's concrete `credential_managers`. Keep the legacy static-reply-user path unchanged in legacy mode.
 
-Route administrative chat commands through `is_platform_administrator` while preserving their existing feature-enable flags. Do not make administrators room members, Matrix room admins, or invite candidates.
+Route plugin reload, configuration commands, configuration-confirmation reactions, administrative usage statistics, config-manager operations, and related config-reload reporting through `is_platform_administrator` while preserving their existing feature-enable flags. Update command help text to name platform administrators rather than legacy global users. Do not make administrators room members, Matrix room admins, or invite candidates.
 
 - [ ] **Step 4: Run credential and command suites**
 
-Run: `uv run pytest -q tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_config_commands.py tests/api/test_oauth_api.py`
+Run: `uv run pytest -q tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_commands.py tests/test_config_commands.py tests/test_bot_reactions_approvals.py tests/test_usage_stats_tool.py tests/test_config_reload.py tests/api/test_oauth_api.py`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit authority separation**
 
 ```bash
-git add src/mindroom/authorization.py src/mindroom/api/dashboard_credential_scope.py src/mindroom/custom_tools/config_manager.py src/mindroom/oauth/reset.py src/mindroom/commands/config_commands.py tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_config_commands.py tests/api/test_oauth_api.py
+git add src/mindroom/authorization.py src/mindroom/api/dashboard_credential_scope.py src/mindroom/commands/handler.py src/mindroom/commands/config_confirmation.py src/mindroom/commands/parsing.py src/mindroom/custom_tools/config_manager.py src/mindroom/custom_tools/usage_stats.py src/mindroom/oauth/reset.py src/mindroom/commands/config_commands.py src/mindroom/orchestrator.py tests/test_authorization.py tests/api/test_dashboard_credential_scope.py tests/test_oauth_connection_tools.py tests/test_commands.py tests/test_config_commands.py tests/test_bot_reactions_approvals.py tests/test_usage_stats_tool.py tests/test_config_reload.py tests/api/test_oauth_api.py
 git commit -m "feat: separate credential and platform authority"
 ```
 
@@ -662,9 +695,19 @@ uv run pytest -q \
   tests/test_routing_regression.py \
   tests/test_edit_response_regeneration.py \
   tests/test_voice_command_processing.py \
+  tests/test_bot_reactions_approvals.py \
+  tests/api/test_external_triggers_api.py \
+  tests/test_script_runtime_lifecycle.py \
+  tests/test_delegate_tools.py \
+  tests/test_attachments_tool.py \
+  tests/test_matrix_rtc_call_manager.py \
+  tests/test_visible_voice_echo.py \
   tests/api/test_dashboard_credential_scope.py \
   tests/test_oauth_connection_tools.py \
+  tests/test_commands.py \
   tests/test_config_commands.py \
+  tests/test_usage_stats_tool.py \
+  tests/test_config_reload.py \
   tests/test_cli_config.py
 ```
 
