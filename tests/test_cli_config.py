@@ -172,6 +172,35 @@ def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> No
     assert structlog.is_configured() is False
 
 
+def test_config_explain_access_is_read_only_and_separates_capabilities(tmp_path: Path) -> None:
+    """The migration report must expose distinct decisions without rewriting legacy config."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
+        "agents:\n  general:\n    display_name: General Agent\n    model: default\n    rooms: [general]\n"
+        "router:\n  model: default\n"
+        "matrix_space:\n  enabled: false\n"
+        "authorization:\n"
+        "  global_users: ['@owner:example.com']\n"
+        "  room_permissions:\n    general: ['@member:example.com']\n"
+        "  agent_reply_permissions:\n    general: ['@speaker:example.com']\n",
+        encoding="utf-8",
+    )
+    original = config_path.read_text(encoding="utf-8")
+
+    result = _invoke_with_runtime(["config", "explain-access"], config_path)
+
+    assert result.exit_code == 0
+    assert "Invitation intent" in result.output
+    assert "Conversation access" in result.output
+    assert "Matrix power" in result.output
+    assert "Credential authority" in result.output
+    assert "administrators: []" in result.output
+    assert "@owner:example.com" in result.output
+    assert "not automatically assigned" in result.output
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -279,12 +308,15 @@ class TestConfigInit:
         content = target.read_text()
         assert "agents:" in content
         assert "models:" in content
+        assert "access_model: room_membership" in content
         assert "authorization:" in content
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
         config = yaml.safe_load(content)
-        assert config["matrix_room_access"]["room_admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["administrators"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"]["invite_users"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"]["admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
 
     def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
         """mindroom.chat should default to OpenAI without prompting for a provider."""
@@ -737,9 +769,9 @@ class TestConfigInit:
         config_content = target.read_text(encoding="utf-8")
         config = yaml.safe_load(config_content)
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in config_content
-        assert config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
-        assert config["authorization"]["global_users"] == ["@alice:mindroom.chat"]
-        assert config["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat"]
+        assert config["administrators"] == ["@alice:mindroom.chat"]
+        assert config["room_defaults"]["invite_users"] == ["@alice:mindroom.chat"]
+        assert config["room_defaults"]["admins"] == ["@alice:mindroom.chat"]
 
     def test_init_mindroom_chat_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex config should use Codex defaults and hosted Matrix settings."""
@@ -1214,9 +1246,13 @@ class TestConfigInit:
         assert f"#   id: {OPENAI_GPT_TERRA}" in config_text
         assert "# openai_luna:" in config_text
         assert f"#   id: {OPENAI_GPT_LUNA}" in config_text
-        assert config["matrix_room_access"] == {
-            "mode": "single_user_private",
-            "room_admins": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
+        assert config["access_model"] == "room_membership"
+        assert config["administrators"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
+        assert config["room_defaults"] == {
+            "join_policy": "invite",
+            "listed": False,
+            "invite_users": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
+            "admins": [OWNER_MATRIX_USER_ID_PLACEHOLDER],
         }
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:

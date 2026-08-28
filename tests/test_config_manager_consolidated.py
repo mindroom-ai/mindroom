@@ -148,8 +148,125 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     return config_path
 
 
+@pytest.mark.parametrize("requester_id", ["@member:example.org", "@manager:example.org"])
+def test_membership_config_mutations_require_platform_administrator(
+    tmp_path: Path,
+    requester_id: str,
+) -> None:
+    """Conversation or credential authority must not grant full configuration control."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "access_model": "room_membership",
+            "administrators": ["@admin:example.org"],
+            "agents": {
+                "talent": {
+                    "display_name": "Talent",
+                    "role": "Original",
+                    "access": {"users": ["@member:example.org"]},
+                    "credential_managers": ["@manager:example.org"],
+                },
+            },
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+    original = config_path.read_text(encoding="utf-8")
+
+    with tool_runtime_context(_caller_context(config_manager, config, agent_name="talent", requester_id=requester_id)):
+        results = (
+            config_manager.manage_config(
+                operation="patch",
+                changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
+            ),
+            config_manager.manage_agent(operation="update", agent_name="talent", role="Changed"),
+            config_manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["talent"],
+            ),
+        )
+
+    assert all("platform administrator" in result for result in results)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path) -> None:
+    """The top-level administrator list must authorize every config-manager write surface."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "access_model": "room_membership",
+            "administrators": ["@admin:example.org"],
+            "agents": {
+                "talent": {
+                    "display_name": "Talent",
+                    "role": "Original",
+                },
+            },
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        patch_result = config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Patched"}],
+        )
+        agent_result = config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            role="Updated",
+        )
+        team_result = config_manager.manage_team(
+            team_name="reviewers",
+            display_name="Reviewers",
+            role="Review",
+            agents=["talent"],
+        )
+
+    assert "patch updated" in patch_result
+    assert "Successfully updated agent" in agent_result
+    assert "Successfully created team" in team_result
+
+
+def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) -> None:
+    """Direct tool execution without a requester must never inherit administrative authority."""
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(
+        Config.model_validate(
+            {
+                "access_model": "room_membership",
+                "administrators": ["@admin:example.org"],
+                "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
+            },
+        ),
+        config_path,
+    )
+
+    result = _config_manager(config_path).manage_config(
+        operation="patch",
+        changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
+    )
+
+    assert "active platform administrator requester" in result
+
+
 class TestConsolidatedConfigManager:
     """Test the consolidated ConfigManager with four tools."""
+
+    @pytest.fixture(autouse=True)
+    def _permit_writes_for_non_authorization_tests(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep behavior tests focused; dedicated tests above exercise the real admin gate."""
+        monkeypatch.setattr(
+            ConfigManagerTools,
+            "_configuration_mutation_authorization_error",
+            staticmethod(lambda _config: None),
+        )
 
     def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""

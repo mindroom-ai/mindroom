@@ -671,7 +671,7 @@ def _print_pairing_success_with_exports(
             markup=False,
         )
         console.print(
-            "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",
+            "Update your config.yaml owner placeholder(s) manually if you rely on membership access settings.",
         )
     console.print("\nThen run:")
     console.print("  uv run mindroom run")

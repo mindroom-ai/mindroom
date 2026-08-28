@@ -1007,7 +1007,7 @@ class TestAgentBot(AgentBotTestBase):
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_unauth")
 
-        with patch("mindroom.ingress_validation.is_authorized_sender", return_value=False):
+        with patch("mindroom.authorization.is_authorized_sender", return_value=False):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
@@ -1070,8 +1070,8 @@ class TestAgentBot(AgentBotTestBase):
 
         wrap_extracted_collaborators(bot, "_turn_policy")
         with (
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-            patch.object(bot._turn_policy, "can_reply_to_sender", return_value=False),
+            patch("mindroom.authorization.is_authorized_sender", return_value=True),
+            patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
                 bot._turn_controller.deps.turn_policy,
                 "can_reply_to_sender_in_room",

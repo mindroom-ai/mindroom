@@ -38,12 +38,13 @@ Voice transcription is not rewritten into chat-command syntax; commands must arr
 ## Permission Behavior
 
 Commands are subject to the same authorization rules as normal messages.
-The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
+In membership mode, the responder's `access` policy authorizes the sender.
+In legacy mode, room authorization and `authorization.agent_reply_permissions` remain unchanged.
 See [Authorization](authorization.md) for details.
 
 `!config` is disabled by default.
 Set `authorization.config_command_enabled: true` to enable it.
-When enabled, callers must be in `authorization.global_users`.
+When enabled, callers must be platform administrators.
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
 
@@ -272,7 +273,7 @@ Enable Matrix end-to-end encryption for the current room.
 `!encrypt` reviews what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
 Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
-Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`.
+Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`, while legacy configurations may use `matrix_room_access.encrypt_managed_rooms: true`.
 
 ### `!e2ee`
 
@@ -290,7 +291,7 @@ Use it when an agent seems to ignore messages in an encrypted room.
 View and modify MindRoom configuration from chat.
 This command is disabled by default.
 Set `authorization.config_command_enabled: true` to enable it.
-When enabled, only users in `authorization.global_users` can use it.
+When enabled, only platform administrators can use it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**
@@ -349,7 +350,7 @@ This command is the manual override: useful if the auto-watcher missed something
 ✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
 ```
 
-**Permission:** Caller must be in `authorization.global_users`. Aliases: `!reload-plugins`, `!reload_plugins`.
+**Permission:** Caller must be a platform administrator. Aliases: `!reload-plugins`, `!reload_plugins`.
 
 ## Stop Button
 

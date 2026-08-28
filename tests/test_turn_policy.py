@@ -339,7 +339,6 @@ async def test_unauthorized_sender_is_ignored_even_when_mentioned(tmp_path: Path
     plan = await _plan(policy, room, _dispatch(context, agent_name="general"))
 
     assert plan.kind == "ignore"
-    assert policy.can_reply_to_sender(_SENDER) is False
 
 
 def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
@@ -356,7 +355,7 @@ def test_internal_agent_sender_bypasses_reply_allowlist(tmp_path: Path) -> None:
     )
     policy = _policy_for(config, "general")
 
-    assert policy.can_reply_to_sender(_entity_id(config, "research").full_id) is True
+    assert policy.can_reply_to_sender_in_room(_entity_id(config, "research").full_id, "!room:localhost") is True
 
 
 @pytest.mark.asyncio

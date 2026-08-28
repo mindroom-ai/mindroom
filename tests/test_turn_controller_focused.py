@@ -274,9 +274,6 @@ class _SpyTurnPolicy:
     inner: TurnPolicy
     plan_turn_calls: int = 0
 
-    def can_reply_to_sender(self, sender_id: str) -> bool:
-        return self.inner.can_reply_to_sender(sender_id)
-
     def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
         return self.inner.can_reply_to_sender_in_room(sender_id, room_id)
 

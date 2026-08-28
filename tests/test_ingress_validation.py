@@ -51,7 +51,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
     turn_store = MagicMock()
     turn_store.is_handled.return_value = False
     turn_policy = MagicMock()
-    turn_policy.can_reply_to_sender.return_value = True
+    turn_policy.can_reply_to_sender_in_room.return_value = True
     validator = IngressValidator(
         IngressValidatorDeps(
             runtime=runtime,

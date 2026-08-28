@@ -68,6 +68,62 @@ def test_matrix_room_access_rejects_duplicate_room_admins() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_membership_schema_reconciles_effective_policy_for_existing_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Membership mode must apply inherited state even when the legacy reconcile flag is false."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        access_model="room_membership",
+        room_defaults={"encrypted": True},
+        rooms={
+            "lobby": {
+                "display_name": "Lobby",
+                "join_policy": "public",
+                "listed": True,
+                "admins": ["@room-admin:example.com"],
+            },
+        },
+        matrix_room_access={"reconcile_existing_rooms": False},
+    )
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
+    ensure_power = AsyncMock(return_value=True)
+    ensure_encryption = AsyncMock(return_value=True)
+    ensure_join_rule = AsyncMock(return_value=True)
+    ensure_visibility = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", ensure_power)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_encryption_enabled", ensure_encryption)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_join_rule", ensure_join_rule)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_directory_visibility", ensure_visibility)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"lobby": "!lobby:example.com"}
+    ensure_power.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        ["@room-admin:example.com"],
+    )
+    ensure_encryption.assert_awaited_once_with(mock_client, "!lobby:example.com")
+    ensure_join_rule.assert_awaited_once_with(mock_client, "!lobby:example.com", "public")
+    ensure_visibility.assert_awaited_once_with(mock_client, "!lobby:example.com", "public")
+
+
 def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
     """`matrix_room_access: null` should be treated the same as omitting the block."""
     config_path = tmp_path / "config.yaml"

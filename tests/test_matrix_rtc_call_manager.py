@@ -1078,6 +1078,7 @@ async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None:
     """A participant must pass normal room authorization before the agent joins."""
     client = _client()

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.authorization import is_platform_administrator
 from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
@@ -534,7 +535,7 @@ async def _ensure_decision_checkpoint(
         response_text = "❌ Configuration change cancelled."
     elif not authorization.config_command_enabled:
         response_text = "❌ Config command disabled."
-    elif resolved_sender not in authorization.global_users:
+    elif not is_platform_administrator(resolved_sender, context.runtime.config):
         response_text = "❌ Admin only."
 
     checkpoint = replace(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import is_authorized_sender
+from mindroom.authorization import is_authorized_sender, is_sender_allowed_for_responder
 from mindroom.matrix.state import resolve_room_id
 
 if TYPE_CHECKING:
@@ -35,6 +35,15 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         return False
     if room_id == context.room_id:
         return True
+    if context.current_config.access_model == "room_membership":
+        return is_sender_allowed_for_responder(
+            context.requester_id,
+            context.agent_name,
+            room_id,
+            context.current_config,
+            context.runtime_paths,
+            context.require_agent_reply_memberships(),
+        )
     return is_authorized_sender(
         context.requester_id,
         context.current_config,

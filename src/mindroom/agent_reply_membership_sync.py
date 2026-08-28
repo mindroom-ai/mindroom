@@ -83,12 +83,12 @@ class AgentReplyMembershipSync:
         refresh: Callable[[], Awaitable[None]],
     ) -> None:
         """Refresh once when due and apply bounded retry backoff on failure."""
-        if not self._refresh_pending and not self._memberships.needs_refresh(config.authorization):
+        if not self._refresh_pending and not self._memberships.needs_refresh(config):
             return
         if time.monotonic() < self._refresh_retry_at:
             return
         await refresh()
-        self._refresh_pending = self._memberships.needs_refresh(config.authorization)
+        self._refresh_pending = self._memberships.needs_refresh(config)
         if not self._refresh_pending:
             self._refresh_attempt = 0
             self._refresh_retry_at = 0.0

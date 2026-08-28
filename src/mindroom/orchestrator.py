@@ -106,7 +106,7 @@ from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
-from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
+from .orchestration.rooms import get_room_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
@@ -1810,8 +1810,8 @@ class _MultiAgentOrchestrator:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
         reply_membership_policy_changed = agent_reply_membership_policy_changed(
-            current_config.authorization,
-            new_config.authorization,
+            current_config,
+            new_config,
         )
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
@@ -1843,7 +1843,11 @@ class _MultiAgentOrchestrator:
             changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
             logger.info(
                 "updating_config_authorization",
-                authorized_user_ids=new_config.authorization.global_users,
+                platform_administrator_ids=(
+                    new_config.administrators
+                    if new_config.access_model == "room_membership"
+                    else new_config.authorization.global_users
+                ),
             )
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
@@ -1990,12 +1994,13 @@ class _MultiAgentOrchestrator:
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
         root_space_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
+        root_space_admin_ids = root_space_user_ids if config.access_model != "room_membership" else set()
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
             self.runtime_paths,
             normalized_room_ids,
-            admin_user_ids=root_space_user_ids,
+            admin_user_ids=root_space_admin_ids,
         )
         if root_space_id is None:
             return
@@ -2085,7 +2090,12 @@ class _MultiAgentOrchestrator:
     ) -> None:
         """Invite authorized human users who can access a given room."""
         for authorized_user_id in authorized_user_ids:
-            if not is_authorized_sender(authorized_user_id, config, room_id, self.runtime_paths):
+            if config.access_model != "room_membership" and not is_authorized_sender(
+                authorized_user_id,
+                config,
+                room_id,
+                self.runtime_paths,
+            ):
                 continue
             await self._invite_user_if_missing(
                 room_id,
@@ -2142,7 +2152,7 @@ class _MultiAgentOrchestrator:
             if current_members is None:
                 logger.warning("room_invitations_skipped_members_unavailable", room_id=room_id)
                 continue
-            authorized_user_ids = get_authorized_user_ids_to_invite(config, room_id, self.runtime_paths)
+            authorized_user_ids = get_room_user_ids_to_invite(config, room_id, self.runtime_paths)
             if internal_user_id is not None:
                 authorized_user_ids.discard(internal_user_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)

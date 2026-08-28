@@ -8,8 +8,9 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to match the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
-Membership in a policy's `joined_rooms` grants conversation access only and never grants OAuth-management access.
+When an OAuth request targets an agent with `agent_name`, membership mode requires the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Responder access and room membership never grant OAuth-management access.
+Legacy mode continues to authorize the policy's static `users` entries in `authorization.agent_reply_permissions` for that agent.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.

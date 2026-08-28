@@ -65,6 +65,18 @@ _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
 
 
+def _approval_action_authorized(
+    pending: PendingApproval,
+    stored: StoredApprovalCard,
+    authorize_responder: Callable[[str], bool] | None,
+) -> bool:
+    """Authorize an actionable card against its trusted originating responder."""
+    if authorize_responder is None:
+        return True
+    entity_name = stored.continuation_entity_name if stored.target_kind == "continuation" else pending.agent_name
+    return entity_name is not None and authorize_responder(entity_name)
+
+
 class ToolApprovalTransportError(RuntimeError):
     """One actionable reason an approval card cannot be transported or verified."""
 
@@ -486,6 +498,7 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
         before_consume: Callable[[], Awaitable[None]] | None = None,
+        authorize_responder: Callable[[str], bool] | None = None,
     ) -> ApprovalActionResult:
         """Atomically choose the exact-call winner and enqueue its terminal edit."""
         if self.has_active_in_memory_approval_card(card_event_id):
@@ -547,7 +560,11 @@ class _ApprovalManager:
                 expected_card_event_id=card_event_id,
             )
         )
-        if pending is None or pending.approver_user_id != sender_id:
+        if (
+            pending is None
+            or pending.approver_user_id != sender_id
+            or not _approval_action_authorized(pending, stored, authorize_responder)
+        ):
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()

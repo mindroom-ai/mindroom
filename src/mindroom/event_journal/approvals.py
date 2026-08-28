@@ -35,6 +35,7 @@ _CARD_COLUMNS = """
     cards.continuation_id AS continuation_id,
     cards.continuation_generation AS continuation_generation,
     cards.tool_call_id AS tool_call_id,
+    continuations.entity_name AS continuation_entity_name,
     background.run_id AS background_run_id,
     background.call_id AS background_call_id
 """
@@ -50,6 +51,9 @@ _CARD_DELIVERY_JOINS = """
     LEFT JOIN background_approval_calls AS background
       ON background.principal_id = cards.principal_id
      AND background.delivery_id = cards.delivery_id
+    LEFT JOIN approval_continuations AS continuations
+      ON continuations.approval_id = cards.continuation_id
+     AND continuations.generation = cards.continuation_generation
 """
 
 
@@ -67,6 +71,7 @@ class StoredApprovalCard:
     continuation_id: str
     continuation_generation: int
     tool_call_id: str
+    continuation_entity_name: str | None
     target_kind: Literal["continuation", "background_script"] = "continuation"
 
 
@@ -935,8 +940,10 @@ def _card(row: Row) -> StoredApprovalCard | None:
         if background_run_id is None:
             target_kind: Literal["continuation", "background_script"] = "continuation"
             card_identity = _native_identity(card)
+            continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:
             target_kind = "background_script"
+            continuation_entity_name = None
             background_call_id = _required_background_call_id(row)
             stored_identity = (background_run_id, -1, background_call_id)
             card_run_id, card_call_id = background_approvals.background_identity(card)
@@ -957,6 +964,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
         continuation_id=stored_identity[0],
         continuation_generation=stored_identity[1],
         tool_call_id=stored_identity[2],
+        continuation_entity_name=continuation_entity_name,
         target_kind=target_kind,
     )
 

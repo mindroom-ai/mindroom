@@ -2562,7 +2562,7 @@ class AgentBot:
                 orchestrator=self.orchestrator,
                 logger=self.logger,
                 before_consume=None if approval_reply_claimed else claim_approval_reply,
-                authorization_prevalidated=approval_reply_claimed,
+                membership_index=self._runtime_view.agent_reply_memberships,
             )
             if approval_reply_claimed or approval_reply_handled:
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
@@ -2807,6 +2807,7 @@ class AgentBot:
             approval_event_id=payload.card_event_id,
             status=payload.status,
             reason=payload.reason,
+            membership_index=self._runtime_view.agent_reply_memberships,
         )
 
     async def _on_media_message(

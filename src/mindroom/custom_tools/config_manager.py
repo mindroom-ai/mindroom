@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_va
 
 from mindroom.api.config_lifecycle import persist_runtime_validated_config, validate_and_persist_config_payload
 from mindroom.authorization import (
+    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     responder_candidate_entities_from_cached_room,
 )
@@ -50,6 +51,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_PLATFORM_ADMIN_REQUIRED_MESSAGE = (
+    "Error: Full configuration changes require an active platform administrator requester."
+)
 _AgentScope = Literal["current_room", "all"]
 _VALID_AGENT_SCOPES = {"current_room", "all"}
 _MAX_CONFIG_INSPECTION_CHARS = 20_000
@@ -585,6 +589,9 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
+        authorization_error = self._configuration_mutation_authorization_error(config)
+        if authorization_error is not None:
+            return authorization_error
         if len(config.source_files) > 1:
             return (
                 "Error: configuration is composed from multiple files via !include; "
@@ -726,6 +733,10 @@ class ConfigManagerTools(Toolkit):
             Success message or error details
 
         """
+        if operation in {"create", "update"}:
+            authorization_error = self._load_configuration_mutation_authorization_error()
+            if authorization_error is not None:
+                return authorization_error
         if operation == "create":
             if not display_name:
                 return "Error: display_name is required for create operation"
@@ -785,6 +796,9 @@ class ConfigManagerTools(Toolkit):
             Success message or error details
 
         """
+        authorization_error = self._load_configuration_mutation_authorization_error()
+        if authorization_error is not None:
+            return authorization_error
         return self._create_team_config(team_name, display_name, role, agents, mode)
 
     # ===== Internal helper methods (not exposed as tools) =====
@@ -818,6 +832,22 @@ class ConfigManagerTools(Toolkit):
             footer=footer,
             tolerate_plugin_load_errors=True,
         )
+
+    @staticmethod
+    def _configuration_mutation_authorization_error(config: Config) -> str | None:
+        """Deny full configuration writes without a current platform administrator."""
+        runtime_context = get_tool_runtime_context()
+        if runtime_context is not None and is_platform_administrator(runtime_context.requester_id, config):
+            return None
+        return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+
+    def _load_configuration_mutation_authorization_error(self) -> str | None:
+        """Load the current config and authorize one full-configuration write."""
+        config, load_error = self._load_config_or_error(footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
+        if load_error is not None:
+            return load_error
+        assert config is not None
+        return self._configuration_mutation_authorization_error(config)
 
     def _load_config_and_tool_metadata_or_error(
         self,

@@ -12,6 +12,7 @@ import pytest
 
 import mindroom.authorization
 from mindroom import constants
+from mindroom.access_policy import resolve_room_policy
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -20,7 +21,13 @@ from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
+from tests.access_schema_support import (
+    membership_config,
+    membership_index,
+    unresolved_membership_index,
+)
 from tests.conftest import TEST_PASSWORD
+from tests.conftest import runtime_paths_for as shared_runtime_paths_for
 from tests.identity_helpers import entity_ids, entity_names_for_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -90,12 +97,13 @@ def is_sender_allowed_for_agent_reply(
 ) -> bool:
     """Run reply-permission checks with the test config's bound runtime context."""
     effective_membership_index = membership_index or AgentReplyMembershipIndex()
-    return mindroom.authorization.is_sender_allowed_for_agent_reply(
+    return mindroom.authorization.is_sender_allowed_for_responder(
         sender_id,
         agent_name,
+        None,
         config,
         _runtime_paths_for(config),
-        membership_index=effective_membership_index,
+        effective_membership_index,
     )
 
 
@@ -124,6 +132,29 @@ def is_sender_allowed_for_agent_credential_management(sender_id: str, agent_name
         sender_id,
         agent_name,
         config,
+    )
+
+
+def is_platform_administrator(sender_id: str, config: Config) -> bool:
+    """Run platform-administrator checks through the production helper."""
+    return mindroom.authorization.is_platform_administrator(sender_id, config)
+
+
+def is_sender_allowed_for_responder(
+    sender_id: str,
+    entity_name: str,
+    room_id: str,
+    config: Config,
+    membership_index: AgentReplyMembershipIndex,
+) -> bool:
+    """Run the membership-mode responder policy with bound runtime paths."""
+    return mindroom.authorization.is_sender_allowed_for_responder(
+        sender_id,
+        entity_name,
+        room_id,
+        config,
+        shared_runtime_paths_for(config),
+        membership_index,
     )
 
 
@@ -174,6 +205,160 @@ async def responder_candidate_entities_for_room(
         config,
         _runtime_paths_for(config),
         AgentReplyMembershipIndex(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_membership_mode_does_not_apply_legacy_room_gate() -> None:
+    """A current grant-room member must not be denied by the legacy default room gate."""
+    config = membership_config(agent_rooms=["talent"])
+    memberships = await membership_index(config, {"talent": {"@member:example.com"}})
+
+    assert is_sender_allowed_for_responder(
+        "@member:example.com",
+        "talent",
+        "!other:example.com",
+        config,
+        memberships,
+    )
+    assert mindroom.authorization.is_sender_allowed_for_agent_reply_in_room(
+        "@member:example.com",
+        "talent",
+        config,
+        "!other:example.com",
+        shared_runtime_paths_for(config),
+        memberships,
+    )
+
+
+def test_membership_mode_fails_closed_when_grant_room_is_unresolved() -> None:
+    """An unresolved managed grant room must never authorize its intended members."""
+    config = membership_config(agent_rooms=["talent"])
+    memberships = unresolved_membership_index(config, "talent")
+
+    assert not is_sender_allowed_for_responder(
+        "@member:example.com",
+        "talent",
+        "!other:example.com",
+        config,
+        memberships,
+    )
+
+
+@pytest.mark.asyncio
+async def test_membership_mode_current_room_clause_uses_authoritative_snapshot() -> None:
+    """Current-room access must distinguish joined users from non-members."""
+    config = membership_config(
+        agent_rooms=["talent"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    memberships = await membership_index(config, {"talent": {"@member:example.com"}})
+
+    assert is_sender_allowed_for_responder(
+        "@member:example.com",
+        "talent",
+        "!talent:example.com",
+        config,
+        memberships,
+    )
+    assert not is_sender_allowed_for_responder(
+        "@outsider:example.com",
+        "talent",
+        "!talent:example.com",
+        config,
+        memberships,
+    )
+
+
+def test_room_member_cannot_manage_agent_credentials() -> None:
+    """Conversation membership must not grant credential authority."""
+    config = membership_config(
+        agent_rooms=["talent"],
+        credential_managers=["@manager:example.com"],
+    )
+
+    assert not is_sender_allowed_for_agent_credential_management(
+        "@member:example.com",
+        "talent",
+        config,
+    )
+
+
+def test_administrator_manages_credentials_without_being_an_invitee() -> None:
+    """Platform authority must not imply Matrix room membership."""
+    config = membership_config(administrators=["@admin:example.com"], agent_rooms=["talent"])
+
+    assert is_platform_administrator("@admin:example.com", config)
+    assert is_sender_allowed_for_agent_credential_management(
+        "@admin:example.com",
+        "talent",
+        config,
+    )
+    assert "@admin:example.com" not in resolve_room_policy(config, "talent").invite_users
+
+
+def test_credential_manager_does_not_bypass_responder_access() -> None:
+    """Credential authority must not grant conversation access."""
+    config = membership_config(
+        access={"users": ["@speaker:example.com"]},
+        credential_managers=["@manager:example.com"],
+    )
+
+    assert is_sender_allowed_for_agent_credential_management(
+        "@manager:example.com",
+        "talent",
+        config,
+    )
+    assert not is_sender_allowed_for_responder(
+        "@manager:example.com",
+        "talent",
+        "!talent:example.com",
+        config,
+        AgentReplyMembershipIndex(),
+    )
+
+
+def test_matrix_room_admin_is_not_platform_or_credential_administrator() -> None:
+    """Matrix room power must remain independent from platform authority."""
+    config = membership_config(
+        rooms={"talent": {"admins": ["@room-admin:example.com"]}},
+        agent_rooms=["talent"],
+    )
+
+    assert not is_platform_administrator("@room-admin:example.com", config)
+    assert not is_sender_allowed_for_agent_credential_management(
+        "@room-admin:example.com",
+        "talent",
+        config,
+    )
+
+
+def test_membership_mode_applies_aliases_before_static_and_administrator_checks() -> None:
+    """Canonical identities must receive their explicit responder and administrator grants."""
+    config = membership_config(
+        administrators=["@admin:example.com"],
+        agent_rooms=["talent"],
+        access={"members_of_rooms": [], "users": ["@adviser:example.com"]},
+    )
+    config.authorization.aliases = {
+        "@admin:example.com": ["@bridged-admin:example.com"],
+        "@adviser:example.com": ["@bridged-adviser:example.com"],
+    }
+    memberships = AgentReplyMembershipIndex()
+
+    assert is_sender_allowed_for_responder(
+        "@bridged-admin:example.com",
+        "talent",
+        "!other:example.com",
+        config,
+        memberships,
+    )
+    assert is_sender_allowed_for_responder(
+        "@bridged-adviser:example.com",
+        "talent",
+        "!other:example.com",
+        config,
+        memberships,
     )
 
 

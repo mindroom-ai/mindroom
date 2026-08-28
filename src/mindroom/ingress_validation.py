@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
+from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
@@ -47,8 +47,8 @@ if TYPE_CHECKING:
 class _SenderReplyPolicy(Protocol):
     """Minimal reply-permission surface needed at the ingress boundary."""
 
-    def can_reply_to_sender(self, sender_id: str) -> bool:
-        """Return whether this agent may reply to one effective requester."""
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this agent may reply to one requester in a room."""
         ...
 
 
@@ -288,16 +288,7 @@ class IngressValidator:
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
-        if not is_authorized_sender(
-            requester_user_id,
-            self.deps.runtime.config,
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
-            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
-            return None
-
-        if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 

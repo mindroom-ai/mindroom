@@ -10,11 +10,13 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
 
+from mindroom.config.access import ResponderAccessConfig, RoomJoinPolicy, validate_concrete_matrix_user_ids
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.models import (
@@ -191,6 +193,14 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )
+    credential_managers: list[str] = Field(
+        default_factory=list,
+        description="Concrete Matrix user IDs allowed to manage this agent's credentials",
+    )
     accept_invites: bool = Field(default=True, description="Whether this agent accepts room invites")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
@@ -371,6 +381,12 @@ class AgentConfig(BaseModel):
         """Ensure configured context files stay inside the canonical workspace."""
         return [agent_workspace_relative_path(value).as_posix() for value in values]
 
+    @field_validator("credential_managers")
+    @classmethod
+    def validate_credential_managers(cls, values: list[str]) -> list[str]:
+        """Require unique, concrete credential-manager identities."""
+        return validate_concrete_matrix_user_ids(values, field_name="credential_managers")
+
 
 class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
@@ -379,6 +395,10 @@ class TeamConfig(BaseModel):
     role: str = Field(description="Description of the team's purpose")
     agents: list[str] = Field(min_length=1, description="List of agent names that compose this team")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
     compaction: CompactionOverrideConfig | None = Field(
@@ -428,6 +448,8 @@ class RoomConfig(BaseModel):
 
     display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
     description: str = Field(default="", description="Dashboard-facing room purpose")
+    join_policy: RoomJoinPolicy | None = Field(default=None, description="Room-specific join-policy override")
+    listed: bool | None = Field(default=None, description="Room-specific directory-listing override")
     encrypted: bool | None = Field(
         default=None,
         description=(
@@ -436,6 +458,20 @@ class RoomConfig(BaseModel):
             "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
         ),
     )
+    invite_users: list[str] | None = Field(default=None, description="Room-specific invitation roster override")
+    admins: list[str] | None = Field(default=None, description="Room-specific Matrix administrator override")
+
+    @field_validator("invite_users", "admins")
+    @classmethod
+    def validate_unique_access_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
+        """Reject duplicate room access entries while preserving omitted versus empty lists."""
+        if values is None:
+            return None
+        duplicates = duplicate_items(values)
+        if duplicates:
+            msg = f"Duplicate {info.field_name} are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        return values
 
     @field_validator("display_name")
     @classmethod
@@ -452,6 +488,9 @@ class RoomConfig(BaseModel):
             data.pop("display_name", None)
         if data.get("encrypted") is None:
             data.pop("encrypted", None)
+        for field_name in ("join_policy", "listed", "invite_users", "admins"):
+            if data.get(field_name) is None:
+                data.pop(field_name, None)
         return data
 
 

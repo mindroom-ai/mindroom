@@ -687,6 +687,7 @@ def test_policy_caps_apply_at_request_time(
         api_main.unbind_external_trigger_runtime(api_main.app)
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     trigger_api: TriggerApiContext,
 ) -> None:
@@ -703,6 +704,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
