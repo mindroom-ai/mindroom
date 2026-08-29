@@ -1626,6 +1626,42 @@ def test_candidate_checkpoint_replays_journal_and_tolerates_a_torn_tail(tmp_path
     assert reloaded.failed == checkpoint.failed
 
 
+def test_candidate_checkpoint_retirement_deletes_the_authoritative_snapshot_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on the second unlink must leave a resumable checkpoint."""
+    storage_path = tmp_path / "state"
+    settings = _manager(_config(tmp_path / "cfg", tmp_path / "cfg" / "docs"))._indexing_settings
+    save_candidate_checkpoint(
+        storage_path,
+        CandidateCheckpoint(collection="candidate", settings=settings, completed={"a.md": (1, 2, "digest")}),
+    )
+    append_candidate_journal(storage_path, completed=[("b.md", (3, 4, "journal-digest"))])
+    snapshot_path = _candidate_checkpoint_path(storage_path)
+    journal_path = _candidate_journal_path(storage_path)
+    original_unlink = Path.unlink
+    unlinked: list[Path] = []
+
+    def _fail_second_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        unlinked.append(path)
+        if len(unlinked) == 2:
+            message = "checkpoint directory stopped accepting unlinks"
+            raise OSError(message)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _fail_second_unlink)
+
+    with pytest.raises(OSError, match="stopped accepting unlinks"):
+        delete_candidate_checkpoint(storage_path)
+
+    assert unlinked == [journal_path, snapshot_path]
+    checkpoint = load_candidate_checkpoint(storage_path)
+    assert checkpoint is not None
+    assert checkpoint.collection == "candidate"
+    assert checkpoint.completed == {"a.md": (1, 2, "digest")}
+
+
 def test_unknown_checkpoint_schema_version_is_ignored(tmp_path: Path) -> None:
     """Future or corrupt candidate state must never be resumed blindly."""
     storage_path = tmp_path / "state"

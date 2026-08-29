@@ -344,5 +344,7 @@ def append_candidate_journal(
 
 def delete_candidate_checkpoint(base_storage_path: Path) -> None:
     """Remove candidate state once the candidate is published or discarded."""
-    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
+    # Retire the journal first so a failure before the final unlink leaves the
+    # authoritative snapshot available for a safe retry.
     _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
+    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
