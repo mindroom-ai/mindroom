@@ -48,6 +48,7 @@ class RoomJoinOutcome(StrEnum):
     """Typed outcome for one Matrix room join attempt."""
 
     JOINED = "joined"
+    ACCESS_DENIED = "access_denied"
     RETRYABLE_FAILURE = "retryable_failure"
     TERMINAL_FAILURE = "terminal_failure"
 
@@ -625,11 +626,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
             )
         logger.info("matrix_room_joined", room_id=room_id)
         return RoomJoinOutcome.JOINED
-    outcome = (
-        RoomJoinOutcome.TERMINAL_FAILURE
-        if isinstance(response, nio.JoinError) and response.status_code in _TERMINAL_ROOM_JOIN_ERROR_CODES
-        else RoomJoinOutcome.RETRYABLE_FAILURE
-    )
+    if isinstance(response, nio.JoinError) and response.status_code in _TERMINAL_ROOM_JOIN_ERROR_CODES:
+        outcome = RoomJoinOutcome.TERMINAL_FAILURE
+    elif isinstance(response, nio.JoinError) and response.status_code == "M_FORBIDDEN":
+        outcome = RoomJoinOutcome.ACCESS_DENIED
+    else:
+        outcome = RoomJoinOutcome.RETRYABLE_FAILURE
     logger.warning(
         "matrix_room_join_failed",
         room_id=room_id,

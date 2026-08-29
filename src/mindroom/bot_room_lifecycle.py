@@ -183,13 +183,17 @@ class BotRoomLifecycle:
         )
         join_outcome = await join_room(client, room_id)
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
-            self.apply_continuity_record(
-                await asyncio.to_thread(
-                    self.deps.continuity_store.update_join_fences,
-                    remove=(room_id,),
-                ),
-            )
+            await self._clear_join_decrypt_notice_fence(room_id)
         return join_outcome
+
+    async def _clear_join_decrypt_notice_fence(self, room_id: str) -> None:
+        """Clear a join fence after the current join work becomes terminal."""
+        self.apply_continuity_record(
+            await asyncio.to_thread(
+                self.deps.continuity_store.update_join_fences,
+                remove=(room_id,),
+            ),
+        )
 
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
@@ -433,7 +437,7 @@ class BotRoomLifecycle:
 
     async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Handle one invite whose identity is already durable."""
-        await self._handle_invite(room, sender)
+        await self._handle_invite(room, sender, invite_is_current=True)
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after responder access changes."""
@@ -444,12 +448,19 @@ class BotRoomLifecycle:
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
+            invite_is_current = room is not None
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
-            await self._handle_invite(room, sender)
+            await self._handle_invite(room, sender, invite_is_current=invite_is_current)
 
-    async def _handle_invite(self, room: nio.MatrixRoom, sender: str) -> None:
+    async def _handle_invite(
+        self,
+        room: nio.MatrixRoom,
+        sender: str,
+        *,
+        invite_is_current: bool,
+    ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
         if not self._should_accept_invite():
@@ -486,6 +497,10 @@ class BotRoomLifecycle:
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
+                if join_outcome is RoomJoinOutcome.ACCESS_DENIED and not invite_is_current:
+                    await self._clear_join_decrypt_notice_fence(room.room_id)
+                    self._forget_pending_room_invite(room.room_id)
+                    return
                 if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
                     self._forget_pending_room_invite(room.room_id)
                     return

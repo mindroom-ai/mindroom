@@ -391,11 +391,11 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
 
 
 @pytest.mark.asyncio
-async def test_invite_join_failure_propagates_to_sync_boundary(
+async def test_live_invite_forbidden_join_remains_retryable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Failed invite joins must remain retryable instead of returning success."""
+    """A live invite's ambiguous forbidden join must remain retryable."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -407,15 +407,12 @@ async def test_invite_join_failure_propagates_to_sync_boundary(
         runtime_paths=runtime_paths_for(config),
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.rooms = {}
+    bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
         lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.join_room",
-        AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE),
     )
 
     with pytest.raises(RuntimeError, match="Failed to join invited room"):
@@ -424,6 +421,9 @@ async def test_invite_join_failure_propagates_to_sync_boundary(
             MagicMock(room_id="!failed:localhost", canonical_alias=None),
             MagicMock(sender="@owner:localhost"),
         )
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+        "!failed:localhost": "@owner:localhost",
+    }
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!failed:localhost")
 
 
@@ -470,6 +470,41 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
     assert await bot._journal_dispatcher.store.pending() == ()
     assert not bot._room_lifecycle.decrypt_notice_is_fenced("!invalid-state:localhost")
+
+
+@pytest.mark.asyncio
+async def test_recovered_revoked_invite_is_forgotten_after_forbidden_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A durable invite revoked while offline must not retry forever."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.invited_rooms = {}
+    bot.client.join = AsyncMock(return_value=nio.JoinError("not invited", "M_FORBIDDEN"))
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
+        lambda *_args, **_kwargs: True,
+    )
+    room_id = "!revoked-invite:localhost"
+    bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+
+    await bot._room_lifecycle.reconcile_pending_invites()
+    await bot._room_lifecycle.reconcile_pending_invites()
+
+    bot.client.join.assert_awaited_once_with(room_id)
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
 @pytest.mark.asyncio
