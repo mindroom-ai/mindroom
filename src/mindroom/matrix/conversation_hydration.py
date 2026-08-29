@@ -502,8 +502,7 @@ class ConversationHydrator:
             recovery = await self.store.room_history_recovery(room_id)
             recovery_needs_walk = recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE
             if recovery is not None and recovery.state is HistoryRecoveryState.TRUNCATED and self.require_complete:
-                room_coverage = await self.store.conversation_hydration_coverage(room_id=room_id, thread_id=None)
-                recovery_needs_walk = room_coverage is None or room_coverage.attempted_policy_rank < self.policy
+                recovery_needs_walk = recovery.attempted_policy_rank < self.policy
             if recovery is not None and recovery_needs_walk:
                 # Shared per room, so two readers in two threads walk one
                 # repairable gap -- or one truncated gap under a wider policy --

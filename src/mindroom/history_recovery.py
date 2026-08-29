@@ -15,11 +15,12 @@ class HistoryRecoveryState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RoomHistoryRecovery:
-    """One room's durable obligation to account for unknown missing history."""
+    """One room's durable obligation and the widest policy spent on it."""
 
     room_id: str
     state: HistoryRecoveryState
     revision: int = 0
+    attempted_policy_rank: int = 0
 
 
 class HistoryRecoveryOutcome(StrEnum):

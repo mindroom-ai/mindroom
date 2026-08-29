@@ -268,7 +268,7 @@ async def stored_recovery_row(principal: PrincipalStore) -> dict[str, Any] | Non
     row = await principal._backend.read(
         lambda transaction: transaction.fetchone(
             """
-            SELECT state, revision FROM room_history_recovery
+            SELECT state, revision, attempted_policy_rank FROM room_history_recovery
             WHERE principal_id = ? AND room_id = ?
             """,
             (principal._principal_id, ROOM),
@@ -747,6 +747,7 @@ async def test_recording_creates_a_repairable_unknown_obligation(principal: Prin
     assert await stored_recovery_row(principal) == {
         "state": "repairable",
         "revision": 0,
+        "attempted_policy_rank": 0,
     }
 
 
@@ -808,7 +809,12 @@ async def test_truncated_obligation_leaves_bounded_context_readable_but_incomple
     )
 
     assert outcome is HistoryRecoveryOutcome.TRUNCATED
-    assert (await principal.room_history_recovery(ROOM)).state is HistoryRecoveryState.TRUNCATED  # type: ignore[union-attr]
+    assert await principal.room_history_recovery(ROOM) == RoomHistoryRecovery(
+        room_id=ROOM,
+        state=HistoryRecoveryState.TRUNCATED,
+        revision=0,
+        attempted_policy_rank=3,
+    )
     assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
     assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=None)
     coverage = await principal.conversation_hydration_coverage(room_id=ROOM, thread_id=None)
@@ -836,6 +842,7 @@ async def test_a_new_abandonment_resets_truncated_to_repairable(principal: Princ
         room_id=ROOM,
         state=HistoryRecoveryState.REPAIRABLE,
         revision=1,
+        attempted_policy_rank=0,
     )
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
