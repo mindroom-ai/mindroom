@@ -96,9 +96,7 @@ class ThreadExportTarget:
             msg = "Pass required_member_user_ids only, not both membership scope forms."
             raise ValueError(msg)
         normalized_member_ids = (
-            (required_member_user_id,)
-            if required_member_user_id is not None
-            else required_member_user_ids
+            (required_member_user_id,) if required_member_user_id is not None else required_member_user_ids
         )
         object.__setattr__(self, "output_dir", output_dir)
         object.__setattr__(self, "required_member_user_ids", normalized_member_ids)
