@@ -75,39 +75,13 @@ class ThreadExportStats:
         return len(self.failed_items)
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class ThreadExportTarget:
     """One export destination and its optional room-membership scope."""
 
     output_dir: Path
     required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
-
-    def __init__(
-        self,
-        output_dir: Path,
-        required_member_user_id: str | None = None,
-        include_invited_rooms: bool = True,
-        *,
-        required_member_user_ids: tuple[str, ...] = (),
-    ) -> None:
-        """Normalize the transitional singular constructor input."""
-        if required_member_user_id is not None and required_member_user_ids:
-            msg = "Pass required_member_user_ids only, not both membership scope forms."
-            raise ValueError(msg)
-        normalized_member_ids = (
-            (required_member_user_id,) if required_member_user_id is not None else required_member_user_ids
-        )
-        object.__setattr__(self, "output_dir", output_dir)
-        object.__setattr__(self, "required_member_user_ids", normalized_member_ids)
-        object.__setattr__(self, "include_invited_rooms", include_invited_rooms)
-
-    @property
-    def required_member_user_id(self) -> str | None:
-        """Return the transitional singular view when exactly one member is required."""
-        if len(self.required_member_user_ids) == 1:
-            return self.required_member_user_ids[0]
-        return None
 
 
 @dataclass
