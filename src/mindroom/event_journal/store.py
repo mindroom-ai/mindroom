@@ -1419,6 +1419,7 @@ def _settle_history_recovery(
         principal_id,
         recovery,
         exhausted_server=exhausted_server,
+        attempted_policy_rank=attempted_policy_rank,
     )
 
 

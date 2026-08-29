@@ -8,6 +8,7 @@ def pre_schema_migration_statements(
     approval_continuation_call_columns: frozenset[str] = frozenset(),
     interactive_question_columns: frozenset[str] = frozenset(),
     matrix_delivery_outbox_columns: frozenset[str] = frozenset(),
+    room_history_recovery_columns: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """Return upgrades that must run before installing the current schema."""
     statements: list[str] = []
@@ -19,6 +20,10 @@ def pre_schema_migration_statements(
         statements.append("ALTER TABLE matrix_delivery_outbox ADD COLUMN result_json TEXT")
     if matrix_delivery_outbox_columns and "permanent_failure_reason" not in matrix_delivery_outbox_columns:
         statements.append("ALTER TABLE matrix_delivery_outbox ADD COLUMN permanent_failure_reason TEXT")
+    if room_history_recovery_columns and "attempted_policy_rank" not in room_history_recovery_columns:
+        statements.append(
+            "ALTER TABLE room_history_recovery ADD COLUMN attempted_policy_rank BIGINT NOT NULL DEFAULT 0",
+        )
     if "claimed_source_event_id" in interactive_question_columns:
         statements.extend(
             (

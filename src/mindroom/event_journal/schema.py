@@ -219,6 +219,10 @@ _TABLES = (
         room_id TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('repairable', 'truncated', 'repaired')),
         revision BIGINT NOT NULL DEFAULT 0,
+        -- The widest bounded walk spent on this exact missing interval. A new
+        -- revision resets it because an older gap says nothing about the new
+        -- one; a wider caller may then make exactly one sequential attempt.
+        attempted_policy_rank BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id)
     )
     """,

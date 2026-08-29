@@ -214,10 +214,14 @@ class SqliteBackend:
             matrix_delivery_outbox_columns = frozenset(
                 str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
             )
+            room_history_recovery_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(room_history_recovery)")
+            )
             for statement in pre_schema_migration_statements(
                 approval_continuation_call_columns=approval_continuation_call_columns,
                 interactive_question_columns=interactive_question_columns,
                 matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
+                room_history_recovery_columns=room_history_recovery_columns,
             ):
                 connection.execute(statement)
             transaction = _SqliteTransaction(connection)

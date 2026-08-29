@@ -500,9 +500,13 @@ class ConversationHydrator:
         """
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
             recovery = await self.store.room_history_recovery(room_id)
-            if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
-                # Shared per room, so two readers in two threads of a repairable
-                # room walk it once between them rather than once each.
+            recovery_needs_walk = recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE
+            if recovery is not None and recovery.state is HistoryRecoveryState.TRUNCATED and self.require_complete:
+                recovery_needs_walk = recovery.attempted_policy_rank < self.policy
+            if recovery is not None and recovery_needs_walk:
+                # Shared per room, so two readers in two threads walk one
+                # repairable gap -- or one truncated gap under a wider policy --
+                # between them rather than once each.
                 await self._shared(
                     self._recoveries,
                     room_id,

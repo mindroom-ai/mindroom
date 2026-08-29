@@ -109,6 +109,7 @@ def _room_history_recovery_from_row(room_id: str, row: Row) -> RoomHistoryRecove
         room_id=room_id,
         state=HistoryRecoveryState(str(row["state"])),
         revision=int(row["revision"]),
+        attempted_policy_rank=int(row["attempted_policy_rank"]),
     )
 
 
@@ -120,7 +121,7 @@ def room_history_recovery(
     """Return one room's current history-recovery obligation, if any."""
     row = transaction.fetchone(
         """
-        SELECT state, revision FROM room_history_recovery
+        SELECT state, revision, attempted_policy_rank FROM room_history_recovery
         WHERE principal_id = ? AND room_id = ? AND state <> ?
         """,
         (principal_id, room_id, _REPAIRED_RECOVERY_STATE),
@@ -138,12 +139,15 @@ def record_room_history_recovery(
         return None
     row = transaction.fetchone(
         """
-        INSERT INTO room_history_recovery (principal_id, room_id, state, revision)
-        VALUES (?, ?, ?, 0)
+        INSERT INTO room_history_recovery (
+            principal_id, room_id, state, revision, attempted_policy_rank
+        )
+        VALUES (?, ?, ?, 0, 0)
         ON CONFLICT (principal_id, room_id) DO UPDATE SET
             state = excluded.state,
-            revision = room_history_recovery.revision + 1
-        RETURNING state, revision
+            revision = room_history_recovery.revision + 1,
+            attempted_policy_rank = 0
+        RETURNING state, revision, attempted_policy_rank
         """,
         (principal_id, room_id, HistoryRecoveryState.REPAIRABLE.value),
     )
@@ -163,6 +167,7 @@ def claim_room_history_recovery(
         """
         UPDATE room_history_recovery SET state = state
         WHERE principal_id = ? AND room_id = ? AND state = ? AND revision = ?
+          AND attempted_policy_rank = ?
         RETURNING room_id
         """,
         (
@@ -170,6 +175,7 @@ def claim_room_history_recovery(
             recovery.room_id,
             recovery.state.value,
             recovery.revision,
+            recovery.attempted_policy_rank,
         ),
     )
     return row is not None
@@ -181,6 +187,7 @@ def settle_room_history_recovery(
     recovery: RoomHistoryRecovery,
     *,
     exhausted_server: bool,
+    attempted_policy_rank: int,
 ) -> HistoryRecoveryOutcome:
     """Commit the terminal state of a previously claimed recovery obligation."""
     if exhausted_server:
@@ -194,10 +201,15 @@ def settle_room_history_recovery(
         return HistoryRecoveryOutcome.REPAIRED
     transaction.execute(
         """
-        UPDATE room_history_recovery SET state = ?
+        UPDATE room_history_recovery SET state = ?, attempted_policy_rank = ?
         WHERE principal_id = ? AND room_id = ?
         """,
-        (HistoryRecoveryState.TRUNCATED.value, principal_id, recovery.room_id),
+        (
+            HistoryRecoveryState.TRUNCATED.value,
+            attempted_policy_rank,
+            principal_id,
+            recovery.room_id,
+        ),
     )
     return HistoryRecoveryOutcome.TRUNCATED
 

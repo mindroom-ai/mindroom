@@ -21,7 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.event_journal import EventClass, EventKind, HydrationPolicy, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
@@ -978,6 +978,92 @@ class TestCompletenessRequirement:
             "answer 2 v0",
             "answer 3 v0",
         ]
+
+    async def test_a_strict_caller_retries_room_recovery_past_a_prompt_ceiling(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A wider caller must spend its room budget before refusing a thread.
+
+        A skipped sync interval is room-wide, so a complete relation walk cannot
+        make one thread trustworthy while that interval remains truncated. The
+        prompt caller may legitimately stop its repair at a small bound, but an
+        exporter has a larger bound precisely so it can finish that same walk.
+        """
+        client = FakeClient(
+            events={"$root": raw("$root", "root", ts=1_000)},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            pages=[
+                ([raw("$reply", "reply", ts=2_000, thread_id="$root")], "older"),
+                ([raw("$root", "root", ts=1_000)], None),
+            ],
+        )
+        await alice.record_room_history_recovery(ROOM)
+        await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        recovery = await alice.room_history_recovery(ROOM)
+        assert recovery is not None
+        assert recovery.state is HistoryRecoveryState.TRUNCATED
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        relation_calls = client.relation_calls
+        client.history_pages = 0
+
+        await hydrator(alice, client, max_requests=3, **EXPORT_CALLER).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+
+        assert await alice.room_history_recovery(ROOM) is None
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert client.history_pages == 2
+        assert client.relation_calls == relation_calls
+
+    async def test_a_new_gap_does_not_inherit_an_older_recovery_policy(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A new recovery revision owes its own wider attempt.
+
+        Conversation coverage retains the widest walk for a membership, but a
+        later skipped interval is a new obligation. An export attempt against
+        the older gap must not make the new gap look as if export already spent
+        its allowance.
+        """
+        client = FakeClient(
+            events={"$root": raw("$root", "root", ts=1_000)},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            pages=[
+                ([raw("$reply", "reply", ts=2_000, thread_id="$root")], "older"),
+                ([raw("$root", "root", ts=1_000)], None),
+            ],
+        )
+        await alice.record_room_history_recovery(ROOM)
+        await hydrator(alice, client, max_requests=1, **EXPORT_CALLER).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+        client.history_pages = 0
+
+        await hydrator(alice, client, max_requests=1, **EXPORT_CALLER).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+        assert client.history_pages == 0
+
+        await alice.record_room_history_recovery(ROOM)
+        await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        recovery = await alice.room_history_recovery(ROOM)
+        assert recovery is not None
+        assert recovery.state is HistoryRecoveryState.TRUNCATED
+        client.history_pages = 0
+
+        await hydrator(alice, client, max_requests=3, **EXPORT_CALLER).ensure_hydrated(
+            room_id=ROOM,
+            thread_id="$root",
+        )
+
+        assert await alice.room_history_recovery(ROOM) is None
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert client.history_pages == 2
 
     async def test_a_strict_caller_accepts_a_walk_that_already_reached_the_end(
         self,
