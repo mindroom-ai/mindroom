@@ -1626,6 +1626,42 @@ def test_candidate_checkpoint_replays_journal_and_tolerates_a_torn_tail(tmp_path
     assert reloaded.failed == checkpoint.failed
 
 
+def test_candidate_checkpoint_retirement_deletes_the_authoritative_snapshot_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on the second unlink must leave a resumable checkpoint."""
+    storage_path = tmp_path / "state"
+    settings = _manager(_config(tmp_path / "cfg", tmp_path / "cfg" / "docs"))._indexing_settings
+    save_candidate_checkpoint(
+        storage_path,
+        CandidateCheckpoint(collection="candidate", settings=settings, completed={"a.md": (1, 2, "digest")}),
+    )
+    append_candidate_journal(storage_path, completed=[("b.md", (3, 4, "journal-digest"))])
+    snapshot_path = _candidate_checkpoint_path(storage_path)
+    journal_path = _candidate_journal_path(storage_path)
+    original_unlink = Path.unlink
+    unlinked: list[Path] = []
+
+    def _fail_second_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        unlinked.append(path)
+        if len(unlinked) == 2:
+            message = "checkpoint directory stopped accepting unlinks"
+            raise OSError(message)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _fail_second_unlink)
+
+    with pytest.raises(OSError, match="stopped accepting unlinks"):
+        delete_candidate_checkpoint(storage_path)
+
+    assert unlinked == [journal_path, snapshot_path]
+    checkpoint = load_candidate_checkpoint(storage_path)
+    assert checkpoint is not None
+    assert checkpoint.collection == "candidate"
+    assert checkpoint.completed == {"a.md": (1, 2, "digest")}
+
+
 def test_unknown_checkpoint_schema_version_is_ignored(tmp_path: Path) -> None:
     """Future or corrupt candidate state must never be resumed blindly."""
     storage_path = tmp_path / "state"
@@ -3693,6 +3729,144 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
 
     assert run.resumed is False
     assert run.completed == {}, "claims survived a collection that no longer holds their vectors"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_candidate_is_discarded_without_touching_the_published_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt unpublished vector segment must not permanently block refresh."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection=unreadable_candidate,
+            settings=manager._indexing_settings,
+            completed={names[0]: (1, 1, "digest")},
+        ),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            message = "Error constructing hnsw segment reader: EOF while parsing"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+
+    run = await manager._open_candidate_run()
+
+    assert run.resumed is False
+    assert run.checkpoint.collection != unreadable_candidate
+    assert sorted(run.completed) == names
+    assert unreadable_candidate not in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_candidate_is_not_deleted_when_its_checkpoint_cannot_be_retired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failure must leave the candidate and published index recoverable."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            message = "Error constructing hnsw segment reader: EOF while parsing"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    def _fail_checkpoint_cleanup(_base_storage_path: Path) -> None:
+        message = "checkpoint directory is read-only"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+    monkeypatch.setattr(knowledge_manager_module, "delete_candidate_checkpoint", _fail_checkpoint_cleanup)
+
+    with pytest.raises(RuntimeError, match="Cannot retire unreadable knowledge candidate checkpoint"):
+        await manager._open_candidate_run()
+
+    assert unreadable_candidate in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
+async def test_a_transient_candidate_probe_failure_preserves_resumable_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated vector-store failure is not evidence of index corruption."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[candidate] = list(published_records)
+    storage = _storage_path(config, runtime_paths)
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_transient_probe(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == candidate:
+            message = "database connection unexpectedly closed"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_transient_probe)
+
+    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
+        await manager._open_candidate_run()
+
+    checkpoint = load_candidate_checkpoint(storage)
+    assert checkpoint is not None
+    assert checkpoint.collection == candidate
+    assert candidate in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
 
 
 @pytest.mark.asyncio

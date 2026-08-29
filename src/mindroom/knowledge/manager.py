@@ -21,6 +21,7 @@ from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
+from chromadb.errors import InternalError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -1345,13 +1346,54 @@ class KnowledgeManager:
         immediately after its rows land, so its pre-existing unclaimed window is
         bounded by the in-flight file rather than the whole copied corpus.
         """
-        if checkpoint.completed:
-            return False
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
         if not vector_db.exists():
             return False
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return bool(collection.get(limit=1, include=[])["ids"])
+        has_rows = bool(collection.get(limit=1, include=[])["ids"])
+        return not checkpoint.completed and has_rows
+
+    async def _inspect_candidate_shape(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: Embedder,
+    ) -> tuple[CandidateCheckpoint | None, bool]:
+        """Return candidate shape, retiring an unreadable unpublished index."""
+        try:
+            holds_unclaimed_rows = await asyncio.to_thread(
+                self._candidate_holds_unclaimed_rows,
+                checkpoint,
+                embedder=embedder,
+            )
+        except InternalError as inspection_error:
+            error_detail = str(inspection_error).lower()
+            if not any(
+                marker in error_detail
+                for marker in ("error constructing hnsw segment reader", "error deserializing pickle file")
+            ):
+                raise
+            # A candidate is never live until publication, so an unreadable
+            # one may be abandoned without risking the last-good index.
+            # Retire its checkpoint even when provider cleanup fails; the
+            # superseded-collection sweep can retry physical reclamation.
+            logger.warning(
+                "Discarding unreadable knowledge candidate",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+                exc_info=True,
+            )
+            try:
+                await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            except OSError as cleanup_error:
+                # Do not delete the collection unless its durable resume pointer
+                # was retired first. A read-only storage failure cannot be
+                # recovered safely in process, but both indexes remain intact.
+                message = "Cannot retire unreadable knowledge candidate checkpoint"
+                raise RuntimeError(message) from cleanup_error
+            await delete_collection(self._collections, checkpoint.collection)
+            return None, False
+        return checkpoint, holds_unclaimed_rows
 
     async def _rebuild_candidate_collection(
         self,
@@ -1486,13 +1528,20 @@ class KnowledgeManager:
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
+        candidate_holds_unclaimed_rows = False
+        if checkpoint is not None:
+            checkpoint, candidate_holds_unclaimed_rows = await self._inspect_candidate_shape(
+                checkpoint,
+                embedder=embedder,
+            )
+
         rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=candidate_collection_name(self._collections),
                 settings=self._indexing_settings,
             )
-        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
+        elif candidate_holds_unclaimed_rows:
             logger.warning(
                 "Rebuilding a knowledge candidate holding vectors it never claimed",
                 base_id=self.base_id,
