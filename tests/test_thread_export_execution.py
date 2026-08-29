@@ -70,6 +70,27 @@ async def _export_threads_for_client(
     return accumulators[0].stats()
 
 
+def test_singular_member_scope_alias_normalizes_to_tuple(tmp_path: Path) -> None:
+    """The transitional singular constructor input should keep one stored source of truth."""
+    target = ThreadExportTarget(
+        output_dir=tmp_path,
+        required_member_user_id="@alice:localhost",
+    )
+
+    assert target.required_member_user_ids == ("@alice:localhost",)
+    assert target.required_member_user_id == "@alice:localhost"
+
+
+def test_singular_member_scope_alias_rejects_plural_input(tmp_path: Path) -> None:
+    """Callers must not supply both membership-scope constructor forms."""
+    with pytest.raises(ValueError, match="required_member_user_ids only"):
+        ThreadExportTarget(
+            output_dir=tmp_path,
+            required_member_user_id="@alice:localhost",
+            required_member_user_ids=("@bob:localhost",),
+        )
+
+
 @pytest.mark.asyncio
 async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_path: Path) -> None:
     """Exporter should enumerate Matrix threads, fetch source history, and write grep-friendly YAML."""
