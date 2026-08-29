@@ -2208,16 +2208,16 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
+async def test_durable_invite_failure_does_not_rewind_classic_cursor(
     tmp_path: Path,
 ) -> None:
-    """Accepted invite work must retry independently of raw sync continuity."""
+    """Durably recorded invite work must not rewind raw sync continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_invite"
     bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
     bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_invite")
-    bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
+    bot._room_lifecycle.handle_recorded_invite = AsyncMock(side_effect=RuntimeError("join failed"))
     room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
@@ -2228,20 +2228,14 @@ async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
         },
     )
     assert isinstance(event, nio.InviteEvent)
-    recovered_invite = AsyncMock()
-    bot._room_lifecycle.on_invite = recovered_invite
-
     await bot._on_invite_before_sync_certification(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert bot.client.next_batch == "s_after_invite"
-    # Invites are not journalled: the homeserver keeps offering an invite the
-    # bot has not acted on, so it needs no durable row of its own.
+    assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
+    # The dedicated pending-invite store owns recovery, so no journal row is needed.
     assert await bot._journal_dispatcher.store.pending() == ()
-    recovered_invite.assert_awaited_once()
-    recovered_event = recovered_invite.await_args.args[1]
-    assert isinstance(recovered_event, nio.InviteMemberEvent)
-    assert recovered_event.content == {"membership": "invite"}
+    bot._room_lifecycle.handle_recorded_invite.assert_awaited_once_with(room, event.sender)
 
 
 @pytest.mark.asyncio

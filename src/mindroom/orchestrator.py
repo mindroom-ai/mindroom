@@ -1352,6 +1352,10 @@ class _MultiAgentOrchestrator:
         """Recheck every active MatrixRTC call against current reply access."""
         await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
 
+    async def reconcile_pending_invites(self) -> None:
+        """Recheck every cached room invite against current responder access."""
+        await asyncio.gather(*(bot.reconcile_pending_invites() for bot in self.agent_bots.values()))
+
     async def revoke_reply_authorized_calls(self) -> None:
         """End active MatrixRTC calls that no longer pass current reply access."""
         await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in self.agent_bots.values()))
@@ -1364,6 +1368,7 @@ class _MultiAgentOrchestrator:
             self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
+        await self.reconcile_pending_invites()
         await self.revoke_reply_authorized_calls()
         for bot in self.agent_bots.values():
             bot.schedule_reply_authorized_call_reconciliation()

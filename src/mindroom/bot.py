@@ -1332,6 +1332,11 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.reconcile_reply_authorization()
 
+    async def reconcile_pending_invites(self) -> None:
+        """Recheck cached room invites against the shared responder policy."""
+        if self.client is not None:
+            await self._room_lifecycle.reconcile_pending_invites()
+
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
         call_manager = self._call_manager
@@ -1382,6 +1387,7 @@ class AgentBot:
             if client is None:
                 return
             await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
+            await self.reconcile_pending_invites()
             await self.revoke_reply_authorized_calls()
             self.schedule_reply_authorized_call_reconciliation()
 
@@ -2456,9 +2462,6 @@ class AgentBot:
                 )
                 await asyncio.sleep(retry_delay)
 
-    async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        await self._room_lifecycle.on_invite(room, event)
-
     async def _on_invite_before_sync_certification(
         self,
         room: nio.MatrixRoom,
@@ -2466,12 +2469,15 @@ class AgentBot:
     ) -> None:
         """Act on one invite without journalling it.
 
-        An invite has no Matrix event ID to key durable work on, and it does
-        not need one: an invite the bot has not acted on reappears in every
-        sync response until it does, so the homeserver already provides the
-        redelivery a journal row would have.
+        An invite has no Matrix event ID to key durable work on.
+        Persist its room and inviter before network work moves to the
+        background so access changes and process restarts can reconcile it.
         """
-        create_background_task(self._on_invite(room, event), owner=self._runtime_view)
+        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        create_background_task(
+            self._room_lifecycle.handle_recorded_invite(room, event.sender),
+            owner=self._runtime_view,
+        )
 
     def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""
@@ -2623,6 +2629,16 @@ class AgentBot:
             emit=self._emit_room_member_joined_hooks,
         )
 
+    async def _reconcile_reply_membership_effects(self) -> None:
+        """Run effects that depend on one committed reply-membership change."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            await self.reconcile_pending_invites()
+            await self.reconcile_reply_authorized_calls()
+            return
+        await orchestrator.reconcile_pending_invites()
+        await orchestrator.reconcile_reply_authorized_calls()
+
     async def _apply_live_reply_membership_transition(
         self,
         room_id: str,
@@ -2631,20 +2647,14 @@ class AgentBot:
         """Update reply grants from one durably admitted live Matrix transition."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        changed = self._router_reply_membership_sync.apply_live_transition(
+        await self._router_reply_membership_sync.apply_live_transition(
             self.config,
             self.runtime_paths,
             room_id,
             event,
             control_user_id=self.matrix_id.full_id,
+            reconcile_effects=self._reconcile_reply_membership_effects,
         )
-        if not changed:
-            return
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            await self.reconcile_reply_authorized_calls()
-        else:
-            await orchestrator.reconcile_reply_authorized_calls()
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,

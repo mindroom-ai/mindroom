@@ -1148,6 +1148,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.device_id = "TESTDEVICE"
     client.olm = None
     client.rooms = _AutoRoomCache(user_id)
+    client.invited_rooms = {}
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
     client.has_uncommitted_classic_sync_state = False

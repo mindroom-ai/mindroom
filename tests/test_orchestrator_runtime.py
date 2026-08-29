@@ -101,10 +101,12 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
     orchestrator.config = config
     router_bot = MagicMock()
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.reconcile_pending_invites = AsyncMock()
     router_bot.revoke_reply_authorized_calls = AsyncMock()
     router_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
     worker_bot = MagicMock()
     worker_bot.client = AsyncMock(spec=nio.AsyncClient)
+    worker_bot.reconcile_pending_invites = AsyncMock()
     worker_bot.revoke_reply_authorized_calls = AsyncMock()
     worker_bot.reconcile_reply_authorized_calls = AsyncMock(side_effect=AssertionError("must be scheduled"))
     orchestrator.agent_bots = {

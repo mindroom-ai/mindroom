@@ -1274,7 +1274,7 @@ class TestJoinRoom:
         [
             (
                 nio.JoinError("forbidden", "M_FORBIDDEN"),
-                RoomJoinOutcome.RETRYABLE_FAILURE,
+                RoomJoinOutcome.ACCESS_DENIED,
             ),
             (
                 nio.JoinError("not found", "M_NOT_FOUND"),
@@ -1294,7 +1294,7 @@ class TestJoinRoom:
             ),
         ],
         ids=[
-            "ambiguous-forbidden-join-error",
+            "access-denied-join-error",
             "ambiguous-not-found-join-error",
             "terminal-join-error",
             "retryable-join-error",

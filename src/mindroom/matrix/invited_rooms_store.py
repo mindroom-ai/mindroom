@@ -23,6 +23,11 @@ def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
     return agent_state_root_path(storage_root, agent_name) / "invited_rooms.json"
 
 
+def pending_room_invites_path(storage_root: Path, agent_name: str) -> Path:
+    """Return the storage path for one agent's outstanding room invites."""
+    return agent_state_root_path(storage_root, agent_name) / "pending_room_invites.json"
+
+
 def load_invited_rooms(path: Path) -> set[str]:
     """Load persisted invited rooms, failing open on missing or invalid files."""
     if not path.exists():
@@ -52,11 +57,41 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
     Callers replacing a cached set must first merge fresh durable state so a
     stale in-memory snapshot cannot discard another runtime component's write.
     """
+    return _save_json(path, sorted(room_ids))
+
+
+def load_pending_room_invites(path: Path) -> dict[str, str]:
+    """Load outstanding room IDs and their inviters from durable state."""
+    if not path.exists():
+        return {}
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("failed_to_load_pending_room_invites", path=str(path), exc_info=True)
+        return {}
+
+    if not isinstance(raw, dict) or any(
+        not isinstance(room_id, str) or not isinstance(sender_id, str) for room_id, sender_id in raw.items()
+    ):
+        logger.warning("invalid_pending_room_invites_file", path=str(path))
+        return {}
+
+    return raw
+
+
+def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
+    """Atomically replace one agent's outstanding room invites."""
+    return _save_json(path, dict(sorted(pending_invites.items())))
+
+
+def _save_json(path: Path, value: object) -> bool:
+    """Atomically replace one JSON state file."""
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path.write_text(
-            f"{json.dumps(sorted(room_ids), ensure_ascii=True, indent=2)}\n",
+            f"{json.dumps(value, ensure_ascii=True, indent=2)}\n",
             encoding="utf-8",
         )
         safe_replace(temp_path, path)
