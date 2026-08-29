@@ -95,6 +95,7 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
     )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
+    orchestrator.reconcile_pending_invites = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
     bot.orchestrator = orchestrator
     return bot, orchestrator

@@ -1332,6 +1332,11 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.reconcile_reply_authorization()
 
+    async def reconcile_pending_invites(self) -> None:
+        """Recheck cached room invites against the shared responder policy."""
+        if self.client is not None:
+            await self._room_lifecycle.reconcile_pending_invites()
+
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
         call_manager = self._call_manager
@@ -2466,10 +2471,10 @@ class AgentBot:
     ) -> None:
         """Act on one invite without journalling it.
 
-        An invite has no Matrix event ID to key durable work on, and it does
-        not need one: an invite the bot has not acted on reappears in every
-        sync response until it does, so the homeserver already provides the
-        redelivery a journal row would have.
+        An invite has no Matrix event ID to key durable work on.
+        Matrix-nio retains outstanding invites in its client cache, and an
+        initial sync reconstructs that cache after a process restart.
+        Responder-access changes explicitly reconcile the live cache.
         """
         create_background_task(self._on_invite(room, event), owner=self._runtime_view)
 
@@ -2642,8 +2647,10 @@ class AgentBot:
             return
         orchestrator = self.orchestrator
         if orchestrator is None:
+            await self.reconcile_pending_invites()
             await self.reconcile_reply_authorized_calls()
         else:
+            await orchestrator.reconcile_pending_invites()
             await orchestrator.reconcile_reply_authorized_calls()
 
     async def _emit_room_member_joined_sync_state_hooks(

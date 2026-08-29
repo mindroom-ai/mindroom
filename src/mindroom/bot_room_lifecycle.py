@@ -397,14 +397,25 @@ class BotRoomLifecycle:
 
     async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle one inbound invite using the configured room membership policy."""
+        await self._handle_invite(room, event.sender)
+
+    async def reconcile_pending_invites(self) -> None:
+        """Re-evaluate cached Matrix invites after responder access changes."""
+        client = self._client()
+        for room in tuple(client.invited_rooms.values()):
+            if room.inviter is not None:
+                await self._handle_invite(room, room.inviter)
+
+    async def _handle_invite(self, room: nio.MatrixRoom, sender: str) -> None:
+        """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
         if not self._should_accept_invite():
-            self._logger().info("Ignored invite", room_id=room.room_id, sender=event.sender)
+            self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
             return
 
         config = self._config()
         invite_allowed = is_sender_allowed_for_agent_reply_in_room(
-            event.sender,
+            sender,
             self.deps.agent_name,
             config,
             room.room_id,
@@ -414,20 +425,20 @@ class BotRoomLifecycle:
         if not invite_allowed:
             self._logger().debug(
                 "ignoring_invite_from_unauthorized_sender",
-                user_id=event.sender,
+                user_id=sender,
                 room_id=room.room_id,
             )
             return
 
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if room.room_id in self._handled_invite_room_ids:
-                self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                self._logger().debug("Invite already handled", room_id=room.room_id, sender=sender)
                 await self.deps.on_room_joined(room.room_id)
                 self._remember_invited_room(room.room_id)
-                await self._send_invite_welcome(room.room_id, event.sender)
+                await self._send_invite_welcome(room.room_id, sender)
                 return
 
-            self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
+            self._logger().info("Received invite", room_id=room.room_id, sender=sender)
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
@@ -440,4 +451,4 @@ class BotRoomLifecycle:
             await self.deps.on_room_joined(room.room_id)
             self._remember_invited_room(room.room_id)
             self._handled_invite_room_ids.add(room.room_id)
-            await self._send_invite_welcome(room.room_id, event.sender)
+            await self._send_invite_welcome(room.room_id, sender)
