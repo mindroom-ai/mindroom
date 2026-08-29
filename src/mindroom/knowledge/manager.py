@@ -1353,6 +1353,35 @@ class KnowledgeManager:
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
         return bool(collection.get(limit=1, include=[])["ids"])
 
+    async def _inspect_candidate_shape(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: Embedder,
+    ) -> tuple[CandidateCheckpoint | None, bool]:
+        """Return candidate shape, retiring an unreadable unpublished index."""
+        try:
+            holds_unclaimed_rows = await asyncio.to_thread(
+                self._candidate_holds_unclaimed_rows,
+                checkpoint,
+                embedder=embedder,
+            )
+        except Exception:
+            # A candidate is never live until publication, so an unreadable
+            # one may be abandoned without risking the last-good index.
+            # Retire its checkpoint even when provider cleanup fails; the
+            # superseded-collection sweep can retry physical reclamation.
+            logger.warning(
+                "Discarding unreadable knowledge candidate",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+                exc_info=True,
+            )
+            await delete_collection(self._collections, checkpoint.collection)
+            await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            return None, False
+        return checkpoint, holds_unclaimed_rows
+
     async def _rebuild_candidate_collection(
         self,
         checkpoint: CandidateCheckpoint,
@@ -1486,13 +1515,20 @@ class KnowledgeManager:
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
+        candidate_holds_unclaimed_rows = False
+        if checkpoint is not None:
+            checkpoint, candidate_holds_unclaimed_rows = await self._inspect_candidate_shape(
+                checkpoint,
+                embedder=embedder,
+            )
+
         rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=candidate_collection_name(self._collections),
                 settings=self._indexing_settings,
             )
-        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
+        elif candidate_holds_unclaimed_rows:
             logger.warning(
                 "Rebuilding a knowledge candidate holding vectors it never claimed",
                 base_id=self.base_id,

@@ -3696,6 +3696,49 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_candidate_is_discarded_without_touching_the_published_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt unpublished vector segment must not permanently block refresh."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            message = "Error constructing hnsw segment reader: EOF while parsing"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+
+    run = await manager._open_candidate_run()
+
+    assert run.resumed is False
+    assert run.checkpoint.collection != unreadable_candidate
+    assert sorted(run.completed) == names
+    assert unreadable_candidate not in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
 async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
