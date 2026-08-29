@@ -3717,7 +3717,11 @@ async def test_an_unreadable_candidate_is_discarded_without_touching_the_publish
     _FakeVectorDb.store[unreadable_candidate] = list(published_records)
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
-        CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
+        CandidateCheckpoint(
+            collection=unreadable_candidate,
+            settings=manager._indexing_settings,
+            completed={names[0]: (1, 1, "digest")},
+        ),
     )
     original_get = _FakeCollection.get
 
@@ -3735,6 +3739,52 @@ async def test_an_unreadable_candidate_is_discarded_without_touching_the_publish
     assert run.checkpoint.collection != unreadable_candidate
     assert sorted(run.completed) == names
     assert unreadable_candidate not in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_candidate_is_not_deleted_when_its_checkpoint_cannot_be_retired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failure must leave the candidate and published index recoverable."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            message = "Error constructing hnsw segment reader: EOF while parsing"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    def _fail_checkpoint_cleanup(_base_storage_path: Path) -> None:
+        message = "checkpoint directory is read-only"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+    monkeypatch.setattr(knowledge_manager_module, "delete_candidate_checkpoint", _fail_checkpoint_cleanup)
+
+    with pytest.raises(RuntimeError, match="Cannot retire unreadable knowledge candidate checkpoint"):
+        await manager._open_candidate_run()
+
+    assert unreadable_candidate in _FakeVectorDb.store
     assert _FakeVectorDb.store[published_collection] == published_records
 
 

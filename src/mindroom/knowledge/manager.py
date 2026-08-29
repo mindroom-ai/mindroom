@@ -1345,13 +1345,12 @@ class KnowledgeManager:
         immediately after its rows land, so its pre-existing unclaimed window is
         bounded by the in-flight file rather than the whole copied corpus.
         """
-        if checkpoint.completed:
-            return False
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
         if not vector_db.exists():
             return False
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return bool(collection.get(limit=1, include=[])["ids"])
+        has_rows = bool(collection.get(limit=1, include=[])["ids"])
+        return not checkpoint.completed and has_rows
 
     async def _inspect_candidate_shape(
         self,
@@ -1377,8 +1376,15 @@ class KnowledgeManager:
                 collection=checkpoint.collection,
                 exc_info=True,
             )
+            try:
+                await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            except OSError as cleanup_error:
+                # Do not delete the collection unless its durable resume pointer
+                # was retired first. A read-only storage failure cannot be
+                # recovered safely in process, but both indexes remain intact.
+                message = "Cannot retire unreadable knowledge candidate checkpoint"
+                raise RuntimeError(message) from cleanup_error
             await delete_collection(self._collections, checkpoint.collection)
-            await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             return None, False
         return checkpoint, holds_unclaimed_rows
 
