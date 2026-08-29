@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -42,6 +43,8 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._preserve_on_next_sync_start = False
+        self._live_transition_lock = asyncio.Lock()
+        self._live_effects_pending = False
 
     @property
     def memberships(self) -> AgentReplyMembershipIndex:
@@ -140,7 +143,7 @@ class AgentReplyMembershipSync:
             self._request_refresh()
         return authorization_changed
 
-    def apply_live_transition(
+    async def apply_live_transition(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -148,15 +151,23 @@ class AgentReplyMembershipSync:
         event: nio.RoomMemberEvent,
         *,
         control_user_id: str,
-    ) -> bool:
-        """Apply one accepted durable LIVE membership transition."""
-        return self._memberships.apply_member_event(
-            config,
-            runtime_paths,
-            room_id,
-            event,
-            control_user_id=control_user_id,
-        )
+        reconcile_effects: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Apply one durable LIVE transition and finish its dependent effects."""
+        async with self._live_transition_lock:
+            changed = self._memberships.apply_member_event(
+                config,
+                runtime_paths,
+                room_id,
+                event,
+                control_user_id=control_user_id,
+            )
+            if changed:
+                self._live_effects_pending = True
+            if not self._live_effects_pending:
+                return
+            await reconcile_effects()
+            self._live_effects_pending = False
 
 
 def _sync_response_has_uncertain_membership(
