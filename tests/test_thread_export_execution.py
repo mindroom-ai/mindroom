@@ -81,6 +81,16 @@ def test_singular_member_scope_alias_normalizes_to_tuple(tmp_path: Path) -> None
     assert target.required_member_user_id == "@alice:localhost"
 
 
+def test_singular_member_scope_alias_preserves_positional_constructor(
+    tmp_path: Path,
+) -> None:
+    """The transitional alias should preserve the former positional API."""
+    target = ThreadExportTarget(tmp_path, "@alice:localhost", False)
+
+    assert target.required_member_user_ids == ("@alice:localhost",)
+    assert target.include_invited_rooms is False
+
+
 def test_singular_member_scope_alias_rejects_plural_input(tmp_path: Path) -> None:
     """Callers must not supply both membership-scope constructor forms."""
     with pytest.raises(ValueError, match="required_member_user_ids only"):

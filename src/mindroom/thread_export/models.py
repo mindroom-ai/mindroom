@@ -86,10 +86,10 @@ class ThreadExportTarget:
     def __init__(
         self,
         output_dir: Path,
-        required_member_user_ids: tuple[str, ...] = (),
+        required_member_user_id: str | None = None,
         include_invited_rooms: bool = True,
         *,
-        required_member_user_id: str | None = None,
+        required_member_user_ids: tuple[str, ...] = (),
     ) -> None:
         """Normalize the transitional singular constructor input."""
         if required_member_user_id is not None and required_member_user_ids:
