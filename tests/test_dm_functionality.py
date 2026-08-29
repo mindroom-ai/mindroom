@@ -303,7 +303,8 @@ class TestDMIntegration:
             event = MagicMock()
             event.sender = "@user:localhost"
 
-            await bot._on_invite(room, event)
+            bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+            await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
 
             mock_join.assert_called_once()
             bot.logger.info.assert_any_call("Joined room", room_id="!dm:localhost")

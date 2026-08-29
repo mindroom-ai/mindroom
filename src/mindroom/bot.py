@@ -1391,6 +1391,7 @@ class AgentBot:
             if client is None:
                 return
             await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
+            await self.reconcile_pending_invites()
             await self.revoke_reply_authorized_calls()
             self.schedule_reply_authorized_call_reconciliation()
 
@@ -2465,9 +2466,6 @@ class AgentBot:
                 )
                 await asyncio.sleep(retry_delay)
 
-    async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        await self._room_lifecycle.on_invite(room, event)
-
     async def _on_invite_before_sync_certification(
         self,
         room: nio.MatrixRoom,
@@ -2476,11 +2474,14 @@ class AgentBot:
         """Act on one invite without journalling it.
 
         An invite has no Matrix event ID to key durable work on.
-        Matrix-nio retains outstanding invites in its client cache, and an
-        initial sync reconstructs that cache after a process restart.
-        Responder-access changes explicitly reconcile the live cache.
+        Persist its room and inviter before network work moves to the
+        background so access changes and process restarts can reconcile it.
         """
-        create_background_task(self._on_invite(room, event), owner=self._runtime_view)
+        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        create_background_task(
+            self._room_lifecycle.handle_recorded_invite(room, event.sender),
+            owner=self._runtime_view,
+        )
 
     def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""

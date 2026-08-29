@@ -1368,6 +1368,7 @@ class _MultiAgentOrchestrator:
             self.invalidate_agent_reply_memberships(reason="router_unavailable")
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
+        await self.reconcile_pending_invites()
         await self.revoke_reply_authorized_calls()
         for bot in self.agent_bots.values():
             bot.schedule_reply_authorized_call_reconciliation()
