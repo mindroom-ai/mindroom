@@ -351,7 +351,7 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
             targets=(
                 ThreadExportTarget(
                     output_dir=output_dir,
-                    required_member_user_id="@alice:localhost",
+                    required_member_user_ids=("@alice:localhost",),
                 ),
             ),
         )

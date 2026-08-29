@@ -88,8 +88,8 @@ async def _authorized_room_accumulators(
         if not target_accepts_room(accumulator.target, room):
             retract_room_export(accumulator, room)
 
-    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is not None]
-    authorized = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is None]
+    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_ids]
+    authorized = [accumulator for accumulator in eligible if not accumulator.target.required_member_user_ids]
     if not scoped:
         return authorized
     try:
@@ -104,8 +104,8 @@ async def _authorized_room_accumulators(
         return authorized
 
     for accumulator in scoped:
-        member_user_id = accumulator.target.required_member_user_id
-        if member_user_id in member_ids:
+        required_member_user_ids = accumulator.target.required_member_user_ids
+        if member_ids.issuperset(required_member_user_ids):
             authorized.append(accumulator)
         else:
             retract_room_export(accumulator, room)

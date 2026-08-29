@@ -80,7 +80,7 @@ class ThreadExportTarget:
     """One export destination and its optional room-membership scope."""
 
     output_dir: Path
-    required_member_user_id: str | None = None
+    required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
 
 
