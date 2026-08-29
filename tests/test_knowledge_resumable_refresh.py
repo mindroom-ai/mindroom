@@ -3789,6 +3789,51 @@ async def test_an_unreadable_candidate_is_not_deleted_when_its_checkpoint_cannot
 
 
 @pytest.mark.asyncio
+async def test_a_transient_candidate_probe_failure_preserves_resumable_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated vector-store failure is not evidence of index corruption."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[candidate] = list(published_records)
+    storage = _storage_path(config, runtime_paths)
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_transient_probe(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == candidate:
+            message = "database connection unexpectedly closed"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_transient_probe)
+
+    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
+        await manager._open_candidate_run()
+
+    checkpoint = load_candidate_checkpoint(storage)
+    assert checkpoint is not None
+    assert checkpoint.collection == candidate
+    assert candidate in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
 async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
     tmp_path: Path,
     embedder: _RecordingEmbedder,

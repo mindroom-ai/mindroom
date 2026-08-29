@@ -21,6 +21,7 @@ from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
+from chromadb.errors import InternalError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -1365,7 +1366,13 @@ class KnowledgeManager:
                 checkpoint,
                 embedder=embedder,
             )
-        except Exception:
+        except InternalError as inspection_error:
+            error_detail = str(inspection_error).lower()
+            if not any(
+                marker in error_detail
+                for marker in ("error constructing hnsw segment reader", "error deserializing pickle file")
+            ):
+                raise
             # A candidate is never live until publication, so an unreadable
             # one may be abandoned without risking the last-good index.
             # Retire its checkpoint even when provider cleanup fails; the
