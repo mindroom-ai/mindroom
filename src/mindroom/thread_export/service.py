@@ -337,7 +337,7 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    required_member_user_id: str | None = None,
+    required_member_user_ids: tuple[str, ...] = (),
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
     """Run one thread export pass for a single destination."""
@@ -347,7 +347,7 @@ async def export_threads_once(
         targets=(
             ThreadExportTarget(
                 output_dir=output_dir or _default_thread_export_dir(runtime_paths),
-                required_member_user_id=required_member_user_id,
+                required_member_user_ids=required_member_user_ids,
                 include_invited_rooms=include_invited_rooms,
             ),
         ),
