@@ -394,6 +394,8 @@ class AgentBot:
     _room_member_join_hooks_armed: bool
     _sliding_sync_startup_warning_emitted: bool
     _reply_membership_sync: AgentReplyMembershipSync | None
+    _reply_membership_transition_lock: asyncio.Lock
+    _reply_membership_effects_pending: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -456,6 +458,8 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
+        self._reply_membership_transition_lock = asyncio.Lock()
+        self._reply_membership_effects_pending = False
         if (
             agent_reply_membership_sync is not None
             and agent_reply_membership_sync.memberships is not agent_reply_memberships
@@ -2636,22 +2640,28 @@ class AgentBot:
         """Update reply grants from one durably admitted live Matrix transition."""
         if self.agent_name != ROUTER_AGENT_NAME:
             return
-        changed = self._router_reply_membership_sync.apply_live_transition(
-            self.config,
-            self.runtime_paths,
-            room_id,
-            event,
-            control_user_id=self.matrix_id.full_id,
-        )
-        if not changed:
-            return
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            await self.reconcile_pending_invites()
-            await self.reconcile_reply_authorized_calls()
-        else:
-            await orchestrator.reconcile_pending_invites()
-            await orchestrator.reconcile_reply_authorized_calls()
+        async with self._reply_membership_transition_lock:
+            changed = self._router_reply_membership_sync.apply_live_transition(
+                self.config,
+                self.runtime_paths,
+                room_id,
+                event,
+                control_user_id=self.matrix_id.full_id,
+            )
+            if changed:
+                # Keep the post-change effects armed until they all finish so
+                # durable event replay retries them after a partial failure.
+                self._reply_membership_effects_pending = True
+            if not self._reply_membership_effects_pending:
+                return
+            orchestrator = self.orchestrator
+            if orchestrator is None:
+                await self.reconcile_pending_invites()
+                await self.reconcile_reply_authorized_calls()
+            else:
+                await orchestrator.reconcile_pending_invites()
+                await orchestrator.reconcile_reply_authorized_calls()
+            self._reply_membership_effects_pending = False
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,
