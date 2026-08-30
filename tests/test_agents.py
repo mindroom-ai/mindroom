@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -59,12 +60,23 @@ from mindroom.history.runtime import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
+from mindroom.private_instance_identity import (
+    PrivateInstanceIdentity,
+    PrivateInstanceIdentityError,
+    load_private_instance_identity,
+)
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
     OPENAI_COMPAT_HISTORY_GUIDANCE,
     WORKSPACE_SKILL_AUTHORING_PROMPT,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import (
+    resolve_agent_execution,
+    resolve_agent_runtime,
+)
+from mindroom.runtime_resolution import (
+    resolve_agent_workspace_from_state_path as resolve_workspace,
+)
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -1204,6 +1216,209 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(
     assert not (runtime_paths.config_dir / "workspace").exists()
 
 
+def _private_runtime_resolution_context(
+    tmp_path: Path,
+    *,
+    requester_id: str | None = "requester-a",
+) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return one bound private runtime context with a configurable requester."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    return (
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id=requester_id,
+            room_id="room-a",
+            thread_id="thread-a",
+            resolved_thread_id="thread-a",
+            session_id="session-a",
+        ),
+    )
+
+
+def test_resolve_agent_runtime_persists_private_instance_identity_on_materialization(tmp_path: Path) -> None:
+    """Private workspace materialization must durably record its resolved owner."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="requester-a",
+    )
+
+
+def test_resolve_agent_runtime_reconciles_a_populated_legacy_workspace_without_an_identity_record(
+    tmp_path: Path,
+) -> None:
+    """Legacy private workspaces remain usable but are not retrospectively made discoverable."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "SOUL.md").write_text("template\n", encoding="utf-8")
+    bound_config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    workspace_root = scope_root / "general" / "mind_data"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "legacy.txt").write_text("keep\n", encoding="utf-8")
+
+    runtime = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == workspace_root
+    assert (workspace_root / "legacy.txt").read_text(encoding="utf-8") == "keep\n"
+    assert (workspace_root / "SOUL.md").read_text(encoding="utf-8") == "template\n"
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) is None
+
+
+def test_resolve_agent_runtime_read_only_private_instance_identity_resolution_does_not_persist(
+    tmp_path: Path,
+) -> None:
+    """Read-only private resolution must not create an identity record or its parent scope."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
+    )
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert not scope_root.exists()
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
+def test_resolve_agent_runtime_persists_private_instance_identity_before_workspace_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Workspace reconciliation must observe the already-persisted private owner record."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    expected_identity = PrivateInstanceIdentity(worker_key=worker_key, requester_id="requester-a")
+
+    def verify_identity_before_workspace(*args: object, **kwargs: object) -> object:
+        assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == expected_identity
+        return resolve_workspace(*args, **kwargs)
+
+    with patch(
+        "mindroom.runtime_resolution.resolve_agent_workspace_from_state_path",
+        side_effect=verify_identity_before_workspace,
+    ):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
+
+
+def test_resolve_agent_runtime_rejects_private_instance_identity_requester_normalization_collision(
+    tmp_path: Path,
+) -> None:
+    """Distinct requesters sharing a normalized private worker key must not share a scope."""
+    bound_config, runtime_paths, first_identity = _private_runtime_resolution_context(
+        tmp_path,
+        requester_id="requester/a",
+    )
+    colliding_identity = replace(first_identity, requester_id="requester?a")
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=first_identity,
+        create=True,
+    )
+
+    with pytest.raises(PrivateInstanceIdentityError, match="conflicts"):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=colliding_identity,
+            create=True,
+        )
+
+
+def test_resolve_agent_execution_rejects_private_instance_identity_without_requester(tmp_path: Path) -> None:
+    """Private execution resolution must reject a missing requester before routing a worker."""
+    bound_config, _, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
+    ):
+        resolve_agent_execution("general", bound_config, execution_identity=execution_identity)
+
+
+def test_resolve_agent_runtime_rejects_whitespace_private_instance_requester_before_creation(
+    tmp_path: Path,
+) -> None:
+    """Whitespace-only requester IDs must fail at ingress before private storage is materialized."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(
+        tmp_path,
+        requester_id=" \t ",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
+    ):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
+
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
+def test_resolve_agent_runtime_shared_create_does_not_create_private_instance_identity_namespace(
+    tmp_path: Path,
+) -> None:
+    """Shared materialization must not create a private ownership namespace."""
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
 def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:
     """Private roots must not resolve outside the canonical private-instance state root."""
     config = _test_config()
@@ -1820,8 +2035,10 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
     assert (first_workspace.root / "LATER.md").read_text(encoding="utf-8") == "later\n"
 
 
-def test_private_workspace_template_initializes_missing_files_in_partially_populated_root(tmp_path: Path) -> None:
-    """First-use template initialization should fill missing files even if the root already exists."""
+def test_private_workspace_template_reconciles_missing_files_in_owned_partially_populated_root(
+    tmp_path: Path,
+) -> None:
+    """Owned workspaces should fill missing template files without replacing customized content."""
     template_dir = tmp_path / "template"
     template_dir.mkdir(parents=True, exist_ok=True)
     (template_dir / "SOUL.md").write_text("soul\n", encoding="utf-8")
@@ -1844,16 +2061,20 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    state_root = resolve_agent_runtime(
+    first_workspace = resolve_agent_runtime(
         "general",
         bound_config,
         runtime_paths,
         execution_identity=identity,
-    ).state_root
-    workspace_root = state_root / "mind_data"
-    workspace_root.mkdir(parents=True, exist_ok=True)
+        create=True,
+    ).workspace
+
+    assert first_workspace is not None
+    workspace_root = first_workspace.root
     existing_file = workspace_root / "existing.txt"
     existing_file.write_text("keep\n", encoding="utf-8")
+    (workspace_root / "SOUL.md").write_text("custom soul\n", encoding="utf-8")
+    (workspace_root / "USER.md").unlink()
 
     workspace = resolve_agent_runtime(
         "general",
@@ -1864,8 +2085,9 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
     ).workspace
 
     assert workspace is not None
+    assert workspace.root == first_workspace.root
     assert existing_file.read_text(encoding="utf-8") == "keep\n"
-    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "soul\n"
+    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "custom soul\n"
     assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
 
 

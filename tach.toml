@@ -96,6 +96,22 @@ path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write"]
 
 [[modules]]
+path = "mindroom.private_instance_identity"
+depends_on = ["mindroom.private_instance_identity_store"]
+
+[[modules]]
+path = "mindroom.private_instance_identity_store"
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.private_instance_identity",
+    "mindroom.runtime_resolution",
+]
+
+[[modules]]
 path = "mindroom.dispatch_callback_outcome"
 depends_on = []
 visibility = [
@@ -793,6 +809,7 @@ path = "mindroom.runtime_resolution"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.constants",
+    "mindroom.private_instance_identity_store",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -4157,6 +4174,14 @@ expose = [
     "resolve_knowledge_binding",
 ]
 from = ["mindroom.runtime_resolution"]
+
+[[interfaces]]
+expose = [
+    "PrivateInstanceIdentity",
+    "PrivateInstanceIdentityError",
+    "load_private_instance_identity",
+]
+from = ["mindroom.private_instance_identity"]
 
 [[interfaces]]
 expose = [

@@ -17,6 +17,7 @@ from mindroom.constants import (
     resolve_config_relative_path_preserving_leaf,
     resolve_session_state_root,
 )
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -161,18 +162,21 @@ def resolve_agent_execution(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     execution_scope = policy.effective_execution_scope
+    if policy.is_private:
+        if execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+            raise ValueError(msg)
+        if not execution_identity.requester_id or not execution_identity.requester_id.strip():
+            msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
+            raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    if policy.is_private:
-        if resolved_worker_execution.execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-            raise ValueError(msg)
-        if resolved_worker_execution.worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
-            raise ValueError(msg)
+    if policy.is_private and resolved_worker_execution.worker_key is None:
+        msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
+        raise ValueError(msg)
     return ResolvedAgentExecution(
         agent_name=agent_name,
         policy=policy,
@@ -199,6 +203,18 @@ def resolve_agent_runtime(
     )
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
+
+    if create and resolved_execution.policy.private_workspace_enabled:
+        execution_identity = resolved_execution.execution_identity
+        worker_key = resolved_execution.worker_key
+        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+            msg = f"Private agent '{agent_name}' has unresolved private execution state"
+            raise ValueError(msg)
+        ensure_private_instance_identity(
+            runtime_paths.storage_root,
+            worker_key=worker_key,
+            requester_id=execution_identity.requester_id,
+        )
 
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,

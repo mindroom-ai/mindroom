@@ -302,7 +302,7 @@ class ScriptRunManager:
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope."""
         effective_limits = limits or ScriptRunLimits()
-        source_bytes = await asyncio.to_thread(self._resolve_source, context, source=source, path=path)
+        source_bytes = await self._resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = build_execution_identity_from_runtime_context(context)
         worker_target = build_agent_toolkit_worker_target(
@@ -835,7 +835,7 @@ class ScriptRunManager:
         source: bytes,
         token: str,
     ) -> ScriptRunRecord:
-        workspace = _agent_workspace(context)
+        workspace = await asyncio.to_thread(_agent_workspace, context)
         await self._record_snapshot_locator(run, workspace)
         source_path, token_path = await asyncio.to_thread(
             _write_snapshot,
@@ -888,16 +888,15 @@ class ScriptRunManager:
             raise ScriptRunManagerError(not_found)
         return run
 
-    def _resolve_source(self, context: ToolRuntimeContext, *, source: str | None, path: str | None) -> bytes:
+    async def _resolve_source(self, context: ToolRuntimeContext, *, source: str | None, path: str | None) -> bytes:
         if (source is None) == (path is None):
             msg = "Provide exactly one of source or path."
             raise ScriptRunManagerError(msg)
         if source is not None:
             source_bytes = source.encode("utf-8")
         else:
-            workspace = _agent_workspace(context)
             try:
-                source_bytes = _read_workspace_source(workspace, path or "")
+                source_bytes = await asyncio.to_thread(_resolve_and_read_workspace_source, context, path or "")
             except (OSError, ValueError) as exc:
                 raise ScriptRunManagerError(str(exc)) from exc
         if not source_bytes:
@@ -1180,6 +1179,11 @@ def _agent_workspace(context: ToolRuntimeContext) -> Path:
     )
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace.resolve()
+
+
+def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
+    """Resolve and read one script source while keeping workspace I/O off the request loop."""
+    return _read_workspace_source(_agent_workspace(context), relative_path)
 
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
