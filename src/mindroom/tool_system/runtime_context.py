@@ -40,7 +40,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal import PrincipalStore
-    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import (
+        HookMatrixAdmin,
+        HookMessageSender,
+        HookRegistryState,
+        HookRoomStatePutter,
+        HookRoomStateQuerier,
+    )
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup
@@ -83,6 +89,7 @@ class ToolRuntimeContext:
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
+    hook_registry_state: HookRegistryState | None = None
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
     matrix_admin: HookMatrixAdmin | None = None
@@ -288,6 +295,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
             hook_registry=self.hook_context.registry,
+            hook_registry_state=self.hook_context.hook_registry_state,
             correlation_id=correlation_id,
             hook_message_sender=self.hook_context.message_sender(),
             matrix_admin=self.hook_context.matrix_admin(),
@@ -600,6 +608,7 @@ async def emit_custom_event(
         thread_id=context.resolved_thread_id,
         sender_id=context.requester_id,
         message_received_depth=bindings.message_received_depth,
+        _hook_registry_state=context.hook_registry_state,
     )
     await emit(context.hook_registry, event_name, hook_context)
 

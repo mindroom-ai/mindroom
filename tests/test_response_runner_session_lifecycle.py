@@ -359,9 +359,14 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
     storage = _SessionStorage()
     sequence: list[tuple[str, str | None, str | None, str | None]] = []
     saw_matrix_admin: list[bool] = []
+    active_states: list[bool] = []
 
     @hook(EVENT_SESSION_STARTED, priority=10)
     async def first(ctx: SessionHookContext) -> None:
+        active_states.append(ctx.is_active())
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(ctx.is_active())
+        registry_state.registry = registry
         saw_matrix_admin.append(ctx.matrix_admin is not None)
         sequence.append(("first", ctx.scope.key, ctx.session_id, ctx.thread_id))
 
@@ -392,6 +397,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
             ),
             enable_streaming=False,
         )
+        registry_state = coordinator.deps.tool_runtime.hook_context.hook_registry_state
 
         async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
@@ -437,6 +443,7 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
         ("deliver", None, None, None),
     ]
     assert saw_matrix_admin == [True]
+    assert active_states == [True, False]
 
 
 @pytest.mark.asyncio

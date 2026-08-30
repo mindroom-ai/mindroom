@@ -299,8 +299,32 @@ class ResponseResult:
     envelope: MessageEnvelope
 
 
+@dataclass(slots=True, kw_only=True)
+class _HookLifecycleContext:
+    """Track whether a bound hook still belongs to the active registry."""
+
+    _hook_registry_state: HookRegistryState | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _hook_registry_snapshot: HookRegistry | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def is_active(self) -> bool:
+        """Return whether this hook still belongs to the live registry snapshot."""
+        return (
+            self._hook_registry_state is None
+            or self._hook_registry_snapshot is None
+            or self._hook_registry_state.registry is self._hook_registry_snapshot
+        )
+
+
 @dataclass(slots=True)
-class HookContext:
+class HookContext(_HookLifecycleContext):
     """Base fields available to every hook."""
 
     event_name: str
@@ -319,26 +343,6 @@ class HookContext:
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
-    _hook_registry_state: HookRegistryState | None = field(
-        default=None,
-        kw_only=True,
-        repr=False,
-        compare=False,
-    )
-    _hook_registry_snapshot: HookRegistry | None = field(
-        default=None,
-        kw_only=True,
-        repr=False,
-        compare=False,
-    )
-
-    def is_active(self) -> bool:
-        """Return whether this hook still belongs to the live registry snapshot."""
-        return (
-            self._hook_registry_state is None
-            or self._hook_registry_snapshot is None
-            or self._hook_registry_state.registry is self._hook_registry_snapshot
-        )
 
     @property
     def state_root(self) -> Path:
@@ -660,7 +664,7 @@ class CustomEventContext(HookContext):
 
 
 @dataclass(slots=True)
-class ToolBeforeCallContext:
+class ToolBeforeCallContext(_HookLifecycleContext):
     """Context passed to tool:before_call hook callbacks."""
 
     tool_name: str
@@ -753,7 +757,7 @@ class ToolBeforeCallContext:
 
 
 @dataclass(slots=True)
-class ToolAfterCallContext:
+class ToolAfterCallContext(_HookLifecycleContext):
     """Context passed to tool:after_call hook callbacks."""
 
     tool_name: str

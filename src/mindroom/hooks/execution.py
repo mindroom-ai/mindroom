@@ -168,9 +168,8 @@ def _bind_hook_context(
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
         "logger": _context_logger(hook),
+        "_hook_registry_snapshot": registry,
     }
-    if isinstance(context, HookContext):
-        replacement_kwargs["_hook_registry_snapshot"] = registry
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):

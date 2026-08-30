@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ import pytest
 import yaml
 
 from mindroom.thread_export import clear_thread_export_root
+from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
     _ROOT_MARKER_FILENAME,
@@ -108,6 +111,48 @@ def test_clear_thread_export_root_never_drops_ownership_before_cleanup_finishes(
 
     unlink.assert_not_called()
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+def test_inactive_cleanup_cannot_race_a_replacement_writer(tmp_path: Path) -> None:
+    """A superseded cleanup must not delete payloads written by its replacement."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    prepare_export_root(output_dir, trusted_root=tmp_path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    active = True
+
+    original_atomic_write = thread_export_storage._atomic_write_at
+
+    def pause_write(*args: object, **kwargs: object) -> None:
+        write_started.set()
+        assert release_write.wait(2)
+        original_atomic_write(*args, **kwargs)
+
+    with (
+        patch("mindroom.thread_export.storage._atomic_write_at", side_effect=pause_write),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        write = pool.submit(
+            write_thread_payload,
+            output_dir,
+            _room(),
+            "$thread:localhost",
+            {"messages": ["replacement"]},
+            trusted_root=tmp_path,
+        )
+        assert write_started.wait(2)
+        active = False
+        clear = pool.submit(
+            clear_thread_export_root,
+            output_dir,
+            trusted_root=tmp_path,
+            should_clear=lambda: active,
+        )
+        release_write.set()
+        assert write.result(timeout=2) is True
+        clear.result(timeout=2)
+
+    assert (output_dir / _room().key / _thread_filename("$thread:localhost")).exists()
 
 
 def test_clear_thread_export_root_rejects_replaced_parent(tmp_path: Path) -> None:

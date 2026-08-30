@@ -6,10 +6,12 @@ import json
 import os
 import shutil
 import stat
+import threading
 from contextlib import suppress
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 from urllib.parse import quote, unquote
 from uuid import uuid4
 
@@ -19,7 +21,7 @@ from mindroom import yaml_io
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.thread_export.models import ThreadExportRoom
@@ -33,6 +35,20 @@ _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 logger = get_logger(__name__)
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_THREAD_EXPORT_MUTATION_LOCK = threading.RLock()
+
+
+def _serialized_export_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Serialize target mutations so cleanup cannot race a replacement writer."""
+
+    @wraps(function)
+    def serialized(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with _THREAD_EXPORT_MUTATION_LOCK:
+            return function(*args, **kwargs)
+
+    return serialized
 
 
 class _UnsafeThreadExportPathError(RuntimeError):
@@ -397,6 +413,7 @@ def _require_owned_export_root(root_fd: int, output_dir: Path) -> None:
     raise _unowned_export_root(output_dir)
 
 
+@_serialized_export_mutation
 def prepare_export_root(
     output_dir: Path,
     *,
@@ -684,6 +701,7 @@ def _room_index_filename_set_matches(room_fd: int) -> bool:
     return declared_filenames == disk_filenames
 
 
+@_serialized_export_mutation
 def write_room_index(
     output_dir: Path,
     room: ThreadExportRoom,
@@ -790,6 +808,7 @@ def _remove_room_export_entries(
         os.close(room_fd)
 
 
+@_serialized_export_mutation
 def remove_room_export(
     output_dir: Path,
     room: ThreadExportRoom,
@@ -832,6 +851,7 @@ def remove_room_export(
         os.close(root_fd)
 
 
+@_serialized_export_mutation
 def remove_stale_thread_exports(
     output_dir: Path,
     room: ThreadExportRoom,
@@ -892,6 +912,7 @@ def _remove_reconciliation_room(root_fd: int, output_dir: Path, room_name: str) 
     return False
 
 
+@_serialized_export_mutation
 def reconcile_room_directories(
     output_dir: Path,
     retained_room_keys: set[str],
@@ -919,12 +940,16 @@ def reconcile_room_directories(
         os.close(root_fd)
 
 
+@_serialized_export_mutation
 def clear_thread_export_root(
     output_dir: Path,
     *,
     trusted_root: Path | None = None,
+    should_clear: Callable[[], bool] | None = None,
 ) -> None:
     """Remove exporter-owned content from one target and preserve unrelated entries."""
+    if should_clear is not None and not should_clear():
+        return
     root_fd = _open_owned_export_root(
         output_dir,
         create=False,
@@ -965,6 +990,7 @@ def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, ob
     return _payload_without_exported_at(existing) == _payload_without_exported_at(payload)
 
 
+@_serialized_export_mutation
 def write_thread_payload(
     output_dir: Path,
     room: ThreadExportRoom,
