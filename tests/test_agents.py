@@ -1261,6 +1261,41 @@ def test_resolve_agent_runtime_persists_private_instance_identity_on_materializa
     )
 
 
+def test_resolve_agent_runtime_reconciles_a_populated_legacy_workspace_without_an_identity_record(
+    tmp_path: Path,
+) -> None:
+    """Legacy private workspaces remain usable but are not retrospectively made discoverable."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "SOUL.md").write_text("template\n", encoding="utf-8")
+    bound_config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    workspace_root = scope_root / "general" / "mind_data"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "legacy.txt").write_text("keep\n", encoding="utf-8")
+
+    runtime = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == workspace_root
+    assert (workspace_root / "legacy.txt").read_text(encoding="utf-8") == "keep\n"
+    assert (workspace_root / "SOUL.md").read_text(encoding="utf-8") == "template\n"
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) is None
+
+
 def test_resolve_agent_runtime_read_only_private_instance_identity_resolution_does_not_persist(
     tmp_path: Path,
 ) -> None:

@@ -81,51 +81,27 @@ def test_ensure_initializes_a_new_empty_private_scope(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("worker_key", "requester_id"),
+    ("first_requester", "second_requester"),
     [
-        ("v1:tenant-a:user:requester-a", "requester-a"),
-        ("v1:tenant-a:user_agent:@alice:example.org:assistant", "@alice:example.org"),
+        ("requester/a", "requester_a"),
+        ("requester_a", "requester/a"),
     ],
 )
-def test_ensure_initializes_a_populated_legacy_scope_for_an_exact_requester(
+def test_ensure_leaves_a_populated_legacy_scope_recordless_for_colliding_requesters(
     tmp_path: Path,
-    worker_key: str,
-    requester_id: str,
+    first_requester: str,
+    second_requester: str,
 ) -> None:
-    """A key that retains the requester verbatim can claim its legacy private scope."""
-    scope_root = _scope_root(tmp_path, worker_key)
-    scope_root.mkdir(parents=True)
-    (scope_root / "legacy-state.db").write_text("legacy", encoding="utf-8")
-
-    identity = ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id=requester_id)
-
-    assert load_private_instance_identity(tmp_path, scope_root) == identity
-
-
-def test_ensure_rejects_a_populated_legacy_scope_for_a_lossy_requester(tmp_path: Path) -> None:
-    """Legacy data stays unclaimed when normalization removed requester information."""
+    """Ambiguous legacy data stays usable without authorizing either normalized requester."""
     worker_key = "v1:tenant-a:user:requester_a"
     scope_root = _scope_root(tmp_path, worker_key)
     scope_root.mkdir(parents=True)
     (scope_root / "legacy-state.db").write_text("legacy", encoding="utf-8")
 
-    with pytest.raises(PrivateInstanceIdentityError, match="ambiguous legacy ownership"):
-        ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester/a")
+    assert ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id=first_requester) is None
+    assert ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id=second_requester) is None
 
-    assert not (scope_root / ".mindroom-private-instance.json").exists()
-
-
-def test_ensure_rejects_a_distinct_normalized_requester_for_a_populated_legacy_scope(tmp_path: Path) -> None:
-    """A second requester sharing a normalized key cannot claim ambiguous legacy data."""
-    worker_key = "v1:tenant-a:user:requester_a"
-    scope_root = _scope_root(tmp_path, worker_key)
-    scope_root.mkdir(parents=True)
-    (scope_root / "legacy-state.db").write_text("legacy", encoding="utf-8")
-
-    with pytest.raises(PrivateInstanceIdentityError, match="ambiguous legacy ownership"):
-        ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester?a")
-
-    assert not (scope_root / ".mindroom-private-instance.json").exists()
+    assert load_private_instance_identity(tmp_path, scope_root) is None
 
 
 def test_ensure_uses_no_lock_for_an_existing_matching_identity(
@@ -215,10 +191,10 @@ def test_ensure_concurrently_creates_the_same_private_scope_idempotently(
     ]
 
 
-def test_ensure_rejects_distinct_requesters_that_normalize_to_the_same_worker_key(tmp_path: Path) -> None:
-    """A normalized worker-key collision must not replace the recorded requester."""
+def test_ensure_records_an_empty_scope_then_rejects_a_normalized_requester_collision(tmp_path: Path) -> None:
+    """New scopes become discoverable and reject a later colliding requester."""
     worker_key = "v1:tenant-a:user:requester_a"
-    ensure_private_instance_identity(
+    identity = ensure_private_instance_identity(
         tmp_path,
         worker_key=worker_key,
         requester_id="requester/a",
@@ -230,6 +206,8 @@ def test_ensure_rejects_distinct_requesters_that_normalize_to_the_same_worker_ke
             worker_key=worker_key,
             requester_id="requester?a",
         )
+
+    assert load_private_instance_identity(tmp_path, _scope_root(tmp_path, worker_key)) == identity
 
 
 @pytest.mark.parametrize(

@@ -57,8 +57,8 @@ def ensure_private_instance_identity(
     *,
     worker_key: str,
     requester_id: str,
-) -> PrivateInstanceIdentity:
-    """Durably create or return the identity record for one private scope."""
+) -> PrivateInstanceIdentity | None:
+    """Create, validate, or deliberately leave undiscoverable one private scope record."""
     requested_identity = _parse_identity(
         {"format": _RECORD_FORMAT, "version": _RECORD_VERSION, "worker_key": worker_key, "requester_id": requester_id},
     )
@@ -74,7 +74,8 @@ def ensure_private_instance_identity(
         existing_identity = load_private_instance_identity(trusted_base_path, trusted_scope_root)
         if existing_identity is not None:
             return _matching_identity(existing_identity, requested_identity)
-        _require_claimable_scope(trusted_scope_root, requested_identity)
+        if _scope_has_preexisting_data(trusted_scope_root):
+            return None
         write_json_file_durable(
             trusted_scope_root / _RECORD_FILENAME,
             _identity_payload(requested_identity),
@@ -96,25 +97,14 @@ def _matching_identity(
     return existing_identity
 
 
-def _require_claimable_scope(scope_root: Path, identity: PrivateInstanceIdentity) -> None:
-    """Permit legacy data only when the worker key retains its requester verbatim."""
+def _scope_has_preexisting_data(scope_root: Path) -> bool:
+    """Return whether a recordless scope contains data beyond identity bookkeeping."""
     for entry in scope_root.iterdir():
         if entry.name in {_LOCK_FILENAME, _RECORD_FILENAME}:
             continue
         if entry.name.startswith(f"{_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
             continue
-        if not _worker_key_embeds_requester_verbatim(identity):
-            _raise_invalid_record("has ambiguous legacy ownership")
-        return
-
-
-def _worker_key_embeds_requester_verbatim(identity: PrivateInstanceIdentity) -> bool:
-    """Return whether a validated private worker key retains its requester unnormalized."""
-    parts = identity.worker_key.split(":")
-    if parts[2] == "user":
-        return ":".join(parts[3:]) == identity.requester_id
-    if parts[2] == "user_agent":
-        return ":".join(parts[3:-1]) == identity.requester_id
+        return True
     return False
 
 
