@@ -17,7 +17,7 @@ from mindroom.constants import (
     resolve_config_relative_path_preserving_leaf,
     resolve_session_state_root,
 )
-from mindroom.private_instance_identity import ensure_private_instance_identity
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -166,7 +166,7 @@ def resolve_agent_execution(
         if execution_identity is None:
             msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
             raise ValueError(msg)
-        if not execution_identity.requester_id:
+        if not execution_identity.requester_id or not execution_identity.requester_id.strip():
             msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
             raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(

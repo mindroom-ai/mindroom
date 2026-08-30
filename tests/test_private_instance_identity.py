@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom import private_instance_identity_store
 from mindroom.private_instance_identity import (
     PrivateInstanceIdentity,
     PrivateInstanceIdentityError,
-    ensure_private_instance_identity,
     load_private_instance_identity,
 )
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 if TYPE_CHECKING:
@@ -64,6 +67,76 @@ def test_ensure_is_idempotent_for_the_same_identity(tmp_path: Path) -> None:
 
     assert second == first
     assert record_path.read_text(encoding="utf-8") == original_contents
+
+
+def test_ensure_rejects_whitespace_requester_before_creating_private_directories(tmp_path: Path) -> None:
+    """A requester rejected by the persisted schema must not create a namespace or scope."""
+    with pytest.raises(PrivateInstanceIdentityError, match="invalid identity fields"):
+        ensure_private_instance_identity(
+            tmp_path,
+            worker_key="v1:tenant-a:user:default",
+            requester_id=" \t ",
+        )
+
+    assert not (tmp_path / "private_instances").exists()
+
+
+def test_ensure_uses_durable_directory_creation_for_namespace_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """First materialization must durably publish both directory entries before writing metadata."""
+    worker_key = "v1:tenant-a:user:requester-a"
+    scope_root = _scope_root(tmp_path, worker_key)
+    original_create_directory = private_instance_identity_store.create_directory_durable
+    created_directories: list[tuple[Path, int]] = []
+
+    def record_durable_directory(path: Path, *, mode: int) -> None:
+        created_directories.append((path, mode))
+        original_create_directory(path, mode=mode)
+
+    monkeypatch.setattr(private_instance_identity_store, "create_directory_durable", record_durable_directory)
+
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+
+    assert created_directories == [
+        (tmp_path / "private_instances", 0o700),
+        (scope_root, 0o700),
+    ]
+
+
+def test_ensure_concurrently_creates_the_same_private_scope_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent first materialization of one owner must return the same persisted identity."""
+    worker_key = "v1:tenant-a:user:requester-a"
+    scope_root = _scope_root(tmp_path, worker_key)
+    original_create_directory = private_instance_identity_store.create_directory_durable
+    scope_creation_barrier = Barrier(2)
+
+    def synchronize_scope_creation(path: Path, *, mode: int) -> None:
+        if path == scope_root:
+            scope_creation_barrier.wait(timeout=5)
+        original_create_directory(path, mode=mode)
+
+    monkeypatch.setattr(private_instance_identity_store, "create_directory_durable", synchronize_scope_creation)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [
+            executor.submit(
+                ensure_private_instance_identity,
+                tmp_path,
+                worker_key=worker_key,
+                requester_id="requester-a",
+            )
+            for _ in range(2)
+        ]
+
+    assert [result.result() for result in results] == [
+        PrivateInstanceIdentity(worker_key=worker_key, requester_id="requester-a"),
+        PrivateInstanceIdentity(worker_key=worker_key, requester_id="requester-a"),
+    ]
 
 
 def test_ensure_rejects_distinct_requesters_that_normalize_to_the_same_worker_key(tmp_path: Path) -> None:

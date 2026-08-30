@@ -1345,6 +1345,30 @@ def test_resolve_agent_execution_rejects_private_instance_identity_without_reque
         resolve_agent_execution("general", bound_config, execution_identity=execution_identity)
 
 
+def test_resolve_agent_runtime_rejects_whitespace_private_instance_requester_before_creation(
+    tmp_path: Path,
+) -> None:
+    """Whitespace-only requester IDs must fail at ingress before private storage is materialized."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(
+        tmp_path,
+        requester_id=" \t ",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
+    ):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
+
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
 def test_resolve_agent_runtime_shared_create_does_not_create_private_instance_identity_namespace(
     tmp_path: Path,
 ) -> None:
