@@ -27,15 +27,12 @@ _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
 class _PendingOAuthState:
     """Pending OAuth connect request bound to its initiating authorization mode."""
 
-    service: str
-    user_id: str
     browser_user_required: bool
     agent_name: str | None
     execution_scope_override_provided: bool
     execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
     code_verifier: str | None
-    created_at: float
 
 
 def issue_pending_oauth_state(
@@ -115,13 +112,10 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
     )
     code_verifier = data.get("code_verifier")
     return _PendingOAuthState(
-        service=service,
-        user_id=user_id,
         browser_user_required=browser_user_required,
         agent_name=agent_name if isinstance(agent_name, str) and agent_name else None,
         execution_scope_override_provided=data.get("execution_scope_override_provided") is True,
         execution_scope_override=cast("WorkerScope | None", execution_scope_override),
         payload=payload,
         code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
-        created_at=0,
     )
