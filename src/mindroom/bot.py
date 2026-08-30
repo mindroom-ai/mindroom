@@ -1318,7 +1318,8 @@ class AgentBot:
             return
         orchestrator = self.orchestrator
         if orchestrator is None:
-            self._router_reply_membership_sync.invalidate(self.config, reason=reason)
+            if self._router_reply_membership_sync.invalidate(self.config, reason=reason):
+                self.schedule_reply_authorized_call_revocation()
         else:
             orchestrator.invalidate_agent_reply_memberships(reason=reason)
 
@@ -1397,8 +1398,11 @@ class AgentBot:
             if client is None:
                 return
             await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
+            self._router_reply_membership_sync.record_authoritative_refresh(self.config)
             await self.reconcile_pending_invites()
             await self.revoke_reply_authorized_calls()
+            if self._runtime_view.agent_reply_memberships.needs_refresh(self.config):
+                return
             self.schedule_reply_authorized_call_reconciliation()
 
         await self._router_reply_membership_sync.refresh_if_needed(self.config, refresh)

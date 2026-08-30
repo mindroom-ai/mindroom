@@ -476,6 +476,50 @@ async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_detached_router_invalidation_during_post_refresh_effects_revokes_and_skips_positive(
+    tmp_path: Path,
+) -> None:
+    """A detached router must reopen revocation before awaiting refresh effects."""
+    room_id = "!grant:localhost"
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
+    state = MatrixState.load(runtime_paths=bot.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=bot.runtime_paths)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(bot.agent_user.user_id, None, None)],
+        room_id=room_id,
+    )
+    bot.client = client
+    effects_started = asyncio.Event()
+    release_effects = asyncio.Event()
+
+    async def block_post_refresh_effects() -> None:
+        effects_started.set()
+        await release_effects.wait()
+
+    bot.reconcile_pending_invites = AsyncMock(side_effect=block_post_refresh_effects)  # type: ignore[method-assign]
+    bot.revoke_reply_authorized_calls = AsyncMock()  # type: ignore[method-assign]
+    bot.schedule_reply_authorized_call_revocation = MagicMock()  # type: ignore[method-assign]
+    bot.schedule_reply_authorized_call_reconciliation = MagicMock()  # type: ignore[method-assign]
+    bot._invalidate_agent_reply_memberships(reason="initial_gap")
+    bot.schedule_reply_authorized_call_revocation.reset_mock()
+
+    refresh_task = asyncio.create_task(bot._refresh_agent_reply_memberships_if_needed())
+    await asyncio.wait_for(effects_started.wait(), timeout=1.0)
+    try:
+        bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    finally:
+        release_effects.set()
+        await refresh_task
+
+    bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["classic", "sliding"])
 async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
     tmp_path: Path,
