@@ -39,6 +39,7 @@ from mindroom.constants import (
 )
 from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.hooks import (
+    ConfigReloadedContext,
     HookRegistry,
 )
 from mindroom.matrix.client import PermanentMatrixStartupError
@@ -3513,6 +3514,56 @@ class TestMultiAgentOrchestrator:
 
         assert calls == ["scripts", "transport", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_stop_invalidates_config_reload_hooks_first(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown must retire orchestrator hooks before stopping subsystems."""
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=TestAgentBot._runtime_paths(tmp_path),
+        )
+        active_registry = HookRegistry.empty()
+        orchestrator.hook_registry = active_registry
+        context = ConfigReloadedContext(
+            event_name="config:reloaded",
+            plugin_name="test",
+            settings={},
+            config=MagicMock(spec=Config),
+            runtime_paths=orchestrator.runtime_paths,
+            logger=MagicMock(),
+            correlation_id="reload",
+            _hook_registry_state=orchestrator._hook_registry_state,
+            _hook_registry_snapshot=active_registry,
+            changed_entities=(),
+            added_entities=(),
+            removed_entities=(),
+            plugin_changes=(),
+        )
+        active_during_script_shutdown: list[bool] = []
+
+        async def record_hook_state() -> None:
+            active_during_script_shutdown.append(context.is_active())
+
+        assert context.is_active()
+        with (
+            patch.object(
+                type(orchestrator._script_runtime),
+                "shutdown",
+                new=AsyncMock(side_effect=record_hook_state),
+            ),
+            patch.object(
+                orchestrator._approval_transport,
+                "close",
+                new=AsyncMock(side_effect=RuntimeError("stop boundary")),
+                create=True,
+            ),
+            pytest.raises(RuntimeError, match="stop boundary"),
+        ):
+            await orchestrator.stop()
+
+        assert active_during_script_shutdown == [False]
 
     @pytest.mark.asyncio
     async def test_config_update_forwards_plan_to_stable_script_runtime_before_replacement(
