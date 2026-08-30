@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
@@ -267,20 +267,22 @@ def build_oauth_reconnect_instruction(
             "The original operation may have partially succeeded; do not automatically retry it after reconnecting."
         )
         expiry_guidance = "request a fresh reconnect link without repeating the original operation"
+    link_guidance = (
+        f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
+        f"{expiry_guidance}: {connect_url}"
+        if "connect_token" in parse_qs(urlparse(connect_url).query)
+        else f"Reconnect here: {connect_url}"
+    )
     if oauth_connect_url_requires_host_browser(connect_url):
         return (
             f"{provider.display_name} session for this agent expired or is no longer valid. "
             "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
             "not on a phone or another computer. If needed, open this conversation there or copy the complete "
-            f"link into that browser. {retry_guidance} "
-            f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
-            f"{expiry_guidance}: {connect_url}"
+            f"link into that browser. {retry_guidance} {link_guidance}"
         )
     return (
         f"{provider.display_name} session for this agent expired or is no longer valid. "
-        f"Reconnect it with this MindRoom link. {retry_guidance} "
-        f"This link is valid for {OAUTH_CONNECT_TOKEN_TTL_MINUTES} minutes; if it expires, "
-        f"{expiry_guidance}: {connect_url}"
+        f"Reconnect it with this MindRoom link. {retry_guidance} {link_guidance}"
     )
 
 

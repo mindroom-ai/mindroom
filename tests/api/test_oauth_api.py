@@ -3915,6 +3915,67 @@ def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_pat
     assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
+@pytest.mark.parametrize("change_before_authorize", [True, False])
+@pytest.mark.parametrize("change_kind", ["scope", "alias"])
+def test_agent_connect_token_rejects_changed_canonical_target(
+    tmp_path: Path,
+    change_kind: str,
+    change_before_authorize: bool,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+    changed_payload = (
+        _config_payload(worker_scope="shared")
+        if change_kind == "scope"
+        else _config_payload(
+            worker_scope="user_agent",
+            allowed_users=["@bob:example.org"],
+            aliases={"@bob:example.org": ["@alice:example.org"]},
+        )
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            if change_before_authorize:
+                _publish_config(api_app, runtime_paths, changed_payload)
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            if change_before_authorize:
+                stale_response = authorize_response
+            else:
+                state = _state_from_auth_url(authorize_response.headers["location"])
+                _publish_config(api_app, runtime_paths, changed_payload)
+                stale_response = client.get(
+                    f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                    follow_redirects=False,
+                )
+
+    assert stale_response.status_code == 409
+    assert _stored_oauth_credentials(provider, runtime_paths) is None
+
+
 def test_agent_connect_token_rejects_generation_changed_after_link_issuance(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

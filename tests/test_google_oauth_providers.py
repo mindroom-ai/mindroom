@@ -625,3 +625,14 @@ def test_build_oauth_reconnect_instruction_explains_loopback_device_handoff() ->
         "This link is valid for 10 minutes; if it expires, rerun the original request for a fresh link: "
         f"{connect_url}"
     )
+
+
+def test_build_oauth_reconnect_instruction_omits_expiry_for_dashboard_link() -> None:
+    """Requester-less dashboard fallback links must not claim a capability TTL."""
+    connect_url = "https://mindroom.example/api/oauth/google_drive/authorize?agent_name=general&execution_scope=shared"
+
+    assert build_oauth_reconnect_instruction(google_drive_oauth_provider(), connect_url) == (
+        "Google Drive session for this agent expired or is no longer valid. "
+        "Reconnect it with this MindRoom link. After reconnecting, retry the request. "
+        f"Reconnect here: {connect_url}"
+    )

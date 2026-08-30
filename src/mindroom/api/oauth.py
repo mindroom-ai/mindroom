@@ -74,10 +74,15 @@ from mindroom.oauth.service import (
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    build_agent_toolkit_worker_target,
+)
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -250,16 +255,17 @@ async def _issue_authorization_url(
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
     connect_target = None
+    conversation_context = None
     if connect_token:
         try:
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _verify_conversation_connect_target_authorized(request, connect_target)
+        conversation_context = _conversation_connect_context(request, provider, runtime_paths, connect_target)
         _verify_connect_target_query(connect_target.binding, agent_name, request.query_params.get("execution_scope"))
     await _client_config_resolution_for_request(request, provider, runtime_paths, reject_remote_provisioned=True)
-    if connect_target is not None:
-        context = _conversation_connect_context(provider, runtime_paths, connect_target)
+    if conversation_context is not None:
+        context = conversation_context
     else:
         target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
         context = _credential_context(provider, target.runtime_paths, target)
@@ -324,7 +330,7 @@ async def _conversation_target_payload(
     return payload
 
 
-def _verify_conversation_connect_target_authorized(request: Request, target: OAuthConnectTarget) -> None:
+def _verify_conversation_connect_target_authorized(request: Request, target: OAuthConnectTarget) -> Config:
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     agent_name = target.binding.requested_agent_name
@@ -336,19 +342,21 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
         or not is_sender_allowed_for_agent_credential_management(requester_id, agent_name, config)
     ):
         raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
+    return config
 
 
 def _conversation_connect_context(
+    request: Request,
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     target: OAuthConnectTarget,
 ) -> OAuthCredentialContext:
+    config = _verify_conversation_connect_target_authorized(request, target)
     binding = target.binding
     agent_name = binding.requested_agent_name
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
-    worker_scope = None if binding.worker_scope == "unscoped" else binding.worker_scope
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
@@ -358,20 +366,24 @@ def _conversation_connect_context(
         resolved_thread_id=None,
         session_id=None,
     )
-    worker_target = ResolvedWorkerTarget(
-        worker_scope=worker_scope,
-        routing_agent_name=agent_name,
+    worker_target = build_agent_toolkit_worker_target(
+        config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=config.get_agent(agent_name).private is not None,
         execution_identity=identity,
-        tenant_id=None,
-        account_id=None,
-        worker_key=binding.worker_key,
-    )
-    return OAuthCredentialContext(
-        provider=provider,
         runtime_paths=runtime_paths,
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=worker_target,
     )
+    context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
+        worker_target,
+        execution_identity=identity,
+        authorization=config.authorization,
+    )
+    if target.binding != oauth_credential_binding(provider, context.worker_target):
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    return context
 
 
 def _conversation_context_from_pending_payload(
@@ -401,8 +413,7 @@ def _conversation_context_from_pending_payload(
         requester_id=requester_id,
         connection_generation=connection_generation,
     )
-    _verify_conversation_connect_target_authorized(request, target)
-    return _conversation_connect_context(provider, runtime_paths, target)
+    return _conversation_connect_context(request, provider, runtime_paths, target)
 
 
 def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
