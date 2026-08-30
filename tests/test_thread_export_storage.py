@@ -119,6 +119,8 @@ def test_inactive_cleanup_cannot_race_a_replacement_writer(tmp_path: Path) -> No
     prepare_export_root(output_dir, trusted_root=tmp_path)
     write_started = threading.Event()
     release_write = threading.Event()
+    clear_started = threading.Event()
+    should_clear_called = threading.Event()
     active = True
 
     original_atomic_write = thread_export_storage._atomic_write_at
@@ -127,6 +129,18 @@ def test_inactive_cleanup_cannot_race_a_replacement_writer(tmp_path: Path) -> No
         write_started.set()
         assert release_write.wait(2)
         original_atomic_write(*args, **kwargs)
+
+    def should_clear() -> bool:
+        should_clear_called.set()
+        return active
+
+    def run_clear() -> None:
+        clear_started.set()
+        clear_thread_export_root(
+            output_dir,
+            trusted_root=tmp_path,
+            should_clear=should_clear,
+        )
 
     with (
         patch("mindroom.thread_export.storage._atomic_write_at", side_effect=pause_write),
@@ -142,15 +156,13 @@ def test_inactive_cleanup_cannot_race_a_replacement_writer(tmp_path: Path) -> No
         )
         assert write_started.wait(2)
         active = False
-        clear = pool.submit(
-            clear_thread_export_root,
-            output_dir,
-            trusted_root=tmp_path,
-            should_clear=lambda: active,
-        )
+        clear = pool.submit(run_clear)
+        assert clear_started.wait(2)
+        assert not should_clear_called.wait(0.1)
         release_write.set()
         assert write.result(timeout=2) is True
         clear.result(timeout=2)
+        assert should_clear_called.is_set()
 
     assert (output_dir / _room().key / _thread_filename("$thread:localhost")).exists()
 
