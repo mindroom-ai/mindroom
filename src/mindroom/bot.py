@@ -1353,6 +1353,16 @@ class AgentBot:
             owner=self._runtime_view,
         )
 
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        """Schedule this bot's fail-closed active-call revocation."""
+        if self._call_manager is None:
+            return
+        create_background_task(
+            self.revoke_reply_authorized_calls(),
+            name=f"matrix_rtc_reply_authorization_revoke_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
     def _schedule_reply_authorized_call_revocation(self) -> None:
         """Revoke calls after a synchronous pre-admission policy change."""
         create_background_task(

@@ -1324,9 +1324,11 @@ class _MultiAgentOrchestrator:
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Synchronously revoke every room-backed reply grant."""
         if self.config is not None:
-            self.agent_reply_membership_sync.invalidate(self.config, reason=reason)
+            refresh_requested = self.agent_reply_membership_sync.invalidate(self.config, reason=reason)
+            if not refresh_requested:
+                return
             for bot in self.agent_bots.values():
-                bot.schedule_reply_authorized_call_reconciliation()
+                bot.schedule_reply_authorized_call_revocation()
 
     def _invalidate_reply_memberships_before_control_stop(self, entity_names: set[str]) -> None:
         """Fence room-backed grants before stopping their sole control client."""

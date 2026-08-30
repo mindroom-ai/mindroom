@@ -126,6 +126,29 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
     worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
 
 
+def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
+    tmp_path: Path,
+) -> None:
+    """Uncertain sync batches must not start overlapping positive call reconciliation."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    worker_bot = MagicMock()
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: router_bot,
+        "worker": worker_bot,
+    }
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
+    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    worker_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+    worker_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 

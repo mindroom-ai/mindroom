@@ -67,18 +67,19 @@ class AgentReplyMembershipSync:
         """Forget one stopped receive generation's preservation state."""
         self._preserve_on_next_sync_start = False
 
-    def _request_refresh(self) -> None:
-        """Request an authoritative rebuild without resetting active backoff."""
+    def _request_refresh(self) -> bool:
+        """Request an authoritative rebuild and report a new refresh gap."""
         if self._refresh_pending:
-            return
+            return False
         self._refresh_pending = True
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
+        return True
 
-    def invalidate(self, config: Config, *, reason: str) -> None:
-        """Fail every room grant closed and request an authoritative rebuild."""
+    def invalidate(self, config: Config, *, reason: str) -> bool:
+        """Fail every room grant closed and report a newly requested rebuild."""
         self._memberships.invalidate(config, reason=reason)
-        self._request_refresh()
+        return self._request_refresh()
 
     async def refresh_if_needed(
         self,
