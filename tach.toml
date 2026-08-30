@@ -4170,7 +4170,6 @@ from = ["mindroom.runtime_resolution"]
 expose = [
     "PrivateInstanceIdentity",
     "PrivateInstanceIdentityError",
-    "ensure_private_instance_identity",
     "load_private_instance_identity",
 ]
 from = ["mindroom.private_instance_identity"]
