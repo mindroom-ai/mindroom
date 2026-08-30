@@ -28,6 +28,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
@@ -126,8 +127,33 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
     worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_successful_reply_membership_refresh_opens_new_revocation_gap(
+    tmp_path: Path,
+) -> None:
+    """A later invalidation must revoke calls again after an authoritative refresh."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=[])
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    await orchestrator.refresh_agent_reply_memberships()
+    router_bot.schedule_reply_authorized_call_revocation.reset_mock()
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
+    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+
+
+@pytest.mark.parametrize("preserve_startup_snapshot", [False, True])
 def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
     tmp_path: Path,
+    preserve_startup_snapshot: bool,
 ) -> None:
     """Uncertain sync batches must not start overlapping positive call reconciliation."""
     config = _runtime_bound_config(Config(), tmp_path)
@@ -139,6 +165,9 @@ def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
         ROUTER_AGENT_NAME: router_bot,
         "worker": worker_bot,
     }
+    if preserve_startup_snapshot:
+        orchestrator.agent_reply_membership_sync.preserve_on_next_sync_start()
+        assert not orchestrator.agent_reply_membership_sync.sync_loop_started()
 
     orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")

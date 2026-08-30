@@ -45,6 +45,7 @@ class AgentReplyMembershipSync:
         self._preserve_on_next_sync_start = False
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
+        self._revocation_wave_issued = False
 
     @property
     def memberships(self) -> AgentReplyMembershipIndex:
@@ -77,9 +78,18 @@ class AgentReplyMembershipSync:
         return True
 
     def invalidate(self, config: Config, *, reason: str) -> bool:
-        """Fail every room grant closed and report a newly requested rebuild."""
+        """Fail every room grant closed and request one revocation wave per gap."""
         self._memberships.invalidate(config, reason=reason)
-        return self._request_refresh()
+        self._request_refresh()
+        if self._revocation_wave_issued:
+            return False
+        self._revocation_wave_issued = True
+        return True
+
+    def record_authoritative_refresh(self, config: Config) -> None:
+        """Allow a future invalidation to issue a new revocation wave."""
+        if not self._memberships.needs_refresh(config):
+            self._revocation_wave_issued = False
 
     async def refresh_if_needed(
         self,
@@ -94,6 +104,7 @@ class AgentReplyMembershipSync:
         await refresh()
         self._refresh_pending = self._memberships.needs_refresh(config)
         if not self._refresh_pending:
+            self.record_authoritative_refresh(config)
             self._refresh_attempt = 0
             self._refresh_retry_at = 0.0
             return
