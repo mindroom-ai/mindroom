@@ -3794,6 +3794,39 @@ def test_agent_connect_token_starts_without_dashboard_login(tmp_path: Path) -> N
     assert urlparse(response.headers["location"]).netloc == "auth.example.test"
 
 
+def test_requesterless_oauth_link_uses_dashboard_login(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-id",
+    )
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    connect_url = oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=worker_target)
+    parsed_connect_url = urlparse(connect_url)
+
+    assert "connect_token" not in parse_qs(parsed_connect_url.query)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(connect_url, follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("/login?")
+
+
 def test_agent_connect_token_callback_stores_bound_scope_without_dashboard_login(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

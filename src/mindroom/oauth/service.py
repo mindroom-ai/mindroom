@@ -79,7 +79,12 @@ def _issue_oauth_connect_token(
     worker_target: ResolvedWorkerTarget | None,
 ) -> str | None:
     """Create an opaque token that binds an OAuth link to one requester and target."""
-    if worker_target is None or worker_target.execution_identity is None or not worker_target.worker_key:
+    if (
+        worker_target is None
+        or worker_target.execution_identity is None
+        or not worker_target.execution_identity.requester_id
+        or not worker_target.worker_key
+    ):
         return None
     requester_id = worker_target.execution_identity.requester_id
 
