@@ -69,6 +69,47 @@ def test_ensure_is_idempotent_for_the_same_identity(tmp_path: Path) -> None:
     assert record_path.read_text(encoding="utf-8") == original_contents
 
 
+def test_ensure_initializes_a_new_empty_private_scope(tmp_path: Path) -> None:
+    """An empty scope has no legacy owner data and may receive its first identity record."""
+    worker_key = "v1:tenant-a:user:requester-a"
+    scope_root = _scope_root(tmp_path, worker_key)
+    scope_root.mkdir(parents=True)
+
+    identity = ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+
+    assert load_private_instance_identity(tmp_path, scope_root) == identity
+
+
+def test_ensure_rejects_a_populated_scope_without_an_identity_record(tmp_path: Path) -> None:
+    """Legacy scope data must not be claimed by the first requester to materialize it."""
+    worker_key = "v1:tenant-a:user:requester-a"
+    scope_root = _scope_root(tmp_path, worker_key)
+    scope_root.mkdir(parents=True)
+    (scope_root / "legacy-state.db").write_text("legacy", encoding="utf-8")
+
+    with pytest.raises(PrivateInstanceIdentityError, match="pre-existing data"):
+        ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+
+    assert not (scope_root / ".mindroom-private-instance.json").exists()
+
+
+def test_ensure_uses_no_lock_for_an_existing_matching_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Steady-state owner checks must not take the creation lock or repeat durable work."""
+    worker_key = "v1:tenant-a:user:requester-a"
+    identity = ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a")
+
+    def unexpected_lock(*_args: object, **_kwargs: object) -> None:
+        msg = "steady-state identity lookup took the creation lock"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(private_instance_identity_store, "advisory_file_lock", unexpected_lock)
+
+    assert ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="requester-a") == identity
+
+
 def test_ensure_rejects_whitespace_requester_before_creating_private_directories(tmp_path: Path) -> None:
     """A requester rejected by the persisted schema must not create a namespace or scope."""
     with pytest.raises(PrivateInstanceIdentityError, match="invalid identity fields"):

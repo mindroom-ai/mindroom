@@ -70,7 +70,13 @@ from mindroom.prompts import (
     OPENAI_COMPAT_HISTORY_GUIDANCE,
     WORKSPACE_SKILL_AUTHORING_PROMPT,
 )
-from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
+from mindroom.runtime_resolution import (
+    resolve_agent_execution,
+    resolve_agent_runtime,
+)
+from mindroom.runtime_resolution import (
+    resolve_agent_workspace_from_state_path as resolve_workspace,
+)
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -1285,9 +1291,6 @@ def test_resolve_agent_runtime_persists_private_instance_identity_before_workspa
     assert worker_key is not None
     scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
     expected_identity = PrivateInstanceIdentity(worker_key=worker_key, requester_id="requester-a")
-    from mindroom.runtime_resolution import (  # noqa: PLC0415
-        resolve_agent_workspace_from_state_path as resolve_workspace,
-    )
 
     def verify_identity_before_workspace(*args: object, **kwargs: object) -> object:
         assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == expected_identity

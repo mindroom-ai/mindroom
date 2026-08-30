@@ -65,22 +65,45 @@ def ensure_private_instance_identity(
     trusted_base_path = shared_storage_root(base_storage_path)
     scope_root = private_instance_scope_root_path(trusted_base_path, worker_key)
     _validate_identity(requested_identity, trusted_base_path, scope_root)
+    existing_identity = load_private_instance_identity(trusted_base_path, scope_root)
+    if existing_identity is not None:
+        return _matching_identity(existing_identity, requested_identity)
+
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=True)
     with advisory_file_lock(trusted_scope_root / _LOCK_FILENAME):
         existing_identity = load_private_instance_identity(trusted_base_path, trusted_scope_root)
-        if existing_identity is None:
-            write_json_file_durable(
-                trusted_scope_root / _RECORD_FILENAME,
-                _identity_payload(requested_identity),
-                indent=2,
-                sort_keys=True,
-                trailing_newline=True,
-            )
-            return requested_identity
-        if existing_identity != requested_identity:
-            msg = "Private instance identity conflicts with the existing scope record"
-            raise PrivateInstanceIdentityError(msg)
-        return existing_identity
+        if existing_identity is not None:
+            return _matching_identity(existing_identity, requested_identity)
+        _require_claimable_scope(trusted_scope_root)
+        write_json_file_durable(
+            trusted_scope_root / _RECORD_FILENAME,
+            _identity_payload(requested_identity),
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
+        return requested_identity
+
+
+def _matching_identity(
+    existing_identity: PrivateInstanceIdentity,
+    requested_identity: PrivateInstanceIdentity,
+) -> PrivateInstanceIdentity:
+    """Return a matching identity or reject a normalized-key ownership collision."""
+    if existing_identity != requested_identity:
+        msg = "Private instance identity conflicts with the existing scope record"
+        raise PrivateInstanceIdentityError(msg)
+    return existing_identity
+
+
+def _require_claimable_scope(scope_root: Path) -> None:
+    """Refuse first-use ownership when any non-identity data already exists."""
+    for entry in scope_root.iterdir():
+        if entry.name in {_LOCK_FILENAME, _RECORD_FILENAME}:
+            continue
+        if entry.name.startswith(f"{_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
+            continue
+        _raise_invalid_record("cannot claim a scope with pre-existing data")
 
 
 def _identity_payload(identity: PrivateInstanceIdentity) -> dict[str, object]:
