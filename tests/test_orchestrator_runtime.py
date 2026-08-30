@@ -138,6 +138,7 @@ async def test_successful_reply_membership_refresh_opens_new_revocation_gap(
     orchestrator.config = config
     router_bot = MagicMock()
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.reconcile_pending_invites = AsyncMock()
     router_bot.revoke_reply_authorized_calls = AsyncMock()
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
