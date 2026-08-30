@@ -3516,7 +3516,7 @@ class TestMultiAgentOrchestrator:
         mock_shutdown_approvals.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_stop_invalidates_config_reload_hooks_first(
+    async def test_orchestrator_stop_invalidates_hook_registries_first(
         self,
         tmp_path: Path,
     ) -> None:
@@ -3542,6 +3542,7 @@ class TestMultiAgentOrchestrator:
             plugin_changes=(),
         )
         active_during_script_shutdown: list[bool] = []
+        scheduling_registries: list[HookRegistry] = []
 
         async def record_hook_state() -> None:
             active_during_script_shutdown.append(context.is_active())
@@ -3559,11 +3560,16 @@ class TestMultiAgentOrchestrator:
                 new=AsyncMock(side_effect=RuntimeError("stop boundary")),
                 create=True,
             ),
+            patch(
+                "mindroom.orchestrator.set_scheduling_hook_registry",
+                side_effect=scheduling_registries.append,
+            ),
             pytest.raises(RuntimeError, match="stop boundary"),
         ):
             await orchestrator.stop()
 
         assert active_during_script_shutdown == [False]
+        assert scheduling_registries == [HookRegistry.empty()]
 
     @pytest.mark.asyncio
     async def test_config_update_forwards_plan_to_stable_script_runtime_before_replacement(

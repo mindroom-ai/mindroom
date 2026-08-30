@@ -2208,6 +2208,7 @@ class _MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
         self.hook_registry = HookRegistry.empty()
+        set_scheduling_hook_registry(self.hook_registry)
         self.invalidate_agent_reply_memberships(reason="shutdown")
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
