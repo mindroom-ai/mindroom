@@ -221,6 +221,7 @@ class HookContextSupport:
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
             "room_state_putter": self.room_state_putter(),
+            "_hook_registry_state": self.hook_registry_state,
         }
 
 
@@ -318,6 +319,26 @@ class HookContext:
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    _hook_registry_state: HookRegistryState | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+    _hook_registry_snapshot: HookRegistry | None = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+
+    def is_active(self) -> bool:
+        """Return whether this hook still belongs to the live registry snapshot."""
+        return (
+            self._hook_registry_state is None
+            or self._hook_registry_snapshot is None
+            or self._hook_registry_state.registry is self._hook_registry_snapshot
+        )
 
     @property
     def state_root(self) -> Path:

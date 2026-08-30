@@ -41,7 +41,11 @@ logger = get_logger(__name__)
 def retract_room_export(accumulator: ThreadExportAccumulator, room: ThreadExportRoom) -> None:
     """Remove one target's room export or record a room-scoped storage failure."""
     try:
-        remove_room_export(accumulator.target.output_dir, room)
+        remove_room_export(
+            accumulator.target.output_dir,
+            room,
+            trusted_root=accumulator.target.trusted_root,
+        )
     except (OSError, RuntimeError) as exc:
         accumulator.failed_items.append(failure_for_room(room, f"Room removal failed: {exc}"))
 
@@ -141,6 +145,7 @@ async def _write_thread_to_targets(
                 room,
                 thread_id,
                 payload,
+                trusted_root=accumulator.target.trusted_root,
             )
         except Exception as exc:
             accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
@@ -164,7 +169,15 @@ def _finish_room_exports(
     for accumulator in accumulators:
         try:
             output_dir = accumulator.target.output_dir
-            skip_empty_reconciliation = not truncated and not thread_ids and room_has_thread_exports(output_dir, room)
+            skip_empty_reconciliation = (
+                not truncated
+                and not thread_ids
+                and room_has_thread_exports(
+                    output_dir,
+                    room,
+                    trusted_root=accumulator.target.trusted_root,
+                )
+            )
             if skip_empty_reconciliation:
                 logger.warning(
                     "Skipping stale thread reconciliation after empty enumeration",
@@ -177,6 +190,7 @@ def _finish_room_exports(
                     output_dir,
                     room,
                     thread_ids,
+                    trusted_root=accumulator.target.trusted_root,
                 )
                 if removed_stale_threads:
                     changed_accumulator_ids.add(id(accumulator))
@@ -184,6 +198,7 @@ def _finish_room_exports(
                 output_dir,
                 room,
                 thread_files_changed=id(accumulator) in changed_accumulator_ids,
+                trusted_root=accumulator.target.trusted_root,
             )
         except Exception as exc:
             accumulator.failed_items.append(failure_for_room(room, f"Room reconciliation failed: {exc}"))

@@ -2700,6 +2700,7 @@ path = "mindroom.thread_export"
 depends_on = [
     "mindroom.thread_export.models",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.storage",
 ]
 
 [[modules]]
@@ -2717,6 +2718,7 @@ visibility = [
 path = "mindroom.thread_export.storage"
 depends_on = []
 visibility = [
+    "mindroom.thread_export",
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
 ]

@@ -967,7 +967,11 @@ async def test_room_removal_failure_is_scoped_to_the_rejected_target(
             targets=(rejected_target, healthy_target),
         )
 
-    remove_export.assert_called_once_with(rejected_target.output_dir, room)
+    remove_export.assert_called_once_with(
+        rejected_target.output_dir,
+        room,
+        trusted_root=None,
+    )
     enumerate_threads.assert_awaited_once_with(client, room.room_id, max_thread_roots=2000)
     assert accumulators[0].rooms_exported == 0
     assert accumulators[0].failed_items[0].error == "Room removal failed: storage unavailable"

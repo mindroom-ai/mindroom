@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
     get_matrix_sync_cache_write_progress,
@@ -2311,6 +2312,8 @@ async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> Non
 async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     """AgentBot.stop() must keep restart provenance for final drains."""
     bot = object.__new__(AgentBot)
+    active_hook_registry = HookRegistry.empty()
+    bot._hook_registry_state = HookRegistryState(active_hook_registry)
     bot.agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:localhost",
@@ -2345,6 +2348,7 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
+    assert bot.hook_registry is not active_hook_registry
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     bot._response_runner.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 

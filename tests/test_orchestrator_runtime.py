@@ -249,6 +249,31 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
     assert "removed" not in orchestrator.agent_bots
 
 
+@pytest.mark.asyncio
+async def test_entity_removal_keeps_bot_registered_until_cleanup_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Failed cleanup cannot detach a bot whose hook contexts are still live."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    bot = MagicMock()
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.cleanup = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+    orchestrator.agent_bots["removed"] = bot
+    orchestrator._approval_transport.reconcile_unavailable_entities = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await orchestrator._remove_deleted_entities({"removed"})
+
+    assert orchestrator.agent_bots["removed"] is bot
+
+
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 

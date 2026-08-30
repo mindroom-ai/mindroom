@@ -82,6 +82,7 @@ class ThreadExportTarget:
     output_dir: Path
     required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
+    trusted_root: Path | None = None
 
 
 @dataclass
