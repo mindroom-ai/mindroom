@@ -14,7 +14,11 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import login_redirect_for_request, verify_user
-from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
+from mindroom.api.credentials_oauth_flows import (
+    consume_pending_oauth_request,
+    issue_pending_oauth_state,
+    pending_oauth_state_requires_browser_user,
+)
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     resolve_requester_credentials_target,
@@ -24,7 +28,9 @@ from mindroom.api.dashboard_credential_scope import (
     build_dashboard_execution_identity,
     require_agent_credential_management_authorized,
 )
+from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth import (
     OAuthClaimValidationError,
@@ -36,8 +42,10 @@ from mindroom.oauth import (
 )
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
+    OAuthCredentialBindingParseError,
     oauth_credential_binding,
     oauth_credential_binding_payload,
+    parse_oauth_credential_binding_payload,
 )
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
@@ -60,16 +68,23 @@ from mindroom.oauth.reset import (
 )
 from mindroom.oauth.reset_execution import OAuthResetPreparationError, retire_and_reset_oauth_credentials
 from mindroom.oauth.service import (
+    OAuthConnectTarget,
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    build_agent_toolkit_worker_target,
+)
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 logger = get_logger(__name__)
@@ -77,8 +92,11 @@ _OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
 _OAUTH_STALE_CONNECTION_MESSAGE = (
     "This OAuth connection changed before the request completed. Start the connection again from the dashboard."
 )
-# OAuth callbacks intentionally verify the browser user inline instead of relying on
-# standalone-public-path bypasses, because callbacks write scoped credentials.
+_OAUTH_STALE_CONVERSATION_MESSAGE = (
+    "This OAuth connection changed before the request completed. Request a fresh connection link from the conversation."
+)
+# Dashboard callbacks verify the browser user inline. Conversation-issued links
+# instead use their short-lived, single-use server-side capability state.
 
 
 class OAuthConnectResponse(BaseModel):
@@ -236,29 +254,38 @@ async def _issue_authorization_url(
     agent_name: str | None,
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
-    await _client_config_resolution_for_request(request, provider, runtime_paths, reject_remote_provisioned=True)
     connect_target = None
+    conversation_context = None
     if connect_token:
         try:
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _verify_connect_target_authorized(request, connect_target.requester_id, runtime_paths)
+        conversation_context = _conversation_connect_context(request, provider, runtime_paths, connect_target)
         _verify_connect_target_query(connect_target.binding, agent_name, request.query_params.get("execution_scope"))
-    target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
-    if connect_target is not None:
-        _verify_connect_target_binding(connect_target.binding, provider, worker_target_for_credentials_target(target))
+    await _client_config_resolution_for_request(request, provider, runtime_paths, reject_remote_provisioned=True)
+    if conversation_context is not None:
+        context = conversation_context
+    else:
+        target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
+        context = _credential_context(provider, target.runtime_paths, target)
     try:
+        payload = (
+            await _conversation_target_payload(context, connect_target)
+            if connect_target is not None
+            else await _credential_context_binding_payload(context)
+        )
         code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
             request,
             provider.id,
             agent_name,
-            payload=await _target_binding_payload(provider, target),
+            payload=payload,
             code_verifier=code_verifier,
+            browser_user_required=connect_target is None,
         )
         auth_url = await provider.authorization_uri_async(
-            target.runtime_paths,
+            runtime_paths,
             state=state,
             code_verifier=code_verifier,
         )
@@ -279,11 +306,114 @@ async def _issue_authorization_url(
 
 
 async def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    snapshot = await load_oauth_credentials_snapshot(_credential_context(provider, target.runtime_paths, target))
-    binding = oauth_credential_binding(provider, worker_target_for_credentials_target(target))
+    return await _credential_context_binding_payload(_credential_context(provider, target.runtime_paths, target))
+
+
+async def _credential_context_binding_payload(context: OAuthCredentialContext) -> dict[str, str]:
+    snapshot = await load_oauth_credentials_snapshot(context)
+    binding = oauth_credential_binding(context.provider, context.worker_target)
     payload = oauth_credential_binding_payload(binding)
     payload["connection_generation"] = snapshot.connection_generation
     return payload
+
+
+async def _conversation_target_payload(
+    context: OAuthCredentialContext,
+    target: OAuthConnectTarget,
+) -> dict[str, str]:
+    snapshot = await load_oauth_credentials_snapshot(context)
+    if snapshot.connection_generation != target.connection_generation:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    payload = oauth_credential_binding_payload(target.binding)
+    payload["conversation_requester_id"] = target.requester_id or ""
+    payload["connection_generation"] = target.connection_generation
+    return payload
+
+
+def _verify_conversation_connect_target_authorized(request: Request, target: OAuthConnectTarget) -> Config:
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    config = snapshot.runtime_config
+    agent_name = target.binding.requested_agent_name
+    requester_id = target.requester_id
+    if (
+        config is None
+        or not agent_name
+        or not requester_id
+        or not is_sender_allowed_for_agent_credential_management(requester_id, agent_name, config)
+    ):
+        raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
+    return config
+
+
+def _conversation_connect_context(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    target: OAuthConnectTarget,
+) -> OAuthCredentialContext:
+    config = _verify_conversation_connect_target_authorized(request, target)
+    binding = target.binding
+    agent_name = binding.requested_agent_name
+    requester_id = target.requester_id
+    if not agent_name or not requester_id:
+        raise HTTPException(status_code=400, detail="OAuth link target is invalid")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = build_agent_toolkit_worker_target(
+        config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=config.get_agent(agent_name).private is not None,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+    )
+    context = resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
+        worker_target,
+        execution_identity=identity,
+        authorization=config.authorization,
+    )
+    if target.binding != oauth_credential_binding(provider, context.worker_target):
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    return context
+
+
+def _conversation_context_from_pending_payload(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    payload: dict[str, str] | None,
+) -> OAuthCredentialContext:
+    if payload is None:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    try:
+        binding = parse_oauth_credential_binding_payload(
+            provider,
+            payload,
+            allowed_worker_scopes=frozenset({"shared", "user", "user_agent"}),
+            require_agent_name=True,
+            require_worker_key=True,
+        )
+    except OAuthCredentialBindingParseError as exc:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE) from exc
+    requester_id = payload.get("conversation_requester_id")
+    connection_generation = payload.get("connection_generation")
+    if not requester_id or not connection_generation:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    target = OAuthConnectTarget(
+        binding=binding,
+        requester_id=requester_id,
+        connection_generation=connection_generation,
+    )
+    return _conversation_connect_context(request, provider, runtime_paths, target)
 
 
 def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
@@ -427,9 +557,10 @@ async def authorize(
     connect_token: str | None = None,
 ) -> RedirectResponse:
     """Start a provider OAuth flow from a browser-openable MindRoom URL."""
-    login_redirect = await _require_oauth_browser_user(request)
-    if login_redirect is not None:
-        return login_redirect
+    if not connect_token:
+        login_redirect = await _require_oauth_browser_user(request)
+        if login_redirect is not None:
+            return login_redirect
     provider, runtime_paths = _load_provider(request, provider_id)
     response = await _issue_authorization_url(
         request,
@@ -560,6 +691,11 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     """Signal OAuth completion to the dashboard popup opener."""
     await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
+    return _oauth_success_response(provider)
+
+
+def _oauth_success_response(provider: OAuthProvider) -> HTMLResponse:
+    """Render a browser-readable OAuth completion response."""
     message = {
         "type": _OAUTH_COMPLETE_MESSAGE_TYPE,
         "provider": provider.id,
@@ -593,48 +729,47 @@ async def _store_callback_credentials(
     *,
     code: str,
     state: str,
-) -> None:
+) -> bool:
     """Resolve and store one callback's exact credential target."""
     pending = consume_pending_oauth_request(request, provider.id, state)
-    target = _resolve_oauth_credentials_target(
-        request,
-        provider,
-        agent_name=pending.agent_name,
-        execution_scope_override_provided=pending.execution_scope_override_provided,
-        execution_scope_override=pending.execution_scope_override,
-    )
+    if pending.browser_user_required:
+        target = _resolve_oauth_credentials_target(
+            request,
+            provider,
+            agent_name=pending.agent_name,
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
+        context = _credential_context(provider, runtime_paths, target)
+    else:
+        target = None
+        context = _conversation_context_from_pending_payload(request, provider, runtime_paths, pending.payload)
 
     async def verify_and_store() -> None:
-        await _verify_pending_target_binding(provider, pending.payload, target)
+        if target is not None:
+            await _verify_pending_target_binding(provider, pending.payload, target)
         await exchange_and_store_oauth_credentials(
-            _credential_context(provider, runtime_paths, target),
+            context,
             code,
             pending.code_verifier,
             expected_connection_generation=_pending_connection_generation(pending.payload),
         )
 
     await run_coroutine_until_complete(verify_and_store())
+    return pending.browser_user_required
 
 
-@router.get("/{provider_id}/callback")
-async def callback(provider_id: str, request: Request) -> Response:
-    """Handle a provider OAuth callback and store scoped credentials."""
-    error = request.query_params.get("error")
-    if error:
-        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
-
-    code = request.query_params.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="No authorization code received")
-
-    state = request.query_params.get("state")
-    if not state:
-        raise HTTPException(status_code=400, detail="No OAuth state received")
-
-    await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id)
+async def _complete_oauth_callback(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    code: str,
+    state: str,
+) -> bool:
+    """Store callback credentials and map failures to the public OAuth boundary."""
     try:
-        await _store_callback_credentials(
+        return await _store_callback_credentials(
             request,
             provider,
             runtime_paths,
@@ -643,10 +778,10 @@ async def callback(provider_id: str, request: Request) -> Response:
         )
     except HTTPException as exc:
         if exc.status_code == 409:
-            return _oauth_browser_error_response(str(exc.detail), status_code=409)
+            raise OAuthCredentialConflictError(str(exc.detail)) from exc
         raise
     except OAuthCredentialConflictError:
-        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409)
+        raise
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:
@@ -664,6 +799,40 @@ async def callback(provider_id: str, request: Request) -> Response:
         )
         raise HTTPException(status_code=500, detail="OAuth callback failed") from exc
 
+
+@router.get("/{provider_id}/callback")
+async def callback(provider_id: str, request: Request) -> Response:
+    """Handle a provider OAuth callback and store scoped credentials."""
+    error = request.query_params.get("error")
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
+
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="No authorization code received")
+
+    state = request.query_params.get("state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No OAuth state received")
+
+    provider, runtime_paths = _load_provider(request, provider_id)
+    browser_user_required = pending_oauth_state_requires_browser_user(request, provider.id, state)
+    if browser_user_required:
+        await _require_oauth_api_user(request)
+    try:
+        browser_user_required = await _complete_oauth_callback(
+            request,
+            provider,
+            runtime_paths,
+            code=code,
+            state=state,
+        )
+    except OAuthCredentialConflictError:
+        message = _OAUTH_STALE_CONNECTION_MESSAGE if browser_user_required else _OAUTH_STALE_CONVERSATION_MESSAGE
+        return _oauth_browser_error_response(message, status_code=409)
+
+    if not browser_user_required:
+        return _oauth_success_response(provider)
     return RedirectResponse(url=oauth_success_redirect_url(provider, runtime_paths))
 
 
