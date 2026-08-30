@@ -87,6 +87,9 @@ _OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
 _OAUTH_STALE_CONNECTION_MESSAGE = (
     "This OAuth connection changed before the request completed. Start the connection again from the dashboard."
 )
+_OAUTH_STALE_CONVERSATION_MESSAGE = (
+    "This OAuth connection changed before the request completed. Request a fresh connection link from the conversation."
+)
 # Dashboard callbacks verify the browser user inline. Conversation-issued links
 # instead use their short-lived, single-use server-side capability state.
 
@@ -262,7 +265,7 @@ async def _issue_authorization_url(
         context = _credential_context(provider, target.runtime_paths, target)
     try:
         payload = (
-            await _conversation_target_payload(context, connect_target.requester_id)
+            await _conversation_target_payload(context, connect_target)
             if connect_target is not None
             else await _credential_context_binding_payload(context)
         )
@@ -310,10 +313,14 @@ async def _credential_context_binding_payload(context: OAuthCredentialContext) -
 
 async def _conversation_target_payload(
     context: OAuthCredentialContext,
-    requester_id: str | None,
+    target: OAuthConnectTarget,
 ) -> dict[str, str]:
-    payload = await _credential_context_binding_payload(context)
-    payload["conversation_requester_id"] = requester_id or ""
+    snapshot = await load_oauth_credentials_snapshot(context)
+    if snapshot.connection_generation != target.connection_generation:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    payload = oauth_credential_binding_payload(target.binding)
+    payload["conversation_requester_id"] = target.requester_id or ""
+    payload["connection_generation"] = target.connection_generation
     return payload
 
 
@@ -374,7 +381,7 @@ def _conversation_context_from_pending_payload(
     payload: dict[str, str] | None,
 ) -> OAuthCredentialContext:
     if payload is None:
-        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
     try:
         binding = parse_oauth_credential_binding_payload(
             provider,
@@ -384,11 +391,16 @@ def _conversation_context_from_pending_payload(
             require_worker_key=True,
         )
     except OAuthCredentialBindingParseError as exc:
-        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE) from exc
     requester_id = payload.get("conversation_requester_id")
-    if not requester_id:
-        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
-    target = OAuthConnectTarget(binding=binding, requester_id=requester_id)
+    connection_generation = payload.get("connection_generation")
+    if not requester_id or not connection_generation:
+        raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
+    target = OAuthConnectTarget(
+        binding=binding,
+        requester_id=requester_id,
+        connection_generation=connection_generation,
+    )
     _verify_conversation_connect_target_authorized(request, target)
     return _conversation_connect_context(provider, runtime_paths, target)
 
@@ -805,7 +817,8 @@ async def callback(provider_id: str, request: Request) -> Response:
             state=state,
         )
     except OAuthCredentialConflictError:
-        return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409)
+        message = _OAUTH_STALE_CONNECTION_MESSAGE if browser_user_required else _OAUTH_STALE_CONVERSATION_MESSAGE
+        return _oauth_browser_error_response(message, status_code=409)
 
     if not browser_user_required:
         return _oauth_success_response(provider)

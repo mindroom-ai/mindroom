@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
     OAuthCredentialBindingParseError,
@@ -13,6 +14,7 @@ from mindroom.oauth.credential_binding import (
     oauth_credential_binding_payload,
     parse_oauth_credential_binding_payload,
 )
+from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
@@ -22,7 +24,6 @@ from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -69,6 +70,7 @@ class OAuthConnectTarget:
 
     binding: OAuthCredentialBinding
     requester_id: str | None
+    connection_generation: str
 
 
 def _issue_oauth_connect_token(
@@ -82,8 +84,17 @@ def _issue_oauth_connect_token(
     requester_id = worker_target.execution_identity.requester_id
 
     binding = oauth_credential_binding(provider, worker_target)
+    snapshot = load_oauth_credentials_snapshot_sync(
+        OAuthCredentialContext(
+            provider=provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            worker_target=worker_target,
+        ),
+    )
     payload = oauth_credential_binding_payload(binding)
     payload["requester_id"] = requester_id or ""
+    payload["connection_generation"] = snapshot.connection_generation
     return issue_opaque_oauth_state(
         runtime_paths,
         kind=_OAUTH_CONNECT_TOKEN_KIND,
@@ -107,7 +118,16 @@ def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, obj
         else:
             msg = "OAuth connect link target is invalid"
         raise OAuthProviderError(msg) from exc
-    return OAuthConnectTarget(binding=binding, requester_id=str(payload.get("requester_id") or "") or None)
+    requester_id = payload.get("requester_id")
+    connection_generation = payload.get("connection_generation")
+    if not isinstance(requester_id, str) or not isinstance(connection_generation, str) or not connection_generation:
+        msg = "OAuth connect link target is invalid"
+        raise OAuthProviderError(msg)
+    return OAuthConnectTarget(
+        binding=binding,
+        requester_id=requester_id or None,
+        connection_generation=connection_generation,
+    )
 
 
 def lookup_oauth_connect_token(provider: OAuthProvider, runtime_paths: RuntimePaths, token: str) -> OAuthConnectTarget:

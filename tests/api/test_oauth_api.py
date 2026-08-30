@@ -3882,6 +3882,96 @@ def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_pat
     assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
+def test_agent_connect_token_rejects_generation_changed_after_link_issuance(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+    context = oauth_lifecycle.resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
+        worker_target,
+    )
+    asyncio.run(oauth_lifecycle.reset_oauth_credentials(context))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 409
+    assert "fresh connection link from the conversation" in response.json()["detail"]
+
+
+def test_agent_connect_token_callback_rejects_generation_changed_after_authorize(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+    context = oauth_lifecycle.resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        get_runtime_credentials_manager(runtime_paths),
+        worker_target,
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            asyncio.run(oauth_lifecycle.reset_oauth_credentials(context))
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 409
+    assert "fresh connection link from the conversation" in callback_response.text
+    assert _stored_oauth_credentials(provider, runtime_paths) is None
+
+
 def _trusted_upstream_oauth_env() -> dict[str, str]:
     return {
         "TEST_OAUTH_CLIENT_ID": "client-id",
