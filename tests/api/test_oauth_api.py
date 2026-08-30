@@ -2689,6 +2689,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         execution_identity=None,
     )
     pending = SimpleNamespace(
+        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -2698,6 +2699,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -2737,6 +2739,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
         execution_identity=None,
     )
     pending = SimpleNamespace(
+        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -2746,6 +2749,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3116,7 +3120,7 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
+    assert callback_response.status_code == 200
     manager = get_runtime_credentials_manager(runtime_paths)
     user_credentials = _stored_oauth_credentials(provider, runtime_paths, worker_scope="user")
     assert user_credentials is not None
@@ -3194,7 +3198,7 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
+    assert callback_response.status_code == 200
     canonical_credentials = _stored_oauth_credentials(
         provider,
         runtime_paths,
@@ -3432,6 +3436,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         execution_identity=None,
     )
     pending = SimpleNamespace(
+        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3455,6 +3460,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", AsyncMock())
@@ -3509,6 +3515,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         execution_identity=None,
     )
     pending = SimpleNamespace(
+        browser_user_required=True,
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
@@ -3525,6 +3532,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
 
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
+    monkeypatch.setattr(oauth_api, "pending_oauth_state_requires_browser_user", lambda *_args: True)
     monkeypatch.setattr(oauth_api, "consume_pending_oauth_request", lambda *_args: pending)
     monkeypatch.setattr(oauth_api, "_resolve_oauth_credentials_target", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(oauth_api, "_verify_pending_target_binding", verify)
@@ -3728,6 +3736,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
                 f"&connect_token={connect_token}",
                 follow_redirects=False,
             )
+            assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
             state = _state_from_auth_url(authorize_response.headers["location"])
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
@@ -3735,7 +3744,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
+    assert callback_response.status_code == 200
     manager = get_runtime_credentials_manager(runtime_paths)
     matrix_credentials = _stored_oauth_credentials(provider, runtime_paths)
     worker_credentials = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).load_credentials(
@@ -3748,6 +3757,129 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert matrix_credentials["token"] == "google_drive-access-token"
     assert worker_credentials is None
     assert standalone_credentials is None
+
+
+def test_agent_connect_token_starts_without_dashboard_login(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).netloc == "auth.example.test"
+
+
+def test_agent_connect_token_callback_stores_bound_scope_without_dashboard_login(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 200
+    assert "Test Drive is connected" in callback_response.text
+    assert _stored_oauth_credentials(provider, runtime_paths) is not None
+    standalone_manager = get_runtime_credentials_manager(runtime_paths).for_worker(_worker_key_for_standalone_user())
+    assert standalone_manager.load_credentials(provider.credential_service) is None
+
+
+def test_agent_connect_token_callback_rechecks_link_requester_permission(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            _publish_config(
+                api_app,
+                runtime_paths,
+                _config_payload(worker_scope="user_agent", allowed_users=["@bob:example.org"]),
+            )
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 403
+    assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
 def _trusted_upstream_oauth_env() -> dict[str, str]:
@@ -4020,7 +4152,7 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
+    assert callback_response.status_code == 200
     manager = get_runtime_credentials_manager(runtime_paths)
     matrix_credentials = _stored_oauth_credentials(provider, runtime_paths)
     standalone_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
@@ -4069,7 +4201,7 @@ def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(t
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 307
+    assert callback_response.status_code == 200
     matrix_credentials = _stored_oauth_credentials(provider, runtime_paths)
     assert matrix_credentials is not None
     assert matrix_credentials["token"] == "google_drive-access-token"
@@ -4108,7 +4240,7 @@ def test_agent_connect_token_rejects_historical_requester_without_explicit_autho
     assert authorize_response.status_code == 403
 
 
-def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_path: Path) -> None:
+def test_agent_connect_token_uses_link_target_despite_trusted_upstream_requester_mismatch(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     _use_runtime_auth_settings(api_app)
@@ -4139,11 +4271,11 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 403
-    assert "current user" in authorize_response.json()["detail"]
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
-def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path: Path) -> None:
+def test_agent_connect_token_starts_without_trusted_upstream_identity(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     _use_runtime_auth_settings(api_app)
@@ -4169,11 +4301,11 @@ def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path:
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 401
-    assert "trusted upstream identity header" in authorize_response.json()["detail"]
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
-def test_agent_connect_token_missing_trusted_identity_does_not_redirect_to_standalone_login(
+def test_agent_connect_token_missing_trusted_identity_bypasses_standalone_login(
     tmp_path: Path,
 ) -> None:
     runtime_paths = _runtime_paths(
@@ -4204,12 +4336,11 @@ def test_agent_connect_token_missing_trusted_identity_does_not_redirect_to_stand
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 401
-    assert "location" not in authorize_response.headers
-    assert "trusted upstream identity header" in authorize_response.json()["detail"]
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
-def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_mapping(
+def test_agent_connect_token_uses_link_target_without_browser_matrix_mapping(
     tmp_path: Path,
 ) -> None:
     runtime_paths = _runtime_paths(
@@ -4241,11 +4372,11 @@ def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_ma
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 403
-    assert "current user" in authorize_response.json()["detail"]
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
-def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(tmp_path: Path) -> None:
+def test_agent_connect_token_callback_uses_state_without_trusted_upstream_identity(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     _use_runtime_auth_settings(api_app)
@@ -4278,11 +4409,11 @@ def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 401
-    assert "trusted upstream identity header" in callback_response.json()["detail"]
+    assert callback_response.status_code == 200
+    assert "Test Drive is connected" in callback_response.text
 
 
-def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(tmp_path: Path) -> None:
+def test_agent_connect_token_callback_uses_state_despite_changed_trusted_matrix_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     _use_runtime_auth_settings(api_app)
@@ -4316,8 +4447,8 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
             )
 
     assert authorize_response.status_code == 307
-    assert callback_response.status_code == 403
-    assert "Not authorized" in callback_response.json()["detail"]
+    assert callback_response.status_code == 200
+    assert "Test Drive is connected" in callback_response.text
 
 
 def _config_payload_with_extra_google_agents(worker_scope: str = "user_agent") -> dict[str, Any]:
@@ -4372,7 +4503,7 @@ def test_connect_token_binding_setup_error_returns_503(
     provider = _fake_provider()
     connect_token = _connect_token_for_devagent(provider, runtime_paths)
     setup_error = OAuthProviderError("provider-controlled-connect-secret")
-    monkeypatch.setattr(oauth_api, "_target_binding_payload", AsyncMock(side_effect=setup_error))
+    monkeypatch.setattr(oauth_api, "_conversation_target_payload", AsyncMock(side_effect=setup_error))
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -4465,7 +4596,7 @@ def test_connect_token_rejects_omitted_target_params(tmp_path: Path) -> None:
     assert "target" in response.json()["detail"]
 
 
-def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
+def test_agent_connect_token_uses_link_target_despite_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path / "wrong-user",
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
@@ -4499,7 +4630,7 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 403
+    assert authorize_response.status_code == 307
     wrong_manager = get_runtime_credentials_manager(runtime_paths)
     wrong_matrix_credentials = wrong_manager.for_worker(
         _worker_key_for_matrix_user("@alice:example.org"),
@@ -4509,7 +4640,7 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
     assert wrong_matrix_credentials is None
 
 
-def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
+def test_shared_agent_connect_token_uses_link_target_despite_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {
@@ -4547,8 +4678,8 @@ def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_pa
                 follow_redirects=False,
             )
 
-    assert authorize_response.status_code == 403
-    assert "current user" in authorize_response.json()["detail"]
+    assert authorize_response.status_code == 307
+    assert urlparse(authorize_response.headers["location"]).netloc == "auth.example.test"
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
