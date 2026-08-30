@@ -74,7 +74,7 @@ def ensure_private_instance_identity(
         existing_identity = load_private_instance_identity(trusted_base_path, trusted_scope_root)
         if existing_identity is not None:
             return _matching_identity(existing_identity, requested_identity)
-        _require_claimable_scope(trusted_scope_root)
+        _require_claimable_scope(trusted_scope_root, requested_identity)
         write_json_file_durable(
             trusted_scope_root / _RECORD_FILENAME,
             _identity_payload(requested_identity),
@@ -96,14 +96,26 @@ def _matching_identity(
     return existing_identity
 
 
-def _require_claimable_scope(scope_root: Path) -> None:
-    """Refuse first-use ownership when any non-identity data already exists."""
+def _require_claimable_scope(scope_root: Path, identity: PrivateInstanceIdentity) -> None:
+    """Permit legacy data only when the worker key retains its requester verbatim."""
     for entry in scope_root.iterdir():
         if entry.name in {_LOCK_FILENAME, _RECORD_FILENAME}:
             continue
         if entry.name.startswith(f"{_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
             continue
-        _raise_invalid_record("cannot claim a scope with pre-existing data")
+        if not _worker_key_embeds_requester_verbatim(identity):
+            _raise_invalid_record("has ambiguous legacy ownership")
+        return
+
+
+def _worker_key_embeds_requester_verbatim(identity: PrivateInstanceIdentity) -> bool:
+    """Return whether a validated private worker key retains its requester unnormalized."""
+    parts = identity.worker_key.split(":")
+    if parts[2] == "user":
+        return ":".join(parts[3:]) == identity.requester_id
+    if parts[2] == "user_agent":
+        return ":".join(parts[3:-1]) == identity.requester_id
+    return False
 
 
 def _identity_payload(identity: PrivateInstanceIdentity) -> dict[str, object]:
