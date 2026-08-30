@@ -2408,18 +2408,33 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "path"),
+    [
+        ("print('ok')\n", None),
+        (None, "watch.py"),
+    ],
+)
 async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    source: str | None,
+    path: str | None,
 ) -> None:
-    """A blocking private-workspace resolution must run away from the request loop."""
+    """Both script source flows must resolve blocking private workspaces off the request loop."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
     loop = asyncio.get_running_loop()
     loop_processed_workspace_callback = threading.Event()
     workspace = agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
+    workspace_resolutions = 0
+    if path is not None:
+        workspace.mkdir(parents=True)
+        (workspace / path).write_text("print('ok')\n", encoding="utf-8")
 
     def blocking_workspace(_context: ToolRuntimeContext) -> Path:
+        nonlocal workspace_resolutions
+        workspace_resolutions += 1
         loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
         if not loop_processed_workspace_callback.wait(timeout=1):
             msg = "workspace resolution blocked the event loop"
@@ -2445,9 +2460,10 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 
-    run = await manager.run(context, source="print('ok')\n")
+    run = await manager.run(context, source=source, path=path)
 
     assert run.state is ScriptRunState.RUNNING
+    assert workspace_resolutions == (1 if source is not None else 2)
 
 
 @pytest.mark.asyncio
