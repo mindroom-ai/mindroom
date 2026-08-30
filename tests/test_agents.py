@@ -59,6 +59,11 @@ from mindroom.history.runtime import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
+from mindroom.private_instance_identity import (
+    PrivateInstanceIdentity,
+    PrivateInstanceIdentityError,
+    load_private_instance_identity,
+)
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
     OPENAI_COMPAT_HISTORY_GUIDANCE,
@@ -1202,6 +1207,159 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(
     assert workspace is not None
     assert workspace.root == expected_workspace
     assert not (runtime_paths.config_dir / "workspace").exists()
+
+
+def test_resolve_agent_runtime_persists_private_instance_identity_on_materialization(tmp_path: Path) -> None:
+    """Private workspace materialization must durably record its resolved owner."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="requester-a",
+        room_id="room-a",
+        thread_id="thread-a",
+        resolved_thread_id="thread-a",
+        session_id="session-a",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="requester-a",
+    )
+
+
+def test_resolve_agent_runtime_read_only_private_instance_identity_resolution_does_not_persist(
+    tmp_path: Path,
+) -> None:
+    """Read-only private resolution must not create an identity record or its parent scope."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="requester-a",
+        room_id="room-a",
+        thread_id="thread-a",
+        resolved_thread_id="thread-a",
+        session_id="session-a",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
+    )
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert not scope_root.exists()
+    assert not (runtime_paths.storage_root / "private_instances").exists()
+
+
+def test_resolve_agent_runtime_persists_private_instance_identity_before_workspace_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """Workspace reconciliation must observe the already-persisted private owner record."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="requester-a",
+        room_id="room-a",
+        thread_id="thread-a",
+        resolved_thread_id="thread-a",
+        session_id="session-a",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    expected_identity = PrivateInstanceIdentity(worker_key=worker_key, requester_id="requester-a")
+    from mindroom.runtime_resolution import (  # noqa: PLC0415
+        resolve_agent_workspace_from_state_path as resolve_workspace,
+    )
+
+    def verify_identity_before_workspace(*args: object, **kwargs: object) -> object:
+        assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == expected_identity
+        return resolve_workspace(*args, **kwargs)
+
+    with patch(
+        "mindroom.runtime_resolution.resolve_agent_workspace_from_state_path",
+        side_effect=verify_identity_before_workspace,
+    ):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
+
+
+def test_resolve_agent_runtime_rejects_private_instance_identity_requester_normalization_collision(
+    tmp_path: Path,
+) -> None:
+    """Distinct requesters sharing a normalized private worker key must not share a scope."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    first_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="requester/a",
+        room_id="room-a",
+        thread_id="thread-a",
+        resolved_thread_id="thread-a",
+        session_id="session-a",
+    )
+    colliding_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="requester?a",
+        room_id="room-a",
+        thread_id="thread-a",
+        resolved_thread_id="thread-a",
+        session_id="session-a",
+    )
+
+    resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=first_identity,
+        create=True,
+    )
+
+    with pytest.raises(PrivateInstanceIdentityError, match="conflicts"):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=colliding_identity,
+            create=True,
+        )
 
 
 def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:

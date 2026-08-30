@@ -801,6 +801,7 @@ path = "mindroom.runtime_resolution"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.constants",
+    "mindroom.private_instance_identity",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -4170,6 +4171,7 @@ from = ["mindroom.runtime_resolution"]
 expose = [
     "PrivateInstanceIdentity",
     "PrivateInstanceIdentityError",
+    "ensure_private_instance_identity",
     "load_private_instance_identity",
 ]
 from = ["mindroom.private_instance_identity"]
