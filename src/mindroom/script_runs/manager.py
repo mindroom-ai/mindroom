@@ -835,7 +835,7 @@ class ScriptRunManager:
         source: bytes,
         token: str,
     ) -> ScriptRunRecord:
-        workspace = _agent_workspace(context)
+        workspace = await asyncio.to_thread(_agent_workspace, context)
         await self._record_snapshot_locator(run, workspace)
         source_path, token_path = await asyncio.to_thread(
             _write_snapshot,

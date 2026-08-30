@@ -2408,6 +2408,49 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
 
 
 @pytest.mark.asyncio
+async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking private-workspace resolution must run away from the request loop."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+    loop = asyncio.get_running_loop()
+    loop_processed_workspace_callback = threading.Event()
+    workspace = agent_workspace_root_path(context.runtime_paths.storage_root, context.agent_name)
+
+    def blocking_workspace(_context: ToolRuntimeContext) -> Path:
+        loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
+        if not loop_processed_workspace_callback.wait(timeout=1):
+            msg = "workspace resolution blocked the event loop"
+            raise AssertionError(msg)
+        return workspace
+
+    async def launch_local(
+        _socket_path: str,
+        *,
+        namespace: str,
+        argv: list[str],
+        env: dict[str, str],
+        cwd: str | None,
+        tail: int,
+        timeout: float,  # noqa: ASYNC109
+        handle: str | None = None,
+    ) -> str:
+        del namespace, argv, env, cwd, tail, timeout
+        assert handle is not None
+        return f"Started background process\nHandle: {handle}"
+
+    monkeypatch.setattr(manager_module, "_agent_workspace", blocking_workspace)
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+
+    run = await manager.run(context, source="print('ok')\n")
+
+    assert run.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
 async def test_local_launch_rechecks_durable_intent_immediately_before_spawn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
