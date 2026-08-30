@@ -2000,8 +2000,10 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
     assert (first_workspace.root / "LATER.md").read_text(encoding="utf-8") == "later\n"
 
 
-def test_private_workspace_template_initializes_missing_files_in_partially_populated_root(tmp_path: Path) -> None:
-    """First-use template initialization should fill missing files even if the root already exists."""
+def test_private_workspace_template_reconciles_missing_files_in_owned_partially_populated_root(
+    tmp_path: Path,
+) -> None:
+    """Owned workspaces should fill missing template files without replacing customized content."""
     template_dir = tmp_path / "template"
     template_dir.mkdir(parents=True, exist_ok=True)
     (template_dir / "SOUL.md").write_text("soul\n", encoding="utf-8")
@@ -2024,16 +2026,20 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    state_root = resolve_agent_runtime(
+    first_workspace = resolve_agent_runtime(
         "general",
         bound_config,
         runtime_paths,
         execution_identity=identity,
-    ).state_root
-    workspace_root = state_root / "mind_data"
-    workspace_root.mkdir(parents=True, exist_ok=True)
+        create=True,
+    ).workspace
+
+    assert first_workspace is not None
+    workspace_root = first_workspace.root
     existing_file = workspace_root / "existing.txt"
     existing_file.write_text("keep\n", encoding="utf-8")
+    (workspace_root / "SOUL.md").write_text("custom soul\n", encoding="utf-8")
+    (workspace_root / "USER.md").unlink()
 
     workspace = resolve_agent_runtime(
         "general",
@@ -2044,8 +2050,9 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
     ).workspace
 
     assert workspace is not None
+    assert workspace.root == first_workspace.root
     assert existing_file.read_text(encoding="utf-8") == "keep\n"
-    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "soul\n"
+    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "custom soul\n"
     assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
 
 
