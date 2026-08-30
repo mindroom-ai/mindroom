@@ -162,18 +162,21 @@ def resolve_agent_execution(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     execution_scope = policy.effective_execution_scope
+    if policy.is_private:
+        if execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+            raise ValueError(msg)
+        if not execution_identity.requester_id:
+            msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
+            raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    if policy.is_private:
-        if resolved_worker_execution.execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-            raise ValueError(msg)
-        if resolved_worker_execution.worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
-            raise ValueError(msg)
+    if policy.is_private and resolved_worker_execution.worker_key is None:
+        msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
+        raise ValueError(msg)
     return ResolvedAgentExecution(
         agent_name=agent_name,
         policy=policy,
@@ -203,21 +206,14 @@ def resolve_agent_runtime(
 
     if create and resolved_execution.policy.private_workspace_enabled:
         execution_identity = resolved_execution.execution_identity
-        if execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an execution identity to materialize its workspace"
-            raise ValueError(msg)
         worker_key = resolved_execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' requires a worker key to materialize its workspace"
-            raise ValueError(msg)
-        requester_id = execution_identity.requester_id
-        if requester_id is None:
-            msg = f"Private agent '{agent_name}' requires a requester identity to materialize its workspace"
+        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+            msg = f"Private agent '{agent_name}' has unresolved private execution state"
             raise ValueError(msg)
         ensure_private_instance_identity(
             runtime_paths.storage_root,
             worker_key=worker_key,
-            requester_id=requester_id,
+            requester_id=execution_identity.requester_id,
         )
 
     workspace = resolve_agent_workspace_from_state_path(

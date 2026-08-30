@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -69,7 +70,7 @@ from mindroom.prompts import (
     OPENAI_COMPAT_HISTORY_GUIDANCE,
     WORKSPACE_SKILL_AUTHORING_PROMPT,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -1209,21 +1210,33 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(
     assert not (runtime_paths.config_dir / "workspace").exists()
 
 
-def test_resolve_agent_runtime_persists_private_instance_identity_on_materialization(tmp_path: Path) -> None:
-    """Private workspace materialization must durably record its resolved owner."""
+def _private_runtime_resolution_context(
+    tmp_path: Path,
+    *,
+    requester_id: str | None = "requester-a",
+) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return one bound private runtime context with a configurable requester."""
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
-    bound_config = _bind_runtime_paths(config, runtime_paths)
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="requester-a",
-        room_id="room-a",
-        thread_id="thread-a",
-        resolved_thread_id="thread-a",
-        session_id="session-a",
+    return (
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id=requester_id,
+            room_id="room-a",
+            thread_id="thread-a",
+            resolved_thread_id="thread-a",
+            session_id="session-a",
+        ),
     )
+
+
+def test_resolve_agent_runtime_persists_private_instance_identity_on_materialization(tmp_path: Path) -> None:
+    """Private workspace materialization must durably record its resolved owner."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
 
@@ -1246,19 +1259,7 @@ def test_resolve_agent_runtime_read_only_private_instance_identity_resolution_do
     tmp_path: Path,
 ) -> None:
     """Read-only private resolution must not create an identity record or its parent scope."""
-    config = _test_config()
-    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
-    bound_config = _bind_runtime_paths(config, runtime_paths)
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="requester-a",
-        room_id="room-a",
-        thread_id="thread-a",
-        resolved_thread_id="thread-a",
-        session_id="session-a",
-    )
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
 
@@ -1279,19 +1280,7 @@ def test_resolve_agent_runtime_persists_private_instance_identity_before_workspa
     tmp_path: Path,
 ) -> None:
     """Workspace reconciliation must observe the already-persisted private owner record."""
-    config = _test_config()
-    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
-    bound_config = _bind_runtime_paths(config, runtime_paths)
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="requester-a",
-        room_id="room-a",
-        thread_id="thread-a",
-        resolved_thread_id="thread-a",
-        session_id="session-a",
-    )
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
     scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
@@ -1321,28 +1310,11 @@ def test_resolve_agent_runtime_rejects_private_instance_identity_requester_norma
     tmp_path: Path,
 ) -> None:
     """Distinct requesters sharing a normalized private worker key must not share a scope."""
-    config = _test_config()
-    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
-    bound_config = _bind_runtime_paths(config, runtime_paths)
-    first_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
+    bound_config, runtime_paths, first_identity = _private_runtime_resolution_context(
+        tmp_path,
         requester_id="requester/a",
-        room_id="room-a",
-        thread_id="thread-a",
-        resolved_thread_id="thread-a",
-        session_id="session-a",
     )
-    colliding_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="requester?a",
-        room_id="room-a",
-        thread_id="thread-a",
-        resolved_thread_id="thread-a",
-        session_id="session-a",
-    )
+    colliding_identity = replace(first_identity, requester_id="requester?a")
 
     resolve_agent_runtime(
         "general",
@@ -1360,6 +1332,29 @@ def test_resolve_agent_runtime_rejects_private_instance_identity_requester_norma
             execution_identity=colliding_identity,
             create=True,
         )
+
+
+def test_resolve_agent_execution_rejects_private_instance_identity_without_requester(tmp_path: Path) -> None:
+    """Private execution resolution must reject a missing requester before routing a worker."""
+    bound_config, _, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
+    ):
+        resolve_agent_execution("general", bound_config, execution_identity=execution_identity)
+
+
+def test_resolve_agent_runtime_shared_create_does_not_create_private_instance_identity_namespace(
+    tmp_path: Path,
+) -> None:
+    """Shared materialization must not create a private ownership namespace."""
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert not (runtime_paths.storage_root / "private_instances").exists()
 
 
 def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:
