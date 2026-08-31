@@ -2539,6 +2539,11 @@ class AgentBot:
         ):
             return
         current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
+        self._room_lifecycle.authorize_current_room_invite(
+            room.room_id,
+            event.sender,
+            current_invite,
+        )
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(
                 room,

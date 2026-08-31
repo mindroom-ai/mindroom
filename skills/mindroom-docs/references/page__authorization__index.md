@@ -108,9 +108,11 @@ Invitations do not count as joined membership, and leave, kick, or ban events re
 Before a responder joins, the exact authenticated sender of its current self-membership invite may satisfy `current_room_members` only for deciding whether to accept that invite.
 Merely observed durable records, stale or revoked invites, and mismatched inviters do not grant this pre-join authorization.
 Once that exact live invite passes policy, MindRoom records an authorized join transaction before contacting Matrix and may retry or finish that transaction after restart.
+An observed transaction without live invite evidence may recover only through ordinary policy sources, and room-derived sources wait until every relevant grant-room snapshot is authoritative.
 The authorized transaction is recovery evidence for that join only and does not authorize normal room activity.
 A Matrix sync-generation reset invalidates all process-local invite evidence, and only a fresh self-membership invite callback can recreate it.
 After the responder joins, the invite is no longer authorization evidence and normal activity uses the authoritative membership index.
+If that post-join check terminally denies an ad-hoc room, MindRoom revokes its accepted-room state before explicitly leaving and retains departure work until Matrix confirms the bot is no longer joined.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize normal activity there.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 

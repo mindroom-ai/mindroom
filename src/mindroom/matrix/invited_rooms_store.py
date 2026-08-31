@@ -25,6 +25,7 @@ class PendingRoomInvitePhase(StrEnum):
 
     OBSERVED = "observed"
     AUTHORIZED = "authorized"
+    LEAVING = "leaving"
 
 
 @dataclass(frozen=True, slots=True)

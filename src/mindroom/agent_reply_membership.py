@@ -122,6 +122,19 @@ class AgentReplyMembershipIndex:
             for room in snapshot.rooms
         )
 
+    def has_authoritative_memberships(
+        self,
+        room_keys: Sequence[str],
+        config: Config,
+    ) -> bool:
+        """Return whether every requested grant room has a ready snapshot."""
+        snapshot = self._snapshot
+        if snapshot.policy_signature != _agent_reply_membership_policy_signature(config):
+            return False
+        requested_room_keys = frozenset(room_keys)
+        ready_room_keys = {room.room_key for room in snapshot.rooms if room.ready and room.room_key is not None}
+        return requested_room_keys <= ready_room_keys
+
     def is_current_room_member(self, sender_id: str, room_id: str, config: Config) -> bool:
         """Return whether the authoritative snapshot joins a sender to one current room."""
         snapshot = self._snapshot
