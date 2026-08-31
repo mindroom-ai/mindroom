@@ -801,7 +801,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted so memberships Matrix still reports as joined survive restart cleanup without entering the static `rooms` list. An absent room requires a fresh invite
+- `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted so memberships Matrix still reports as joined survive restart cleanup without entering the static `rooms` list. Disabling it stops preserving accepted ad-hoc rooms during room reconciliation. An absent room requires a fresh invite
 - Approval-gated tools require the router to be joined to the Matrix room before the call executes.
 - Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` is enabled.
 - The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.

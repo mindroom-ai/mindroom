@@ -20,7 +20,7 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites and persists accepted room IDs so memberships Matrix still reports as joined survive restart cleanup. An absent room requires a fresh invite |
+| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites and persists accepted room IDs so memberships Matrix still reports as joined survive restart cleanup. Disabling it stops preserving accepted ad-hoc rooms during immediate room reconciliation. An absent room requires a fresh invite |
 
 ## How Routing Works
 

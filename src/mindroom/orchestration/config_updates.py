@@ -230,12 +230,18 @@ def _entities_with_room_changes(
     configured_entities: set[str],
     existing_entities: set[str],
 ) -> set[str]:
-    """Return live entities whose desired Matrix room memberships changed."""
-    return {
+    """Return live entities whose room or invite ownership needs reconciliation."""
+    changed_entities = {
         entity_name
         for entity_name in configured_entities & existing_entities
         if set(get_rooms_for_entity(entity_name, config)) != set(get_rooms_for_entity(entity_name, new_config))
     }
+    if ROUTER_AGENT_NAME in configured_entities & existing_entities and (
+        config.router.accept_invites != new_config.router.accept_invites
+        or config.router.access != new_config.router.access
+    ):
+        changed_entities.add(ROUTER_AGENT_NAME)
+    return changed_entities
 
 
 def _room_metadata_changed(config: Config, new_config: Config) -> bool:

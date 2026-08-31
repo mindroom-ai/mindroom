@@ -1917,8 +1917,16 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
         "!kicked:localhost",
         "!banned:localhost",
     }
-    assert membership.departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
+    assert membership.departed_room_ids == {
+        "!invited:localhost",
+        "!kicked:localhost",
+        "!banned:localhost",
+    }
     assert membership.departures == (
+        ReportedDeparture(
+            room_id="!invited:localhost",
+            observation_id="sliding-invite:pos:!invited:localhost",
+        ),
         ReportedDeparture(
             room_id="!kicked:localhost",
             observation_id="sliding:pos:!kicked:localhost",
@@ -2011,6 +2019,10 @@ def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() ->
     assert membership.departures == (
         ReportedDeparture(room_id=room_id, observation_id="$leave"),
         ReportedDeparture(room_id=room_id, observation_id="$ban"),
+        ReportedDeparture(
+            room_id="!invited:localhost",
+            observation_id="classic-invite:next:!invited:localhost",
+        ),
     )
 
 

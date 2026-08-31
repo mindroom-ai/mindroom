@@ -507,10 +507,10 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
+async def test_sliding_authoritative_invite_settles_join_decrypt_notice_fence(
     tmp_path: Path,
 ) -> None:
-    """A Sliding invite keeps the fence until membership becomes joined."""
+    """A final invite proves the attempted join is no longer pending."""
     bot = _agent_bot(tmp_path)
     bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -531,7 +531,7 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
         ),
     )
 
-    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
 
     await bot._on_sync_response(
         nio.SlidingSyncResponse(

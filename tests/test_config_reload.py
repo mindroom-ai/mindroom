@@ -18,6 +18,7 @@ import yaml
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -1873,6 +1874,64 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     assert plan.entities_to_restart == set()
     assert plan.room_metadata_changed is True
     assert plan.only_support_service_changes is False
+
+
+@pytest.mark.parametrize(("old_accepts", "new_accepts"), [(False, True), (True, False)])
+def test_config_update_plan_reconciles_router_rooms_when_invite_policy_changes(
+    old_accepts: bool,
+    new_accepts: bool,
+) -> None:
+    """Router invite-policy changes immediately reconcile cached and accepted rooms."""
+    old_config = _runtime_bound_config(
+        Config(router=RouterConfig(model="default", accept_invites=old_accepts)),
+    )
+    new_config = _runtime_bound_config(
+        Config(router=RouterConfig(model="default", accept_invites=new_accepts)),
+    )
+    running_entities = {ROUTER_AGENT_NAME}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={ROUTER_AGENT_NAME: AsyncMock()},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
+
+
+def test_config_update_plan_reconciles_router_invites_when_access_changes() -> None:
+    """Router access changes immediately reconsider invites cached by Matrix."""
+    old_config = _runtime_bound_config(
+        Config(
+            router=RouterConfig(
+                model="default",
+                access=ResponderAccessConfig(users=[]),
+            ),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            router=RouterConfig(
+                model="default",
+                access=ResponderAccessConfig(users=["@allowed:localhost"]),
+            ),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={ROUTER_AGENT_NAME: AsyncMock()},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:

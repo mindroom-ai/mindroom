@@ -2043,7 +2043,7 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
                 joined_room_ids=current_joined_room_ids,
-                left_room_ids=membership.left_room_ids,
+                left_room_ids=membership.left_room_ids | membership.authoritative_invited_room_ids,
             )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:

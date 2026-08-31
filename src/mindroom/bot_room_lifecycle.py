@@ -13,6 +13,7 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_invite,
     is_sender_allowed_for_agent_reply_in_room,
 )
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import (
@@ -219,6 +220,7 @@ class BotRoomLifecycle:
 
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
+        self._join_fence_protected_room_ids.discard(room_id)
         await self.deps.on_room_joined(room_id)
         await self.deps.on_configured_room_joined(room_id)
 
@@ -323,10 +325,9 @@ class BotRoomLifecycle:
         cleanup_errors: list[Exception] = []
         for room_id in room_ids:
             try:
-                async with self.invite_ownership(room_id):
-                    if recheck_ownership and room_id not in await self._rooms_to_leave():
-                        continue
-                    await self._leave_room_with_confirmed_cleanup(room_id)
+                await run_coroutine_until_complete(
+                    self._leave_owned_room(room_id, recheck_ownership=recheck_ownership),
+                )
             except asyncio.CancelledError as error:
                 cancellation = cancellation or error
             except Exception as error:
@@ -343,6 +344,13 @@ class BotRoomLifecycle:
             raise cancellation
         if cleanup_errors:
             raise cleanup_errors[0]
+
+    async def _leave_owned_room(self, room_id: str, *, recheck_ownership: bool) -> None:
+        """Acquire room ownership and finish one still-required leave."""
+        async with self.invite_ownership(room_id):
+            if recheck_ownership and room_id not in await self._rooms_to_leave():
+                return
+            await self._leave_room_with_confirmed_cleanup(room_id)
 
     async def _leave_room_with_confirmed_cleanup(self, room_id: str) -> bool:
         """Run one Matrix leave and confirmed local cleanup as one protected operation."""
@@ -626,6 +634,7 @@ class BotRoomLifecycle:
         if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
             return False
         self._remember_invited_room(room_id)
+        self._join_fence_protected_room_ids.discard(room_id)
         return True
 
     async def _leave_unaccepted_invite(

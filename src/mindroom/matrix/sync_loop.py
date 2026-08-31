@@ -73,7 +73,8 @@ class OwnRoomMembership:
     where the same response proves a later membership already began.
     ``invited_room_ids`` also contains other non-joined or unresolved initial
     Sliding Sync states because all of them require the same continuity fence.
-    ``authoritative_invited_room_ids`` contains only final invite memberships.
+    ``authoritative_invited_room_ids`` contains only final invite memberships,
+    which also end any preceding joined membership epoch.
     """
 
     joined_room_ids: frozenset[str]
@@ -120,6 +121,15 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
                 ),
             )
         departures.extend(observed)
+    departures.extend(
+        [
+            ReportedDeparture(
+                room_id=room_id,
+                observation_id=_sync_departure_observation_id("classic-invite", response.next_batch, room_id),
+            )
+            for room_id in response.rooms.invite
+        ],
+    )
     return OwnRoomMembership(
         joined_room_ids=frozenset(response.rooms.join),
         left_room_ids=left_room_ids,
@@ -170,6 +180,17 @@ def own_membership_from_sliding_sync(
             invited_room_ids.add(room_id)
             if room.membership == "invite":
                 authoritative_invited_room_ids.add(room_id)
+                if not observed:
+                    observed = (
+                        ReportedDeparture(
+                            room_id=room_id,
+                            observation_id=_sync_departure_observation_id(
+                                "sliding-invite",
+                                response.pos,
+                                room_id,
+                            ),
+                        ),
+                    )
         departures.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),

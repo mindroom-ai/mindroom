@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
 import nio
 
 from mindroom.access_policy import EffectiveRoomPolicy, resolve_room_policy
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import resolve_avatar_path
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.logging_config import get_logger
@@ -684,31 +684,6 @@ async def _leave_room_and_cleanup(
         logger.error("room_leave_failed", room_id=room_id)
 
 
-async def _await_leave_operation(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
-    """Await a leave operation to completion without letting caller cancellation abort cleanup."""
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancellation = cancellation or exc
-            if not task.done():
-                continue
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception as cleanup_error:
-                raise cancellation from cleanup_error
-            return cancellation
-        except Exception as cleanup_error:
-            if cancellation is not None:
-                raise cancellation from cleanup_error
-            raise
-        else:
-            return cancellation
-
-
 async def leave_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
@@ -717,14 +692,10 @@ async def leave_rooms(
 ) -> None:
     """Leave rooms and clean each confirmed departure before continuing."""
     for room_id in room_ids:
-        operation = asyncio.create_task(
+        await run_coroutine_until_complete(
             _leave_room_and_cleanup(
                 client,
                 room_id,
                 on_room_left=on_room_left,
             ),
-            name="matrix_leave_room_and_cleanup",
         )
-        cancellation = await _await_leave_operation(operation)
-        if cancellation is not None:
-            raise cancellation

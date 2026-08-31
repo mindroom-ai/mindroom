@@ -142,13 +142,13 @@ The inviter must pass access before the join, and the latest access policy plus 
 The cached invite object must still identify the authenticated sender, but a joined sync normally removes its cache entry, so absence after a successful join does not revoke acceptance while a still-present different invite makes the attempt fail closed.
 Accepted-room storage is written only after successful post-join setup and only preserves an existing membership across restart; it never causes an absent room to be joined.
 An authoritative leave or ban revokes both the live invite cache entry and accepted-room preservation.
-An authoritative final invite revokes preservation from the ended membership while retaining the new live invite evidence, while unresolved Sliding Sync membership does neither.
+An authoritative final invite fences the ended membership epoch, tears down room-scoped calls, and revokes accepted-room preservation while retaining the new live invite evidence, while unresolved Sliding Sync membership does none of those things.
 Configured-room reconciliation and runtime-owned local cleanup, including startup orphan cleanup and entity removal, share the per-room invite lock.
 Configured ownership is reread before compensation, unowned-room cleanup rechecks ownership before leaving, and every confirmed leave removes accepted-room preservation without consuming newer invite evidence.
 Multi-room cleanup attempts every room before reporting the first failure.
 Ordinary failures after Matrix confirms the join receive one best-effort compensating leave, while interruption or an earlier join failure may require the user to invite the bot again.
 A same-sender cancellation and reinvite that overlaps an in-flight join may also require another invitation rather than creating process-local recovery ownership.
-A compensating leave restores its decrypt-notice fence before network I/O, and a failed leave keeps that fence until Matrix confirms departure within the running process.
+A compensating leave restores its decrypt-notice fence before network I/O, and a failed leave protects that fence until Matrix confirms departure or legitimate configured or accepted ownership takes over.
 Confirmed-leave cleanup has independent task ownership, settles accepted ownership, decrypt fencing, and the local departure fence independently, and keeps caller cancellation primary if cleanup also fails.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.

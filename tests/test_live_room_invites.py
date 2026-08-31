@@ -21,7 +21,7 @@ from mindroom.matrix.rooms import leave_rooms as leave_matrix_rooms
 from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.membership_models import ReportedDeparture
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import FencedRoomRecorder, make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 ROOM_ID = "!invited:localhost"
@@ -1048,6 +1048,98 @@ async def test_repeated_cancellation_cannot_interrupt_compensating_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_cancellation_waits_for_contended_room_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation cannot skip a room while another operation owns its lock."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.filter_non_dm_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+    on_room_left = AsyncMock()
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_left=on_room_left,
+    )
+
+    async with bot._room_lifecycle.invite_ownership(ROOM_ID):
+        cleanup = asyncio.create_task(bot._room_lifecycle.leave_non_dm_rooms_for_cleanup([ROOM_ID]))
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        cleanup.cancel()
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    on_room_left.assert_awaited_once_with(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_configured_owner_releases_failed_leave_fence_protection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured ownership lets the next trusted joined sync settle an old fence."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.rooms = [ROOM_ID]
+    bot._room_lifecycle._join_fence_protected_room_ids.add(ROOM_ID)
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(ROOM_ID,)),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_configured_room_joined=AsyncMock(),
+    )
+
+    await bot.join_configured_rooms()
+    await bot._room_lifecycle.observe_trusted_sync_rooms([ROOM_ID])
+
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_accepted_owner_releases_failed_leave_fence_protection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Accepted invite ownership lets the next trusted joined sync settle an old fence."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    bot._room_lifecycle._join_fence_protected_room_ids.add(ROOM_ID)
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(ROOM_ID,)),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+    await bot._room_lifecycle.observe_trusted_sync_rooms([ROOM_ID])
+
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
 async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_path: Path) -> None:
     """A Matrix departure is the single boundary that revokes both room owners."""
     config = _router_config(tmp_path)
@@ -1074,6 +1166,9 @@ async def test_authoritative_invite_revokes_old_acceptance_but_preserves_live_ev
     config = _router_config(tmp_path)
     bot, live_invite = _router_bot(config)
     bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    recorder = FencedRoomRecorder()
+    bot._membership_fence.store = recorder
+    bot._call_manager = AsyncMock()
 
     await bot._apply_own_room_membership(
         OwnRoomMembership(
@@ -1081,12 +1176,17 @@ async def test_authoritative_invite_revokes_old_acceptance_but_preserves_live_ev
             left_room_ids=frozenset(),
             invited_room_ids=frozenset({ROOM_ID}),
             authoritative_invited_room_ids=frozenset({ROOM_ID}),
-            departures=(),
+            departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="invite"),),
         ),
     )
 
     assert load_invited_rooms(_accepted_path(config)) == set()
     assert bot.client.invited_rooms == {ROOM_ID: live_invite}
+    assert recorder.fenced_room_ids == [ROOM_ID]
+    bot._call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids=frozenset(),
+        left_room_ids=frozenset({ROOM_ID}),
+    )
 
 
 @pytest.mark.asyncio
