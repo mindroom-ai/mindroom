@@ -3927,7 +3927,7 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-agent workers should mount their private instance root when explicitly visible."""
+    """User-agent workers should mount their scope root so identity metadata remains accessible."""
     config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     worker_key = resolve_worker_key(
@@ -3949,9 +3949,9 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
 
     volumes = fake_client.containers.run_calls[0]["volumes"]
     assert isinstance(volumes, dict)
-    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key)).resolve()
     assert volumes[str(expected_private_root)] == {
-        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}",
         "mode": "rw",
     }
     assert all(spec["bind"] != "/app/worker/agents/alpha" for spec in volumes.values())
@@ -3964,7 +3964,7 @@ def test_docker_script_worker_mounts_the_owning_private_state_scope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A unique script worker must not derive a fresh private root from its run ID."""
+    """A script worker should mount its owning scope root, including identity metadata."""
     config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
     state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:alpha"
@@ -3981,12 +3981,10 @@ def test_docker_script_worker_mounts_the_owning_private_state_scope(
 
     volumes = fake_client.containers.run_calls[0]["volumes"]
     assert isinstance(volumes, dict)
-    expected_private_root = (
-        tmp_path / "private_instances" / worker_dir_name(state_scope_worker_key) / "alpha"
-    ).resolve()
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(state_scope_worker_key)).resolve()
     expected_run_root = worker_root_path(tmp_path, worker_key)
     assert volumes[str(expected_private_root)] == {
-        "bind": f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}/alpha",
+        "bind": f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}",
         "mode": "rw",
     }
     assert str(expected_run_root) in volumes
@@ -4023,9 +4021,9 @@ def test_docker_backend_rejects_private_user_agent_container_without_target_visi
     assert len(fake_client.containers.run_calls) == 1
     second_volumes = fake_client.containers.run_calls[0]["volumes"]
     assert isinstance(second_volumes, dict)
-    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key)).resolve()
     assert second_volumes[str(expected_private_root)] == {
-        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}",
         "mode": "rw",
     }
     assert handle.status == "ready"
