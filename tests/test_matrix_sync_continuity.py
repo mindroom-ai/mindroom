@@ -2232,7 +2232,10 @@ async def test_durable_invite_failure_does_not_rewind_classic_cursor(
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert bot.client.next_batch == "s_after_invite"
-    assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
+    assert {
+        room_id: pending_invite.inviter_id
+        for room_id, pending_invite in bot._room_lifecycle._pending_room_invites.items()
+    } == {room.room_id: event.sender}
     # The dedicated pending-invite store owns recovery, so no journal row is needed.
     assert await bot._journal_dispatcher.store.pending() == ()
     bot._room_lifecycle.handle_recorded_invite.assert_awaited_once_with(

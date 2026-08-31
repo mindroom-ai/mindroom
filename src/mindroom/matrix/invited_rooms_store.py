@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -16,6 +18,21 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
+
+
+class PendingRoomInvitePhase(StrEnum):
+    """Durable progress of one accepted-or-pending invite transaction."""
+
+    RECORDED = "recorded"
+    JOINING = "joining"
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRoomInvite:
+    """Durable inviter identity and whether an authorized join may have landed."""
+
+    inviter_id: str
+    phase: PendingRoomInvitePhase
 
 
 def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
@@ -60,7 +77,7 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
     return _save_json(path, sorted(room_ids))
 
 
-def load_pending_room_invites(path: Path) -> dict[str, str]:
+def load_pending_room_invites(path: Path) -> dict[str, PendingRoomInvite]:
     """Load outstanding room IDs and their inviters from durable state."""
     if not path.exists():
         return {}
@@ -71,18 +88,39 @@ def load_pending_room_invites(path: Path) -> dict[str, str]:
         logger.warning("failed_to_load_pending_room_invites", path=str(path), exc_info=True)
         return {}
 
-    if not isinstance(raw, dict) or any(
-        not isinstance(room_id, str) or not isinstance(sender_id, str) for room_id, sender_id in raw.items()
-    ):
-        logger.warning("invalid_pending_room_invites_file", path=str(path))
-        return {}
+    pending_invites: dict[str, PendingRoomInvite] = {}
+    if isinstance(raw, dict):
+        for room_id, value in raw.items():
+            if not isinstance(room_id, str) or not isinstance(value, dict):
+                break
+            inviter_id = value.get("inviter_id")
+            phase_value = value.get("phase")
+            if not isinstance(inviter_id, str) or not isinstance(phase_value, str):
+                break
+            try:
+                phase = PendingRoomInvitePhase(phase_value)
+            except ValueError:
+                break
+            pending_invites[room_id] = PendingRoomInvite(inviter_id=inviter_id, phase=phase)
+        else:
+            return pending_invites
 
-    return raw
+    logger.warning("invalid_pending_room_invites_file", path=str(path))
+    return {}
 
 
-def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
+def save_pending_room_invites(path: Path, pending_invites: dict[str, PendingRoomInvite]) -> bool:
     """Atomically replace one agent's outstanding room invites."""
-    return _save_json(path, dict(sorted(pending_invites.items())))
+    return _save_json(
+        path,
+        {
+            room_id: {
+                "inviter_id": pending_invite.inviter_id,
+                "phase": pending_invite.phase.value,
+            }
+            for room_id, pending_invite in sorted(pending_invites.items())
+        },
+    )
 
 
 def _save_json(path: Path, value: object) -> bool:
