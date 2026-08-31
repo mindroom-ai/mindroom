@@ -2027,8 +2027,6 @@ class AgentBot:
         for room_id in final_departed_room_ids:
             if self.client is not None:
                 self.client.invited_rooms.pop(room_id, None)
-        for room_id in final_invited_room_ids:
-            self._room_lifecycle.forget_accepted_invited_room(room_id)
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in final_departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
@@ -2489,6 +2487,7 @@ class AgentBot:
             or event.state_key != self.matrix_id.full_id
         ):
             return
+        self._room_lifecycle.forget_accepted_invited_room(room.room_id)
         current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(

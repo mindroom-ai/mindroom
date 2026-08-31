@@ -525,12 +525,11 @@ class BotRoomLifecycle:
     ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
-        if not self._should_accept_invite():
-            self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
-            return
-
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
-            if not self._invite_generation_is_current(room.room_id, expected_invite):
+            if not self._should_accept_invite():
+                self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
+                return
+            if not self._invite_attempt_is_current(room.room_id, sender, expected_invite):
                 return
             invite_allowed = is_sender_allowed_for_agent_invite(
                 sender,
@@ -604,16 +603,30 @@ class BotRoomLifecycle:
         """Persist one successful join if its invite generation is still current."""
         if newly_joined:
             self._logger().info("Joined room", room_id=room_id)
-            if not self._invite_generation_is_current(room_id, expected_invite):
+            if not self._invite_attempt_is_current(room_id, sender, expected_invite):
                 return
         await self.deps.on_room_joined(room_id)
-        if not self._invite_generation_is_current(room_id, expected_invite):
+        if not self._invite_attempt_is_current(room_id, sender, expected_invite):
             return
         self._remember_invited_room(room_id)
         if newly_joined:
             self._handled_invite_room_ids.add(room_id)
         await self._send_invite_welcome(room_id, sender)
         self._complete_recorded_room_invite(room_id, sender, expected_invite)
+
+    def _invite_attempt_is_current(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> bool:
+        """Bind live work to its generation or a still-current cached invite."""
+        if expected_invite is not None:
+            return self._invite_generation_is_current(room_id, expected_invite)
+        if self._current_room_invites.get(room_id) is not None:
+            return False
+        room = self._client().invited_rooms.get(room_id)
+        return room is not None and room.inviter == sender
 
     def _invite_generation_is_current(
         self,
