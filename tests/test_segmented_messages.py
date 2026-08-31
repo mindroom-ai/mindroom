@@ -5,6 +5,8 @@ from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
     _estimated_event_size,
+    _render_segment_html,
+    _unclosed_fence_start,
     segment_matrix_content,
 )
 
@@ -235,3 +237,35 @@ def test_mention_pills_survive_segmentation() -> None:
     assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in mentioned[0]["formatted_body"]
     assert segmented.first["m.mentions"] == {"user_ids": ["@alice:localhost"]}
     assert all("m.mentions" not in part for part in segmented.continuations)
+
+
+def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:
+    """A user ID that prefixes another must not match inside an inserted pill."""
+    body = "Thanks @alice:localhost and @alice:localhost2."
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": (
+            '<p>Thanks <a href="https://matrix.to/#/@alice:localhost">@Alice</a> and '
+            '<a href="https://matrix.to/#/@alice:localhost2">@Alice Two</a>.</p>'
+        ),
+        "m.mentions": {"user_ids": ["@alice:localhost", "@alice:localhost2"]},
+    }
+
+    rendered = _render_segment_html(content, body)
+
+    assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in rendered
+    assert '<a href="https://matrix.to/#/@alice:localhost2">@Alice Two</a>' in rendered
+    assert rendered.count("<a ") == 2
+
+
+def test_unclosed_fence_requires_same_marker_and_length() -> None:
+    """Only a same-character fence of at least the opening length closes."""
+    opened = "```python\ncode\n"
+    assert _unclosed_fence_start(opened + "~~~\nmore\n", 0, len(opened) + 8) == 0
+    assert _unclosed_fence_start("````\ncode\n```\nstill open\n", 0, 24) == 0
+    closed = opened + "```   \n"
+    assert _unclosed_fence_start(closed, 0, len(closed)) is None
+    longer_closes = opened + "````\n"
+    assert _unclosed_fence_start(longer_closes, 0, len(longer_closes)) is None

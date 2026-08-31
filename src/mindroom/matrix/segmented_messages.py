@@ -37,7 +37,6 @@ _SEGMENT_METADATA_KEYS = frozenset(
     },
 )
 _MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
-_FENCE_MARKER_PATTERN = re.compile(r"^[ \t]*(`{3,}|~{3,})", re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +106,13 @@ def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
 def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
     """Render one chunk, restoring mention pills its plain body cannot carry."""
     formatted = markdown_to_html(body)
-    for user_id, pill in sorted(_mention_pills(source).items(), key=lambda item: -len(item[0])):
-        formatted = formatted.replace(user_id, pill)
-    return formatted
+    pills = _mention_pills(source)
+    if not pills:
+        return formatted
+    # One pass, longest ID first: a user ID can prefix another, and a second
+    # pass would match inside the anchor an earlier replacement inserted.
+    pattern = re.compile("|".join(re.escape(user_id) for user_id in sorted(pills, key=lambda uid: -len(uid))))
+    return pattern.sub(lambda match: pills[match.group(0)], formatted)
 
 
 def _rich_text_content(
@@ -259,13 +262,25 @@ def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
 
     Segments are rendered as standalone Markdown, so a cut inside a fence
     renders the remainder as plain text in one segment and a dangling opener
-    in the other. Chunks always begin fence-balanced, so a single toggle scan
-    finds the offending opener.
+    in the other. Chunks always begin fence-balanced, so a single scan finds
+    the offending opener. Per CommonMark a fence closes only on the same
+    marker character, at least the opening length, and nothing but trailing
+    whitespace.
     """
-    opener_start: int | None = None
-    for match in _FENCE_MARKER_PATTERN.finditer(text, start, end):
-        opener_start = None if opener_start is not None else match.start()
-    return opener_start
+    opener: tuple[str, int, int] | None = None
+    pos = start
+    while pos < end:
+        line_end = text.find("\n", pos, end)
+        line_end = end if line_end == -1 else line_end
+        match = re.match(r"[ \t]*(`{3,}|~{3,})(.*)", text[pos:line_end])
+        if match:
+            marker = match.group(1)
+            if opener is None:
+                opener = (marker[0], len(marker), pos)
+            elif marker[0] == opener[0] and len(marker) >= opener[1] and not match.group(2).strip():
+                opener = None
+        pos = line_end + 1
+    return opener[2] if opener is not None else None
 
 
 def _split_body(
