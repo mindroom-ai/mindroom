@@ -1971,12 +1971,12 @@ class AgentBot:
         """Ensure agent is in the correct rooms based on configuration.
 
         This consolidates room management into a single method that:
-        1. Joins configured rooms
-        2. Recovers interrupted invite joins
+        1. Recovers interrupted invite joins
+        2. Joins configured rooms
         3. Leaves unconfigured rooms
         """
-        await self.join_configured_rooms()
         await self.reconcile_pending_invites()
+        await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:

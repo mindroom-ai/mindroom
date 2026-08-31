@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 
 from mindroom.authorization import (
+    is_sender_allowed_by_authoritative_current_room_members,
     is_sender_allowed_for_agent_invite,
     is_sender_allowed_for_agent_reply_in_room,
 )
@@ -257,6 +258,7 @@ class BotRoomLifecycle:
             async with self._lock_for_room(self._invite_join_locks, room_id):
                 if room_id not in self._current_room_invites:
                     self._forget_pending_room_invite(room_id)
+                    await self._clear_join_decrypt_notice_fence(room_id)
                 self._forget_accepted_invited_room(room_id)
         finally:
             if self._invite_departure_events.get(room_id) is departure_event:
@@ -630,6 +632,41 @@ class BotRoomLifecycle:
             current_invite = self._current_room_invites.get(room_id)
             await self.deps.on_room_joined(room_id)
             if room_id in self._invite_departure_events or self._current_room_invites.get(room_id) != current_invite:
+                return
+            if not self._should_accept_invite():
+                invite_is_authorized = False
+            elif is_sender_allowed_for_agent_reply_in_room(
+                sender,
+                self.deps.agent_name,
+                self._config(),
+                room_id,
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+            ):
+                invite_is_authorized = True
+            else:
+                joined_members_response = await self._client().joined_members(room_id)
+                if not isinstance(joined_members_response, nio.JoinedMembersResponse):
+                    self._logger().warning(
+                        "recovered_invite_membership_query_failed",
+                        room_id=room_id,
+                        sender=sender,
+                        error=str(joined_members_response),
+                    )
+                    return
+                invite_is_authorized = is_sender_allowed_by_authoritative_current_room_members(
+                    sender,
+                    self.deps.agent_name,
+                    self._config(),
+                    (member.user_id for member in joined_members_response.members),
+                )
+            if not invite_is_authorized:
+                self._logger().info(
+                    "recovered_invite_no_longer_authorized",
+                    room_id=room_id,
+                    sender=sender,
+                )
+                self._complete_recorded_room_invite(room_id, sender, current_invite)
                 return
             self._remember_invited_room(room_id)
             await self._send_invite_welcome(room_id, sender, current_invite)
