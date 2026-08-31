@@ -807,7 +807,8 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
-Agent-scoped credential routes require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Agent-scoped credential routes for shared agents require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Requester-private agents allow authenticated requesters to manage credentials in their own isolated scope.
 Responder access and room membership never grant credential-management access.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
@@ -16494,9 +16495,10 @@ The same responder gate covers text, media, calls, reactions, approval actors, e
 Platform administrators may use administrative commands when their independent feature flag is enabled, manage any agent's credentials, and bypass responder policies.
 
 `agents.<name>.credential_managers` also contains concrete Matrix user IDs and does not accept wildcards.
-A credential manager may manage only the named agent's credentials and OAuth connections.
+A credential manager may manage only the named shared agent's credentials and OAuth connections.
+Authenticated requesters may manage credentials and OAuth connections for their own requester-private agent scope without a static credential-manager entry.
 
-Agent-scoped dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
+Shared-agent dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests resolve to the owner Matrix identity.
 
 `!config` remains disabled by default through `authorization.config_command_enabled`.

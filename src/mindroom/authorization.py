@@ -120,7 +120,11 @@ def is_sender_allowed_for_agent_credential_management(
     if agent is None:
         return False
     resolved_sender = config.authorization.resolve_alias(sender_id)
-    return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
+    return (
+        agent.private is not None
+        or resolved_sender in config.administrators
+        or resolved_sender in agent.credential_managers
+    )
 
 
 def is_platform_administrator(sender_id: str, config: Config) -> bool:
