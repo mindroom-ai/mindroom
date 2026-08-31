@@ -11,7 +11,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.invited_rooms_store import remember_invited_room
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -460,7 +459,8 @@ class TestDMPreservationDuringCleanup:
         )
         rp = runtime_paths_for(config)
         invited_rooms_path = agent_state_root_path(rp.storage_root, "agent") / "invited_rooms.json"
-        remember_invited_room(invited_rooms_path, "!ad-hoc:server")
+        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+        invited_rooms_path.write_text('[\n  "!ad-hoc:server"\n]\n', encoding="utf-8")
 
         with (
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),
@@ -496,7 +496,8 @@ class TestDMPreservationDuringCleanup:
         state.add_account("agent_agent", "mindroom_agent_oldns", "pw", domain=config.get_domain(rp))
         state.save(runtime_paths=rp)
         invited_rooms_path = agent_state_root_path(rp.storage_root, "agent") / "invited_rooms.json"
-        remember_invited_room(invited_rooms_path, "!ad-hoc:server")
+        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
+        invited_rooms_path.write_text('[\n  "!ad-hoc:server"\n]\n', encoding="utf-8")
 
         with (
             patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!ad-hoc:server"]),

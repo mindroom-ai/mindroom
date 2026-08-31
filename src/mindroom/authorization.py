@@ -79,19 +79,6 @@ def is_sender_allowed_for_agent_reply_in_room(
     )
 
 
-def is_sender_allowed_by_authoritative_current_room_members(
-    sender_id: str,
-    agent_name: str,
-    config: Config,
-    joined_user_ids: Iterable[str],
-) -> bool:
-    """Apply only the current-room clause using a freshly queried roster."""
-    if not resolve_responder_access(config, agent_name).current_room_members:
-        return False
-    resolved_sender = config.authorization.resolve_alias(sender_id)
-    return any(config.authorization.resolve_alias(user_id) == resolved_sender for user_id in joined_user_ids)
-
-
 def is_sender_allowed_for_agent_invite(
     sender_id: str,
     agent_name: str,

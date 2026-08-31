@@ -31,7 +31,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix import journal_ingress
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
@@ -1100,11 +1099,7 @@ async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room_id = "!agent-call:localhost"
     bot.client = client
-    remember_invited_room(
-        invited_rooms_path(runtime_paths_for(bot.config).storage_root, bot.agent_name),
-        room_id,
-    )
-    bot._room_lifecycle._reload_room_invite_states()
+    bot._room_lifecycle._update_invited_room(room_id, remember=True)
     call_manager = MagicMock()
 
     async def assert_invite_was_forgotten(**_kwargs: object) -> None:

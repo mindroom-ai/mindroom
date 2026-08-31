@@ -113,12 +113,9 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception to general journal admission because an invite has no Matrix event ID that can key a durable journal row.
-The invite callback records an observed inviter and any immediately available authorization in the room-invite ledger before starting background work.
-After restart, an observed record can pass only ordinary authoritative policy and never receives the current-inviter exception without fresh process-local evidence from the current sync generation.
-Once authorized, the same ledger retains the join transaction across retryable results, ambiguous remote completion, cancellation, and restart until authoritative reconciliation finishes it.
-Persisted invite recovery and accepted ad-hoc room rejoins wait until the bot's first successful sync has exposed any newer invite or departure state.
-Terminal rejection of an already joined ad-hoc room atomically revokes its accepted state and retains explicit departure work until Matrix confirms the bot is absent.
+Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+The authenticated callback creates process-local evidence for that exact inviter, and a different inviter, departure, or sync-generation reset invalidates the evidence.
+MindRoom rechecks that generation before persisting the room as accepted.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses

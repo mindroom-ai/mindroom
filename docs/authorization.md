@@ -109,16 +109,10 @@ MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
-Before a responder joins, the exact authenticated sender of its current self-membership invite may satisfy `current_room_members` only for deciding whether to accept that invite.
-Merely observed durable records, stale or revoked invites, and mismatched inviters do not grant this pre-join authorization.
-Once that exact live invite passes policy, MindRoom records an authorized join transaction before contacting Matrix and may retry or finish that transaction after restart.
-An observed transaction without live invite evidence may recover only through ordinary policy sources, and room-derived sources wait until every relevant grant-room snapshot is authoritative.
-The authorized transaction is recovery evidence for that join only and does not authorize normal room activity.
-Persisted invite recovery and accepted ad-hoc room rejoins wait until the bot's first successful sync has exposed any newer invite or departure state.
-A Matrix sync-generation reset invalidates all process-local invite evidence, and only a fresh self-membership invite callback can recreate it.
-After the responder joins, the invite is no longer authorization evidence and normal activity uses the authoritative membership index.
-If that post-join check terminally denies an ad-hoc room, MindRoom revokes its accepted-room state before explicitly leaving and retains departure work until Matrix confirms the bot is no longer joined.
-The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize normal activity there.
+For invite acceptance only, the exact sender of a live authenticated invite may satisfy `current_room_members` before the invited agent joins.
+That exception is process-local, is discarded across Matrix sync-generation resets, and is never reconstructed from a saved pending invite or cached room alone.
+After the join, messages and other activity continue to use the normal authoritative responder policy.
+The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.

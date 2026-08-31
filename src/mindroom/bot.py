@@ -89,11 +89,7 @@ from mindroom.tool_system.worker_routing import tool_execution_identity
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_sender_allowed_for_agent_reply_in_room
-from .background_tasks import (
-    create_background_task,
-    wait_for_background_tasks,
-    wait_for_future_until_complete,
-)
+from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
@@ -217,29 +213,6 @@ def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
         if delay >= _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS:
             return _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS
     return delay
-
-
-def _raise_room_membership_errors(
-    departure_error: BaseException | None,
-    fence_error: BaseException | None,
-    cleanup_wait_cancellation: asyncio.CancelledError | None,
-    cleanup_error: BaseException | None,
-) -> None:
-    """Raise the earliest membership failure while retaining a later cause."""
-    primary_error = departure_error or fence_error or cleanup_wait_cancellation or cleanup_error
-    if primary_error is None:
-        return
-    later_error = next(
-        (
-            error
-            for error in (cleanup_error, cleanup_wait_cancellation, fence_error)
-            if error is not None and error is not primary_error
-        ),
-        None,
-    )
-    if later_error is not None:
-        raise primary_error from later_error
-    raise primary_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1231,11 +1204,9 @@ class AgentBot:
             refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
         )
 
-    async def join_configured_rooms(self, *, include_persisted_invited_rooms: bool = True) -> None:
+    async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
-        await self._room_lifecycle.join_configured_rooms(
-            include_persisted_invited_rooms=include_persisted_invited_rooms,
-        )
+        await self._room_lifecycle.join_configured_rooms()
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
@@ -1363,7 +1334,7 @@ class AgentBot:
 
     async def reconcile_pending_invites(self) -> None:
         """Recheck cached room invites against the shared responder policy."""
-        if self.client is not None and self._first_sync_done:
+        if self.client is not None:
             await self._room_lifecycle.reconcile_pending_invites()
 
     async def revoke_reply_authorized_calls(self) -> None:
@@ -1766,8 +1737,6 @@ class AgentBot:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
         if first_sync_response:
-            await self.reconcile_pending_invites()
-            await self._room_lifecycle.rejoin_persisted_invited_rooms()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
@@ -1984,12 +1953,10 @@ class AgentBot:
         """Ensure agent is in the correct rooms based on configuration.
 
         This consolidates room management into a single method that:
-        1. Recovers interrupted invite joins
-        2. Joins configured rooms
-        3. Leaves unconfigured rooms
+        1. Joins configured rooms
+        2. Leaves unconfigured rooms
         """
-        await self.reconcile_pending_invites()
-        await self.join_configured_rooms(include_persisted_invited_rooms=self._first_sync_done)
+        await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
@@ -2054,42 +2021,11 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
-        departure_error: BaseException | None = None
+        await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
-            try:
-                self._room_lifecycle.begin_invited_room_departure(room_id)
-            except BaseException as exc:
-                if departure_error is None:
-                    departure_error = exc
-
-        fence_error: BaseException | None = None
-        try:
-            await self._membership_fence.fence_reported_departures(membership.departures)
-        except BaseException as exc:
-            fence_error = exc
-
-        cleanup_future = asyncio.gather(
-            *(self._room_lifecycle.forget_invited_room_after_departure(room_id) for room_id in departed_room_ids),
-            return_exceptions=True,
-        )
-        cleanup_wait_cancellation: asyncio.CancelledError | None = None
-        try:
-            cleanup_results = await wait_for_future_until_complete(
-                cleanup_future,
-                chain_cancelled_result=False,
-            )
-        except asyncio.CancelledError as exc:
-            cleanup_wait_cancellation = exc
-            cleanup_results = cleanup_future.result()
-
-        cleanup_error = next((result for result in cleanup_results if isinstance(result, BaseException)), None)
-        _raise_room_membership_errors(
-            departure_error,
-            fence_error,
-            cleanup_wait_cancellation,
-            cleanup_error,
-        )
-
+            if self.client is not None:
+                self.client.invited_rooms.pop(room_id, None)
+            self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
@@ -2548,11 +2484,6 @@ class AgentBot:
         ):
             return
         current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
-        self._room_lifecycle.authorize_current_room_invite(
-            room.room_id,
-            event.sender,
-            current_invite,
-        )
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(
                 room,

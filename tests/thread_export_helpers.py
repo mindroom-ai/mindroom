@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
+from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixAccount, MatrixRoom, MatrixState
 from mindroom.thread_export.models import ThreadExportAccumulator
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT
@@ -65,8 +66,8 @@ def write_thread_export_matrix_state(
 def write_invited_rooms(runtime_paths: RuntimePaths, entity_name: str, room_ids: list[str]) -> None:
     """Persist invited-room IDs for one managed entity."""
     path = invited_rooms_path(runtime_paths.storage_root, entity_name)
-    for room_id in room_ids:
-        remember_invited_room(path, room_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(room_ids), encoding="utf-8")
 
 
 def mark_thread_export_root(output_dir: Path) -> None:
