@@ -438,7 +438,12 @@ class BotRoomLifecycle:
 
     async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Handle one invite whose identity is already durable."""
-        await self._handle_invite(room, sender, invite_is_current=True)
+        await self._handle_invite(
+            room,
+            sender,
+            invite_is_current=True,
+            sender_is_current_inviter=True,
+        )
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after responder access changes."""
@@ -449,11 +454,17 @@ class BotRoomLifecycle:
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
-            invite_is_current = room is not None and room.inviter == sender
+            invite_is_current = room is not None
+            sender_is_current_inviter = room is not None and room.inviter == sender
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
-            await self._handle_invite(room, sender, invite_is_current=invite_is_current)
+            await self._handle_invite(
+                room,
+                sender,
+                invite_is_current=invite_is_current,
+                sender_is_current_inviter=sender_is_current_inviter,
+            )
 
     async def _handle_invite(
         self,
@@ -461,6 +472,7 @@ class BotRoomLifecycle:
         sender: str,
         *,
         invite_is_current: bool,
+        sender_is_current_inviter: bool,
     ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
@@ -477,7 +489,7 @@ class BotRoomLifecycle:
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
         )
-        if not invite_allowed and invite_is_current:
+        if not invite_allowed and sender_is_current_inviter:
             invite_allowed = resolve_responder_access(config, self.deps.agent_name).current_room_members
         if not invite_allowed:
             self._logger().debug(

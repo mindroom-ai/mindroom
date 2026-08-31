@@ -508,6 +508,54 @@ async def test_recovered_revoked_invite_is_forgotten_after_forbidden_join(
 
 
 @pytest.mark.asyncio
+async def test_cached_invite_without_inviter_keeps_authorized_join_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing inviter metadata must not make cached membership work look revoked."""
+    sender_id = "@owner:localhost"
+    room_id = "!cached-invite:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    access=ResponderAccessConfig(users=[sender_id]),
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    bot.client.invited_rooms = {room_id: nio.MatrixInvitedRoom(room_id, agent_user.user_id)}
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.ACCESS_DENIED),
+    )
+    bot._room_lifecycle.record_pending_room_invite(room_id, sender_id)
+
+    with pytest.raises(RuntimeError, match="Failed to join invited room"):
+        await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert _pending_room_invites(config, "agent1") == {room_id: sender_id}
+
+
+@pytest.mark.asyncio
 async def test_initial_sync_invite_is_current_membership_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -552,6 +600,54 @@ async def test_initial_sync_invite_is_current_membership_work(
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)
     assert bot._room_lifecycle.invited_rooms == {room.room_id}
     assert await bot._journal_dispatcher.store.pending() == ()
+
+
+@pytest.mark.asyncio
+async def test_invite_metadata_event_does_not_start_invite_work(tmp_path: Path) -> None:
+    """Stripped room metadata must not impersonate the self-membership inviter."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    access=ResponderAccessConfig(current_room_members=True),
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
+    room = nio.MatrixInvitedRoom("!metadata:localhost", agent_user.user_id)
+    room.inviter = "@owner:localhost"
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.name",
+            "sender": "@metadata-author:localhost",
+            "state_key": "",
+            "content": {"name": "Project"},
+        },
+    )
+    assert isinstance(event, nio.InviteNameEvent)
+
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert _pending_room_invites(config, "agent1") == {}
+    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
 
 
 @pytest.mark.asyncio

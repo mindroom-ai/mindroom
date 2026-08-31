@@ -2474,6 +2474,12 @@ class AgentBot:
         Persist its room and inviter before network work moves to the
         background so access changes and process restarts can reconcile it.
         """
+        if (
+            not isinstance(event, nio.InviteMemberEvent)
+            or event.state_key != self.agent_user.user_id
+            or event.membership != "invite"
+        ):
+            return
         self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(room, event.sender),
