@@ -265,22 +265,29 @@ def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
     in the other. Chunks always begin fence-balanced, so a single scan finds
     the offending opener. Per CommonMark a fence closes only on the same
     marker character, at least the opening length, and nothing but trailing
-    whitespace.
+    whitespace, and a fence opened inside a block quote closes only at the
+    same quote depth.
     """
-    opener: tuple[str, int, int] | None = None
+    opener: tuple[int, str, int, int] | None = None
     pos = start
     while pos < end:
         line_end = text.find("\n", pos, end)
         line_end = end if line_end == -1 else line_end
-        match = re.match(r"[ \t]*(`{3,}|~{3,})(.*)", text[pos:line_end])
+        match = re.match(r"[ \t]*((?:>[ \t]?)*)(`{3,}|~{3,})(.*)", text[pos:line_end])
         if match:
-            marker = match.group(1)
+            quote_depth = match.group(1).count(">")
+            marker = match.group(2)
             if opener is None:
-                opener = (marker[0], len(marker), pos)
-            elif marker[0] == opener[0] and len(marker) >= opener[1] and not match.group(2).strip():
+                opener = (quote_depth, marker[0], len(marker), pos)
+            elif (
+                quote_depth == opener[0]
+                and marker[0] == opener[1]
+                and len(marker) >= opener[2]
+                and not match.group(3).strip()
+            ):
                 opener = None
         pos = line_end + 1
-    return opener[2] if opener is not None else None
+    return opener[3] if opener is not None else None
 
 
 def _split_body(

@@ -212,6 +212,28 @@ def test_fence_spanning_the_whole_budget_falls_back_to_sidecar() -> None:
     assert segment_matrix_content(content, room_encrypted=False) is None
 
 
+def test_block_quoted_fence_is_not_split_mid_block() -> None:
+    """A fence inside a block quote is still a fence the splitter respects."""
+    prefix = "\n\n".join(f"## Lead {index}\n\nword " * 40 for index in range(30))
+    fence = "> ```python\n" + "".join(f"> value_{index} = {index}\n" for index in range(150)) + "> ```"
+    suffix = "\n\n".join(f"## Tail {index}\n\nword " * 40 for index in range(30))
+    body = f"{prefix}\n\n{fence}\n\n{suffix}"
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    assert len(parts) >= 2
+    assert "".join(part["body"] for part in parts) == body
+    assert sum(fence in part["body"] for part in parts) == 1
+
+
 def test_mention_pills_survive_segmentation() -> None:
     """Re-rendering a chunk must not drop the link its plain body cannot carry."""
     lead = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
@@ -269,3 +291,13 @@ def test_unclosed_fence_requires_same_marker_and_length() -> None:
     assert _unclosed_fence_start(closed, 0, len(closed)) is None
     longer_closes = opened + "````\n"
     assert _unclosed_fence_start(longer_closes, 0, len(longer_closes)) is None
+
+
+def test_unclosed_fence_inside_a_block_quote() -> None:
+    """A fence quoted with `>` opens and closes only at the same quote depth."""
+    quoted_open = "> ```python\n> code\n"
+    assert _unclosed_fence_start(quoted_open, 0, len(quoted_open)) == 0
+    wrong_depth_closes = quoted_open + "```\n"
+    assert _unclosed_fence_start(wrong_depth_closes, 0, len(wrong_depth_closes)) == 0
+    quoted_closes = quoted_open + "> ```\n"
+    assert _unclosed_fence_start(quoted_closes, 0, len(quoted_closes)) is None
