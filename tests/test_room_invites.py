@@ -2218,6 +2218,98 @@ async def test_departure_clears_cached_invite_before_reconciliation(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_fresh_invite_during_departure_fence_remains_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Departure cleanup must preserve an invite observed after its sync state."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    access=ResponderAccessConfig(current_room_members=True),
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    room_id = "!project-room:localhost"
+    old_inviter_id = "@old-member:localhost"
+    new_inviter_id = "@new-member:localhost"
+    old_invite = nio.MatrixInvitedRoom(room_id, agent_user.user_id)
+    old_invite.inviter = old_inviter_id
+    bot.client.invited_rooms = {room_id: old_invite}
+    bot._room_lifecycle.record_current_room_invite(room_id, old_inviter_id)
+    fence_started = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def suspended_fence(_departures: object) -> None:
+        fence_started.set()
+        await release_fence.wait()
+
+    membership_fence = MagicMock()
+    membership_fence.fence_reported_departures = suspended_fence
+    membership_fence.note_membership_restarted = AsyncMock()
+    bot._membership_fence = membership_fence
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
+    response = nio.SyncResponse(
+        next_batch="before-fresh-invite",
+        rooms=nio.Rooms(
+            invite={},
+            join={},
+            leave={
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(events=[], limited=False, prev_batch=None),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+        ),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+
+    departure_task = asyncio.create_task(bot._apply_own_room_membership_from_sync(response))
+    await fence_started.wait()
+    fresh_invite = nio.MatrixInvitedRoom(room_id, agent_user.user_id)
+    fresh_invite.inviter = new_inviter_id
+    bot.client.invited_rooms[room_id] = fresh_invite
+    bot._room_lifecycle.record_current_room_invite(room_id, new_inviter_id)
+    release_fence.set()
+    await departure_task
+
+    assert bot.client.invited_rooms[room_id] is fresh_invite
+    assert _pending_room_invites(config, "agent1") == {room_id: new_inviter_id}
+    await bot._room_lifecycle.reconcile_pending_invites()
+    join_room.assert_awaited_once_with(bot.client, room_id)
+    assert bot._room_lifecycle.invited_rooms == {room_id}
+    assert _pending_room_invites(config, "agent1") == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_departure_during_invite_join_wins_final_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

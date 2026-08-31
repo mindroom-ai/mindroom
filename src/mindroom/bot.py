@@ -2019,6 +2019,8 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
+        for room_id in departed_room_ids:
+            self._room_lifecycle.begin_invited_room_departure(room_id)
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
             await self._room_lifecycle.forget_invited_room_after_departure(room_id)
