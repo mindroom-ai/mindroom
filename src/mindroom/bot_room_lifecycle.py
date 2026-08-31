@@ -550,7 +550,7 @@ class BotRoomLifecycle:
         if not invite_allowed:
             return False
         current_invite = self._client().invited_rooms.get(room_id)
-        if current_invite is not expected_invite or current_invite.inviter != sender:
+        if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
             return False
         self._remember_invited_room(room_id)
         return True

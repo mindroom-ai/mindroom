@@ -109,9 +109,11 @@ For ordinary activity, the router owns this authoritative index, so it must be j
 An authenticated self-invite is the narrow pre-join exception: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy `current_room_members` for that invite only.
 One live cache entry owns at most one join attempt, and a failed attempt requires fresh invite evidence.
 After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
-The same cached invite and inviter must still own the attempt immediately before acceptance, and an authoritative departure revokes that live ownership.
+A joined sync normally removes the invite cache entry, so cache absence after a successful join does not revoke acceptance, while a still-present different invite fails closed.
+An authoritative departure revokes both live invite work and accepted-room preservation.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
+A same-sender cancellation and reinvite that overlaps an in-flight join may be consumed by that attempt and require another invitation.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.

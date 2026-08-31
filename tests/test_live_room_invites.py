@@ -174,6 +174,37 @@ async def test_postjoin_cancellation_consumes_exact_live_invite(
 
 
 @pytest.mark.asyncio
+async def test_joined_sync_cache_removal_does_not_revoke_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nio's normal joined-sync cache transition cannot reject a successful join."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+
+    async def joined_members_after_sync(_client: object, _room_id: str) -> set[str]:
+        bot.client.invited_rooms.pop(ROOM_ID)
+        return {INVITER_ID, bot.agent_user.user_id}
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        joined_members_after_sync,
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", leave_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    leave_room.assert_not_awaited()
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
 async def test_policy_is_rechecked_after_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
