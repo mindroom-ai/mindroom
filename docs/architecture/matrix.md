@@ -113,11 +113,8 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception because an invite snapshot has no Matrix event ID to key a durable journal row on.
-`_on_invite_before_sync_certification` persists limited pending work before starting a plain background task, and later trusted syncs retry it only from matching current Matrix state.
-Incremental `/sync` does not promise to repeat an unchanged invite, so an interruption can require reinvitation.
-The authenticated callback creates process-local evidence for that exact inviter, and a different inviter, departure, receive-loop restart, or sync-position reset invalidates the evidence.
-MindRoom rechecks that generation before persisting the room as accepted.
+Invites are the deliberate exception: MindRoom acts only on Matrix's current authenticated invite cache and creates no durable pending-invite work.
+Access is checked before and after joining, accepted-room storage only preserves a membership that still exists, and interruption or a failed attempt may require another invitation.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses

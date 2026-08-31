@@ -95,7 +95,7 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
     )
     orchestrator.refresh_agent_reply_memberships = AsyncMock()
     orchestrator.revoke_reply_authorized_calls = AsyncMock()
-    orchestrator.reconcile_pending_invites = AsyncMock()
+    orchestrator.reconcile_live_invites = AsyncMock()
     orchestrator.handle_bot_ready = AsyncMock()
     bot.orchestrator = orchestrator
     return bot, orchestrator
@@ -291,7 +291,6 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     """Calls reconcile after each sync-loop's first successful response."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    bot.client.invited_rooms = {}
     call_manager = MagicMock()
     call_manager.reconcile_joined_rooms = AsyncMock()
     install_call_manager_mock(bot, call_manager)
@@ -1604,7 +1603,6 @@ async def test_bot_ready_fires_after_shutdown_clears(tmp_path: Path) -> None:
     """bot:ready must fire after shutdown suppresses and then clears (restart recovery)."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    bot.client.invited_rooms = {}
 
     fired_count = 0
 

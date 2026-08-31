@@ -1293,7 +1293,6 @@ class AgentBot:
         first ``SyncResponse`` or ``SyncError`` arrives.  The watchdog has its
         own startup timeout for the pre-first-response window.
         """
-        self._invalidate_invite_sync_state()
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
@@ -1327,29 +1326,16 @@ class AgentBot:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
         self._invalidate_agent_reply_memberships(reason=reason)
 
-    def _invalidate_invite_sync_state(self, room_ids: Iterable[str] | None = None) -> None:
-        """Discard invite evidence owned by an ended receive generation."""
-        invalidated_room_ids = None if room_ids is None else frozenset(room_ids)
-        self._room_lifecycle.invalidate_current_invite_evidence(invalidated_room_ids)
-        client = self.client
-        if client is None:
-            return
-        if invalidated_room_ids is None:
-            client.invited_rooms.clear()
-            return
-        for room_id in invalidated_room_ids:
-            client.invited_rooms.pop(room_id, None)
-
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck this bot's active calls against the shared reply policy."""
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.reconcile_reply_authorization()
 
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against the shared responder policy."""
+    async def reconcile_live_invites(self) -> None:
+        """Recheck live Matrix invites against the shared responder policy."""
         if self.client is not None:
-            await self._room_lifecycle.reconcile_pending_invites()
+            await self._room_lifecycle.reconcile_invites()
 
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
@@ -1401,7 +1387,7 @@ class AgentBot:
             if client is None:
                 return
             await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
-            await self.reconcile_pending_invites()
+            await self.reconcile_live_invites()
             await self.revoke_reply_authorized_calls()
             self.schedule_reply_authorized_call_reconciliation()
 
@@ -1486,7 +1472,6 @@ class AgentBot:
         staged = client.has_uncommitted_classic_sync_state
         if not force and not staged and (client.next_batch or None) == retry_token:
             return False, retry_token is not None
-        self._invalidate_invite_sync_state()
         reset_completed = False
         try:
             await client.reset_classic_sync_state()
@@ -1747,8 +1732,6 @@ class AgentBot:
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
         await self._refresh_agent_reply_memberships_if_needed()
-        if self._room_lifecycle.has_pending_invite_work:
-            await self.reconcile_pending_invites()
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
@@ -1935,7 +1918,6 @@ class AgentBot:
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
             if _response.status_code == "M_UNKNOWN_POS":
-                self._invalidate_invite_sync_state()
                 self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
             return
         if _response.status_code == "M_UNKNOWN_POS":
@@ -2037,19 +2019,9 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
-        final_invited_room_ids = membership.invited_room_ids
-        final_departed_room_ids = departed_room_ids - final_invited_room_ids
-        self._invalidate_invite_sync_state(final_departed_room_ids)
-        cleanup_failures: list[Exception] = []
-        for room_id in final_departed_room_ids:
-            try:
-                self._room_lifecycle.forget_invited_room(room_id)
-            except Exception as error:
-                self.logger.exception("Failed to forget departed invited room", room_id=room_id)
-                cleanup_failures.append(error)
         await self._membership_fence.fence_reported_departures(membership.departures)
-        if cleanup_failures:
-            raise cleanup_failures[0]
+        for room_id in departed_room_ids:
+            self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
@@ -2496,25 +2468,15 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.InviteEvent,
     ) -> None:
-        """Act on one invite without journalling it.
-
-        An invite has no Matrix event ID to key durable work on.
-        Persist its room and inviter before network work moves to the
-        background so access changes and process restarts can reconcile it.
-        """
+        """Start best-effort work for one authenticated self-invite."""
         if (
             not isinstance(event, nio.InviteMemberEvent)
             or event.membership != "invite"
             or event.state_key != self.matrix_id.full_id
         ):
             return
-        current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
         create_background_task(
-            self._room_lifecycle.handle_recorded_invite(
-                room,
-                event.sender,
-                current_invite,
-            ),
+            self._room_lifecycle.handle_invite(room, event.sender),
             owner=self._runtime_view,
         )
 
@@ -2672,10 +2634,10 @@ class AgentBot:
         """Run effects that depend on one committed reply-membership change."""
         orchestrator = self.orchestrator
         if orchestrator is None:
-            await self.reconcile_pending_invites()
+            await self.reconcile_live_invites()
             await self.reconcile_reply_authorized_calls()
             return
-        await orchestrator.reconcile_pending_invites()
+        await orchestrator.reconcile_live_invites()
         await orchestrator.reconcile_reply_authorized_calls()
 
     async def _apply_live_reply_membership_transition(

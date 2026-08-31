@@ -105,11 +105,11 @@ MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
-For invite acceptance only, the exact sender of a live authenticated invite may satisfy `current_room_members` before the invited agent joins.
-That exception is process-local, is discarded whenever the Matrix receive generation restarts or its sync position resets, and is never reconstructed from a saved pending invite or cached room alone.
-Before persisting an acceptance that relied on this exception, MindRoom confirms after joining that the inviter is still a joined room member and leaves when membership is absent or unreadable.
-After the join, messages and other activity continue to use the normal authoritative responder policy.
-The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+For ordinary activity, the router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+An authenticated self-invite is the narrow pre-join exception: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy `current_room_members` for that invite only.
+After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
+Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
+MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.

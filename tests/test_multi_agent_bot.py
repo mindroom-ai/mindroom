@@ -554,18 +554,11 @@ class TestAgentBot(AgentBotTestBase):
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite", return_value=True),
-            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_responder", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),
         ):
-            current_invite = bot._room_lifecycle.record_current_room_invite(
-                mock_room.room_id,
-                mock_event.sender,
-            )
-            await bot._room_lifecycle.handle_recorded_invite(
-                mock_room,
-                mock_event.sender,
-                current_invite,
-            )
+            mock_room.inviter = mock_event.sender
+            bot.client.invited_rooms = {mock_room.room_id: mock_room}
+            await bot._room_lifecycle.handle_invite(mock_room, mock_event.sender)
 
         assert join_room.await_count == expected_join_calls
 

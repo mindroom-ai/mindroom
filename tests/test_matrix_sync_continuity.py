@@ -2208,16 +2208,16 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_durable_invite_failure_does_not_rewind_classic_cursor(
+async def test_live_invite_failure_does_not_rewind_classic_cursor(
     tmp_path: Path,
 ) -> None:
-    """Durably recorded invite work must not rewind raw sync continuity."""
+    """Best-effort invite work must not rewind raw sync continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_invite"
     bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
     bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_invite")
-    bot._room_lifecycle.handle_recorded_invite = AsyncMock(side_effect=RuntimeError("join failed"))
+    bot._room_lifecycle.handle_invite = AsyncMock(side_effect=RuntimeError("join failed"))
     room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
@@ -2232,13 +2232,8 @@ async def test_durable_invite_failure_does_not_rewind_classic_cursor(
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert bot.client.next_batch == "s_after_invite"
-    assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
-    # The dedicated pending-invite store owns recovery, so no journal row is needed.
     assert await bot._journal_dispatcher.store.pending() == ()
-    bot._room_lifecycle.handle_recorded_invite.assert_awaited_once()
-    invite_args = bot._room_lifecycle.handle_recorded_invite.await_args.args
-    assert invite_args[:2] == (room, event.sender)
-    assert invite_args[2].inviter_id == event.sender
+    bot._room_lifecycle.handle_invite.assert_awaited_once_with(room, event.sender)
 
 
 @pytest.mark.asyncio

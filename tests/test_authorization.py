@@ -44,6 +44,28 @@ def _allowed(
     )
 
 
+def _invite_allowed(
+    sender_id: str,
+    config: object,
+    memberships: AgentReplyMembershipIndex,
+    *,
+    current_inviter_id: str | None = None,
+    joined_member_ids: set[str] | None = None,
+) -> bool:
+    from mindroom.config.main import Config  # noqa: PLC0415
+
+    assert isinstance(config, Config)
+    return is_sender_allowed_for_agent_invite(
+        sender_id,
+        "talent",
+        config,
+        runtime_paths_for(config),
+        memberships,
+        current_inviter_id=current_inviter_id,
+        joined_member_ids=joined_member_ids,
+    )
+
+
 def test_explicit_user_and_alias_can_use_responder(tmp_path: Path) -> None:
     """Static grants must resolve bridge aliases before matching."""
     config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
@@ -87,29 +109,31 @@ async def test_current_room_member_can_use_responder(tmp_path: Path) -> None:
     assert not _allowed(sender_id, config, memberships, room_id="!other:example.com")
 
 
-def test_current_invite_access_is_bound_to_authenticated_inviter(tmp_path: Path) -> None:
-    """Current-room invite evidence must authorize only its exact inviter."""
+def test_only_exact_live_inviter_satisfies_prejoin_current_room_access(tmp_path: Path) -> None:
+    """Pre-join current-room access belongs only to Matrix's exact live inviter."""
     sender_id = "@member:example.com"
     config = membership_config(
         tmp_path,
         access={"current_room_members": True, "members_of_rooms": []},
     )
     memberships = AgentReplyMembershipIndex()
-    args = (
-        sender_id,
-        "talent",
-        config,
-        "!project:example.com",
-        runtime_paths_for(config),
-        memberships,
-    )
 
-    assert is_sender_allowed_for_agent_invite(*args, current_inviter_id=sender_id)
-    assert not is_sender_allowed_for_agent_invite(
-        *args,
-        current_inviter_id="@different-member:example.com",
+    assert _invite_allowed(sender_id, config, memberships, current_inviter_id=sender_id)
+    assert not _invite_allowed(sender_id, config, memberships, current_inviter_id="@other:example.com")
+    assert not _invite_allowed(sender_id, config, memberships)
+
+
+def test_postjoin_current_room_access_requires_joined_inviter(tmp_path: Path) -> None:
+    """Post-join current-room access requires the inviter in the joined member set."""
+    sender_id = "@member:example.com"
+    config = membership_config(
+        tmp_path,
+        access={"current_room_members": True, "members_of_rooms": []},
     )
-    assert not is_sender_allowed_for_agent_invite(*args, current_inviter_id=None)
+    memberships = AgentReplyMembershipIndex()
+
+    assert _invite_allowed(sender_id, config, memberships, joined_member_ids={sender_id})
+    assert not _invite_allowed(sender_id, config, memberships, joined_member_ids={"@other:example.com"})
 
 
 @pytest.mark.asyncio

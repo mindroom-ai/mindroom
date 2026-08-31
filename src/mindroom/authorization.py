@@ -38,8 +38,6 @@ def is_sender_allowed_for_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
-    *,
-    include_current_room_members: bool = True,
 ) -> bool:
     """Apply the complete membership policy for one responder."""
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
@@ -49,7 +47,6 @@ def is_sender_allowed_for_responder(
     allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
     allowed = allowed or (
         room_id is not None
-        and include_current_room_members
         and access.current_room_members
         and membership_index.is_current_room_member(resolved_sender, room_id, config)
     )
@@ -86,33 +83,31 @@ def is_sender_allowed_for_agent_invite(
     sender_id: str,
     agent_name: str,
     config: Config,
-    room_id: str,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
     *,
-    current_inviter_id: str | None,
+    current_inviter_id: str | None = None,
+    joined_member_ids: set[str] | None = None,
 ) -> bool:
-    """Authorize an inviter using normal access or a current Matrix invite.
+    """Authorize one live invite before or after its join.
 
-    Matrix authenticates the sender as a joined member with permission when it
-    creates the invite event. That evidence can tentatively satisfy
-    ``current_room_members`` before the invited agent joins; callers must
-    confirm current membership after joining and before persisting acceptance.
+    Ordinary access never depends on the invited room's not-yet-authoritative
+    membership snapshot. ``current_room_members`` is instead satisfied by the
+    exact live inviter before joining or by an authoritative joined-members
+    query afterward.
     """
-    if is_sender_allowed_for_agent_reply_in_room(
+    if is_sender_allowed_for_responder(
         sender_id,
         agent_name,
+        None,
         config,
-        room_id,
         runtime_paths,
         membership_index,
     ):
         return True
-    return (
-        current_inviter_id is not None
-        and sender_id == current_inviter_id
-        and resolve_responder_access(config, agent_name).current_room_members
-    )
+    if not resolve_responder_access(config, agent_name).current_room_members:
+        return False
+    return sender_id == current_inviter_id or (joined_member_ids is not None and sender_id in joined_member_ids)
 
 
 def is_sender_allowed_for_entity_replies_in_room(

@@ -523,7 +523,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
         AsyncMock(return_value=["!private:localhost", "!old:localhost"]),
     )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_rooms", mock_leave_non_dm_rooms)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: MatrixState())
 
     await bot.leave_unconfigured_rooms()

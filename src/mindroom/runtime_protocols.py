@@ -88,8 +88,8 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """End active calls whose requester no longer has reply access."""
         ...
 
-    def reconcile_pending_invites(self) -> Awaitable[None]:
-        """Recheck cached room invites against current responder access."""
+    def reconcile_live_invites(self) -> Awaitable[None]:
+        """Recheck live Matrix invites against current responder access."""
         ...
 
     def revoke_reply_authorized_calls(self) -> Awaitable[None]:
