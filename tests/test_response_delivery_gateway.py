@@ -86,6 +86,7 @@ pytestmark = pytest.mark.asyncio
 
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
+_SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
 
 
 def _failed_delivery() -> MatrixDeliveryFailure:
@@ -1149,8 +1150,19 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         frozen = delivery.payload
         assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
-        assert delivery.result == {"body": answer, "interactive": None}
-        assert client.room_send.await_args.kwargs["content"] == frozen
+        assert delivery.result is not None
+        assert delivery.result["body"] == answer
+        assert delivery.result["interactive"] is None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        parts = [frozen["m.new_content"], *continuations]
+        assert "".join(part["body"] for part in parts) == answer
+        assert all(part["format"] == "org.matrix.custom.html" for part in parts)
+        assert all("formatted_body" in part for part in parts)
+        assert all("file" not in part and "url" not in part for part in parts)
+        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        assert sent_contents == [frozen, *continuations]
 
     async def test_delivery_identity_is_included_in_the_validated_event_size(
         self,
@@ -1212,17 +1224,24 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             outcome = await gateway.deliver_final(self._final_request("x" * 50_000))
 
         assert outcome.event_id == "$sent"
-        frozen = outbox.rows["$cause", "final"].payload
-        assert frozen["msgtype"] == "m.file"
-        assert (
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.text"
+        assert delivery.result is not None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert all(
             _calculate_delivery_event_size(
-                frozen,
+                candidate,
                 room_id=_ROOM_ID,
                 room_encrypted=True,
                 device_id="DEVICE",
             )
             <= _MATRIX_EVENT_HARD_LIMIT
+            for candidate in [frozen, *continuations]
         )
+        client.upload.assert_not_awaited()
         client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
 
     async def test_plaintext_durable_payload_is_fitted_for_a_later_encrypted_send(
@@ -1256,18 +1275,26 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         assert outcome.terminal_status == "completed"
-        frozen = outbox.rows["$cause", "final"].payload
-        assert frozen["file"]["url"] == "mxc://localhost/transition-sidecar"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.text"
+        assert "file" not in frozen
         assert "url" not in frozen
-        assert (
+        assert delivery.result is not None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert all(
             _calculate_delivery_event_size(
-                frozen,
+                candidate,
                 room_id=_ROOM_ID,
                 room_encrypted=True,
                 device_id="DEVICE",
             )
             <= _MATRIX_EVENT_HARD_LIMIT
+            for candidate in [frozen, *continuations]
         )
+        client.upload.assert_not_awaited()
 
     async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
         self,
@@ -1485,13 +1512,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         self,
         tmp_path: Path,
     ) -> None:
-        """Wire delivery must not prepare an already-frozen outbox payload again.
-
-        A large edit becomes a sidecar-backed ``m.file`` replacement before
-        the outbox freezes it. Preparing that envelope a second time promotes
-        the inner ``m.file`` type to the outer edit without its required URL,
-        so nio rejects the event and later history reads cannot hydrate it.
-        """
+        """Wire delivery must not prepare an already-frozen outbox payload again."""
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
@@ -1528,10 +1549,19 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         assert delivered is not None
-        assert client.upload.await_count == 1, "wire delivery uploaded a second sidecar"
         frozen = outbox.rows["$cause", "final"].payload
-        wire_content = client.room_send.await_args.kwargs["content"]
-        assert wire_content == frozen
+        result = outbox.rows["$cause", "final"].result
+        assert result is not None
+        continuations = result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert client.upload.await_count == 0
+        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        assert sent_contents == [frozen, *continuations]
+        wire_content = sent_contents[0]
+        assert wire_content["msgtype"] == "m.text"
+        assert wire_content["m.new_content"]["format"] == "org.matrix.custom.html"
+        assert "".join([wire_content["m.new_content"]["body"], *(item["body"] for item in continuations)]) == answer
         parsed = nio.Event.parse_event(
             {
                 "event_id": "$edit",
@@ -1593,8 +1623,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         delivered = await terminal(client, _ROOM_ID, "$streamed", content, answer)
 
         assert delivered is not None
-        assert client.upload.await_count == 1
-        assert client.room_send.await_args.kwargs["content"] == frozen
+        result = outbox.rows["$cause", "final"].result
+        assert result is not None
+        continuations = result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert client.upload.await_count == 0
+        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        assert sent_contents[:2] == [frozen, frozen]
+        assert sent_contents[2:] == continuations
 
     async def test_a_definitive_oversized_refusal_stops_recovery(
         self,
@@ -1641,7 +1678,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert second is None
         assert stored.permanent_failure_reason is not None
         assert client.room_send.await_count == 1
-        assert client.upload.await_count == 1
+        assert client.upload.await_count == 0
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,

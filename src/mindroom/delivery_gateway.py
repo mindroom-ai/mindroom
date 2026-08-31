@@ -7,7 +7,8 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakValueDictionary
 
 import nio
@@ -63,6 +64,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
 )
+from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix_delivery import (
     DeliveryStage,
     MatrixDeliveryWorker,
@@ -89,7 +91,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     import structlog
 
@@ -116,6 +118,47 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
         "terminal_update_failed",
     },
 )
+_SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedWirePayload:
+    """One frozen primary event plus any lossless continuation events."""
+
+    content: dict[str, Any]
+    continuation_payloads: tuple[dict[str, Any], ...] = ()
+
+
+def _result_with_segment_payloads(
+    result: dict[str, object] | None,
+    continuation_payloads: tuple[dict[str, Any], ...],
+) -> dict[str, object] | None:
+    """Store continuation payloads in local outbox state, never on Matrix."""
+    if not continuation_payloads:
+        return result
+    merged = dict(result or {})
+    merged[_SEGMENT_PAYLOADS_RESULT_KEY] = [dict(payload) for payload in continuation_payloads]
+    return merged
+
+
+def _continuation_payloads(result: Mapping[str, object] | None) -> tuple[dict[str, Any], ...]:
+    """Read a frozen continuation list from an outbox result, if present."""
+    if result is None:
+        return ()
+    raw_payloads = result.get(_SEGMENT_PAYLOADS_RESULT_KEY)
+    if not isinstance(raw_payloads, list):
+        return ()
+    payloads: list[dict[str, Any]] = []
+    for payload in raw_payloads:
+        if not isinstance(payload, dict):
+            return ()
+        payloads.append(dict(cast("dict[str, Any]", payload)))
+    return tuple(payloads)
+
+
+def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
+    """Derive a stable Matrix transaction ID for one continuation event."""
+    return str(uuid5(NAMESPACE_URL, f"mindroom-matrix-segment:{base_transaction_id}:{index}"))
 
 
 def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
@@ -742,6 +785,7 @@ class DeliveryGateway:
         claimed: MatrixDelivery,
         *,
         retry_sync_recovery: bool,
+        operation: str = "send_message",
     ) -> DeliveredMatrixEvent:
         """Send one claimed delivery exactly as it was frozen.
 
@@ -752,10 +796,12 @@ class DeliveryGateway:
         duplicate, and leave the durable result and the room disagreeing
         forever.
         """
+        client = self._client()
         outcome = await send_message_outcome(
-            self._client(),
+            client,
             claimed.room_id,
             dict(claimed.payload),
+            operation=operation,
             retry_sync_recovery=retry_sync_recovery,
             transaction_id=claimed.transaction_id,
             content_is_prepared=True,
@@ -766,6 +812,33 @@ class DeliveryGateway:
                 raise PermanentDeliveryError(detail)
             msg = f"Matrix refused delivery for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
             raise _DeliveryRefusedError(msg)
+
+        continuations = _continuation_payloads(claimed.result)
+        for index, continuation in enumerate(continuations, start=1):
+            continuation_outcome = await send_message_outcome(
+                client,
+                claimed.room_id,
+                continuation,
+                retry_sync_recovery=retry_sync_recovery,
+                transaction_id=_segment_transaction_id(claimed.transaction_id, index),
+                content_is_prepared=True,
+            )
+            if isinstance(continuation_outcome, MatrixDeliveryFailure):
+                detail = _matrix_delivery_failure_reason(continuation_outcome)
+                if continuation_outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                    raise PermanentDeliveryError(detail)
+                msg = (
+                    f"Matrix refused continuation {index} for turn {claimed.delivery_id!r} "
+                    f"stage {claimed.stage.value!r}: {detail}"
+                )
+                raise _DeliveryRefusedError(msg)
+        if continuations:
+            self.deps.logger.info(
+                "Sent segmented Matrix response",
+                delivery_id=claimed.delivery_id,
+                stage=claimed.stage.value,
+                continuation_count=len(continuations),
+            )
         return outcome
 
     async def _observe_matrix_event(
@@ -961,6 +1034,8 @@ class DeliveryGateway:
             content,
             turn_id=request.delivery_turn_id,
             stage=request.delivery_stage,
+            continuation_thread_id=request.target.resolved_thread_id,
+            continuation_reply_to_event_id=request.target.reply_to_event_id,
         )
         if isinstance(prepared, MatrixDeliveryFailure):
             if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
@@ -968,7 +1043,11 @@ class DeliveryGateway:
             preparation_failure: MatrixDeliveryFailure | None = prepared
         else:
             preparation_failure = None
-            content = prepared
+            content = prepared.content
+        delivery_result = _result_with_segment_payloads(
+            request.delivery_result,
+            () if isinstance(prepared, MatrixDeliveryFailure) else prepared.continuation_payloads,
+        )
 
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
@@ -978,7 +1057,7 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
-                result=request.delivery_result,
+                result=delivery_result,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
                 ),
@@ -1091,23 +1170,12 @@ class DeliveryGateway:
             # attempt landed, visible while the durable row says otherwise if it did
             # not. The stored envelope already is what that helper would build.
             nonlocal delivered
-            outcome = await send_message_outcome(
-                client,
-                claimed.room_id,
-                dict(claimed.payload),
-                operation="edit_message",
+            delivered = await self._send_claimed(
+                claimed,
                 retry_sync_recovery=request.retry_sync_recovery,
-                transaction_id=claimed.transaction_id,
-                content_is_prepared=True,
+                operation="edit_message",
             )
-            if isinstance(outcome, MatrixDeliveryFailure):
-                detail = _matrix_delivery_failure_reason(outcome)
-                if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
-                    raise PermanentDeliveryError(detail)
-                msg = f"Matrix refused the final edit for turn {claimed.delivery_id!r}: {detail}"
-                raise _DeliveryRefusedError(msg)
-            delivered = outcome
-            return outcome.event_id
+            return delivered.event_id
 
         # What is stored is the finished wire event, not the text it was built
         # from. Recovery sends the row exactly as frozen and has no request to
@@ -1132,6 +1200,8 @@ class DeliveryGateway:
             envelope,
             turn_id=request.delivery_turn_id,
             stage=DeliveryStage.FINAL,
+            continuation_thread_id=request.target.resolved_thread_id,
+            continuation_reply_to_event_id=request.event_id,
         )
         if isinstance(prepared, MatrixDeliveryFailure):
             if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
@@ -1139,7 +1209,11 @@ class DeliveryGateway:
             preparation_failure = prepared
         else:
             preparation_failure = None
-            envelope = prepared
+            envelope = prepared.content
+        delivery_result = _result_with_segment_payloads(
+            request.delivery_result,
+            () if isinstance(prepared, MatrixDeliveryFailure) else prepared.continuation_payloads,
+        )
 
         try:
             handoff = None if request.defer_source_handoff else self.deps.turn_handoff
@@ -1149,7 +1223,7 @@ class DeliveryGateway:
                 room_id=room_id,
                 thread_id=request.target.resolved_thread_id,
                 payload=envelope,
-                result=request.delivery_result,
+                result=delivery_result,
                 edits_event_id=request.event_id,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
@@ -1785,7 +1859,9 @@ class DeliveryGateway:
         *,
         turn_id: str,
         stage: DeliveryStage,
-    ) -> dict[str, Any] | MatrixDeliveryFailure:
+        continuation_thread_id: str | None = None,
+        continuation_reply_to_event_id: str | None = None,
+    ) -> _PreparedWirePayload | MatrixDeliveryFailure:
         """Prepare a payload for the wire, unless a frozen one already exists.
 
         Preparation can upload a sidecar, so it must not run for a turn whose
@@ -1802,7 +1878,7 @@ class DeliveryGateway:
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
-            return content
+            return _PreparedWirePayload(content=content)
         client = self._client()
         encryption_outcome = await resolve_room_encryption_outcome(
             client,
@@ -1817,14 +1893,41 @@ class DeliveryGateway:
             stage,
             content,
         )
+        segmented = segment_matrix_content(
+            wire_content,
+            room_encrypted=encryption_outcome,
+            continuation_thread_id=continuation_thread_id,
+            continuation_reply_to_event_id=continuation_reply_to_event_id,
+        )
+        if segmented is not None:
+            continuation_payloads = tuple(
+                matrix_delivery_payload(
+                    self.deps.outbox.principal_id,
+                    turn_id,
+                    stage,
+                    continuation,
+                )
+                for continuation in segmented.continuations
+            )
+            self.deps.logger.info(
+                "Prepared lossless Matrix response segmentation",
+                delivery_id=turn_id,
+                stage=stage.value,
+                continuation_count=len(continuation_payloads),
+            )
+            return _PreparedWirePayload(
+                content=segmented.first,
+                continuation_payloads=continuation_payloads,
+            )
         try:
-            return await prepare_large_message(
+            prepared = await prepare_large_message(
                 client,
                 room_id,
                 wire_content,
                 room_encrypted=encryption_outcome,
                 prepare_for_encrypted_delivery=True,
             )
+            return _PreparedWirePayload(content=prepared)
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
 
