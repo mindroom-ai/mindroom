@@ -251,11 +251,15 @@ class BotRoomLifecycle:
         """Finish departure cleanup without deleting a subsequently observed invite."""
         if room_id not in self._invite_departure_events:
             self.begin_invited_room_departure(room_id)
-        async with self._lock_for_room(self._invite_join_locks, room_id):
-            if room_id not in self._current_room_invites:
-                self._forget_pending_room_invite(room_id)
-            self._forget_accepted_invited_room(room_id)
-            departure_event = self._invite_departure_events.pop(room_id)
+        departure_event = self._invite_departure_events[room_id]
+        try:
+            async with self._lock_for_room(self._invite_join_locks, room_id):
+                if room_id not in self._current_room_invites:
+                    self._forget_pending_room_invite(room_id)
+                self._forget_accepted_invited_room(room_id)
+        finally:
+            if self._invite_departure_events.get(room_id) is departure_event:
+                self._invite_departure_events.pop(room_id)
             departure_event.set()
 
     def _forget_accepted_invited_room(self, room_id: str) -> None:

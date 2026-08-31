@@ -1090,7 +1090,7 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed departure save must reject work until the durable room is removed."""
+    """A failed departure save must release waiters and remain retryable."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -1117,10 +1117,14 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
     room_id = "!agent-call:localhost"
     assert bot._room_lifecycle._update_invited_room(room_id, remember=True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
+    bot._room_lifecycle.begin_invited_room_departure(room_id)
+    departure_event = bot._room_lifecycle._invite_departure_events[room_id]
 
     with pytest.raises(OSError, match="Failed to forget invited room"):
         await bot._room_lifecycle.forget_invited_room_after_departure(room_id)
 
+    assert departure_event.is_set()
+    assert room_id not in bot._room_lifecycle._invite_departure_events
     restarted = make_test_agent_bot(
         agent_user=bot.agent_user,
         storage_path=tmp_path,
