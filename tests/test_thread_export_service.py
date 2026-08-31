@@ -23,6 +23,7 @@ from mindroom.event_journal_open import (
 )
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
+from mindroom.thread_export import service as thread_export_service
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportGroupFailure, ThreadExportRoom
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME
 from tests.conftest import runtime_paths_for
@@ -473,6 +474,52 @@ async def test_symlinked_final_target_is_skipped_without_touching_destination(tm
     assert "symlinked thread export root" in stats[0].failed_items[0].error
     assert victim.read_text(encoding="utf-8") == "secret"
     assert output_dir.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_trusted_root_target_rejects_parent_replaced_after_validation(
+    tmp_path: Path,
+) -> None:
+    """Replacing a validated parent cannot redirect an anchored export target."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    instance_root = tmp_path / "private_instances" / "scope" / "agent"
+    output_dir = instance_root / "workspace" / "thread_exports"
+    instance_root.mkdir(parents=True)
+    saved_instance_root = instance_root.with_name("agent-saved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_prepare = thread_export_service.prepare_export_root
+    swapped = False
+
+    def swap_before_prepare(path: Path, *, trusted_root: Path | None = None) -> None:
+        nonlocal swapped
+        instance_root.rename(saved_instance_root)
+        instance_root.symlink_to(outside, target_is_directory=True)
+        swapped = True
+        original_prepare(path, trusted_root=trusted_root)
+
+    with patch(
+        "mindroom.thread_export.service.prepare_export_root",
+        side_effect=swap_before_prepare,
+    ):
+        stats = await export_threads_to_targets_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=(
+                ThreadExportTarget(
+                    output_dir,
+                    trusted_root=runtime_paths.storage_root,
+                ),
+            ),
+        )
+
+    assert swapped is True
+    assert stats[0].failures == 1
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not (outside / "workspace" / "thread_exports").exists()
 
 
 @pytest.mark.parametrize(

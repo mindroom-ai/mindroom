@@ -2324,6 +2324,38 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
+def test_private_agent_requester_can_resolve_own_oauth_reset_target(tmp_path: Path) -> None:
+    """Private-agent requesters need no administrator or credential-manager grant to reset their own OAuth."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    config_payload = _config_payload(worker_scope=None, allowed_users=[])
+    agent_payload = config_payload["agents"]["general"]
+    agent_payload.pop("worker_scope")
+    agent_payload["private"] = {"per": "user_agent"}
+    api_app = _make_test_app(runtime_paths, config_payload)
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+
+    target = oauth_reset.resolve_oauth_reset_target(
+        "google_drive",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+
+    assert target.worker_target.worker_scope == "user_agent"
+    assert target.worker_target.execution_identity is not None
+    assert target.worker_target.execution_identity.requester_id == "@alice:example.org"
+
+
 def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> None:
     """A reset link cannot delete credentials replaced after the link was issued."""
     runtime_paths = _runtime_paths(
@@ -2795,6 +2827,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
     )
     config_payload = _mcp_oauth_config_payload(worker_scope=authored_worker_scope)
     if private_scope is not None:
+        config_payload["administrators"] = ["@admin:example.org"]
         agent_payload = config_payload["agents"]["general"]
         agent_payload.pop("worker_scope")
         agent_payload["private"] = {"per": private_scope}
@@ -3757,6 +3790,48 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert matrix_credentials["token"] == "google_drive-access-token"
     assert worker_credentials is None
     assert standalone_credentials is None
+
+
+def test_private_agent_requester_can_redeem_own_connect_token(tmp_path: Path) -> None:
+    """Private-agent requesters need no administrator or credential-manager grant to connect their own OAuth."""
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    config_payload = _config_payload(worker_scope=None, allowed_users=[])
+    agent_payload = config_payload["agents"]["general"]
+    agent_payload.pop("worker_scope")
+    agent_payload["private"] = {"per": "user_agent"}
+    api_app = _make_test_app(runtime_paths, config_payload)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 200
+    credentials = _stored_oauth_credentials(provider, runtime_paths)
+    assert credentials is not None
+    assert credentials["token"] == "google_drive-access-token"
 
 
 def test_agent_connect_token_starts_without_dashboard_login(tmp_path: Path) -> None:

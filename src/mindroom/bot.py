@@ -2290,6 +2290,7 @@ class AgentBot:
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
+        self.hook_registry = HookRegistry.empty()
 
         call_manager = self._call_manager
         self._call_manager = None

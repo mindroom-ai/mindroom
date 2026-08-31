@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -388,6 +389,45 @@ async def test_hook_emission_fires_with_task_context(tmp_path: Path) -> None:
     assert outcome.delivered is True
     assert seen == [("task-hooked", "$thread")]
     assert "Prepare the agenda (hooked)" in mock_send.await_args.args[2]["body"]
+
+
+@pytest.mark.asyncio
+async def test_running_schedule_hook_becomes_inactive_after_registry_replacement(tmp_path: Path) -> None:
+    """A registry replacement retires a schedule hook that is already running."""
+    hook_started = asyncio.Event()
+    resume_hook = asyncio.Event()
+    active_states: list[bool] = []
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def observe_lifecycle(ctx: ScheduleFiredContext) -> None:
+        active_states.append(ctx.is_active())
+        hook_started.set()
+        await resume_hook.wait()
+        active_states.append(ctx.is_active())
+
+    config = _config(tmp_path)
+    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [observe_lifecycle])]))
+
+    with patch(
+        "mindroom.scheduling_executor.send_matrix_message",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+    ):
+        execution = asyncio.create_task(
+            execute_scheduled_workflow(
+                AsyncMock(),
+                _workflow("Prepare the agenda"),
+                config,
+                runtime_paths_for(config),
+                _conversation_reader(latest_thread_event_id="$latest"),
+            ),
+        )
+        await hook_started.wait()
+        set_scheduling_hook_registry(HookRegistry.empty())
+        resume_hook.set()
+        outcome = await execution
+
+    assert outcome.delivered is True
+    assert active_states == [True, False]
 
 
 @pytest.mark.asyncio

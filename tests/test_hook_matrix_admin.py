@@ -669,3 +669,4 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
 
     context = mock_emit.await_args.args[2]
     assert context.matrix_admin is not None
+    assert context._hook_registry_state is orchestrator._hook_registry_state

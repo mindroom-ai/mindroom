@@ -99,6 +99,7 @@ healthz  # unused function (src/mindroom/api/sandbox_runner_app.py)
 is_kubernetes_worker_backend_config_env_name  # unused function (src/mindroom/workers/backends/kubernetes_config.py)
 _.serialize  # unused method (src/mindroom/config/models.py)
 _.decline  # unused method (src/mindroom/hooks/context.py)
+_.is_active  # plugin hooks inspect whether their registry snapshot is still live
 _.get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)

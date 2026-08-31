@@ -124,9 +124,11 @@ The same responder gate covers text, media, calls, reactions, approval actors, e
 Platform administrators may use administrative commands when their independent feature flag is enabled, manage any agent's credentials, and bypass responder policies.
 
 `agents.<name>.credential_managers` also contains concrete Matrix user IDs and does not accept wildcards.
-A credential manager may manage only the named agent's credentials and OAuth connections.
+A credential manager may manage only the named shared agent's credentials and OAuth connections.
+Authenticated requesters may manage OAuth connections for their own requester-private agent scope without a static credential-manager entry.
+Deployment-global OAuth client configuration remains restricted to platform administrators.
 
-Agent-scoped dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
+Shared-agent dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests resolve to the owner Matrix identity.
 
 `!config` remains disabled by default through `authorization.config_command_enabled`.

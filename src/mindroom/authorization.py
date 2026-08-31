@@ -159,6 +159,26 @@ def is_sender_allowed_for_agent_credential_management(
     return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
 
 
+def is_sender_allowed_for_agent_oauth_connection_management(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+) -> bool:
+    """Check whether a requester may manage their OAuth connection for one agent.
+
+    Callers granting the private-agent exception must resolve credentials to the
+    authenticated requester's isolated user or user-agent target.
+    """
+    if not sender_id:
+        return False
+    agent = config.agents.get(agent_name)
+    if agent is None:
+        return False
+    if agent.private is not None:
+        return True
+    return is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config)
+
+
 def is_platform_administrator(sender_id: str, config: Config) -> bool:
     """Return whether a requester has platform-wide administrative authority."""
     resolved_sender = config.authorization.resolve_alias(sender_id)
