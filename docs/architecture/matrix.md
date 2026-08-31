@@ -113,7 +113,9 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+Invites are the deliberate exception to general journal admission because an invite has no Matrix event ID that can key a durable journal row.
+The invite callback records an observed inviter in the room-invite ledger before starting background work, and only exact process-local evidence from the current sync generation can authorize that observation.
+Once authorized, the same ledger retains the join transaction across retryable results, ambiguous remote completion, cancellation, and restart until authoritative reconciliation finishes it.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses

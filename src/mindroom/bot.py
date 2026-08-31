@@ -1492,6 +1492,7 @@ class AgentBot:
         staged = client.has_uncommitted_classic_sync_state
         if not force and not staged and (client.next_batch or None) == retry_token:
             return False, retry_token is not None
+        self._room_lifecycle.invalidate_current_invite_evidence()
         reset_completed = False
         try:
             await client.reset_classic_sync_state()
@@ -1938,6 +1939,7 @@ class AgentBot:
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
             if _response.status_code == "M_UNKNOWN_POS":
+                self._room_lifecycle.invalidate_current_invite_evidence()
                 self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
             return
         if _response.status_code == "M_UNKNOWN_POS":
@@ -2041,8 +2043,13 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
+        departure_error: BaseException | None = None
         for room_id in departed_room_ids:
-            self._room_lifecycle.begin_invited_room_departure(room_id)
+            try:
+                self._room_lifecycle.begin_invited_room_departure(room_id)
+            except BaseException as exc:
+                if departure_error is None:
+                    departure_error = exc
 
         fence_error: BaseException | None = None
         try:
@@ -2066,7 +2073,7 @@ class AgentBot:
 
         cleanup_error = next(
             (result for result in cleanup_results if isinstance(result, BaseException)),
-            None,
+            departure_error,
         )
         _raise_room_membership_errors(
             fence_error,

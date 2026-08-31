@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom.constants import ROUTER_AGENT_NAME, safe_replace
@@ -23,16 +23,24 @@ logger = get_logger(__name__)
 class PendingRoomInvitePhase(StrEnum):
     """Durable progress of one accepted-or-pending invite transaction."""
 
-    RECORDED = "recorded"
-    JOINING = "joining"
+    OBSERVED = "observed"
+    AUTHORIZED = "authorized"
 
 
 @dataclass(frozen=True, slots=True)
 class PendingRoomInvite:
-    """Durable inviter identity and whether an authorized join may have landed."""
+    """Durable inviter identity and authorization progress for one invite."""
 
     inviter_id: str
     phase: PendingRoomInvitePhase
+
+
+@dataclass(frozen=True, slots=True)
+class RoomInviteState:
+    """Accepted membership and optional unfinished work for one invited room."""
+
+    accepted: bool = False
+    pending: PendingRoomInvite | None = None
 
 
 def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
@@ -40,85 +48,88 @@ def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
     return agent_state_root_path(storage_root, agent_name) / "invited_rooms.json"
 
 
-def pending_room_invites_path(storage_root: Path, agent_name: str) -> Path:
-    """Return the storage path for one agent's outstanding room invites."""
-    return agent_state_root_path(storage_root, agent_name) / "pending_room_invites.json"
-
-
 def load_invited_rooms(path: Path) -> set[str]:
-    """Load persisted invited rooms, failing open on missing or invalid files."""
+    """Load the accepted-room projection of one invited-room ledger."""
+    return {room_id for room_id, state in load_room_invite_states(path).items() if state.accepted}
+
+
+def load_room_invite_states(path: Path) -> dict[str, RoomInviteState]:
+    """Load one invited-room ledger, failing closed on invalid content."""
     if not path.exists():
-        return set()
+        return {}
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
-        return set()
-
-    if not isinstance(raw, list):
-        logger.warning("invalid_invited_rooms_file", path=str(path))
-        return set()
-
-    room_ids = [room_id for room_id in raw if isinstance(room_id, str)]
-    if len(room_ids) != len(raw):
-        logger.warning("invalid_invited_rooms_file", path=str(path))
-        return set()
-
-    return set(room_ids)
-
-
-def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
-    """Replace invited rooms atomically for one eligible entity.
-
-    Callers replacing a cached set must first merge fresh durable state so a
-    stale in-memory snapshot cannot discard another runtime component's write.
-    """
-    return _save_json(path, sorted(room_ids))
-
-
-def load_pending_room_invites(path: Path) -> dict[str, PendingRoomInvite]:
-    """Load outstanding room IDs and their inviters from durable state."""
-    if not path.exists():
         return {}
 
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        logger.warning("failed_to_load_pending_room_invites", path=str(path), exc_info=True)
+    if not isinstance(raw, dict):
+        logger.warning("invalid_invited_rooms_file", path=str(path))
         return {}
 
-    pending_invites: dict[str, PendingRoomInvite] = {}
-    if isinstance(raw, dict):
-        for room_id, value in raw.items():
-            if not isinstance(room_id, str) or not isinstance(value, dict):
-                break
-            inviter_id = value.get("inviter_id")
-            phase_value = value.get("phase")
-            if not isinstance(inviter_id, str) or not isinstance(phase_value, str):
-                break
-            try:
-                phase = PendingRoomInvitePhase(phase_value)
-            except ValueError:
-                break
-            pending_invites[room_id] = PendingRoomInvite(inviter_id=inviter_id, phase=phase)
-        else:
-            return pending_invites
+    states: dict[str, RoomInviteState] = {}
+    for room_id, value in raw.items():
+        state = _parse_room_invite_state(value)
+        if not isinstance(room_id, str) or state is None:
+            break
+        states[room_id] = state
+    else:
+        return states
 
-    logger.warning("invalid_pending_room_invites_file", path=str(path))
+    logger.warning("invalid_invited_rooms_file", path=str(path))
     return {}
 
 
-def save_pending_room_invites(path: Path, pending_invites: dict[str, PendingRoomInvite]) -> bool:
-    """Atomically replace one agent's outstanding room invites."""
+def _parse_room_invite_state(value: object) -> RoomInviteState | None:
+    """Parse one strict ledger value without accepting partial state."""
+    if not isinstance(value, dict) or set(value) != {"accepted", "pending"}:
+        return None
+    state_value = cast("dict[str, object]", value)
+    accepted = state_value["accepted"]
+    if not isinstance(accepted, bool):
+        return None
+    pending_is_valid, pending = _parse_pending_room_invite(state_value["pending"])
+    if not pending_is_valid:
+        return None
+    return RoomInviteState(accepted=accepted, pending=pending)
+
+
+def _parse_pending_room_invite(value: object) -> tuple[bool, PendingRoomInvite | None]:
+    """Parse the optional pending portion of one ledger value."""
+    if value is None:
+        return True, None
+    if not isinstance(value, dict) or set(value) != {"inviter_id", "phase"}:
+        return False, None
+    pending_value = cast("dict[str, object]", value)
+    inviter_id = pending_value["inviter_id"]
+    phase_value = pending_value["phase"]
+    if not isinstance(inviter_id, str) or not isinstance(phase_value, str):
+        return False, None
+    try:
+        phase = PendingRoomInvitePhase(phase_value)
+    except ValueError:
+        return False, None
+    return True, PendingRoomInvite(inviter_id=inviter_id, phase=phase)
+
+
+def save_room_invite_states(path: Path, states: dict[str, RoomInviteState]) -> bool:
+    """Atomically replace one agent's complete invited-room ledger."""
     return _save_json(
         path,
         {
             room_id: {
-                "inviter_id": pending_invite.inviter_id,
-                "phase": pending_invite.phase.value,
+                "accepted": state.accepted,
+                "pending": (
+                    {
+                        "inviter_id": state.pending.inviter_id,
+                        "phase": state.pending.phase.value,
+                    }
+                    if state.pending is not None
+                    else None
+                ),
             }
-            for room_id, pending_invite in sorted(pending_invites.items())
+            for room_id, state in sorted(states.items())
         },
     )
 
@@ -143,11 +154,12 @@ def _save_json(path: Path, value: object) -> bool:
 
 def remember_invited_room(path: Path, room_id: str) -> None:
     """Add one room using fresh durable state."""
-    room_ids = load_invited_rooms(path)
-    if room_id in room_ids:
+    states = load_room_invite_states(path)
+    state = states.get(room_id, RoomInviteState())
+    if state.accepted:
         return
-    room_ids.add(room_id)
-    save_invited_rooms(path, room_ids)
+    states[room_id] = RoomInviteState(accepted=True, pending=state.pending)
+    save_room_invite_states(path, states)
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:
