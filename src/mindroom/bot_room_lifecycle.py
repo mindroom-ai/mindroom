@@ -141,9 +141,13 @@ class BotRoomLifecycle:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
-    def invalidate_current_invite_evidence(self) -> None:
-        """Discard invite generations tied to the previous sync world."""
-        self._current_room_invites.clear()
+    def invalidate_current_invite_evidence(self, room_ids: Iterable[str] | None = None) -> None:
+        """Discard invite generations for selected rooms or the whole sync world."""
+        if room_ids is None:
+            self._current_room_invites.clear()
+            return
+        for room_id in room_ids:
+            self._current_room_invites.pop(room_id, None)
 
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
@@ -245,6 +249,10 @@ class BotRoomLifecycle:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         self._current_room_invites.pop(room_id, None)
         self._forget_pending_room_invite(room_id)
+        self.forget_accepted_invited_room(room_id)
+
+    def forget_accepted_invited_room(self, room_id: str) -> None:
+        """Stop preserving an accepted room without discarding a fresh reinvite."""
         if not self._should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
@@ -269,6 +277,9 @@ class BotRoomLifecycle:
 
     def record_current_room_invite(self, room_id: str, sender_id: str) -> _CurrentRoomInvite:
         """Persist an invite and bind its callback to one process-local generation."""
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite is not None and current_invite.inviter_id != sender_id:
+            self._current_room_invites.pop(room_id)
         self._record_pending_room_invite(room_id, sender_id)
         current_invite = self._current_room_invites.get(room_id)
         if current_invite is not None and current_invite.inviter_id == sender_id:
@@ -499,11 +510,11 @@ class BotRoomLifecycle:
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
+            if room is None or room.inviter != sender:
+                continue
             expected_invite = self._current_room_invites.get(room_id)
-            if room is None or expected_invite is None or expected_invite.inviter_id != sender:
+            if expected_invite is None or expected_invite.inviter_id != sender:
                 expected_invite = None
-            if room is None:
-                room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
             await self._handle_invite(room, sender, expected_invite)
 
     async def _handle_invite(
