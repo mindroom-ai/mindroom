@@ -26,7 +26,7 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.dashboard_credential_scope import (
     build_dashboard_execution_identity,
-    require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
 )
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -465,12 +465,11 @@ def _verify_browser_reset_intent(
         raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
     if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
-    identity = require_agent_credential_management_authorized(
+    identity = require_agent_oauth_connection_authorized(
         request,
         config=config,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
-        allow_private_agent_requester=True,
     )
     try:
         target = resolve_oauth_reset_target(

@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 
 from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -220,7 +221,6 @@ class TestRequireAgentCredentialManagementAuthorized:
             config=_config(credential_managers=self._credential_managers),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
-            allow_private_agent_requester=True,
         )
         assert identity.requester_id == "@alice:example.org"
         assert identity.agent_name == "general"
@@ -265,20 +265,32 @@ class TestRequireAgentCredentialManagementAuthorized:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.parametrize("private_per", ["user", "user_agent"])
-    def test_requester_can_manage_own_private_agent_credentials_without_allowlist(self, private_per: str) -> None:
-        """A private agent requester must not need a static credential-manager entry."""
-        identity = require_agent_credential_management_authorized(
-            _request(
-                {
-                    "user_id": "alice",
-                    "auth_source": "trusted_upstream",
-                    "matrix_user_id": "@alice:example.org",
-                },
-            ),
-            config=_config(private_per=private_per),
-            runtime_paths=self._runtime_paths(),
+    def test_requester_can_manage_own_private_agent_oauth_without_allowlist(self, private_per: str) -> None:
+        """Private-agent OAuth authority is separate from generic credential management."""
+        request = _request(
+            {
+                "user_id": "alice",
+                "auth_source": "trusted_upstream",
+                "matrix_user_id": "@alice:example.org",
+            },
+        )
+        config = _config(private_per=private_per)
+        runtime_paths = self._runtime_paths()
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_agent_credential_management_authorized(
+                request,
+                config=config,
+                runtime_paths=runtime_paths,
+                agent_name="general",
+            )
+        assert exc_info.value.status_code == 403
+
+        identity = require_agent_oauth_connection_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
             agent_name="general",
-            allow_private_agent_requester=True,
         )
 
         assert identity.requester_id == "@alice:example.org"

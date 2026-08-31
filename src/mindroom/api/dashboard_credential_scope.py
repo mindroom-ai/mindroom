@@ -221,7 +221,6 @@ def require_agent_credential_management_authorized(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    allow_private_agent_requester: bool = False,
 ) -> ToolExecutionIdentity:
     """Require the dashboard requester to be allowed to manage one agent's credentials."""
     execution_identity = build_dashboard_execution_identity(
@@ -234,10 +233,54 @@ def require_agent_credential_management_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
-        allow_private_agent_requester=allow_private_agent_requester,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
     return execution_identity
+
+
+def _require_private_agent_requester_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> ToolExecutionIdentity:
+    """Require a bound requester identity for one requester-private agent."""
+    agent = config.agents.get(agent_name)
+    if agent is None or agent.private is None:
+        raise HTTPException(status_code=403, detail=f"Agent '{agent_name}' is not requester-private")
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name,
+        runtime_paths=runtime_paths,
+    )
+    if execution_identity.requester_id is None:
+        raise HTTPException(status_code=403, detail=f"Could not resolve requester identity for agent '{agent_name}'")
+    return execution_identity
+
+
+def require_agent_oauth_connection_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> ToolExecutionIdentity:
+    """Require requester-private or managed-agent authority for OAuth connections."""
+    agent = config.agents.get(agent_name)
+    if agent is not None and agent.private is not None:
+        return _require_private_agent_requester_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+        )
+    return require_agent_credential_management_authorized(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+    )
 
 
 def require_platform_administrator_authorized(

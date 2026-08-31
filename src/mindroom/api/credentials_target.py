@@ -14,6 +14,7 @@ from mindroom.api.dashboard_credential_scope import (
     dashboard_scope_label,
     reject_unbound_private_dashboard_requester,
     require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
     require_platform_administrator_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
@@ -155,12 +156,16 @@ def resolve_request_credentials_target(
             for service in service_names
         )
     )
-    execution_identity = require_agent_credential_management_authorized(
+    authorize = (
+        require_agent_oauth_connection_authorized
+        if allow_private_agent_requester
+        else require_agent_credential_management_authorized
+    )
+    execution_identity = authorize(
         request,
         config=config,
         runtime_paths=runtime_paths,
         agent_name=scope_request.agent_name,
-        allow_private_agent_requester=allow_private_agent_requester,
     )
     if execution_scope is None:
         return RequestCredentialsTarget(

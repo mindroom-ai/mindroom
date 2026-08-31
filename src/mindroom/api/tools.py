@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
 from mindroom.api.dashboard_credential_scope import (
-    require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -255,12 +255,11 @@ def _resolve_tool_availability_context(
         execution_scope,
     )
     authorized_identity = (
-        require_agent_credential_management_authorized(
+        require_agent_oauth_connection_authorized(
             request,
             config=config,
             runtime_paths=runtime_paths,
             agent_name=scope_request.agent_name,
-            allow_private_agent_requester=execution_scope in {"user", "user_agent"},
         )
         if scope_request.agent_name is not None
         else None

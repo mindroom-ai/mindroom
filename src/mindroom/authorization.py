@@ -114,19 +114,13 @@ def is_sender_allowed_for_agent_credential_management(
     sender_id: str,
     agent_name: str,
     config: Config,
-    *,
-    allow_private_agent_requester: bool = False,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
     agent = config.agents.get(agent_name)
     if agent is None:
         return False
     resolved_sender = config.authorization.resolve_alias(sender_id)
-    return (
-        (allow_private_agent_requester and agent.private is not None)
-        or resolved_sender in config.administrators
-        or resolved_sender in agent.credential_managers
-    )
+    return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
 
 
 def is_platform_administrator(sender_id: str, config: Config) -> bool:
