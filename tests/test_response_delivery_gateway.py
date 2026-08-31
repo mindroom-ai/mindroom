@@ -19,6 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, LargeMessageStrategy
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -150,10 +151,14 @@ def _gateway(
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
+    large_message_strategy: LargeMessageStrategy = "split",
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
-        Config(agents={"agent": AgentConfig(display_name="Agent")}),
+        Config(
+            agents={"agent": AgentConfig(display_name="Agent")},
+            defaults=DefaultsConfig(large_message_strategy=large_message_strategy),
+        ),
         test_runtime_paths(tmp_path),
     )
     client = AsyncMock()
@@ -1163,6 +1168,43 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert all("file" not in part and "url" not in part for part in parts)
         sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
         assert sent_contents == [frozen, *continuations]
+
+    async def test_sidecar_strategy_keeps_oversized_final_on_the_attachment_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The default strategy uploads one sidecar instead of segmenting the answer."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="sidecar")
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar-strategy"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$sent", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(
+            replace(self._final_request("x" * 100_000), defer_source_handoff=True),
+        )
+
+        assert outcome.terminal_status == "completed"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.file"
+        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert client.upload.await_count == 1
+        assert client.room_send.await_count == 1
+        assert delivery.result is not None
+        assert _SEGMENT_PAYLOADS_RESULT_KEY not in delivery.result
 
     async def test_delivery_identity_is_included_in_the_validated_event_size(
         self,

@@ -287,6 +287,7 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+  large_message_strategy: sidecar
 
 memory:
   backend: mem0

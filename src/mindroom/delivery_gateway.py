@@ -15,6 +15,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
+from mindroom.config.models import LargeMessageStrategy  # noqa: TC001
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -1893,11 +1894,16 @@ class DeliveryGateway:
             stage,
             content,
         )
-        segmented = segment_matrix_content(
-            wire_content,
-            room_encrypted=encryption_outcome,
-            continuation_thread_id=continuation_thread_id,
-            continuation_reply_to_event_id=continuation_reply_to_event_id,
+        strategy: LargeMessageStrategy = self.deps.runtime.config.defaults.large_message_strategy
+        segmented = (
+            segment_matrix_content(
+                wire_content,
+                room_encrypted=encryption_outcome,
+                continuation_thread_id=continuation_thread_id,
+                continuation_reply_to_event_id=continuation_reply_to_event_id,
+            )
+            if strategy == "split"
+            else None
         )
         if segmented is not None:
             continuation_payloads = tuple(

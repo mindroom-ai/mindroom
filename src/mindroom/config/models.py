@@ -32,6 +32,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -359,6 +360,13 @@ class DefaultsConfig(BaseModel):
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",
+    )
+    large_message_strategy: LargeMessageStrategy = Field(
+        default="sidecar",
+        description=(
+            "How to deliver oversized text responses: 'sidecar' uploads the full content as an "
+            "attachment behind a preview event; 'split' sends the full text as lossless segmented messages"
+        ),
     )
     coalescing: CoalescingConfig = Field(
         default_factory=CoalescingConfig,
