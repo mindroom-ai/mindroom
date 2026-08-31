@@ -38,6 +38,8 @@ def is_sender_allowed_for_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    include_current_room_members: bool = True,
 ) -> bool:
     """Apply the complete membership policy for one responder."""
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
@@ -47,6 +49,7 @@ def is_sender_allowed_for_responder(
     allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
     allowed = allowed or (
         room_id is not None
+        and include_current_room_members
         and access.current_room_members
         and membership_index.is_current_room_member(resolved_sender, room_id, config)
     )
@@ -91,9 +94,10 @@ def is_sender_allowed_for_agent_invite(
 ) -> bool:
     """Authorize an inviter using normal access or a current Matrix invite.
 
-    Matrix authenticates the sender of a current invite as a room member with
-    permission to invite. That evidence can satisfy ``current_room_members``
-    before the invited agent has joined and acquired a membership snapshot.
+    Matrix authenticates the sender as a joined member with permission when it
+    creates the invite event. That evidence can tentatively satisfy
+    ``current_room_members`` before the invited agent joins; callers must
+    confirm current membership after joining and before persisting acceptance.
     """
     if is_sender_allowed_for_agent_reply_in_room(
         sender_id,

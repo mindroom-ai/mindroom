@@ -9,13 +9,21 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
+from mindroom.access_policy import resolve_responder_access
 from mindroom.authorization import (
     is_sender_allowed_for_agent_invite,
     is_sender_allowed_for_agent_reply_in_room,
+    is_sender_allowed_for_responder,
 )
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room, leave_room
+from mindroom.matrix.client_room_admin import (
+    RoomJoinOutcome,
+    get_joined_rooms,
+    get_room_members,
+    join_room,
+    leave_room,
+)
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -547,7 +555,7 @@ class BotRoomLifecycle:
                     configured_rooms,
                 )
                 continue
-            if joined_rooms is not None and room is None:
+            if joined_rooms is not None and (room is None or room_id in self._invite_join_cleanups):
                 await self._reconcile_absent_pending_invite(room_id, sender)
                 continue
             if room is None or room.inviter != sender:
@@ -565,13 +573,19 @@ class BotRoomLifecycle:
         async with self._lock_for_room(self._invite_join_locks, room_id):
             if self._pending_room_invites.get(room_id) != sender:
                 return
-            if room_id in configured_rooms or room_id in self.invited_rooms:
-                await self._settle_preserved_pending_invite(room_id, sender)
+            if room_id in configured_rooms:
+                await self._settle_configured_pending_invite(room_id, sender)
+                return
+            if room_id in self.invited_rooms and await self._finish_preserved_pending_invite(
+                room_id,
+                sender,
+                expected_invite,
+            ):
                 return
             await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
 
-    async def _settle_preserved_pending_invite(self, room_id: str, sender: str) -> None:
-        """Discard obsolete pending work once the joined room is already preserved."""
+    async def _settle_configured_pending_invite(self, room_id: str, sender: str) -> None:
+        """Discard invite work after configuration independently preserves the room."""
         current_invite = self._current_room_invites.get(room_id)
         if current_invite is None:
             self._forget_pending_room_invite(room_id, expected_sender_id=sender)
@@ -582,6 +596,37 @@ class BotRoomLifecycle:
         if room_id in self._decrypt_notice_fenced_room_ids:
             await self._clear_join_decrypt_notice_fence(room_id)
         self._invite_join_cleanups.pop(room_id, None)
+
+    async def _finish_preserved_pending_invite(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> bool:
+        """Finish acceptance work before settling a joined ad-hoc room."""
+        durable_rooms = await asyncio.to_thread(load_invited_rooms, self._invited_rooms_file_path())
+        if room_id not in durable_rooms:
+            if expected_invite is None or not self._invite_generation_is_current(room_id, expected_invite):
+                return False
+            await self._finish_joined_invite(
+                room_id,
+                sender,
+                expected_invite,
+                newly_joined=True,
+            )
+        else:
+            current_invite = self._current_room_invites.get(room_id)
+            if current_invite is not None and current_invite.inviter_id != sender:
+                return True
+            await self._send_invite_welcome(room_id, sender)
+            if current_invite is None:
+                self._forget_pending_room_invite(room_id, expected_sender_id=sender)
+            else:
+                self._complete_recorded_room_invite(room_id, sender, current_invite)
+        if room_id in self._decrypt_notice_fenced_room_ids:
+            await self._clear_join_decrypt_notice_fence(room_id)
+        self._invite_join_cleanups.pop(room_id, None)
+        return True
 
     async def _reconcile_absent_pending_invite(self, room_id: str, sender: str) -> None:
         """Settle cleanup after authoritative membership no longer contains the room."""
@@ -628,7 +673,6 @@ class BotRoomLifecycle:
                     room_id=room.room_id,
                 )
                 return
-
             already_handled = room.room_id in self._handled_invite_room_ids
             if already_handled:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=sender)
@@ -697,11 +741,37 @@ class BotRoomLifecycle:
         if not self._invite_attempt_is_current(room_id, sender, expected_invite):
             await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
             return
+        if newly_joined and not await self._inviter_is_authorized_after_join(room_id, sender):
+            self._logger().info(
+                "invite_authorization_not_confirmed_after_join",
+                room_id=room_id,
+                sender=sender,
+            )
+            await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
+            return
         self._remember_invited_room(room_id)
         if newly_joined:
             self._handled_invite_room_ids.add(room_id)
         await self._send_invite_welcome(room_id, sender)
         self._complete_recorded_room_invite(room_id, sender, expected_invite)
+
+    async def _inviter_is_authorized_after_join(self, room_id: str, sender: str) -> bool:
+        """Recheck current policy using authoritative post-join membership."""
+        config = self._config()
+        if is_sender_allowed_for_responder(
+            sender,
+            self.deps.agent_name,
+            room_id,
+            config,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+            include_current_room_members=False,
+        ):
+            return True
+        if not resolve_responder_access(config, self.deps.agent_name).current_room_members:
+            return False
+        current_members = await get_room_members(self._client(), room_id)
+        return current_members is not None and sender in current_members
 
     async def _leave_unaccepted_invite_join(
         self,

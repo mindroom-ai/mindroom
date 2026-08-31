@@ -292,6 +292,7 @@ class TestDMIntegration:
         # Mock join_room to return success
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite", return_value=True),
+            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_responder", return_value=True),
             patch(
                 "mindroom.bot_room_lifecycle.join_room",
                 return_value=RoomJoinOutcome.JOINED,

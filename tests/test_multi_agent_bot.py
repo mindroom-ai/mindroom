@@ -554,6 +554,7 @@ class TestAgentBot(AgentBotTestBase):
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite", return_value=True),
+            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_responder", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),
         ):
             current_invite = bot._room_lifecycle.record_current_room_invite(
