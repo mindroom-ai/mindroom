@@ -248,7 +248,8 @@ class BotRoomLifecycle:
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
-        if not self._should_persist_invited_rooms():
+        invited_rooms_file_exists = self._invited_rooms_file_path().exists()
+        if not self._should_persist_invited_rooms() and not invited_rooms_file_exists:
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
             msg = f"Failed to forget invited room {room_id}"
@@ -307,18 +308,29 @@ class BotRoomLifecycle:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
         rooms_to_leave = room_ids if room_ids is not None else await self._rooms_to_leave()
-        await leave_rooms(
-            client,
-            rooms_to_leave,
-            on_room_left=self._finish_confirmed_leave,
-        )
+        for room_id in rooms_to_leave:
+            async with self.invite_ownership(room_id):
+                if room_id not in await self._rooms_to_leave():
+                    continue
+                await leave_rooms(
+                    client,
+                    [room_id],
+                    on_room_left=self._finish_confirmed_leave,
+                )
 
     async def _finish_confirmed_leave(self, room_id: str) -> None:
         """Clear local join state only after Matrix confirms departure."""
+        forget_error: Exception | None = None
+        try:
+            self.forget_invited_room(room_id)
+        except Exception as error:
+            forget_error = error
         self._join_fence_protected_room_ids.discard(room_id)
         if self.decrypt_notice_is_fenced(room_id):
             await self._clear_join_decrypt_notice_fence(room_id)
         await self.deps.on_room_left(room_id)
+        if forget_error is not None:
+            raise forget_error
 
     async def settle_authoritative_departure(self, room_id: str) -> None:
         """Clear transient join state after Matrix authoritatively reports departure."""
@@ -548,6 +560,8 @@ class BotRoomLifecycle:
                 joined_member_ids=joined_member_ids,
             )
         if not invite_allowed:
+            return False
+        if expected_invite.inviter != sender:
             return False
         current_invite = self._client().invited_rooms.get(room_id)
         if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):

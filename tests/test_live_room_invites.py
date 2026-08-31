@@ -205,6 +205,37 @@ async def test_joined_sync_cache_removal_does_not_revoke_acceptance(
 
 
 @pytest.mark.asyncio
+async def test_mutated_replacement_cannot_hide_behind_joined_sync_cache_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement observed before normal cache removal invalidates the old attempt."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+
+    async def replacement_then_joined_sync(_client: object, _room_id: str) -> set[str]:
+        room.inviter = "@replacement:localhost"
+        bot.client.invited_rooms.pop(ROOM_ID)
+        return {INVITER_ID, bot.agent_user.user_id}
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        replacement_then_joined_sync,
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", leave_room)
+
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    assert load_invited_rooms(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
 async def test_policy_is_rechecked_after_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -620,6 +651,85 @@ async def test_failed_unowned_leave_keeps_join_fence(
 
 
 @pytest.mark.asyncio
+async def test_unowned_cleanup_rechecks_ownership_after_inflight_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cleanup cannot leave a room while its invite acceptance owns the room lock."""
+    config = bind_runtime_paths(
+        Config(
+            administrators=[INVITER_ID],
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(
+                    current_room_members=False,
+                    members_of_rooms=[],
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    join_setup_started = asyncio.Event()
+    release_join_setup = asyncio.Event()
+
+    async def delayed_join_setup(_room_id: str) -> None:
+        join_setup_started.set()
+        await release_join_setup.wait()
+
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_joined=delayed_join_setup,
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    leave_rooms = AsyncMock()
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_rooms", leave_rooms)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    invite = asyncio.create_task(bot._room_lifecycle.handle_invite(room, INVITER_ID))
+    await asyncio.wait_for(join_setup_started.wait(), timeout=1)
+    cleanup = asyncio.create_task(bot.leave_unconfigured_rooms())
+    await asyncio.sleep(0)
+    release_join_setup.set()
+    await invite
+    await cleanup
+
+    leave_rooms.assert_not_awaited()
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+async def test_confirmed_local_leave_immediately_revokes_durable_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful local leave cannot wait for a later sync to forget the room."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    bot.config.router.accept_invites = False
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+
+    await bot.leave_unconfigured_rooms()
+
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    assert load_invited_rooms(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
 async def test_trusted_sync_cannot_clear_fence_during_failed_compensating_leave(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -673,6 +783,26 @@ async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_p
     assert ROOM_ID not in bot.client.invited_rooms
     assert load_invited_rooms(_accepted_path(config)) == set()
     assert room.inviter == INVITER_ID
+
+
+@pytest.mark.asyncio
+async def test_authoritative_departure_revokes_durable_ownership_when_invites_disabled(tmp_path: Path) -> None:
+    """Disabling future invites cannot preserve a room after confirmed departure."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    bot.config.router.accept_invites = False
+
+    await bot._apply_own_room_membership(
+        OwnRoomMembership(
+            joined_room_ids=frozenset(),
+            left_room_ids=frozenset({ROOM_ID}),
+            invited_room_ids=frozenset(),
+            departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="departure"),),
+        ),
+    )
+
+    assert load_invited_rooms(_accepted_path(config)) == set()
 
 
 @pytest.mark.asyncio
