@@ -220,18 +220,25 @@ def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
 
 
 def _raise_room_membership_errors(
+    departure_error: BaseException | None,
     fence_error: BaseException | None,
     cleanup_wait_cancellation: asyncio.CancelledError | None,
     cleanup_error: BaseException | None,
 ) -> None:
     """Raise the earliest membership failure while retaining a later cause."""
-    primary_error = fence_error or cleanup_wait_cancellation or cleanup_error
+    primary_error = departure_error or fence_error or cleanup_wait_cancellation or cleanup_error
     if primary_error is None:
         return
-    if cleanup_error is not None and cleanup_error is not primary_error:
-        raise primary_error from cleanup_error
-    if cleanup_wait_cancellation is not None and cleanup_wait_cancellation is not primary_error:
-        raise primary_error from cleanup_wait_cancellation
+    later_error = next(
+        (
+            error
+            for error in (cleanup_error, cleanup_wait_cancellation, fence_error)
+            if error is not None and error is not primary_error
+        ),
+        None,
+    )
+    if later_error is not None:
+        raise primary_error from later_error
     raise primary_error
 
 
@@ -1224,9 +1231,11 @@ class AgentBot:
             refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
         )
 
-    async def join_configured_rooms(self) -> None:
+    async def join_configured_rooms(self, *, include_persisted_invited_rooms: bool = True) -> None:
         """Join all rooms this agent is configured for."""
-        await self._room_lifecycle.join_configured_rooms()
+        await self._room_lifecycle.join_configured_rooms(
+            include_persisted_invited_rooms=include_persisted_invited_rooms,
+        )
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
@@ -1757,6 +1766,7 @@ class AgentBot:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
         if first_sync_response:
+            await self._room_lifecycle.rejoin_persisted_invited_rooms()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
@@ -1978,7 +1988,7 @@ class AgentBot:
         3. Leaves unconfigured rooms
         """
         await self.reconcile_pending_invites()
-        await self.join_configured_rooms()
+        await self.join_configured_rooms(include_persisted_invited_rooms=self._first_sync_done)
         await self.leave_unconfigured_rooms()
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
@@ -2071,11 +2081,9 @@ class AgentBot:
             cleanup_wait_cancellation = exc
             cleanup_results = cleanup_future.result()
 
-        cleanup_error = next(
-            (result for result in cleanup_results if isinstance(result, BaseException)),
-            departure_error,
-        )
+        cleanup_error = next((result for result in cleanup_results if isinstance(result, BaseException)), None)
         _raise_room_membership_errors(
+            departure_error,
             fence_error,
             cleanup_wait_cancellation,
             cleanup_error,

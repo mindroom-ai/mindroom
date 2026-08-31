@@ -117,6 +117,7 @@ Invites are the deliberate exception to general journal admission because an inv
 The invite callback records an observed inviter and any immediately available authorization in the room-invite ledger before starting background work.
 After restart, an observed record can pass only ordinary authoritative policy and never receives the current-inviter exception without fresh process-local evidence from the current sync generation.
 Once authorized, the same ledger retains the join transaction across retryable results, ambiguous remote completion, cancellation, and restart until authoritative reconciliation finishes it.
+Persisted accepted ad-hoc rooms are not rejoined until the first successful sync has exposed any newer invite or departure state.
 Terminal rejection of an already joined ad-hoc room atomically revokes its accepted state and retains explicit departure work until Matrix confirms the bot is absent.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 

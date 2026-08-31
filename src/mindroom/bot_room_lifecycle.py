@@ -527,14 +527,27 @@ class BotRoomLifecycle:
         msg = f"Failed to complete welcome message for {room_id}"
         raise RuntimeError(msg)
 
-    async def join_configured_rooms(self) -> None:
+    async def join_configured_rooms(self, *, include_persisted_invited_rooms: bool = True) -> None:
         """Join all rooms this bot should preserve across restarts."""
+        desired_rooms = set(self.deps.get_configured_rooms())
+        if include_persisted_invited_rooms and self._should_persist_invited_rooms():
+            desired_rooms.update(self.invited_rooms - self._pending_room_invites.keys())
+        await self._join_rooms(desired_rooms)
+
+    async def rejoin_persisted_invited_rooms(self) -> None:
+        """Rejoin accepted ad-hoc rooms only after live sync has exposed fresh invites."""
+        if not self._should_persist_invited_rooms():
+            return
+        desired_rooms = self.invited_rooms - self._pending_room_invites.keys() - set(self.deps.get_configured_rooms())
+        if not desired_rooms:
+            return
+        await self._join_rooms(desired_rooms)
+
+    async def _join_rooms(self, desired_rooms: set[str]) -> None:
+        """Join one already-selected set of desired rooms."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
-        desired_rooms = set(self.deps.get_configured_rooms())
-        if self._should_persist_invited_rooms():
-            desired_rooms.update(self.invited_rooms - self._pending_room_invites.keys())
 
         for room_id in desired_rooms:
             if room_id in current_rooms:
@@ -713,17 +726,27 @@ class BotRoomLifecycle:
             pending_invite = state.pending if state is not None else None
             if pending_invite is None:
                 return
+            observed_current_invite = self._current_room_invites.get(room_id)
 
             joined_rooms = await get_joined_rooms(self._client())
             states = self._reload_room_invite_states()
             state = states.get(room_id)
-            if state is None or state.pending != pending_invite or room_id in self._invite_departure_events:
+            if (
+                state is None
+                or state.pending != pending_invite
+                or self._current_room_invites.get(room_id) != observed_current_invite
+                or room_id in self._invite_departure_events
+            ):
                 return
             if joined_rooms is None:
                 return
+            current_invite = observed_current_invite
+            if current_invite is not None and current_invite.inviter_id != pending_invite.inviter_id:
+                current_invite = None
             await self._reconcile_pending_invite_under_lock(
                 room_id,
                 pending_invite,
+                current_invite,
                 joined=room_id in joined_rooms,
             )
 
@@ -731,14 +754,12 @@ class BotRoomLifecycle:
         self,
         room_id: str,
         pending_invite: PendingRoomInvite,
+        current_invite: _CurrentRoomInvite | None,
         *,
         joined: bool,
     ) -> None:
         """Apply one already-validated authoritative membership result."""
         sender = pending_invite.inviter_id
-        current_invite = self._current_room_invites.get(room_id)
-        if current_invite is not None and current_invite.inviter_id != sender:
-            current_invite = None
         if pending_invite.phase is PendingRoomInvitePhase.LEAVING:
             await self._reconcile_leaving_invite(room_id, sender, current_invite, joined=joined)
             return
@@ -825,6 +846,16 @@ class BotRoomLifecycle:
         if joined:
             await self._leave_terminal_invite_under_lock(room_id, sender, current_invite)
             return
+        await self._finish_left_terminal_invite_under_lock(room_id, sender, current_invite)
+
+    async def _finish_left_terminal_invite_under_lock(
+        self,
+        room_id: str,
+        sender: str,
+        current_invite: _CurrentRoomInvite | None,
+    ) -> None:
+        """Fence one completed Matrix leave before clearing its durable work."""
+        await self.deps.on_room_left(room_id)
         self._forget_recorded_room_invite(room_id, sender, current_invite)
         if room_id not in self._pending_room_invites:
             await self._clear_join_decrypt_notice_fence(room_id)
@@ -1079,10 +1110,7 @@ class BotRoomLifecycle:
         if not await leave_room(self._client(), room_id):
             msg = f"Failed to leave terminally rejected invited room {room_id}"
             raise RuntimeError(msg)
-        await self.deps.on_room_left(room_id)
-        self._forget_recorded_room_invite(room_id, sender, current_invite)
-        if room_id not in self._pending_room_invites:
-            await self._clear_join_decrypt_notice_fence(room_id)
+        await self._finish_left_terminal_invite_under_lock(room_id, sender, current_invite)
 
     def _current_invite_is_authorized(
         self,

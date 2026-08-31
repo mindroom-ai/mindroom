@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_LEGACY_PENDING_ROOM_INVITES_FILENAME = "pending_room_invites.json"
+
 
 class PendingRoomInvitePhase(StrEnum):
     """Durable progress of one accepted-or-pending invite transaction."""
@@ -57,7 +59,10 @@ def load_invited_rooms(path: Path) -> set[str]:
 def load_room_invite_states(path: Path) -> dict[str, RoomInviteState]:
     """Load one invited-room ledger, failing closed on invalid content."""
     if not path.exists():
-        return {}
+        legacy_pending_path = path.with_name(_LEGACY_PENDING_ROOM_INVITES_FILENAME)
+        if not legacy_pending_path.exists():
+            return {}
+        return _migrate_legacy_room_invite_states(path, [], legacy_pending_path)
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -65,10 +70,22 @@ def load_room_invite_states(path: Path) -> dict[str, RoomInviteState]:
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
         return {}
 
+    if isinstance(raw, list):
+        return _migrate_legacy_room_invite_states(
+            path,
+            raw,
+            path.with_name(_LEGACY_PENDING_ROOM_INVITES_FILENAME),
+        )
+
     if not isinstance(raw, dict):
         logger.warning("invalid_invited_rooms_file", path=str(path))
         return {}
 
+    return _parse_room_invite_states(path, raw)
+
+
+def _parse_room_invite_states(path: Path, raw: dict[object, object]) -> dict[str, RoomInviteState]:
+    """Parse the current strict ledger shape."""
     states: dict[str, RoomInviteState] = {}
     for room_id, value in raw.items():
         state = _parse_room_invite_state(value)
@@ -80,6 +97,51 @@ def load_room_invite_states(path: Path) -> dict[str, RoomInviteState]:
 
     logger.warning("invalid_invited_rooms_file", path=str(path))
     return {}
+
+
+def _migrate_legacy_room_invite_states(
+    path: Path,
+    accepted_values: list[object],
+    pending_path: Path,
+) -> dict[str, RoomInviteState]:
+    """Combine the two legacy invite files without trusting pending authorization."""
+    if any(not isinstance(room_id, str) for room_id in accepted_values):
+        logger.warning("invalid_invited_rooms_file", path=str(path))
+        return {}
+
+    states = {room_id: RoomInviteState(accepted=True) for room_id in cast("list[str]", accepted_values)}
+    pending_invites = _load_legacy_pending_room_invites(pending_path)
+    if pending_invites is None:
+        return states
+    for room_id, inviter_id in pending_invites.items():
+        prior = states.get(room_id, RoomInviteState())
+        states[room_id] = RoomInviteState(
+            accepted=prior.accepted,
+            pending=PendingRoomInvite(
+                inviter_id=inviter_id,
+                phase=PendingRoomInvitePhase.OBSERVED,
+            ),
+        )
+
+    save_room_invite_states(path, states)
+    return states
+
+
+def _load_legacy_pending_room_invites(path: Path) -> dict[str, str] | None:
+    """Load the strict legacy pending-invite map for one-time migration."""
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("failed_to_load_pending_room_invites", path=str(path), exc_info=True)
+        return None
+    if not isinstance(raw, dict) or any(
+        not isinstance(room_id, str) or not isinstance(inviter_id, str) for room_id, inviter_id in raw.items()
+    ):
+        logger.warning("invalid_pending_room_invites_file", path=str(path))
+        return None
+    return cast("dict[str, str]", raw)
 
 
 def _parse_room_invite_state(value: object) -> RoomInviteState | None:

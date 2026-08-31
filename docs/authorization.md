@@ -114,6 +114,7 @@ Merely observed durable records, stale or revoked invites, and mismatched invite
 Once that exact live invite passes policy, MindRoom records an authorized join transaction before contacting Matrix and may retry or finish that transaction after restart.
 An observed transaction without live invite evidence may recover only through ordinary policy sources, and room-derived sources wait until every relevant grant-room snapshot is authoritative.
 The authorized transaction is recovery evidence for that join only and does not authorize normal room activity.
+Persisted accepted ad-hoc rooms are rejoined only after the first successful sync has exposed any newer invite or departure state.
 A Matrix sync-generation reset invalidates all process-local invite evidence, and only a fresh self-membership invite callback can recreate it.
 After the responder joins, the invite is no longer authorization evidence and normal activity uses the authoritative membership index.
 If that post-join check terminally denies an ad-hoc room, MindRoom revokes its accepted-room state before explicitly leaving and retains departure work until Matrix confirms the bot is no longer joined.
