@@ -89,7 +89,11 @@ from mindroom.tool_system.worker_routing import tool_execution_identity
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_sender_allowed_for_agent_reply_in_room
-from .background_tasks import create_background_task, wait_for_background_tasks
+from .background_tasks import (
+    create_background_task,
+    wait_for_background_tasks,
+    wait_for_future_until_complete,
+)
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
@@ -213,6 +217,22 @@ def _classic_sync_rebuild_backoff_seconds(attempt: int) -> float:
         if delay >= _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS:
             return _CLASSIC_SYNC_REBUILD_BACKOFF_MAX_SECONDS
     return delay
+
+
+def _raise_room_membership_errors(
+    fence_error: BaseException | None,
+    cleanup_wait_cancellation: asyncio.CancelledError | None,
+    cleanup_error: BaseException | None,
+) -> None:
+    """Raise the earliest membership failure while retaining a later cause."""
+    primary_error = fence_error or cleanup_wait_cancellation or cleanup_error
+    if primary_error is None:
+        return
+    if cleanup_error is not None and cleanup_error is not primary_error:
+        raise primary_error from cleanup_error
+    if cleanup_wait_cancellation is not None and cleanup_wait_cancellation is not primary_error:
+        raise primary_error from cleanup_wait_cancellation
+    raise primary_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -2021,16 +2041,37 @@ class AgentBot:
         departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
             self._room_lifecycle.begin_invited_room_departure(room_id)
+
+        fence_error: BaseException | None = None
         try:
             await self._membership_fence.fence_reported_departures(membership.departures)
-        finally:
-            cleanup_results = await asyncio.gather(
-                *(self._room_lifecycle.forget_invited_room_after_departure(room_id) for room_id in departed_room_ids),
-                return_exceptions=True,
+        except BaseException as exc:
+            fence_error = exc
+
+        cleanup_future = asyncio.gather(
+            *(self._room_lifecycle.forget_invited_room_after_departure(room_id) for room_id in departed_room_ids),
+            return_exceptions=True,
+        )
+        cleanup_wait_cancellation: asyncio.CancelledError | None = None
+        try:
+            cleanup_results = await wait_for_future_until_complete(
+                cleanup_future,
+                chain_cancelled_result=False,
             )
-            for cleanup_result in cleanup_results:
-                if isinstance(cleanup_result, BaseException):
-                    raise cleanup_result
+        except asyncio.CancelledError as exc:
+            cleanup_wait_cancellation = exc
+            cleanup_results = cleanup_future.result()
+
+        cleanup_error = next(
+            (result for result in cleanup_results if isinstance(result, BaseException)),
+            None,
+        )
+        _raise_room_membership_errors(
+            fence_error,
+            cleanup_wait_cancellation,
+            cleanup_error,
+        )
+
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync

@@ -325,9 +325,9 @@ class BotRoomLifecycle:
         current_invite = self._current_room_invites.get(room_id)
         if current_invite != expected_invite:
             return
+        self._forget_pending_room_invite(room_id, expected_sender_id=sender)
         if current_invite is not None:
             self._current_room_invites.pop(room_id, None)
-        self._forget_pending_room_invite(room_id, expected_sender_id=sender)
 
     def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
@@ -520,11 +520,34 @@ class BotRoomLifecycle:
         for room in tuple(client.invited_rooms.values()):
             if room.inviter is not None:
                 self.record_current_room_invite(room.room_id, room.inviter)
+        joined_rooms = await get_joined_rooms(client) if self._pending_room_invites else ()
+        joined_room_ids = frozenset(joined_rooms or ())
         for room_id, sender in tuple(self._pending_room_invites.items()):
+            if room_id in joined_room_ids:
+                await self._finish_recovered_joined_invite(room_id, sender)
+                continue
             room = client.invited_rooms.get(room_id)
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
             await self._handle_invite(room, sender, self._current_room_invites.get(room_id))
+
+    async def _finish_recovered_joined_invite(self, room_id: str, sender: str) -> None:
+        """Finish one durable invite transaction confirmed joined by Matrix."""
+        departure_event = self._invite_departure_events.get(room_id)
+        if departure_event is not None:
+            await departure_event.wait()
+
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if room_id in self._invite_departure_events:
+                return
+            current_invite = self._current_room_invites.get(room_id)
+            await self.deps.on_room_joined(room_id)
+            if room_id in self._invite_departure_events or self._current_room_invites.get(room_id) != current_invite:
+                return
+            self._remember_invited_room(room_id)
+            self._handled_invite_room_ids.add(room_id)
+            await self._send_invite_welcome(room_id, sender)
+            self._complete_recorded_room_invite(room_id, sender, current_invite)
 
     async def _handle_invite(
         self,
