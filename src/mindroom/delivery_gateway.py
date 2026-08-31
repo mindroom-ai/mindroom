@@ -816,23 +816,12 @@ class DeliveryGateway:
 
         continuations = _continuation_payloads(claimed.result)
         for index, continuation in enumerate(continuations, start=1):
-            continuation_outcome = await send_message_outcome(
-                client,
-                claimed.room_id,
+            await self._send_continuation(
+                claimed,
                 continuation,
+                index=index,
                 retry_sync_recovery=retry_sync_recovery,
-                transaction_id=_segment_transaction_id(claimed.transaction_id, index),
-                content_is_prepared=True,
             )
-            if isinstance(continuation_outcome, MatrixDeliveryFailure):
-                detail = _matrix_delivery_failure_reason(continuation_outcome)
-                if continuation_outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
-                    raise PermanentDeliveryError(detail)
-                msg = (
-                    f"Matrix refused continuation {index} for turn {claimed.delivery_id!r} "
-                    f"stage {claimed.stage.value!r}: {detail}"
-                )
-                raise _DeliveryRefusedError(msg)
         if continuations:
             self.deps.logger.info(
                 "Sent segmented Matrix response",
@@ -841,6 +830,33 @@ class DeliveryGateway:
                 continuation_count=len(continuations),
             )
         return outcome
+
+    async def _send_continuation(
+        self,
+        claimed: MatrixDelivery,
+        continuation: dict[str, Any],
+        *,
+        index: int,
+        retry_sync_recovery: bool,
+    ) -> None:
+        """Send one frozen continuation event under its stable transaction ID."""
+        outcome = await send_message_outcome(
+            self._client(),
+            claimed.room_id,
+            continuation,
+            retry_sync_recovery=retry_sync_recovery,
+            transaction_id=_segment_transaction_id(claimed.transaction_id, index),
+            content_is_prepared=True,
+        )
+        if isinstance(outcome, MatrixDeliveryFailure):
+            detail = _matrix_delivery_failure_reason(outcome)
+            if outcome.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+                raise PermanentDeliveryError(detail)
+            msg = (
+                f"Matrix refused continuation {index} for turn {claimed.delivery_id!r} "
+                f"stage {claimed.stage.value!r}: {detail}"
+            )
+            raise _DeliveryRefusedError(msg)
 
     async def _observe_matrix_event(
         self,
@@ -961,7 +977,7 @@ class DeliveryGateway:
         response_sender = client.user_id
         if not response_sender:
             return None
-        return await find_outbox_delivery_event_id_via_room_messages(
+        event_id = await find_outbox_delivery_event_id_via_room_messages(
             client,
             claimed.room_id,
             delivery_sender=response_sender,
@@ -969,6 +985,49 @@ class DeliveryGateway:
             delivery_content=claimed.payload,
             delivery_event_type=claimed.event_type,
         )
+        if event_id is not None:
+            await self._deliver_missing_continuations(claimed)
+        return event_id
+
+    async def _deliver_missing_continuations(self, claimed: MatrixDelivery) -> None:
+        """Send the continuation events an earlier device never got into the room.
+
+        Adopting a segmented delivery keys on the primary event alone, so a
+        crash between the primary and its continuations would acknowledge the
+        row with most of the answer never sent. Each continuation is matched
+        by its exact frozen content first -- transaction IDs are scoped to the
+        device that used them, so a blind resend from this device would
+        duplicate every segment the earlier device did deliver. A failed
+        lookup or send raises, leaving the row unacknowledged so the next
+        recovery pass resumes exactly here.
+        """
+        continuations = _continuation_payloads(claimed.result)
+        if not continuations:
+            return
+        client = self._client()
+        response_sender = client.user_id
+        assert response_sender, "continuation reconciliation requires a logged-in client"
+        missing: list[tuple[int, dict[str, Any]]] = []
+        for index, continuation in enumerate(continuations, start=1):
+            delivered = await find_outbox_delivery_event_id_via_room_messages(
+                client,
+                claimed.room_id,
+                delivery_sender=response_sender,
+                source_event_ids=(),
+                delivery_content=continuation,
+                delivery_event_type=claimed.event_type,
+            )
+            if delivered is None:
+                missing.append((index, continuation))
+        for index, continuation in missing:
+            await self._send_continuation(claimed, continuation, index=index, retry_sync_recovery=True)
+        if missing:
+            self.deps.logger.info(
+                "Recovered segmented Matrix response continuations",
+                delivery_id=claimed.delivery_id,
+                stage=claimed.stage.value,
+                continuation_count=len(missing),
+            )
 
     async def recover_deliveries(self) -> RecoveryOutcome:
         """Resend every delivery whose Matrix outcome this process cannot know.

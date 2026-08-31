@@ -35,6 +35,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
+    _segment_transaction_id,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DepartureSource
@@ -1205,6 +1206,67 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.room_send.await_count == 1
         assert delivery.result is not None
         assert _SEGMENT_PAYLOADS_RESULT_KEY not in delivery.result
+
+    async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Adopting the primary event must not strand or duplicate continuations.
+
+        The earlier device crashed between the primary send and the
+        continuations, and one continuation did land. Transaction IDs are
+        scoped to the dead device, so the replacement device cannot resend
+        blindly: each segment is matched by its exact frozen content and only
+        the missing one goes out, under its stable derived transaction ID.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        answer = "\n\n".join(f"## Part {index}\n\n" + "x" * 500 for index in range(200))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
+            await gateway.deliver_final(replace(self._final_request(answer), defer_source_handoff=True))
+        row = outbox.rows["$cause", "final"]
+        assert row.acknowledged_event_id is None
+        assert row.result is not None
+        continuations = row.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert len(continuations) >= 2
+
+        async def found_events(
+            _client: object,
+            _room_id: str,
+            *,
+            delivery_content: Mapping[str, object],
+            **_kwargs: object,
+        ) -> str | None:
+            if delivery_content == row.payload:
+                return "$primary"
+            if delivery_content == continuations[1]:
+                return "$continuation-2"
+            return None
+
+        recovered_gateway = _gateway(tmp_path, outbox, sending_device_id="NEW-DEVICE")
+        delivered = DeliveredMatrixEvent("$continuation-1", continuations[0])
+        with (
+            patch(
+                "mindroom.delivery_gateway.find_outbox_delivery_event_id_via_room_messages",
+                AsyncMock(side_effect=found_events),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                AsyncMock(return_value=delivered),
+            ) as send,
+        ):
+            recovered = await recovered_gateway.recover_deliveries()
+
+        assert recovered.recovered == 1
+        expected_missing = [(index, c) for index, c in enumerate(continuations, start=1) if index != 2]
+        assert [call.args[2] for call in send.await_args_list] == [c for _, c in expected_missing]
+        assert [call.kwargs["transaction_id"] for call in send.await_args_list] == [
+            _segment_transaction_id(row.transaction_id, index) for index, _ in expected_missing
+        ]
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$primary"
 
     async def test_delivery_identity_is_included_in_the_validated_event_size(
         self,

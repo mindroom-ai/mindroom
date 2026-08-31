@@ -9,6 +9,7 @@ streaming placeholder; subsequent events are thread replies.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,8 @@ _SEGMENT_METADATA_KEYS = frozenset(
         "m.mentions",
     },
 )
+_MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
+_FENCE_MARKER_PATTERN = re.compile(r"^[ \t]*(`{3,}|~{3,})", re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,32 @@ def _first_segment_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
+    """Map each mentioned user ID to its pill anchor from the rendered source.
+
+    The plain ``body`` carries only the bare user ID where a mention goes; the
+    pill link exists solely in ``formatted_body``. Re-rendering one chunk from
+    its body would silently drop the link, so the anchor is copied across.
+    """
+    formatted = source.get("formatted_body")
+    if not isinstance(formatted, str):
+        return {}
+    pills: dict[str, str] = {}
+    for match in _MENTION_PILL_PATTERN.finditer(formatted):
+        target = match.group("href").removeprefix("https://matrix.to/#/")
+        if target.startswith("@"):
+            pills[target] = match.group(0)
+    return pills
+
+
+def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
+    """Render one chunk, restoring mention pills its plain body cannot carry."""
+    formatted = markdown_to_html(body)
+    for user_id, pill in sorted(_mention_pills(source).items(), key=lambda item: -len(item[0])):
+        formatted = formatted.replace(user_id, pill)
+    return formatted
+
+
 def _rich_text_content(
     source: Mapping[str, Any],
     body: str,
@@ -101,7 +130,7 @@ def _rich_text_content(
         candidate["msgtype"] = source.get("msgtype", "m.text")
     candidate["body"] = body
     candidate["format"] = "org.matrix.custom.html"
-    candidate["formatted_body"] = markdown_to_html(body)
+    candidate["formatted_body"] = _render_segment_html(source, body)
     if include_relation:
         relation = source.get("m.relates_to")
         if isinstance(relation, Mapping):
@@ -119,7 +148,7 @@ def _edit_content_chunk(
     candidate = {key: value for key, value in content.items() if key not in _SEGMENT_FIRST_DROPPED_KEYS}
     candidate["body"] = f"* {body}"
     candidate["format"] = "org.matrix.custom.html"
-    candidate["formatted_body"] = markdown_to_html(candidate["body"])
+    candidate["formatted_body"] = _render_segment_html(source, candidate["body"])
     candidate["m.new_content"] = replacement
     return candidate
 
@@ -135,27 +164,25 @@ def _thread_relation(thread_id: str | None, reply_to_event_id: str | None) -> di
     }
 
 
-def _edit_continuation_content(
+def _continuation_content(
     source: Mapping[str, Any],
     body: str,
     *,
     thread_id: str | None,
     reply_to_event_id: str | None,
 ) -> dict[str, Any]:
-    """Build a normal rich-text thread reply for a continuation of an edit."""
+    """Build a continuation that recovery cannot mistake for a fresh answer.
+
+    Copying the source relation verbatim would repeat a genuine reply to the
+    turn's source event, and replay recovery counts every such event as a
+    visible response of the turn -- several for one segmented answer, which it
+    refuses. Continuations therefore always take the thread-fallback form (or
+    no relation outside threads), which recovery explicitly excludes.
+    """
     candidate = _rich_text_content(source, body, include_mentions=False)
     relation = _thread_relation(thread_id, reply_to_event_id)
     if relation is not None:
         candidate["m.relates_to"] = relation
-    return candidate
-
-
-def _normal_continuation_content(source: Mapping[str, Any], body: str) -> dict[str, Any]:
-    """Build a continuation preserving the original message's thread relation."""
-    candidate = _rich_text_content(source, body, include_mentions=False)
-    relation = source.get("m.relates_to")
-    if isinstance(relation, Mapping):
-        candidate["m.relates_to"] = dict(relation)
     return candidate
 
 
@@ -188,14 +215,6 @@ def _segment_builders(
         def first_builder(chunk: str) -> dict[str, Any]:
             return _edit_content_chunk(content, source, chunk)
 
-        def continuation_builder(chunk: str) -> dict[str, Any]:
-            return _edit_continuation_content(
-                source,
-                chunk,
-                thread_id=continuation_thread_id,
-                reply_to_event_id=continuation_reply_to_event_id,
-            )
-
     else:
 
         def first_builder(chunk: str) -> dict[str, Any]:
@@ -206,8 +225,13 @@ def _segment_builders(
                 include_relation=True,
             )
 
-        def continuation_builder(chunk: str) -> dict[str, Any]:
-            return _normal_continuation_content(source, chunk)
+    def continuation_builder(chunk: str) -> dict[str, Any]:
+        return _continuation_content(
+            source,
+            chunk,
+            thread_id=continuation_thread_id,
+            reply_to_event_id=continuation_reply_to_event_id,
+        )
 
     def size_builder(chunk: str) -> int:
         return max(
@@ -228,6 +252,20 @@ def _preferred_boundary(text: str, start: int, end: int) -> int:
     if line >= minimum and line + 1 <= end:
         return line + 1
     return end
+
+
+def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
+    """Return where an unclosed fenced code block opens inside text[start:end].
+
+    Segments are rendered as standalone Markdown, so a cut inside a fence
+    renders the remainder as plain text in one segment and a dangling opener
+    in the other. Chunks always begin fence-balanced, so a single toggle scan
+    finds the offending opener.
+    """
+    opener_start: int | None = None
+    for match in _FENCE_MARKER_PATTERN.finditer(text, start, end):
+        opener_start = None if opener_start is not None else match.start()
+    return opener_start
 
 
 def _split_body(
@@ -260,6 +298,13 @@ def _split_body(
         if best == offset:
             return None
         end = _preferred_boundary(text, offset, best)
+        fence_start = _unclosed_fence_start(text, offset, end)
+        if fence_start is not None:
+            if fence_start == offset:
+                # One fence spans the whole remaining budget; no cut can keep
+                # every segment self-contained, so the sidecar keeps it intact.
+                return None
+            end = fence_start
         chunks.append(text[offset:end])
         offset = end
     return chunks

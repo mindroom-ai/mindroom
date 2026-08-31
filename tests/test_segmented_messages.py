@@ -27,7 +27,12 @@ def test_plaintext_segments_preserve_markdown_body() -> None:
         "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
     }
 
-    segmented = segment_matrix_content(content, room_encrypted=False)
+    segmented = segment_matrix_content(
+        content,
+        room_encrypted=False,
+        continuation_thread_id="$thread",
+        continuation_reply_to_event_id="$cause",
+    )
 
     assert segmented is not None
     parts = [segmented.first, *segmented.continuations]
@@ -37,6 +42,65 @@ def test_plaintext_segments_preserve_markdown_body() -> None:
     assert all(part["format"] == "org.matrix.custom.html" for part in parts)
     assert all(part["formatted_body"] for part in parts)
     assert all(_estimated_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
+
+
+def test_continuations_use_thread_fallback_relation() -> None:
+    """Continuations never repeat a genuine reply to the turn's source event.
+
+    Replay recovery counts every non-fallback reply to a source as a visible
+    response of the turn; one segmented answer must produce exactly one.
+    """
+    body = _body()
+    genuine_reply = {
+        "rel_type": "m.thread",
+        "event_id": "$thread",
+        "is_falling_back": False,
+        "m.in_reply_to": {"event_id": "$cause"},
+    }
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "m.relates_to": genuine_reply,
+    }
+
+    segmented = segment_matrix_content(
+        content,
+        room_encrypted=False,
+        continuation_thread_id="$thread",
+        continuation_reply_to_event_id="$cause",
+    )
+
+    assert segmented is not None
+    assert segmented.first["m.relates_to"] == genuine_reply
+    assert segmented.continuations
+    for continuation in segmented.continuations:
+        assert continuation["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$thread",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$cause"},
+        }
+
+
+def test_room_mode_continuations_carry_no_reply_relation() -> None:
+    """Outside threads a continuation is a bare message, not a second reply."""
+    body = _body()
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$cause"}},
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    assert segmented.continuations
+    assert all("m.relates_to" not in part for part in segmented.continuations)
+    assert "".join(part["body"] for part in [segmented.first, *segmented.continuations]) == body
 
 
 def test_edit_segments_use_replace_then_thread_replies() -> None:
@@ -103,3 +167,71 @@ def test_large_tool_trace_does_not_disable_visible_markdown() -> None:
     assert "io.mindroom.tool_trace" not in first
     assert first["format"] == "org.matrix.custom.html"
     assert first["formatted_body"]
+
+
+def _fence_balance(text: str) -> int:
+    """Return the net number of unclosed fence openers in one chunk."""
+    return sum(1 for line in text.splitlines() if line.lstrip().startswith(("```", "~~~"))) % 2
+
+
+def test_fenced_code_block_is_not_split_mid_block() -> None:
+    """Every segment must be self-contained Markdown, fences included."""
+    prefix = "\n\n".join(f"## Lead {index}\n\nword " * 40 for index in range(30))
+    fence = "```python\n" + "".join(f"value_{index} = {index}\n" for index in range(150)) + "```"
+    suffix = "\n\n".join(f"## Tail {index}\n\nword " * 40 for index in range(30))
+    body = f"{prefix}\n\n{fence}\n\n{suffix}"
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    assert len(parts) >= 2
+    assert "".join(part["body"] for part in parts) == body
+    assert all(_fence_balance(part["body"]) == 0 for part in parts)
+    assert sum(fence in part["body"] for part in parts) == 1
+
+
+def test_fence_spanning_the_whole_budget_falls_back_to_sidecar() -> None:
+    """A code block no cut can keep whole stays on the sidecar path."""
+    body = "```\n" + "x" * (_SEGMENT_TARGET_PLAINTEXT_BYTES * 2) + "\n```"
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+    }
+
+    assert segment_matrix_content(content, room_encrypted=False) is None
+
+
+def test_mention_pills_survive_segmentation() -> None:
+    """Re-rendering a chunk must not drop the link its plain body cannot carry."""
+    lead = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
+    body = f"{lead}\n\nThanks @alice:localhost for the review."
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": (
+            markdown_to_html(lead)
+            + '<p>Thanks <a href="https://matrix.to/#/@alice:localhost">@Alice</a> for the review.</p>'
+        ),
+        "m.mentions": {"user_ids": ["@alice:localhost"]},
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    assert "".join(part["body"] for part in parts) == body
+    mentioned = [part for part in parts if "@alice:localhost" in part["body"]]
+    assert len(mentioned) == 1
+    assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in mentioned[0]["formatted_body"]
+    assert segmented.first["m.mentions"] == {"user_ids": ["@alice:localhost"]}
+    assert all("m.mentions" not in part for part in segmented.continuations)
