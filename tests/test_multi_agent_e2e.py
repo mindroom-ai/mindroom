@@ -657,6 +657,8 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_room.display_name = "Invite Room"
         mock_event = MagicMock(spec=nio.InviteEvent)
         mock_event.sender = "@inviter:localhost"
+        mock_room.inviter = mock_event.sender
+        bot.client.invited_rooms = {mock_room.room_id: mock_room}
 
         bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
         await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)

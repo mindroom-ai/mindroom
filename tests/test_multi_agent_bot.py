@@ -550,6 +550,8 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
+        mock_room.inviter = mock_event.sender
+        bot.client.invited_rooms = {mock_room.room_id: mock_room}
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
