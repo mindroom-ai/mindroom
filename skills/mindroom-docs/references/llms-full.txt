@@ -16488,7 +16488,7 @@ Merely observed durable records, stale or revoked invites, and mismatched invite
 Once that exact live invite passes policy, MindRoom records an authorized join transaction before contacting Matrix and may retry or finish that transaction after restart.
 An observed transaction without live invite evidence may recover only through ordinary policy sources, and room-derived sources wait until every relevant grant-room snapshot is authoritative.
 The authorized transaction is recovery evidence for that join only and does not authorize normal room activity.
-Persisted accepted ad-hoc rooms are rejoined only after the first successful sync has exposed any newer invite or departure state.
+Persisted invite recovery and accepted ad-hoc room rejoins wait until the bot's first successful sync has exposed any newer invite or departure state.
 A Matrix sync-generation reset invalidates all process-local invite evidence, and only a fresh self-membership invite callback can recreate it.
 After the responder joins, the invite is no longer authorization evidence and normal activity uses the authoritative membership index.
 If that post-join check terminally denies an ad-hoc room, MindRoom revokes its accepted-room state before explicitly leaving and retains departure work until Matrix confirms the bot is no longer joined.
@@ -17017,7 +17017,7 @@ Invites are the deliberate exception to general journal admission because an inv
 The invite callback records an observed inviter and any immediately available authorization in the room-invite ledger before starting background work.
 After restart, an observed record can pass only ordinary authoritative policy and never receives the current-inviter exception without fresh process-local evidence from the current sync generation.
 Once authorized, the same ledger retains the join transaction across retryable results, ambiguous remote completion, cancellation, and restart until authoritative reconciliation finishes it.
-Persisted accepted ad-hoc rooms are not rejoined until the first successful sync has exposed any newer invite or departure state.
+Persisted invite recovery and accepted ad-hoc room rejoins wait until the bot's first successful sync has exposed any newer invite or departure state.
 Terminal rejection of an already joined ad-hoc room atomically revokes its accepted state and retains explicit departure work until Matrix confirms the bot is absent.
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
 

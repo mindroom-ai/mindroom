@@ -1363,7 +1363,7 @@ class AgentBot:
 
     async def reconcile_pending_invites(self) -> None:
         """Recheck cached room invites against the shared responder policy."""
-        if self.client is not None:
+        if self.client is not None and self._first_sync_done:
             await self._room_lifecycle.reconcile_pending_invites()
 
     async def revoke_reply_authorized_calls(self) -> None:
@@ -1766,6 +1766,7 @@ class AgentBot:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
         if first_sync_response:
+            await self.reconcile_pending_invites()
             await self._room_lifecycle.rejoin_persisted_invited_rooms()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
