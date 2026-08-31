@@ -105,6 +105,8 @@ MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
+Before a responder joins, the authenticated sender of its current invite may satisfy `current_room_members` only for deciding whether to accept that invite.
+Recovered invite records without current Matrix invite state do not receive this exception, and normal post-join authorization remains unchanged.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 

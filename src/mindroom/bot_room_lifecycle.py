@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
+from mindroom.access_policy import resolve_responder_access
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -476,6 +477,8 @@ class BotRoomLifecycle:
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
         )
+        if not invite_allowed and invite_is_current:
+            invite_allowed = resolve_responder_access(config, self.deps.agent_name).current_room_members
         if not invite_allowed:
             self._logger().debug(
                 "ignoring_invite_from_unauthorized_sender",

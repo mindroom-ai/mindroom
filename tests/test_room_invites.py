@@ -2047,6 +2047,80 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
     assert not _invited_rooms_path(config, "agent1").exists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(
+    ("invite_is_current", "expected_invited_rooms"),
+    [
+        (True, {"!invited-room:localhost"}),
+        (False, set()),
+    ],
+    ids=["current", "recovered"],
+)
+async def test_current_room_members_only_authorize_a_current_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    invite_is_current: bool,
+    expected_invited_rooms: set[str],
+) -> None:
+    """Only the authenticated sender of a live invite gets the pre-join exception."""
+    sender_id = "@member:localhost"
+    room_id = "!invited-room:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    access=ResponderAccessConfig(current_room_members=True),
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    invited_room = nio.MatrixInvitedRoom(room_id, agent_user.user_id)
+    invited_room.inviter = sender_id
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+
+    if invite_is_current:
+        bot.client.invited_rooms = {room_id: invited_room}
+        event = nio.InviteEvent.parse_event(
+            {
+                "type": "m.room.member",
+                "sender": sender_id,
+                "state_key": agent_user.user_id,
+                "content": {"membership": "invite"},
+            },
+        )
+        assert isinstance(event, nio.InviteMemberEvent)
+        await _handle_invite(bot, invited_room, event)
+    else:
+        bot._room_lifecycle.record_pending_room_invite(room_id, sender_id)
+        await bot._room_lifecycle.reconcile_pending_invites()
+
+    assert bot._room_lifecycle.invited_rooms == expected_invited_rooms
+    assert load_invited_rooms(_invited_rooms_path(config, "agent1")) == expected_invited_rooms
+
+
 @dataclass(frozen=True)
 class _GrantInviteScenario:
     config: Config
