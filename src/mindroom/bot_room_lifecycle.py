@@ -75,6 +75,14 @@ class BotRoomLifecycleDeps:
     on_room_left: Callable[[str], Awaitable[None]]
 
 
+@dataclass(frozen=True, slots=True)
+class _CurrentRoomInvite:
+    """One live invite observation that later sync state can invalidate."""
+
+    revision: int
+    inviter_id: str
+
+
 class BotRoomLifecycle:
     """Own room joins, leaves, invite handling, and invited-room persistence."""
 
@@ -88,6 +96,8 @@ class BotRoomLifecycle:
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         self._pending_forgotten_invited_rooms: set[str] = set()
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
+        self._current_room_invites: dict[str, _CurrentRoomInvite] = {}
+        self._current_room_invite_revision = 0
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
@@ -226,9 +236,19 @@ class BotRoomLifecycle:
         room_ids.difference_update(self._pending_forgotten_invited_rooms)
         self.invited_rooms = room_ids
 
-    def forget_invited_room(self, room_id: str) -> None:
-        """Stop preserving an ad-hoc room after this bot leaves it."""
-        self._forget_pending_room_invite(room_id)
+    async def forget_invited_room_after_departure(self, room_id: str) -> None:
+        """Make an authoritative departure win against in-flight invite work."""
+        self._current_room_invites.pop(room_id, None)
+        client = self.deps.runtime.client
+        if client is not None:
+            client.invited_rooms.pop(room_id, None)
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if room_id not in self._current_room_invites:
+                self._forget_pending_room_invite(room_id)
+            self._forget_accepted_invited_room(room_id)
+
+    def _forget_accepted_invited_room(self, room_id: str) -> None:
+        """Clear accepted-invite state while preserving any replacement invite."""
         if not self._should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
@@ -237,7 +257,19 @@ class BotRoomLifecycle:
         self._handled_invite_room_ids.discard(room_id)
         self._welcomed_room_ids.discard(room_id)
 
-    def record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
+    def record_current_room_invite(self, room_id: str, sender_id: str) -> None:
+        """Record durable and live evidence for the room's current inviter."""
+        self._record_pending_room_invite(room_id, sender_id)
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite is not None and current_invite.inviter_id == sender_id:
+            return
+        self._current_room_invite_revision += 1
+        self._current_room_invites[room_id] = _CurrentRoomInvite(
+            revision=self._current_room_invite_revision,
+            inviter_id=sender_id,
+        )
+
+    def _record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
         """Persist an outstanding invite before its network work runs."""
         if not self._should_persist_invited_rooms():
             return
@@ -251,9 +283,12 @@ class BotRoomLifecycle:
             raise OSError(msg)
         self._pending_room_invites = pending_invites
 
-    def _forget_pending_room_invite(self, room_id: str) -> None:
+    def _forget_pending_room_invite(self, room_id: str, *, expected_sender_id: str | None = None) -> None:
         """Forget a resolved outstanding invite without losing concurrent state."""
         pending_invites = load_pending_room_invites(self._pending_room_invites_file_path())
+        if expected_sender_id is not None and pending_invites.get(room_id) != expected_sender_id:
+            self._pending_room_invites = pending_invites
+            return
         if room_id not in pending_invites:
             self._pending_room_invites = pending_invites
             return
@@ -262,6 +297,20 @@ class BotRoomLifecycle:
             msg = f"Failed to forget pending room invite {room_id}"
             raise OSError(msg)
         self._pending_room_invites = pending_invites
+
+    def _complete_recorded_room_invite(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> None:
+        """Forget one resolved invite without deleting a newer replacement."""
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite != expected_invite:
+            return
+        if current_invite is not None:
+            self._current_room_invites.pop(room_id, None)
+        self._forget_pending_room_invite(room_id, expected_sender_id=sender)
 
     def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
@@ -442,11 +491,9 @@ class BotRoomLifecycle:
         self,
         room: nio.MatrixRoom,
         sender: str,
-        *,
-        current_inviter_id: str,
     ) -> None:
-        """Handle one durable invite bound to its current Matrix inviter."""
-        await self._handle_invite(room, sender, current_inviter_id=current_inviter_id)
+        """Handle one durable invite against lifecycle-owned current evidence."""
+        await self._handle_invite(room, sender)
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after responder access changes."""
@@ -454,20 +501,17 @@ class BotRoomLifecycle:
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         for room in tuple(client.invited_rooms.values()):
             if room.inviter is not None:
-                self.record_pending_room_invite(room.room_id, room.inviter)
+                self.record_current_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
-            current_inviter_id = room.inviter if room is not None else None
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
-            await self._handle_invite(room, sender, current_inviter_id=current_inviter_id)
+            await self._handle_invite(room, sender)
 
     async def _handle_invite(
         self,
         room: nio.MatrixRoom,
         sender: str,
-        *,
-        current_inviter_id: str | None,
     ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
@@ -475,50 +519,100 @@ class BotRoomLifecycle:
             self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
             return
 
-        config = self._config()
-        invite_allowed = is_sender_allowed_for_agent_invite(
-            sender,
-            self.deps.agent_name,
-            config,
-            room.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            current_inviter_id=current_inviter_id,
-        )
-        if not invite_allowed:
-            self._logger().debug(
-                "ignoring_invite_from_unauthorized_sender",
-                user_id=sender,
-                room_id=room.room_id,
-            )
-            return
-
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
+            current_invite = self._current_room_invites.get(room.room_id)
+            if not self._current_invite_is_authorized(room.room_id, sender, current_invite):
+                self._logger().debug(
+                    "ignoring_invite_from_unauthorized_sender",
+                    user_id=sender,
+                    room_id=room.room_id,
+                )
+                return
+
             if room.room_id in self._handled_invite_room_ids:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=sender)
-                await self.deps.on_room_joined(room.room_id)
-                self._remember_invited_room(room.room_id)
-                await self._send_invite_welcome(room.room_id, sender)
-                self._forget_pending_room_invite(room.room_id)
+                await self._finish_handled_invite(room.room_id, sender, current_invite)
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
-                self._logger().error("Failed to join room", room_id=room.room_id)
-                if join_outcome is RoomJoinOutcome.ACCESS_DENIED and current_inviter_id is None:
-                    await self._clear_join_decrypt_notice_fence(room.room_id)
-                    self._forget_pending_room_invite(room.room_id)
-                    return
-                if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
-                    self._forget_pending_room_invite(room.room_id)
-                    return
-                msg = f"Failed to join invited room {room.room_id}"
-                raise RuntimeError(msg)
+                await self._handle_failed_invite_join(room.room_id, sender, current_invite, join_outcome)
+                return
 
             self._logger().info("Joined room", room_id=room.room_id)
+            if not self._current_invite_is_authorized(room.room_id, sender, current_invite):
+                self._logger().info(
+                    "invite_changed_during_join",
+                    room_id=room.room_id,
+                    sender=sender,
+                )
+                return
             await self.deps.on_room_joined(room.room_id)
+            if not self._current_invite_is_authorized(room.room_id, sender, current_invite):
+                self._logger().info(
+                    "invite_changed_before_persist",
+                    room_id=room.room_id,
+                    sender=sender,
+                )
+                return
             self._remember_invited_room(room.room_id)
             self._handled_invite_room_ids.add(room.room_id)
             await self._send_invite_welcome(room.room_id, sender)
-            self._forget_pending_room_invite(room.room_id)
+            self._complete_recorded_room_invite(room.room_id, sender, current_invite)
+
+    async def _finish_handled_invite(
+        self,
+        room_id: str,
+        sender: str,
+        current_invite: _CurrentRoomInvite | None,
+    ) -> None:
+        """Retry final state and welcome work for an already joined invite."""
+        await self.deps.on_room_joined(room_id)
+        if not self._current_invite_is_authorized(room_id, sender, current_invite):
+            return
+        self._remember_invited_room(room_id)
+        await self._send_invite_welcome(room_id, sender)
+        self._complete_recorded_room_invite(room_id, sender, current_invite)
+
+    async def _handle_failed_invite_join(
+        self,
+        room_id: str,
+        sender: str,
+        current_invite: _CurrentRoomInvite | None,
+        join_outcome: RoomJoinOutcome,
+    ) -> None:
+        """Apply retry or cleanup semantics for one unsuccessful invite join."""
+        self._logger().error("Failed to join room", room_id=room_id)
+        invite_is_current = self._current_room_invites.get(room_id) == current_invite
+        if join_outcome is RoomJoinOutcome.ACCESS_DENIED and (current_invite is None or not invite_is_current):
+            await self._clear_join_decrypt_notice_fence(room_id)
+            self._complete_recorded_room_invite(room_id, sender, current_invite)
+            return
+        if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
+            self._complete_recorded_room_invite(room_id, sender, current_invite)
+            return
+        msg = f"Failed to join invited room {room_id}"
+        raise RuntimeError(msg)
+
+    def _current_invite_is_authorized(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> bool:
+        """Revalidate one exact live invite and its current responder access."""
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite != expected_invite:
+            return False
+        if current_invite is not None and current_invite.inviter_id != sender:
+            return False
+        return is_sender_allowed_for_agent_invite(
+            sender,
+            self.deps.agent_name,
+            self._config(),
+            room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+            current_inviter_id=(current_invite.inviter_id if current_invite is not None else None),
+        )
