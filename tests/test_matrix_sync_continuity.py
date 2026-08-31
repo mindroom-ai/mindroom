@@ -2235,7 +2235,11 @@ async def test_durable_invite_failure_does_not_rewind_classic_cursor(
     assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
     # The dedicated pending-invite store owns recovery, so no journal row is needed.
     assert await bot._journal_dispatcher.store.pending() == ()
-    bot._room_lifecycle.handle_recorded_invite.assert_awaited_once_with(room, event.sender)
+    bot._room_lifecycle.handle_recorded_invite.assert_awaited_once_with(
+        room,
+        event.sender,
+        current_inviter_id=event.sender,
+    )
 
 
 @pytest.mark.asyncio

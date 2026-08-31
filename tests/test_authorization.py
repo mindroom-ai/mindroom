@@ -11,6 +11,7 @@ from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
+    is_sender_allowed_for_agent_invite,
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
@@ -84,6 +85,31 @@ async def test_current_room_member_can_use_responder(tmp_path: Path) -> None:
 
     assert _allowed(sender_id, config, memberships, room_id="!talent:example.com")
     assert not _allowed(sender_id, config, memberships, room_id="!other:example.com")
+
+
+def test_current_invite_access_is_bound_to_authenticated_inviter(tmp_path: Path) -> None:
+    """Current-room invite evidence must authorize only its exact inviter."""
+    sender_id = "@member:example.com"
+    config = membership_config(
+        tmp_path,
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    memberships = AgentReplyMembershipIndex()
+    args = (
+        sender_id,
+        "talent",
+        config,
+        "!project:example.com",
+        runtime_paths_for(config),
+        memberships,
+    )
+
+    assert is_sender_allowed_for_agent_invite(*args, current_inviter_id=sender_id)
+    assert not is_sender_allowed_for_agent_invite(
+        *args,
+        current_inviter_id="@different-member:example.com",
+    )
+    assert not is_sender_allowed_for_agent_invite(*args, current_inviter_id=None)
 
 
 @pytest.mark.asyncio

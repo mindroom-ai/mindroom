@@ -291,7 +291,7 @@ class TestDMIntegration:
 
         # Mock join_room to return success
         with (
-            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
+            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite", return_value=True),
             patch(
                 "mindroom.bot_room_lifecycle.join_room",
                 return_value=RoomJoinOutcome.JOINED,
@@ -304,7 +304,11 @@ class TestDMIntegration:
             event.sender = "@user:localhost"
 
             bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-            await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
+            await bot._room_lifecycle.handle_recorded_invite(
+                room,
+                event.sender,
+                current_inviter_id=event.sender,
+            )
 
             mock_join.assert_called_once()
             bot.logger.info.assert_any_call("Joined room", room_id="!dm:localhost")

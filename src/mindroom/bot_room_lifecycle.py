@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import (
+    is_sender_allowed_for_agent_invite,
+    is_sender_allowed_for_agent_reply_in_room,
+)
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
@@ -435,9 +438,15 @@ class BotRoomLifecycle:
         self._logger().info("Welcome message sent", room_id=room_id)
         return True
 
-    async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
-        """Handle one invite whose identity is already durable."""
-        await self._handle_invite(room, sender, invite_is_current=True)
+    async def handle_recorded_invite(
+        self,
+        room: nio.MatrixRoom,
+        sender: str,
+        *,
+        current_inviter_id: str,
+    ) -> None:
+        """Handle one durable invite bound to its current Matrix inviter."""
+        await self._handle_invite(room, sender, current_inviter_id=current_inviter_id)
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after responder access changes."""
@@ -448,18 +457,17 @@ class BotRoomLifecycle:
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
-            invite_is_current = room is not None
+            current_inviter_id = room.inviter if room is not None else None
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
-                room.inviter = sender
-            await self._handle_invite(room, sender, invite_is_current=invite_is_current)
+            await self._handle_invite(room, sender, current_inviter_id=current_inviter_id)
 
     async def _handle_invite(
         self,
         room: nio.MatrixRoom,
         sender: str,
         *,
-        invite_is_current: bool,
+        current_inviter_id: str | None,
     ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
@@ -468,13 +476,14 @@ class BotRoomLifecycle:
             return
 
         config = self._config()
-        invite_allowed = is_sender_allowed_for_agent_reply_in_room(
+        invite_allowed = is_sender_allowed_for_agent_invite(
             sender,
             self.deps.agent_name,
             config,
             room.room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
+            current_inviter_id=current_inviter_id,
         )
         if not invite_allowed:
             self._logger().debug(
@@ -497,7 +506,7 @@ class BotRoomLifecycle:
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
-                if join_outcome is RoomJoinOutcome.ACCESS_DENIED and not invite_is_current:
+                if join_outcome is RoomJoinOutcome.ACCESS_DENIED and current_inviter_id is None:
                     await self._clear_join_decrypt_notice_fence(room.room_id)
                     self._forget_pending_room_invite(room.room_id)
                     return

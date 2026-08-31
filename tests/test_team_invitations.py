@@ -213,7 +213,7 @@ class TestTeamRoomMembership:
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         monkeypatch.setattr(
-            "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
+            "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite",
             lambda *_args, **_kwargs: True,
         )
         monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
@@ -223,6 +223,10 @@ class TestTeamRoomMembership:
         event = MagicMock(sender="@user:localhost")
 
         bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-        await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
+        await bot._room_lifecycle.handle_recorded_invite(
+            room,
+            event.sender,
+            current_inviter_id=event.sender,
+        )
 
         join_room.assert_awaited_once_with(bot.client, "!team-room:localhost")

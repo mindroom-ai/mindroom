@@ -2021,6 +2021,8 @@ class AgentBot:
         departed_room_ids = membership.departed_room_ids
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
+            if self.client is not None:
+                self.client.invited_rooms.pop(room_id, None)
             self._room_lifecycle.forget_invited_room(room_id)
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
@@ -2473,9 +2475,19 @@ class AgentBot:
         Persist its room and inviter before network work moves to the
         background so access changes and process restarts can reconcile it.
         """
+        if (
+            not isinstance(event, nio.InviteMemberEvent)
+            or event.membership != "invite"
+            or event.state_key != self.matrix_id.full_id
+        ):
+            return
         self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
-            self._room_lifecycle.handle_recorded_invite(room, event.sender),
+            self._room_lifecycle.handle_recorded_invite(
+                room,
+                event.sender,
+                current_inviter_id=event.sender,
+            ),
             owner=self._runtime_view,
         )
 

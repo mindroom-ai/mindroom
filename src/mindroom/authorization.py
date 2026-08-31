@@ -79,6 +79,38 @@ def is_sender_allowed_for_agent_reply_in_room(
     )
 
 
+def is_sender_allowed_for_agent_invite(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    *,
+    current_inviter_id: str | None,
+) -> bool:
+    """Authorize an inviter using normal access or a current Matrix invite.
+
+    Matrix authenticates the sender of a current invite as a room member with
+    permission to invite. That evidence can satisfy ``current_room_members``
+    before the invited agent has joined and acquired a membership snapshot.
+    """
+    if is_sender_allowed_for_agent_reply_in_room(
+        sender_id,
+        agent_name,
+        config,
+        room_id,
+        runtime_paths,
+        membership_index,
+    ):
+        return True
+    return (
+        current_inviter_id is not None
+        and sender_id == current_inviter_id
+        and resolve_responder_access(config, agent_name).current_room_members
+    )
+
+
 def is_sender_allowed_for_entity_replies_in_room(
     sender_id: str,
     entity_names: Iterable[str],
