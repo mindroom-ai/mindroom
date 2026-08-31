@@ -34,7 +34,9 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.membership_models import ReportedDeparture
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.access_schema_support import with_responder_access
 from tests.bot_helpers import FencedRoomRecorder, make_test_agent_bot
@@ -81,6 +83,49 @@ def _router_user() -> AgentMatrixUser:
         user_id="@mindroom_router:localhost",
         display_name="Router",
         password=TEST_PASSWORD,
+    )
+
+
+def _agent_bot_with_persisted_invites(
+    tmp_path: Path,
+    room_ids: tuple[str, ...],
+) -> tuple[AgentBot, Config]:
+    """Build one invite-persisting agent with the requested accepted rooms."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    accept_invites=True,
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="agent1",
+            user_id="@mindroom_agent1:localhost",
+            display_name="Agent 1",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    for room_id in room_ids:
+        assert bot._room_lifecycle._update_invited_room(room_id, remember=True)
+    return bot, config
+
+
+def _departed_membership(room_ids: tuple[str, ...]) -> OwnRoomMembership:
+    """Return one authoritative membership snapshot for the departed rooms."""
+    return OwnRoomMembership(
+        joined_room_ids=frozenset(),
+        left_room_ids=frozenset(room_ids),
+        invited_room_ids=frozenset(),
+        departures=tuple(ReportedDeparture(room_id=room_id, observation_id=f"leave:{room_id}") for room_id in room_ids),
     )
 
 
@@ -1142,6 +1187,62 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
         runtime_paths=runtime_paths_for(config),
     )
     assert restarted._room_lifecycle.invited_rooms == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fence_interruption",
+    [
+        RuntimeError("journal fence interrupted"),
+        asyncio.CancelledError("journal fence interrupted"),
+    ],
+)
+async def test_departure_fence_interruption_releases_every_invite_waiter(
+    tmp_path: Path,
+    fence_interruption: BaseException,
+) -> None:
+    """An interrupted journal fence must not leave departed-room invites blocked."""
+    room_ids = ("!first:localhost", "!second:localhost")
+    bot, config = _agent_bot_with_persisted_invites(tmp_path, room_ids)
+    bot._membership_fence = MagicMock()
+    bot._membership_fence.fence_reported_departures = AsyncMock(
+        side_effect=fence_interruption,
+    )
+
+    with pytest.raises(type(fence_interruption), match="journal fence interrupted"):
+        await bot._apply_own_room_membership(_departed_membership(room_ids))
+
+    assert bot._room_lifecycle._invite_departure_events == {}
+    assert load_invited_rooms(_invited_rooms_path(config, "agent1")) == set()
+
+
+@pytest.mark.asyncio
+async def test_departure_cleanup_failure_still_settles_every_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One failed room save must not skip cleanup for another departed room."""
+    room_ids = ("!first:localhost", "!second:localhost")
+    bot, config = _agent_bot_with_persisted_invites(tmp_path, room_ids)
+    bot._membership_fence = MagicMock()
+    bot._membership_fence.fence_reported_departures = AsyncMock()
+    save_attempt = 0
+
+    def fail_first_save(path: Path, invited_room_ids: set[str]) -> bool:
+        nonlocal save_attempt
+        save_attempt += 1
+        if save_attempt == 1:
+            return False
+        return save_invited_rooms(path, invited_room_ids)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", fail_first_save)
+
+    with pytest.raises(OSError, match="Failed to forget invited room"):
+        await bot._apply_own_room_membership(_departed_membership(room_ids))
+
+    assert save_attempt == 2
+    assert bot._room_lifecycle._invite_departure_events == {}
+    assert load_invited_rooms(_invited_rooms_path(config, "agent1")) == set()
 
 
 @pytest.mark.asyncio

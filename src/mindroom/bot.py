@@ -2021,9 +2021,16 @@ class AgentBot:
         departed_room_ids = membership.departed_room_ids
         for room_id in departed_room_ids:
             self._room_lifecycle.begin_invited_room_departure(room_id)
-        await self._membership_fence.fence_reported_departures(membership.departures)
-        for room_id in departed_room_ids:
-            await self._room_lifecycle.forget_invited_room_after_departure(room_id)
+        try:
+            await self._membership_fence.fence_reported_departures(membership.departures)
+        finally:
+            cleanup_results = await asyncio.gather(
+                *(self._room_lifecycle.forget_invited_room_after_departure(room_id) for room_id in departed_room_ids),
+                return_exceptions=True,
+            )
+            for cleanup_result in cleanup_results:
+                if isinstance(cleanup_result, BaseException):
+                    raise cleanup_result
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
