@@ -137,11 +137,13 @@ Live `room-member-joined` hooks are at-least-once because hook emission happens 
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
 Invites take neither path and are not journalled because Matrix's current invite cache owns their lifetime.
 Only the exact inviter on a current authenticated self-invite may start a join.
+Each live invite cache entry owns at most one join attempt, so a failed attempt requires fresh Matrix invite evidence.
 The inviter must pass access before the join, and the latest access policy plus any required joined-membership evidence are checked again after the join.
 The same cached invite and inviter must still own the attempt immediately before acceptance; replacement or authoritative departure makes the attempt fail closed.
 Accepted-room storage is written only after successful post-join setup and only preserves an existing membership across restart; it never causes an absent room to be joined.
 An authoritative departure revokes both the live invite cache entry and accepted-room preservation.
 Ordinary failures after Matrix confirms the join receive one best-effort compensating leave, while interruption or an earlier join failure may require the user to invite the bot again.
+A failed compensating leave keeps its decrypt-notice fence until Matrix confirms departure within the running process.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.

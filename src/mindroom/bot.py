@@ -1551,7 +1551,7 @@ class AgentBot:
         applied = await self._apply_sync_response_decision(
             decision,
             recovery=recovery,
-            joined_room_ids=response.rooms.join,
+            joined_room_ids=self._room_lifecycle.join_fence_settlement_rooms(response.rooms.join),
         )
         if applied.reset_client_token:
             room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
@@ -2019,11 +2019,18 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
+        forget_error: Exception | None = None
         for room_id in departed_room_ids:
             self._room_lifecycle.discard_live_invite(room_id)
+            try:
+                self._room_lifecycle.forget_invited_room(room_id)
+            except Exception as error:
+                forget_error = forget_error or error
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
-            self._room_lifecycle.forget_invited_room(room_id)
+            await self._room_lifecycle.settle_authoritative_departure(room_id)
+        if forget_error is not None:
+            raise forget_error
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync

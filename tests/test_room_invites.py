@@ -391,11 +391,11 @@ async def test_router_accepts_agent_invite_and_restores_setup_while_joined(
 
 
 @pytest.mark.asyncio
-async def test_live_invite_forbidden_join_stays_only_in_matrix_cache(
+async def test_live_invite_forbidden_join_consumes_one_attempt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed join has no durable owner but remains visible while Matrix caches it."""
+    """A failed join consumes its live invite and creates no durable owner."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -421,7 +421,7 @@ async def test_live_invite_forbidden_join_stays_only_in_matrix_cache(
         MagicMock(sender="@owner:localhost"),
     )
 
-    assert "!failed:localhost" in bot.client.invited_rooms
+    assert "!failed:localhost" not in bot.client.invited_rooms
     assert bot._room_lifecycle.invited_rooms == set()
     assert not bot._room_lifecycle.decrypt_notice_is_fenced("!failed:localhost")
 
@@ -781,7 +781,7 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
+    assert bot._room_lifecycle.invited_rooms == set()
     assert left_room_ids == ["!stale:localhost"]
 
 
@@ -1085,7 +1085,7 @@ def test_agent_retries_failed_persisted_invited_room_forget(
 
 
 @pytest.mark.asyncio
-async def test_failed_forget_keeps_durable_owner_until_next_attempt(
+async def test_failed_forget_keeps_durable_owner_without_mutating_live_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1119,7 +1119,7 @@ async def test_failed_forget_keeps_durable_owner_until_next_attempt(
     )
 
     assert await bot._room_lifecycle._rooms_to_leave() == []
-    assert bot._room_lifecycle.invited_rooms == {"!departed:localhost"}
+    assert bot._room_lifecycle.invited_rooms == set()
 
 
 def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) -> None:
@@ -2125,9 +2125,7 @@ async def _grant_invite_scenario(
     router_bot.client.joined_members = AsyncMock(
         return_value=nio.JoinedMembersResponse(members=[], room_id=grant_room_id),
     )
-    join_room = AsyncMock(
-        side_effect=[RoomJoinOutcome.RETRYABLE_FAILURE, RoomJoinOutcome.JOINED],
-    )
+    join_room = AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
     event = nio.InviteEvent.parse_event(
         {
@@ -2207,12 +2205,12 @@ async def _restart_grant_invite_scenario(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("restart", [False, True], ids=["event-replay", "process-restart"])
-async def test_grant_room_join_reconsiders_only_the_live_invite(
+async def test_grant_room_join_consumes_one_attempt_from_the_live_invite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     restart: bool,
 ) -> None:
-    """A grant change may retry only while Matrix still exposes the invite."""
+    """A newly authorized live invite owns one join attempt, not a retry loop."""
     scenario = await _grant_invite_scenario(monkeypatch, tmp_path)
 
     join_event = nio.RoomMemberEvent.from_dict(
@@ -2242,14 +2240,11 @@ async def test_grant_room_join_reconsiders_only_the_live_invite(
         scenario.runtime_paths,
         recovered_bot._runtime_view.agent_reply_memberships,
     )
-    assert recovered_bot.client.invited_rooms
     await recovered_bot.reconcile_live_invites()
-    assert recovered_bot._room_lifecycle.invited_rooms == {scenario.invited_room_id}
+    assert recovered_bot._room_lifecycle.invited_rooms == set()
+    assert recovered_bot.client.invited_rooms == {}
     first_attempt_client = recovered_bot.client if restart else scenario.bot.client
-    assert scenario.join_room.await_args_list == [
-        ((first_attempt_client, scenario.invited_room_id),),
-        ((recovered_bot.client, scenario.invited_room_id),),
-    ]
+    assert scenario.join_room.await_args_list == [((first_attempt_client, scenario.invited_room_id),)]
 
 
 @pytest.mark.asyncio

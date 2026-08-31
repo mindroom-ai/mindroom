@@ -107,6 +107,7 @@ The authoritative membership index fails closed while a referenced room is missi
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 For ordinary activity, the router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
 An authenticated self-invite is the narrow pre-join exception: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy `current_room_members` for that invite only.
+One live cache entry owns at most one join attempt, and a failed attempt requires fresh invite evidence.
 After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
 The same cached invite and inviter must still own the attempt immediately before acceptance, and an authoritative departure revokes that live ownership.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.

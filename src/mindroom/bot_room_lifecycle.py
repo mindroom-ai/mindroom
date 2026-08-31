@@ -91,6 +91,7 @@ class BotRoomLifecycle:
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._welcomed_room_ids: set[str] = set()
         self._decrypt_notice_fenced_room_ids: set[str] = set()
+        self._join_fence_protected_room_ids: set[str] = set()
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
@@ -140,18 +141,24 @@ class BotRoomLifecycle:
 
     async def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
+        settled_room_ids = self.join_fence_settlement_rooms(room_ids)
         record = await asyncio.to_thread(
             self.deps.continuity_store.update_join_fences,
-            remove=tuple(room_ids),
+            remove=settled_room_ids,
         )
         self.apply_continuity_record(record)
+
+    def join_fence_settlement_rooms(self, room_ids: Iterable[str]) -> tuple[str, ...]:
+        """Exclude still-joined rooms whose compensating leave is unconfirmed."""
+        return tuple(room_id for room_id in room_ids if room_id not in self._join_fence_protected_room_ids)
 
     def apply_continuity_record(self, record: SyncContinuityRecord) -> None:
         """Expose join fences from one already-persisted continuity update."""
         if record.revision <= self._applied_continuity_revision:
             return
         self._applied_continuity_revision = record.revision
-        self._decrypt_notice_fenced_room_ids = set(record.pending_join_decrypt_fences)
+        protected_room_ids = self._decrypt_notice_fenced_room_ids & self._join_fence_protected_room_ids
+        self._decrypt_notice_fenced_room_ids = set(record.pending_join_decrypt_fences) | protected_room_ids
 
     async def restore_pending_join_decrypt_fences(self) -> None:
         """Validate durable unfinished-join fences before sync can start."""
@@ -197,6 +204,16 @@ class BotRoomLifecycle:
             ),
         )
 
+    async def _ensure_join_decrypt_notice_fence(self, room_id: str) -> None:
+        """Retain a join fence after Matrix fails to confirm departure."""
+        self._decrypt_notice_fenced_room_ids.add(room_id)
+        self.apply_continuity_record(
+            await asyncio.to_thread(
+                self.deps.continuity_store.update_join_fences,
+                add=(room_id,),
+            ),
+        )
+
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
         await self.deps.on_room_joined(room_id)
@@ -212,12 +229,12 @@ class BotRoomLifecycle:
             return set()
         return load_invited_rooms(self._invited_rooms_file_path())
 
-    async def _refresh_invited_rooms(self) -> None:
-        """Merge accepted rooms written by another in-process component."""
+    async def _accepted_rooms_snapshot(self) -> set[str]:
+        """Read accepted ownership without mutating the lifecycle's live state."""
         if not self._should_persist_invited_rooms():
-            return
+            return set(self.invited_rooms)
         durable_rooms = await asyncio.to_thread(load_invited_rooms, self._invited_rooms_file_path())
-        self.invited_rooms.update(durable_rooms)
+        return durable_rooms | self.invited_rooms
 
     def discard_live_invite(self, room_id: str) -> None:
         """Revoke transient invite ownership after an authoritative departure."""
@@ -267,10 +284,9 @@ class BotRoomLifecycle:
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
         configured_rooms = set(self.deps.get_configured_rooms())
-        if joined_rooms is not None:
-            await self._refresh_invited_rooms()
+        accepted_rooms = await self._accepted_rooms_snapshot() if joined_rooms is not None else set(self.invited_rooms)
 
-        for room_id in configured_rooms | self.invited_rooms:
+        for room_id in configured_rooms | accepted_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 await self._on_configured_room_joined(room_id)
@@ -295,9 +311,16 @@ class BotRoomLifecycle:
 
     async def _finish_confirmed_leave(self, room_id: str) -> None:
         """Clear local join state only after Matrix confirms departure."""
+        self._join_fence_protected_room_ids.discard(room_id)
         if self.decrypt_notice_is_fenced(room_id):
             await self._clear_join_decrypt_notice_fence(room_id)
         await self.deps.on_room_left(room_id)
+
+    async def settle_authoritative_departure(self, room_id: str) -> None:
+        """Clear transient join state after Matrix authoritatively reports departure."""
+        self._join_fence_protected_room_ids.discard(room_id)
+        if self.decrypt_notice_is_fenced(room_id):
+            await self._clear_join_decrypt_notice_fence(room_id)
 
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms with no configured or accepted owner."""
@@ -309,8 +332,7 @@ class BotRoomLifecycle:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
         if self._should_persist_invited_rooms():
-            await self._refresh_invited_rooms()
-            configured_rooms.update(self.invited_rooms)
+            configured_rooms.update(await self._accepted_rooms_snapshot())
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
             if root_space_id is not None:
@@ -454,6 +476,7 @@ class BotRoomLifecycle:
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
+                self._discard_invite_if_current(room.room_id, sender, current_invite)
                 await self._clear_join_decrypt_notice_fence(room.room_id)
                 return
 
@@ -467,8 +490,7 @@ class BotRoomLifecycle:
                 await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
                 return
 
-            if client.invited_rooms.get(room.room_id) is current_invite and current_invite.inviter == sender:
-                client.invited_rooms.pop(room.room_id, None)
+            self._discard_invite_if_current(room.room_id, sender, current_invite)
             if send_welcome:
                 try:
                     await self._send_invite_welcome(room.room_id, sender)
@@ -518,12 +540,24 @@ class BotRoomLifecycle:
     ) -> None:
         """Attempt one compensating leave without creating retry ownership."""
         client = self._client()
-        current_invite = client.invited_rooms.get(room_id)
-        if current_invite is expected_invite and current_invite.inviter == sender:
-            client.invited_rooms.pop(room_id, None)
+        self._discard_invite_if_current(room_id, sender, expected_invite)
+        self._join_fence_protected_room_ids.add(room_id)
         if not await leave_room(client, room_id):
+            await self._ensure_join_decrypt_notice_fence(room_id)
             return
         try:
             await self._finish_confirmed_leave(room_id)
         except Exception:
             self._logger().exception("invite_compensating_leave_cleanup_failed", room_id=room_id)
+
+    def _discard_invite_if_current(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+    ) -> None:
+        """Consume only the exact live invite that owns this attempt."""
+        client = self._client()
+        current_invite = client.invited_rooms.get(room_id)
+        if current_invite is expected_invite and current_invite.inviter == sender:
+            client.invited_rooms.pop(room_id, None)

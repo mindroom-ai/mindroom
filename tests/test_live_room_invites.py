@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock
@@ -427,6 +429,40 @@ async def test_stale_joined_snapshot_cannot_erase_concurrent_acceptance(
 
 
 @pytest.mark.asyncio
+async def test_stale_accepted_read_cannot_resurrect_departed_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An off-thread snapshot cannot mutate ownership after departure wins."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    read_started = threading.Event()
+    release_read = threading.Event()
+    original_load = load_invited_rooms
+
+    def delayed_load(path: Path) -> set[str]:
+        room_ids = original_load(path)
+        read_started.set()
+        release_read.wait(timeout=1)
+        return room_ids
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.load_invited_rooms", delayed_load)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[ROOM_ID]))
+
+    cleanup = asyncio.create_task(bot._room_lifecycle._rooms_to_leave())
+    await asyncio.wait_for(asyncio.to_thread(read_started.wait), timeout=1)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.load_invited_rooms", original_load)
+    bot._room_lifecycle.forget_invited_room(ROOM_ID)
+    release_read.set()
+    await cleanup
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    assert original_load(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
 async def test_unowned_two_member_room_is_left(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -496,6 +532,41 @@ async def test_failed_unowned_leave_keeps_join_fence(
 
 
 @pytest.mark.asyncio
+async def test_trusted_sync_cannot_clear_fence_during_failed_compensating_leave(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A still-joined rejected invite remains fenced after its leave fails."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={bot.agent_user.user_id}),
+    )
+    leave_started = asyncio.Event()
+    release_leave = asyncio.Event()
+
+    async def delayed_failed_leave(_client: object, _room_id: str) -> bool:
+        leave_started.set()
+        await release_leave.wait()
+        return False
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", delayed_failed_leave)
+
+    invite = asyncio.create_task(bot._room_lifecycle.handle_invite(room, INVITER_ID))
+    await asyncio.wait_for(leave_started.wait(), timeout=1)
+    await bot._room_lifecycle.observe_trusted_sync_rooms([ROOM_ID])
+    release_leave.set()
+    await invite
+
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
 async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_path: Path) -> None:
     """A Matrix departure is the single boundary that revokes both room owners."""
     config = _router_config(tmp_path)
@@ -514,3 +585,39 @@ async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_p
     assert ROOM_ID not in bot.client.invited_rooms
     assert load_invited_rooms(_accepted_path(config)) == set()
     assert room.inviter == INVITER_ID
+
+
+@pytest.mark.asyncio
+async def test_new_acceptance_during_departure_fence_is_not_overwritten(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Departure removes old ownership before awaiting, so later acceptance wins."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    fence_started = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def delayed_fence(_fence: object, _departures: object) -> None:
+        fence_started.set()
+        await release_fence.wait()
+
+    monkeypatch.setattr(type(bot._membership_fence), "fence_reported_departures", delayed_fence)
+    departure = asyncio.create_task(
+        bot._apply_own_room_membership(
+            OwnRoomMembership(
+                joined_room_ids=frozenset(),
+                left_room_ids=frozenset({ROOM_ID}),
+                invited_room_ids=frozenset(),
+                departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="departure"),),
+            ),
+        ),
+    )
+    await asyncio.wait_for(fence_started.wait(), timeout=1)
+    assert load_invited_rooms(_accepted_path(config)) == set()
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    release_fence.set()
+    await departure
+
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
