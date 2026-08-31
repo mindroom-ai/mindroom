@@ -196,6 +196,11 @@ def _final_response_transform_context(
     )
 
 
+def test_unbound_hook_context_is_inactive(tmp_path: Path) -> None:
+    """A context without lifecycle bindings must fail closed."""
+    assert _message_received_context(tmp_path).is_active() is False
+
+
 def test_final_response_transform_builtin_event_can_register() -> None:
     """The final-response transform event should be accepted as a built-in hook."""
 

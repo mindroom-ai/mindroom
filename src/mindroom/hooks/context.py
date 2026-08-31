@@ -317,9 +317,9 @@ class _HookLifecycleContext:
     def is_active(self) -> bool:
         """Return whether this hook still belongs to the live registry snapshot."""
         return (
-            self._hook_registry_state is None
-            or self._hook_registry_snapshot is None
-            or self._hook_registry_state.registry is self._hook_registry_snapshot
+            self._hook_registry_state is not None
+            and self._hook_registry_snapshot is not None
+            and self._hook_registry_state.registry is self._hook_registry_snapshot
         )
 
 
