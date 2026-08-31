@@ -449,7 +449,7 @@ class BotRoomLifecycle:
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
-            invite_is_current = room is not None
+            invite_is_current = room is not None and room.inviter == sender
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender

@@ -2050,18 +2050,19 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
-    ("invite_is_current", "expected_invited_rooms"),
+    ("invite_source", "expected_invited_rooms"),
     [
-        (True, {"!invited-room:localhost"}),
-        (False, set()),
+        ("current", {"!invited-room:localhost"}),
+        ("recovered", set()),
+        ("cached_without_inviter", set()),
     ],
-    ids=["current", "recovered"],
+    ids=["current", "recovered", "cached-without-inviter"],
 )
 async def test_current_room_members_only_authorize_a_current_invite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    invite_is_current: bool,
+    invite_source: str,
     expected_invited_rooms: set[str],
 ) -> None:
     """Only the authenticated sender of a live invite gets the pre-join exception."""
@@ -2095,13 +2096,13 @@ async def test_current_room_members_only_authorize_a_current_invite(
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     invited_room = nio.MatrixInvitedRoom(room_id, agent_user.user_id)
-    invited_room.inviter = sender_id
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
     )
 
-    if invite_is_current:
+    if invite_source == "current":
+        invited_room.inviter = sender_id
         bot.client.invited_rooms = {room_id: invited_room}
         event = nio.InviteEvent.parse_event(
             {
@@ -2114,6 +2115,8 @@ async def test_current_room_members_only_authorize_a_current_invite(
         assert isinstance(event, nio.InviteMemberEvent)
         await _handle_invite(bot, invited_room, event)
     else:
+        if invite_source == "cached_without_inviter":
+            bot.client.invited_rooms = {room_id: invited_room}
         bot._room_lifecycle.record_pending_room_invite(room_id, sender_id)
         await bot._room_lifecycle.reconcile_pending_invites()
 
