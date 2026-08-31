@@ -1685,7 +1685,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
+- `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted so memberships Matrix still reports as joined survive restart cleanup without entering the static `rooms` list. An absent room requires a fresh invite
 - Approval-gated tools require the router to be joined to the Matrix room before the call executes.
 - Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` is enabled.
 - The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
@@ -1883,7 +1883,7 @@ Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
-Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
+Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted to preserve memberships Matrix reports as joined.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
@@ -3079,7 +3079,7 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites and persists accepted room IDs so memberships Matrix still reports as joined survive restart cleanup. An absent room requires a fresh invite |
 
 ## How Routing Works
 
@@ -16488,6 +16488,7 @@ Invitations do not count as joined membership, and leave, kick, or ban events re
 For ordinary activity, the router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
 An authenticated self-invite is the narrow pre-join exception: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy `current_room_members` for that invite only.
 After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
+The same cached invite and inviter must still own the attempt immediately before acceptance, and an authoritative departure revokes that live ownership.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.

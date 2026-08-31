@@ -315,7 +315,7 @@ async def test_agent_does_not_rejoin_absent_accepted_room_on_startup(
     await bot.join_configured_rooms()
 
     join_room.assert_not_awaited()
-    assert load_invited_rooms(invited_path) == set()
+    assert load_invited_rooms(invited_path) == {"!invited-room:localhost"}
 
 
 @pytest.mark.asyncio

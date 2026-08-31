@@ -15,7 +15,9 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.membership_models import ReportedDeparture
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -193,6 +195,48 @@ async def test_policy_revocation_during_postjoin_setup_prevents_persistence(
 
 
 @pytest.mark.asyncio
+async def test_replaced_live_invite_cannot_be_accepted_or_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old join attempt cannot consume newer Matrix invite ownership."""
+    config = bind_runtime_paths(
+        Config(
+            administrators=[INVITER_ID],
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(
+                    current_room_members=False,
+                    members_of_rooms=[],
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot, room = _router_bot(config)
+    replacement_inviter = "@replacement:localhost"
+
+    async def join_after_replacement(_client: object, _room_id: str) -> RoomJoinOutcome:
+        room.inviter = replacement_inviter
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(side_effect=join_after_replacement),
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", leave_room)
+
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    assert load_invited_rooms(_accepted_path(config)) == set()
+    assert bot.client.invited_rooms == {ROOM_ID: room}
+    assert room.inviter == replacement_inviter
+
+
+@pytest.mark.asyncio
 async def test_current_room_member_must_still_be_joined_after_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -355,7 +399,31 @@ async def test_absent_accepted_room_is_not_rejoined(
     await bot.join_configured_rooms()
 
     join_room.assert_not_awaited()
-    assert load_invited_rooms(accepted_path) == set()
+    assert load_invited_rooms(accepted_path) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+async def test_stale_joined_snapshot_cannot_erase_concurrent_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A joined-room snapshot must not prune acceptance recorded after that snapshot."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+
+    async def stale_joined_rooms(_client: object) -> list[str]:
+        bot._room_lifecycle._remember_invited_room(ROOM_ID)
+        return []
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", stale_joined_rooms)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+
+    await bot.join_configured_rooms()
+
+    join_room.assert_not_awaited()
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
 
 
 @pytest.mark.asyncio
@@ -405,3 +473,44 @@ async def test_unowned_leave_clears_join_fence_before_cleanup_failure(
         await bot.leave_unconfigured_rooms()
 
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_failed_unowned_leave_keeps_join_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed Matrix leave cannot make a still-joined room appear unfenced."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(ROOM_ID,)),
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[ROOM_ID]))
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", AsyncMock(return_value=False))
+
+    await bot.leave_unconfigured_rooms()
+
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_path: Path) -> None:
+    """A Matrix departure is the single boundary that revokes both room owners."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+
+    await bot._apply_own_room_membership(
+        OwnRoomMembership(
+            joined_room_ids=frozenset(),
+            left_room_ids=frozenset({ROOM_ID}),
+            invited_room_ids=frozenset(),
+            departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="departure"),),
+        ),
+    )
+
+    assert ROOM_ID not in bot.client.invited_rooms
+    assert load_invited_rooms(_accepted_path(config)) == set()
+    assert room.inviter == INVITER_ID

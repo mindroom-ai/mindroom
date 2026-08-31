@@ -212,15 +212,18 @@ class BotRoomLifecycle:
             return set()
         return load_invited_rooms(self._invited_rooms_file_path())
 
-    async def _refresh_invited_rooms(self, joined_rooms: set[str]) -> None:
-        """Keep accepted-room storage limited to current Matrix memberships."""
+    async def _refresh_invited_rooms(self) -> None:
+        """Merge accepted rooms written by another in-process component."""
         if not self._should_persist_invited_rooms():
             return
         durable_rooms = await asyncio.to_thread(load_invited_rooms, self._invited_rooms_file_path())
-        room_ids = (durable_rooms | self.invited_rooms) & joined_rooms
-        self.invited_rooms = room_ids
-        if room_ids != durable_rooms:
-            await asyncio.to_thread(save_invited_rooms, self._invited_rooms_file_path(), room_ids)
+        self.invited_rooms.update(durable_rooms)
+
+    def discard_live_invite(self, room_id: str) -> None:
+        """Revoke transient invite ownership after an authoritative departure."""
+        client = self.deps.runtime.client
+        if client is not None:
+            client.invited_rooms.pop(room_id, None)
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
@@ -247,7 +250,7 @@ class BotRoomLifecycle:
         return saved
 
     def _remember_invited_room(self, room_id: str) -> None:
-        """Persist one accepted invite or fail so its durable intent can retry."""
+        """Persist one accepted invite or fail so the caller can compensate."""
         if self._should_persist_invited_rooms() and not self._update_invited_room(room_id, remember=True):
             msg = f"Failed to persist invited room {room_id}"
             raise OSError(msg)
@@ -265,7 +268,7 @@ class BotRoomLifecycle:
         current_rooms = set(joined_rooms or ())
         configured_rooms = set(self.deps.get_configured_rooms())
         if joined_rooms is not None:
-            await self._refresh_invited_rooms(current_rooms)
+            await self._refresh_invited_rooms()
 
         for room_id in configured_rooms | self.invited_rooms:
             if room_id in current_rooms:
@@ -284,14 +287,17 @@ class BotRoomLifecycle:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
         rooms_to_leave = room_ids if room_ids is not None else await self._rooms_to_leave()
-        for room_id in rooms_to_leave:
-            if self.decrypt_notice_is_fenced(room_id):
-                await self._clear_join_decrypt_notice_fence(room_id)
         await leave_rooms(
             client,
             rooms_to_leave,
-            on_room_left=self.deps.on_room_left,
+            on_room_left=self._finish_confirmed_leave,
         )
+
+    async def _finish_confirmed_leave(self, room_id: str) -> None:
+        """Clear local join state only after Matrix confirms departure."""
+        if self.decrypt_notice_is_fenced(room_id):
+            await self._clear_join_decrypt_notice_fence(room_id)
+        await self.deps.on_room_left(room_id)
 
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms with no configured or accepted owner."""
@@ -303,7 +309,7 @@ class BotRoomLifecycle:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
         if self._should_persist_invited_rooms():
-            await self._refresh_invited_rooms(current_rooms)
+            await self._refresh_invited_rooms()
             configured_rooms.update(self.invited_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
@@ -453,22 +459,28 @@ class BotRoomLifecycle:
 
             self._logger().info("Joined room", room_id=room.room_id)
             try:
-                accepted = await self._accept_joined_invite(room.room_id, sender)
+                accepted = await self._accept_joined_invite(room.room_id, sender, current_invite)
             except Exception:
                 self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
                 accepted = False
             if not accepted:
-                await self._leave_unaccepted_invite(room.room_id)
+                await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
                 return
 
-            client.invited_rooms.pop(room.room_id, None)
+            if client.invited_rooms.get(room.room_id) is current_invite and current_invite.inviter == sender:
+                client.invited_rooms.pop(room.room_id, None)
             if send_welcome:
                 try:
                     await self._send_invite_welcome(room.room_id, sender)
                 except Exception:
                     self._logger().exception("invite_welcome_failed", room_id=room.room_id)
 
-    async def _accept_joined_invite(self, room_id: str, sender: str) -> bool:
+    async def _accept_joined_invite(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+    ) -> bool:
         """Recheck current policy and persist one confirmed joined invite."""
         await self.deps.on_room_joined(room_id)
         if not self._should_accept_invite():
@@ -492,17 +504,26 @@ class BotRoomLifecycle:
             )
         if not invite_allowed:
             return False
+        current_invite = self._client().invited_rooms.get(room_id)
+        if current_invite is not expected_invite or current_invite.inviter != sender:
+            return False
         self._remember_invited_room(room_id)
         return True
 
-    async def _leave_unaccepted_invite(self, room_id: str) -> None:
+    async def _leave_unaccepted_invite(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+    ) -> None:
         """Attempt one compensating leave without creating retry ownership."""
         client = self._client()
-        client.invited_rooms.pop(room_id, None)
-        await self._clear_join_decrypt_notice_fence(room_id)
+        current_invite = client.invited_rooms.get(room_id)
+        if current_invite is expected_invite and current_invite.inviter == sender:
+            client.invited_rooms.pop(room_id, None)
         if not await leave_room(client, room_id):
             return
         try:
-            await self.deps.on_room_left(room_id)
+            await self._finish_confirmed_leave(room_id)
         except Exception:
             self._logger().exception("invite_compensating_leave_cleanup_failed", room_id=room_id)
