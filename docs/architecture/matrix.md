@@ -115,6 +115,7 @@ An event reaches an agent through durable admission, never straight from the syn
 
 Invites are the deliberate exception: MindRoom acts only on Matrix's current authenticated invite cache and creates no durable pending-invite work.
 Access is checked before and after joining, accepted-room storage only preserves a membership that still exists, and interruption or a failed attempt may require another invitation.
+Final invite membership replaces preservation from an older joined membership without consuming the new live invite, while unresolved Sliding Sync membership is not treated as final.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses

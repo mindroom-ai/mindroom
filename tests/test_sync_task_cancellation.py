@@ -1908,6 +1908,7 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
         "!knocking:localhost",
         "!peek:localhost",
     }
+    assert membership.authoritative_invited_room_ids == {"!invited:localhost"}
     assert membership.continuity_lost_room_ids == {
         "!invited:localhost",
         "!stripped:localhost",
@@ -1997,7 +1998,7 @@ def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() ->
     )
     response = nio.SyncResponse(
         next_batch="next",
-        rooms=nio.Rooms(invite={}, join={}, leave={room_id: room_info}),
+        rooms=nio.Rooms(invite={"!invited:localhost": MagicMock()}, join={}, leave={room_id: room_info}),
         device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
         device_list=nio.DeviceList(changed=[], left=[]),
         to_device_events=[],
@@ -2006,6 +2007,7 @@ def test_classic_own_membership_does_not_invent_a_rejoin_between_departures() ->
 
     membership = own_membership_from_sync(response, self_user_id=user_id)
 
+    assert membership.authoritative_invited_room_ids == {"!invited:localhost"}
     assert membership.departures == (
         ReportedDeparture(room_id=room_id, observation_id="$leave"),
         ReportedDeparture(room_id=room_id, observation_id="$ban"),

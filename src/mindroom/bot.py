@@ -2019,11 +2019,13 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
+        ownership_lost_room_ids = departed_room_ids | membership.authoritative_invited_room_ids
         forget_error: Exception | None = None
         async with AsyncExitStack() as ownership:
-            for room_id in sorted(departed_room_ids):
+            for room_id in sorted(ownership_lost_room_ids):
                 await ownership.enter_async_context(self._room_lifecycle.invite_ownership(room_id))
-                self._room_lifecycle.discard_live_invite(room_id)
+                if room_id not in membership.authoritative_invited_room_ids:
+                    self._room_lifecycle.discard_live_invite(room_id)
                 try:
                     self._room_lifecycle.forget_invited_room(room_id)
                 except Exception as error:
@@ -2129,7 +2131,12 @@ class AgentBot:
             # Router bot has additional responsibilities
             if self.agent_name == ROUTER_AGENT_NAME:
                 try:
-                    await cleanup_all_orphaned_bots(client, self.config, self.runtime_paths)
+                    await cleanup_all_orphaned_bots(
+                        client,
+                        self.config,
+                        self.runtime_paths,
+                        on_self_leave=self._room_lifecycle.leave_orphaned_room,
+                    )
                 except Exception as e:
                     self.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 

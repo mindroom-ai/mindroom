@@ -476,6 +476,42 @@ class TestDMPreservationDuringCleanup:
         assert result == {}
         client.room_kick.assert_not_called()
 
+    async def test_cleanup_all_orphaned_bots_routes_self_leave_through_callback(self, tmp_path: Path) -> None:
+        """An active bot's orphan cleanup must not leave outside its lifecycle owner."""
+        client = AsyncMock()
+        client.user_id = "@mindroom_router:server"
+        client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+        config = _config_with_runtime_paths(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        on_self_leave = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", return_value=["!orphaned:server"]),
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=[client.user_id],
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                return_value={client.user_id},
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup.configured_bot_user_ids_for_room",
+                return_value=set(),
+            ),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", new=AsyncMock(return_value=False)),
+        ):
+            result = await cleanup_all_orphaned_bots(
+                client,
+                config,
+                runtime_paths,
+                on_self_leave=on_self_leave,
+            )
+
+        assert result == {"!orphaned:server": [client.user_id]}
+        on_self_leave.assert_awaited_once_with("!orphaned:server")
+        client.room_leave.assert_not_awaited()
+
     async def test_cleanup_all_orphaned_bots_preserves_drifted_persisted_invited_room(
         self,
         tmp_path: Path,

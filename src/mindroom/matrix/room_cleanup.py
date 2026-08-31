@@ -27,6 +27,8 @@ from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -70,6 +72,7 @@ async def _cleanup_orphaned_bots_in_room(
     config: Config,
     runtime_paths: RuntimePaths,
     persisted_invited_rooms_by_bot: dict[str, set[str]] | None = None,
+    on_self_leave: Callable[[str], Awaitable[bool]] | None = None,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
@@ -81,6 +84,7 @@ async def _cleanup_orphaned_bots_in_room(
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
         persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot Matrix user ID
+        on_self_leave: Optional runtime-owned leave operation for the sweeping account
 
     Returns:
         List of bot Matrix user IDs that were removed from the room
@@ -139,13 +143,19 @@ async def _cleanup_orphaned_bots_in_room(
                 configured_bots=sorted(configured_bot_ids),
             )
 
-            if await _remove_orphaned_bot(client, room_id, matrix_id):
+            if await _remove_orphaned_bot(client, room_id, matrix_id, on_self_leave=on_self_leave):
                 removed_bots.append(user_id)
 
     return removed_bots
 
 
-async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id: MatrixID) -> bool:
+async def _remove_orphaned_bot(
+    client: nio.AsyncClient,
+    room_id: str,
+    matrix_id: MatrixID,
+    *,
+    on_self_leave: Callable[[str], Awaitable[bool]] | None = None,
+) -> bool:
     """Remove one orphaned bot from a room, returning True on success.
 
     Matrix forbids kicking your own account (M_FORBIDDEN), so when the orphan
@@ -153,8 +163,12 @@ async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id:
     """
     user_id = matrix_id.full_id
     if user_id == client.user_id:
-        leave_response = await client.room_leave(room_id)
-        if isinstance(leave_response, nio.RoomLeaveResponse):
+        if on_self_leave is not None:
+            left = await on_self_leave(room_id)
+        else:
+            leave_response = await client.room_leave(room_id)
+            left = isinstance(leave_response, nio.RoomLeaveResponse)
+        if left:
             logger.info("orphaned_bot_left", agent=matrix_id.username, room_id=room_id, user_id=user_id)
             return True
         logger.error(
@@ -162,7 +176,6 @@ async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id:
             agent=matrix_id.username,
             room_id=room_id,
             user_id=user_id,
-            error=str(leave_response),
         )
         return False
 
@@ -184,6 +197,8 @@ async def cleanup_all_orphaned_bots(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    on_self_leave: Callable[[str], Awaitable[bool]] | None = None,
 ) -> dict[str, list[str]]:
     """Remove all orphaned bots from all rooms the client has access to.
 
@@ -212,6 +227,7 @@ async def cleanup_all_orphaned_bots(
             config,
             runtime_paths,
             persisted_invited_rooms_by_bot,
+            on_self_leave,
         )
         if room_kicked:
             kicked_bots[room_id] = room_kicked

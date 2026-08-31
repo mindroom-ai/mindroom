@@ -656,7 +656,7 @@ async def test_invite_persistence_failure_compensates_once(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
     leave_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
 
     await _handle_invite(
         bot,
@@ -860,7 +860,7 @@ async def test_router_persistence_failure_compensates_without_retry_state(
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
     )
     leave_room = AsyncMock(return_value=True)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", leave_room)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
 
     first_room = MagicMock(room_id="!first:localhost", canonical_alias=None)

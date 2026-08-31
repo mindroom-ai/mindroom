@@ -73,12 +73,14 @@ class OwnRoomMembership:
     where the same response proves a later membership already began.
     ``invited_room_ids`` also contains other non-joined or unresolved initial
     Sliding Sync states because all of them require the same continuity fence.
+    ``authoritative_invited_room_ids`` contains only final invite memberships.
     """
 
     joined_room_ids: frozenset[str]
     left_room_ids: frozenset[str]
     invited_room_ids: frozenset[str]
     departures: tuple[ReportedDeparture, ...]
+    authoritative_invited_room_ids: frozenset[str] = frozenset()
 
     @property
     def departed_room_ids(self) -> frozenset[str]:
@@ -123,6 +125,7 @@ def own_membership_from_sync(response: nio.SyncResponse, *, self_user_id: str) -
         left_room_ids=left_room_ids,
         invited_room_ids=frozenset(response.rooms.invite),
         departures=tuple(departures),
+        authoritative_invited_room_ids=frozenset(response.rooms.invite),
     )
 
 
@@ -139,6 +142,7 @@ def own_membership_from_sliding_sync(
     joined_room_ids: set[str] = set()
     left_room_ids: set[str] = set()
     invited_room_ids: set[str] = set()
+    authoritative_invited_room_ids: set[str] = set()
     departures: list[ReportedDeparture] = []
     for room_id, room in response.rooms.items():
         membership_unchanged = room.membership is None and not room.initial and not room.stripped_state
@@ -164,12 +168,15 @@ def own_membership_from_sliding_sync(
             joined_room_ids.add(room_id)
         else:
             invited_room_ids.add(room_id)
+            if room.membership == "invite":
+                authoritative_invited_room_ids.add(room_id)
         departures.extend(observed)
     return OwnRoomMembership(
         joined_room_ids=frozenset(joined_room_ids),
         left_room_ids=frozenset(left_room_ids),
         invited_room_ids=frozenset(invited_room_ids),
         departures=tuple(departures),
+        authoritative_invited_room_ids=frozenset(authoritative_invited_room_ids),
     )
 
 

@@ -20,7 +20,6 @@ from mindroom.matrix.client_room_admin import (
     get_joined_rooms,
     get_room_members,
     join_room,
-    leave_room,
 )
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
@@ -286,23 +285,23 @@ class BotRoomLifecycle:
     async def join_configured_rooms(self) -> None:
         """Join configured rooms and restore setup for accepted memberships."""
         client = self._client()
-        joined_rooms = await get_joined_rooms(client)
-        current_rooms = set(joined_rooms or ())
         configured_rooms = set(self.deps.get_configured_rooms())
-        accepted_rooms = await self._accepted_rooms_snapshot() if joined_rooms is not None else set(self.invited_rooms)
+        accepted_rooms = await self._accepted_rooms_snapshot()
 
-        for room_id in configured_rooms | accepted_rooms:
-            if room_id in current_rooms:
-                self._logger().debug("Already joined room", room_id=room_id)
-                await self._on_configured_room_joined(room_id)
-
-        for room_id in configured_rooms - current_rooms:
-            if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
-                current_rooms.add(room_id)
-                self._logger().info("Joined room", room_id=room_id)
-                await self._on_configured_room_joined(room_id)
-            else:
-                self._logger().warning("Failed to join room", room_id=room_id)
+        for room_id in sorted(configured_rooms | accepted_rooms):
+            async with self.invite_ownership(room_id):
+                joined_rooms = await get_joined_rooms(client)
+                if joined_rooms is not None and room_id in joined_rooms:
+                    self._logger().debug("Already joined room", room_id=room_id)
+                    await self._on_configured_room_joined(room_id)
+                    continue
+                if room_id not in configured_rooms:
+                    continue
+                if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
+                    self._logger().info("Joined room", room_id=room_id)
+                    await self._on_configured_room_joined(room_id)
+                else:
+                    self._logger().warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
         """Leave any rooms this bot is no longer configured for."""
@@ -320,16 +319,51 @@ class BotRoomLifecycle:
 
     async def _leave_rooms_with_ownership(self, room_ids: list[str], *, recheck_ownership: bool) -> None:
         """Serialize confirmed local leaves with invite and departure work."""
-        client = self._client()
+        cancellation: asyncio.CancelledError | None = None
+        cleanup_errors: list[Exception] = []
         for room_id in room_ids:
-            async with self.invite_ownership(room_id):
-                if recheck_ownership and room_id not in await self._rooms_to_leave():
-                    continue
-                await leave_rooms(
-                    client,
-                    [room_id],
-                    on_room_left=self._finish_confirmed_leave,
-                )
+            try:
+                async with self.invite_ownership(room_id):
+                    if recheck_ownership and room_id not in await self._rooms_to_leave():
+                        continue
+                    await self._leave_room_with_confirmed_cleanup(room_id)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+            except Exception as error:
+                cleanup_errors.append(error)
+
+        for error in cleanup_errors[1:]:
+            self._logger().error(
+                "additional_room_leave_failure",
+                error=str(error),
+            )
+        if cancellation is not None:
+            if cancellation.__cause__ is None and cleanup_errors:
+                raise cancellation from cleanup_errors[0]
+            raise cancellation
+        if cleanup_errors:
+            raise cleanup_errors[0]
+
+    async def _leave_room_with_confirmed_cleanup(self, room_id: str) -> bool:
+        """Run one Matrix leave and confirmed local cleanup as one protected operation."""
+        confirmed = False
+
+        async def finish_confirmed_leave(confirmed_room_id: str) -> None:
+            nonlocal confirmed
+            confirmed = True
+            await self._finish_confirmed_leave(confirmed_room_id)
+
+        await leave_rooms(
+            self._client(),
+            [room_id],
+            on_room_left=finish_confirmed_leave,
+        )
+        return confirmed
+
+    async def leave_orphaned_room(self, room_id: str) -> bool:
+        """Leave one startup orphan through the runtime room owner."""
+        async with self.invite_ownership(room_id):
+            return await self._leave_room_with_confirmed_cleanup(room_id)
 
     async def _finish_confirmed_leave(self, room_id: str) -> None:
         """Clear local join state only after Matrix confirms departure."""
@@ -601,7 +635,11 @@ class BotRoomLifecycle:
         expected_invite: nio.MatrixInvitedRoom,
     ) -> None:
         """Attempt one compensating leave without creating retry ownership."""
-        client = self._client()
+        if room_id in self.deps.get_configured_rooms():
+            self._discard_invite_if_current(room_id, sender, expected_invite)
+            await self._on_configured_room_joined(room_id)
+            return
+
         self._discard_invite_if_current(room_id, sender, expected_invite)
         self._join_fence_protected_room_ids.add(room_id)
         fence_error: Exception | None = None
@@ -610,14 +648,15 @@ class BotRoomLifecycle:
         except Exception as error:
             fence_error = error
             self._logger().exception("invite_compensating_leave_fence_failed", room_id=room_id)
-        if not await leave_room(client, room_id):
-            if fence_error is not None:
-                raise fence_error
-            return
         try:
-            await self._finish_confirmed_leave(room_id)
+            confirmed = await self._leave_room_with_confirmed_cleanup(room_id)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             self._logger().exception("invite_compensating_leave_cleanup_failed", room_id=room_id)
+            return
+        if not confirmed and fence_error is not None:
+            raise fence_error
 
     def _discard_invite_if_current(
         self,
