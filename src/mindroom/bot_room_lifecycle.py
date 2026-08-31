@@ -29,7 +29,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_accept_invites,
     should_persist_invited_rooms,
 )
-from mindroom.matrix.rooms import leave_rooms
+from mindroom.matrix.rooms import filter_non_dm_rooms, leave_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
@@ -306,11 +306,24 @@ class BotRoomLifecycle:
 
     async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
         """Leave any rooms this bot is no longer configured for."""
-        client = self._client()
         rooms_to_leave = room_ids if room_ids is not None else await self._rooms_to_leave()
-        for room_id in rooms_to_leave:
+        await self._leave_rooms_with_ownership(rooms_to_leave, recheck_ownership=True)
+
+    async def leave_non_dm_rooms_for_cleanup(self, room_ids: list[str]) -> None:
+        """Leave non-DM rooms during entity removal through lifecycle ownership."""
+        client = self._client()
+        non_dm_room_ids = await filter_non_dm_rooms(client, room_ids)
+        preserved_room_ids = set(room_ids) - set(non_dm_room_ids)
+        for room_id in preserved_room_ids:
+            self._logger().debug("dm_room_preserved", room_id=room_id)
+        await self._leave_rooms_with_ownership(non_dm_room_ids, recheck_ownership=False)
+
+    async def _leave_rooms_with_ownership(self, room_ids: list[str], *, recheck_ownership: bool) -> None:
+        """Serialize confirmed local leaves with invite and departure work."""
+        client = self._client()
+        for room_id in room_ids:
             async with self.invite_ownership(room_id):
-                if room_id not in await self._rooms_to_leave():
+                if recheck_ownership and room_id not in await self._rooms_to_leave():
                     continue
                 await leave_rooms(
                     client,
@@ -320,17 +333,29 @@ class BotRoomLifecycle:
 
     async def _finish_confirmed_leave(self, room_id: str) -> None:
         """Clear local join state only after Matrix confirms departure."""
-        forget_error: Exception | None = None
+        cleanup_errors: list[Exception] = []
         try:
             self.forget_invited_room(room_id)
         except Exception as error:
-            forget_error = error
+            cleanup_errors.append(error)
         self._join_fence_protected_room_ids.discard(room_id)
         if self.decrypt_notice_is_fenced(room_id):
-            await self._clear_join_decrypt_notice_fence(room_id)
-        await self.deps.on_room_left(room_id)
-        if forget_error is not None:
-            raise forget_error
+            try:
+                await self._clear_join_decrypt_notice_fence(room_id)
+            except Exception as error:
+                cleanup_errors.append(error)
+        try:
+            await self.deps.on_room_left(room_id)
+        except Exception as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            for error in cleanup_errors[1:]:
+                self._logger().error(
+                    "confirmed_leave_additional_cleanup_failure",
+                    room_id=room_id,
+                    error=str(error),
+                )
+            raise cleanup_errors[0]
 
     async def settle_authoritative_departure(self, room_id: str) -> None:
         """Clear transient join state after Matrix authoritatively reports departure."""
@@ -579,8 +604,15 @@ class BotRoomLifecycle:
         client = self._client()
         self._discard_invite_if_current(room_id, sender, expected_invite)
         self._join_fence_protected_room_ids.add(room_id)
-        if not await leave_room(client, room_id):
+        fence_error: Exception | None = None
+        try:
             await self._ensure_join_decrypt_notice_fence(room_id)
+        except Exception as error:
+            fence_error = error
+            self._logger().exception("invite_compensating_leave_fence_failed", room_id=room_id)
+        if not await leave_room(client, room_id):
+            if fence_error is not None:
+                raise fence_error
             return
         try:
             await self._finish_confirmed_leave(room_id)

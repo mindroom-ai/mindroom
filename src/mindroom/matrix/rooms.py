@@ -691,26 +691,22 @@ async def _await_leave_operation(task: asyncio.Task[None]) -> asyncio.CancelledE
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
-            if task.done():
-                task.result()
-                return cancellation or exc
             cancellation = cancellation or exc
+            if not task.done():
+                continue
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as cleanup_error:
+                raise cancellation from cleanup_error
+            return cancellation
+        except Exception as cleanup_error:
+            if cancellation is not None:
+                raise cancellation from cleanup_error
+            raise
         else:
             return cancellation
-
-
-async def leave_non_dm_rooms(
-    client: nio.AsyncClient,
-    room_ids: list[str],
-    *,
-    on_room_left: Callable[[str], Awaitable[None]],
-) -> None:
-    """Leave non-DM rooms and clean each confirmed departure before continuing."""
-    non_dm_room_ids = await filter_non_dm_rooms(client, room_ids)
-    preserved_room_ids = set(room_ids) - set(non_dm_room_ids)
-    for room_id in preserved_room_ids:
-        logger.debug("dm_room_preserved", room_id=room_id)
-    await leave_rooms(client, non_dm_room_ids, on_room_left=on_room_left)
 
 
 async def leave_rooms(

@@ -53,7 +53,6 @@ from mindroom.matrix.health import (
 )
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
@@ -2239,11 +2238,7 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                await leave_non_dm_rooms(
-                    self.client,
-                    joined_rooms,
-                    on_room_left=self._fence_left_room,
-                )
+                await self._room_lifecycle.leave_non_dm_rooms_for_cleanup(joined_rooms)
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 

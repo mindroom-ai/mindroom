@@ -142,10 +142,11 @@ The inviter must pass access before the join, and the latest access policy plus 
 The cached invite object must still identify the authenticated sender, but a joined sync normally removes its cache entry, so absence after a successful join does not revoke acceptance while a still-present different invite makes the attempt fail closed.
 Accepted-room storage is written only after successful post-join setup and only preserves an existing membership across restart; it never causes an absent room to be joined.
 An authoritative departure revokes both the live invite cache entry and accepted-room preservation.
-Local unowned-room cleanup shares the per-room invite lock, rechecks ownership before leaving, and removes accepted-room preservation as soon as Matrix confirms departure without consuming newer invite evidence.
+Runtime-owned local cleanup, including entity removal, shares the per-room invite lock; unowned-room cleanup rechecks ownership before leaving, and every confirmed leave removes accepted-room preservation without consuming newer invite evidence.
 Ordinary failures after Matrix confirms the join receive one best-effort compensating leave, while interruption or an earlier join failure may require the user to invite the bot again.
 A same-sender cancellation and reinvite that overlaps an in-flight join may also require another invitation rather than creating process-local recovery ownership.
-A failed compensating leave keeps its decrypt-notice fence until Matrix confirms departure within the running process.
+A compensating leave restores its decrypt-notice fence before network I/O, and a failed leave keeps that fence until Matrix confirms departure within the running process.
+Confirmed-leave cleanup settles accepted ownership, decrypt fencing, and the local departure fence independently; caller cancellation remains primary if cleanup also fails.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.

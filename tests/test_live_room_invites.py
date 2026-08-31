@@ -6,7 +6,7 @@ import asyncio
 import threading
 from dataclasses import replace
 from pathlib import Path  # noqa: TC003
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -17,6 +17,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
+from mindroom.matrix.rooms import leave_rooms as leave_matrix_rooms
 from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.membership_models import ReportedDeparture
@@ -730,6 +731,71 @@ async def test_confirmed_local_leave_immediately_revokes_durable_ownership(
 
 
 @pytest.mark.asyncio
+async def test_entity_removal_cleanup_uses_confirmed_leave_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Entity removal cannot bypass accepted-room revocation after leaving."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    monkeypatch.setattr(
+        "mindroom.bot.get_joined_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.is_dm_room",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.leave_room",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(bot, "stop", AsyncMock())
+
+    await bot.cleanup()
+
+    assert load_invited_rooms(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_leave_fences_departure_after_join_fence_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each confirmed-leave cleanup step runs even when an earlier step fails."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(ROOM_ID,)),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[ROOM_ID]),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.leave_room",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        bot._room_lifecycle,
+        "_clear_join_decrypt_notice_fence",
+        AsyncMock(side_effect=OSError("continuity save failed")),
+    )
+    on_room_left = AsyncMock()
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_left=on_room_left,
+    )
+
+    with pytest.raises(OSError, match="continuity save failed"):
+        await bot.leave_unconfigured_rooms()
+
+    on_room_left.assert_awaited_once_with(ROOM_ID)
+
+
+@pytest.mark.asyncio
 async def test_trusted_sync_cannot_clear_fence_during_failed_compensating_leave(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -762,6 +828,74 @@ async def test_trusted_sync_cannot_clear_fence_during_failed_compensating_leave(
     await invite
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_compensating_leave_restores_fence_before_network_leave(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A joined sync cannot leave rejection cleanup unfenced during its leave."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+
+    async def deny_after_joined_sync(_client: object, _room_id: str) -> set[str]:
+        await bot._room_lifecycle.observe_trusted_sync_rooms([ROOM_ID])
+        return {bot.agent_user.user_id}
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        deny_after_joined_sync,
+    )
+    leave_started = asyncio.Event()
+    release_leave = asyncio.Event()
+
+    async def delayed_failed_leave(_client: object, _room_id: str) -> bool:
+        leave_started.set()
+        await release_leave.wait()
+        return False
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_room", delayed_failed_leave)
+
+    invite = asyncio.create_task(bot._room_lifecycle.handle_invite(room, INVITER_ID))
+    await asyncio.wait_for(leave_started.wait(), timeout=1)
+
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+    release_leave.set()
+    await invite
+
+
+@pytest.mark.asyncio
+async def test_leave_cancellation_remains_primary_when_cleanup_fails() -> None:
+    """Protected cleanup failure is retained without swallowing caller cancellation."""
+    client = AsyncMock()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_error = OSError("accepted-room delete failed")
+
+    async def failing_cleanup(_room_id: str) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        raise cleanup_error
+
+    with patch("mindroom.matrix.rooms.leave_room", AsyncMock(return_value=True)):
+        leave = asyncio.create_task(
+            leave_matrix_rooms(client, [ROOM_ID], on_room_left=failing_cleanup),
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        leave.cancel()
+        await asyncio.sleep(0)
+        release_cleanup.set()
+
+        with pytest.raises(asyncio.CancelledError) as cancellation:
+            await leave
+
+    assert isinstance(cancellation.value.__cause__, OSError)
 
 
 @pytest.mark.asyncio

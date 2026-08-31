@@ -115,7 +115,7 @@ One live cache entry owns at most one join attempt, and a failed attempt require
 After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
 The cached invite object must still identify the authenticated sender, but a joined sync normally removes its cache entry, so absence after a successful join does not revoke acceptance while a still-present different invite fails closed.
 An authoritative departure revokes both live invite work and accepted-room preservation.
-A confirmed local leave immediately revokes accepted-room preservation, while transient invite evidence is consumed only by its exact invite attempt or an authoritative departure.
+A confirmed runtime-owned local leave, including entity removal, immediately revokes accepted-room preservation, while transient invite evidence is consumed only by its exact invite attempt or an authoritative departure.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
 A same-sender cancellation and reinvite that overlaps an in-flight join may be consumed by that attempt and require another invitation.
