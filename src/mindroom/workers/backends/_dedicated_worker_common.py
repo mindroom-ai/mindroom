@@ -11,6 +11,7 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_key_agent_name,
@@ -260,16 +261,21 @@ def plan_scoped_visible_state_roots(
         )
 
     effective_private_agent_names = private_agent_names or frozenset()
-    worker_visible_roots = visible_state_roots_for_worker_key(
-        worker_visible_shared_storage_root,
-        worker_key,
-        private_agent_names=effective_private_agent_names,
-    )
-    local_roots = visible_state_roots_for_worker_key(
-        local_shared_storage_root,
-        worker_key,
-        private_agent_names=effective_private_agent_names,
-    )
+    agent_name = worker_key_agent_name(worker_key)
+    if scope == "user_agent" and agent_name is not None and agent_name in effective_private_agent_names:
+        worker_visible_roots = (private_instance_scope_root_path(worker_visible_shared_storage_root, worker_key),)
+        local_roots = (private_instance_scope_root_path(local_shared_storage_root, worker_key),)
+    else:
+        worker_visible_roots = visible_state_roots_for_worker_key(
+            worker_visible_shared_storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
+        local_roots = visible_state_roots_for_worker_key(
+            local_shared_storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
     if not worker_visible_roots or len(worker_visible_roots) != len(local_roots):
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
         raise WorkerBackendError(msg)
