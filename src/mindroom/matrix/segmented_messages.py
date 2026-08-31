@@ -103,6 +103,23 @@ def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
     return pills
 
 
+def _chunk_mentions(source: Mapping[str, Any], body: str) -> dict[str, Any] | None:
+    """Return the mention metadata for just the users one chunk names.
+
+    ``m.mentions`` must travel with the event whose body carries the mention;
+    leaving every mentioned user on the first segment both misattributes the
+    mention and can notify a user whose name never visibly arrived.
+    """
+    mentions = source.get("m.mentions")
+    if not isinstance(mentions, Mapping):
+        return None
+    user_ids = mentions.get("user_ids")
+    if not isinstance(user_ids, list):
+        return None
+    present = [user_id for user_id in user_ids if isinstance(user_id, str) and user_id in body]
+    return {"user_ids": present} if present else None
+
+
 def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
     """Render one chunk, restoring mention pills its plain body cannot carry."""
     formatted = markdown_to_html(body)
@@ -134,6 +151,11 @@ def _rich_text_content(
     candidate["body"] = body
     candidate["format"] = "org.matrix.custom.html"
     candidate["formatted_body"] = _render_segment_html(source, body)
+    chunk_mentions = _chunk_mentions(source, body)
+    if chunk_mentions is None:
+        candidate.pop("m.mentions", None)
+    else:
+        candidate["m.mentions"] = chunk_mentions
     if include_relation:
         relation = source.get("m.relates_to")
         if isinstance(relation, Mapping):
@@ -153,6 +175,11 @@ def _edit_content_chunk(
     candidate["format"] = "org.matrix.custom.html"
     candidate["formatted_body"] = _render_segment_html(source, candidate["body"])
     candidate["m.new_content"] = replacement
+    chunk_mentions = _chunk_mentions(source, body)
+    if chunk_mentions is None:
+        candidate.pop("m.mentions", None)
+    else:
+        candidate["m.mentions"] = chunk_mentions
     return candidate
 
 

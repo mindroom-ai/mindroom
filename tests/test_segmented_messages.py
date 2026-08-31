@@ -257,8 +257,9 @@ def test_mention_pills_survive_segmentation() -> None:
     mentioned = [part for part in parts if "@alice:localhost" in part["body"]]
     assert len(mentioned) == 1
     assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in mentioned[0]["formatted_body"]
-    assert segmented.first["m.mentions"] == {"user_ids": ["@alice:localhost"]}
-    assert all("m.mentions" not in part for part in segmented.continuations)
+    # m.mentions belongs to the event whose body carries the mention.
+    assert mentioned[0]["m.mentions"] == {"user_ids": ["@alice:localhost"]}
+    assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
 
 
 def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:
