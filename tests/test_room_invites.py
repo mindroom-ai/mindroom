@@ -2413,11 +2413,24 @@ async def test_restart_recovers_pending_invite_after_successful_join(
     restarted_membership_fence = MagicMock()
     restarted_membership_fence.note_membership_restarted = AsyncMock()
     restarted_bot._membership_fence = restarted_membership_fence
+    left_room_ids: list[str] = []
 
-    await restarted_bot._room_lifecycle.reconcile_pending_invites()
+    async def record_room_leaves(
+        _client: object,
+        room_ids: list[str],
+        *,
+        on_room_left: Callable[[str], Awaitable[None]],
+    ) -> list[str]:
+        del on_room_left
+        left_room_ids.extend(room_ids)
+        return room_ids
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_room_leaves)
+
+    await restarted_bot.ensure_rooms()
 
     join_room.assert_awaited_once_with(bot.client, room_id)
-    restarted_bot.client.joined_rooms.assert_awaited_once_with()
+    assert left_room_ids == []
     assert restarted_bot._room_lifecycle.invited_rooms == {room_id}
     assert load_invited_rooms(_invited_rooms_path(config, "agent1")) == {room_id}
     assert _pending_room_invites(config, "agent1") == {}

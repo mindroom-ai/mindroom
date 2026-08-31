@@ -1972,9 +1972,11 @@ class AgentBot:
 
         This consolidates room management into a single method that:
         1. Joins configured rooms
-        2. Leaves unconfigured rooms
+        2. Recovers interrupted invite joins
+        3. Leaves unconfigured rooms
         """
         await self.join_configured_rooms()
+        await self.reconcile_pending_invites()
         await self.leave_unconfigured_rooms()
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
