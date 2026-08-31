@@ -220,6 +220,7 @@ class TestRequireAgentCredentialManagementAuthorized:
             config=_config(credential_managers=self._credential_managers),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
+            allow_private_agent_requester=True,
         )
         assert identity.requester_id == "@alice:example.org"
         assert identity.agent_name == "general"
@@ -277,6 +278,7 @@ class TestRequireAgentCredentialManagementAuthorized:
             config=_config(private_per=private_per),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
+            allow_private_agent_requester=True,
         )
 
         assert identity.requester_id == "@alice:example.org"

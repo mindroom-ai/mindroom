@@ -260,6 +260,7 @@ def _resolve_tool_availability_context(
             config=config,
             runtime_paths=runtime_paths,
             agent_name=scope_request.agent_name,
+            allow_private_agent_requester=execution_scope in {"user", "user_agent"},
         )
         if scope_request.agent_name is not None
         else None

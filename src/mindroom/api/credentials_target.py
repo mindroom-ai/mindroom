@@ -132,13 +132,23 @@ def resolve_request_credentials_target(
             execution_identity=None,
             allowed_shared_services=None,
         )
+    execution_scope = scope_request.requested_execution_scope
+    allow_private_agent_requester = (
+        scope_request.persisted_policy is not None
+        and scope_request.persisted_policy.is_private
+        and execution_scope in {"user", "user_agent"}
+        and not any(
+            credential_service_policy(service, execution_scope).uses_primary_runtime_global_credentials
+            for service in service_names
+        )
+    )
     execution_identity = require_agent_credential_management_authorized(
         request,
         config=config,
         runtime_paths=runtime_paths,
         agent_name=scope_request.agent_name,
+        allow_private_agent_requester=allow_private_agent_requester,
     )
-    execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
             runtime_paths=runtime_paths,
@@ -157,7 +167,11 @@ def resolve_request_credentials_target(
         execution_scope=execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
     )
-    if not allow_private_scopes and not dashboard_credentials_supported_for_scope(execution_scope):
+    if (
+        not allow_private_scopes
+        and not allow_private_agent_requester
+        and not dashboard_credentials_supported_for_scope(execution_scope)
+    ):
         raise HTTPException(
             status_code=400,
             detail=(

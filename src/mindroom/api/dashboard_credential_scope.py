@@ -221,6 +221,7 @@ def require_agent_credential_management_authorized(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
+    allow_private_agent_requester: bool = False,
 ) -> ToolExecutionIdentity:
     """Require the dashboard requester to be allowed to manage one agent's credentials."""
     execution_identity = build_dashboard_execution_identity(
@@ -233,6 +234,7 @@ def require_agent_credential_management_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
+        allow_private_agent_requester=allow_private_agent_requester,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
     return execution_identity

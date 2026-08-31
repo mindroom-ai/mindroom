@@ -470,6 +470,7 @@ def _verify_browser_reset_intent(
         config=config,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
+        allow_private_agent_requester=True,
     )
     try:
         target = resolve_oauth_reset_target(
