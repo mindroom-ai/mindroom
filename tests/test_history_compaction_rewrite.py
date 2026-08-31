@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ from mindroom.hooks import (
     EVENT_COMPACTION_BEFORE,
     CompactionHookContext,
     HookRegistry,
+    HookRegistryState,
     build_hook_matrix_admin,
     hook,
 )
@@ -627,9 +629,14 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     storage.upsert_session(session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
+    active_states: list[bool] = []
 
     @hook(EVENT_COMPACTION_BEFORE, priority=10)
     async def before_first(ctx: CompactionHookContext) -> None:
+        active_states.append(ctx.is_active())
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(ctx.is_active())
+        registry_state.registry = registry
         persisted = get_agent_session(storage, "session-1")
         assert persisted is not None
         assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
@@ -662,12 +669,16 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         )
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before_first, before_second, after])])
+    registry_state = HookRegistryState(registry)
     agent = _agent(db=storage)
-    runtime_context = _hook_runtime_context(
-        config=config,
-        runtime_paths=runtime_paths,
-        registry=registry,
-        session_id="session-1",
+    runtime_context = replace(
+        _hook_runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            registry=registry,
+            session_id="session-1",
+        ),
+        hook_registry_state=registry_state,
     )
 
     with (
@@ -713,6 +724,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     )
     assert observed[0][3] == prepared.compaction_outcomes[0].before_tokens
     assert observed[2][3] == prepared.compaction_outcomes[0].before_tokens
+    assert active_states == [True, False]
 
 
 @pytest.mark.asyncio

@@ -697,6 +697,7 @@ class ResponseLifecycle:
             session_id=watch.session_id,
             room_id=watch.room_id,
             thread_id=watch.thread_id,
+            _hook_registry_state=watch.tool_context.hook_registry_state,
         )
         await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
 

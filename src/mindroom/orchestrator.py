@@ -36,6 +36,7 @@ from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
     HookRegistry,
+    HookRegistryState,
     build_hook_matrix_admin,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
@@ -274,7 +275,11 @@ class _MultiAgentOrchestrator:
     plugin_watch: PluginWatchState = field(init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
-    hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
+    _hook_registry_state: HookRegistryState = field(
+        default_factory=lambda: HookRegistryState(HookRegistry.empty()),
+        init=False,
+        repr=False,
+    )
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _router_reply_memberships_live_sync_ready: asyncio.Event = field(
         default_factory=asyncio.Event,
@@ -355,6 +360,16 @@ class _MultiAgentOrchestrator:
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
             mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
         )
+
+    @property
+    def hook_registry(self) -> HookRegistry:
+        """Return the currently active hook registry."""
+        return self._hook_registry_state.registry
+
+    @hook_registry.setter
+    def hook_registry(self, value: HookRegistry) -> None:
+        """Update the active hook registry snapshot."""
+        self._hook_registry_state.registry = value
 
     @property
     def script_runtime(self) -> ScriptRuntimeLifecycle:
@@ -1568,6 +1583,7 @@ class _MultiAgentOrchestrator:
             matrix_admin=self.hook_matrix_admin(),
             room_state_querier=self.hook_room_state_querier(),
             room_state_putter=self.hook_room_state_putter(),
+            _hook_registry_state=self._hook_registry_state,
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(added_entities)),
             removed_entities=tuple(sorted(removed_entities)),
@@ -1593,9 +1609,10 @@ class _MultiAgentOrchestrator:
         await self._approval_transport.reconcile_unavailable_entities(removed_entities)
 
         for entity_name in removed_entities:
-            bot = self.agent_bots.pop(entity_name, None)
+            bot = self.agent_bots.get(entity_name)
             if bot is not None:
                 await bot.cleanup()
+                self.agent_bots.pop(entity_name, None)
 
     async def _stop_entities_before_mcp_sync(
         self,
@@ -2190,6 +2207,8 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+        self.hook_registry = HookRegistry.empty()
+        set_scheduling_hook_registry(self.hook_registry)
         self.invalidate_agent_reply_memberships(reason="shutdown")
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()

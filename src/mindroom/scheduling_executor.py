@@ -17,6 +17,7 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOUR
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
+    HookRegistryState,
     ScheduleFiredContext,
     build_hook_message_sender,
     build_hook_room_state_putter,
@@ -40,13 +41,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
+_SCHEDULING_HOOK_REGISTRY_STATE = HookRegistryState(HookRegistry.empty())
 
 
 def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
     """Update the immutable hook snapshot used by scheduled task runners."""
-    global _ACTIVE_HOOK_REGISTRY
-    _ACTIVE_HOOK_REGISTRY = hook_registry
+    _SCHEDULING_HOOK_REGISTRY_STATE.registry = hook_registry
 
 
 @dataclass(frozen=True)
@@ -188,7 +188,8 @@ async def execute_scheduled_workflow(
     with bound_log_context(**target.log_context):
         try:
             message_text = workflow.message
-            if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
+            hook_registry = _SCHEDULING_HOOK_REGISTRY_STATE.registry
+            if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
                 context = ScheduleFiredContext(
                     event_name=EVENT_SCHEDULE_FIRED,
                     plugin_name="",
@@ -212,8 +213,9 @@ async def execute_scheduled_workflow(
                     thread_id=target.resolved_thread_id,
                     created_by=workflow.created_by,
                     message_text=message_text,
+                    _hook_registry_state=_SCHEDULING_HOOK_REGISTRY_STATE,
                 )
-                await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
+                await emit(hook_registry, EVENT_SCHEDULE_FIRED, context)
                 if context.suppress:
                     logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
                     return ScheduledWorkflowOutcome(delivered=False, failure_reason="suppressed by hook")

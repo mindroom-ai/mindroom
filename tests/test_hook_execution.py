@@ -25,6 +25,7 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookRegistry,
+    HookRegistryState,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
@@ -195,6 +196,11 @@ def _final_response_transform_context(
     )
 
 
+def test_unbound_hook_context_is_inactive(tmp_path: Path) -> None:
+    """A context without lifecycle bindings must fail closed."""
+    assert _message_received_context(tmp_path).is_active() is False
+
+
 def test_final_response_transform_builtin_event_can_register() -> None:
     """The final-response transform event should be accepted as a built-in hook."""
 
@@ -237,6 +243,32 @@ async def test_emit_observer_continues_after_failure_and_propagates_suppression(
 
     assert seen == ["failing", "suppressing"]
     assert context.suppress is True
+
+
+@pytest.mark.asyncio
+async def test_bound_hook_context_tracks_whether_its_registry_is_still_active(
+    tmp_path: Path,
+) -> None:
+    """Long-running hooks can stop work after their registry is replaced."""
+    observed: list[bool] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def observer(ctx: MessageReceivedContext) -> None:
+        observed.append(ctx.is_active())
+        registry_state.registry = replacement_registry
+        observed.append(ctx.is_active())
+
+    active_registry = HookRegistry.from_plugins([_plugin("observer-plugin", [observer])])
+    replacement_registry = HookRegistry.empty()
+    registry_state = HookRegistryState(active_registry)
+    context = replace(
+        _message_received_context(tmp_path),
+        _hook_registry_state=registry_state,
+    )
+
+    await emit(active_registry, EVENT_MESSAGE_RECEIVED, context)
+
+    assert observed == [True, False]
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         HookMatrixAdmin,
         HookMessageSender,
         HookRegistry,
+        HookRegistryState,
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
@@ -174,6 +175,7 @@ class _ResolvedToolContext:
     room_state_querier: HookRoomStateQuerier | None
     room_state_putter: HookRoomStatePutter | None
     message_received_depth: int
+    hook_registry_state: HookRegistryState | None
     origin: BackgroundScriptToolOrigin | None
 
     def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +194,7 @@ class _ResolvedToolContext:
             "room_state_querier": self.room_state_querier,
             "room_state_putter": self.room_state_putter,
             "message_received_depth": self.message_received_depth,
+            "_hook_registry_state": self.hook_registry_state,
         }
 
 
@@ -273,6 +276,7 @@ def _resolve_tool_context(
             room_state_querier=bindings.room_state_querier,
             room_state_putter=bindings.room_state_putter,
             message_received_depth=bindings.message_received_depth,
+            hook_registry_state=runtime_context.hook_registry_state,
             origin=bridge_context.origin,
         )
 
@@ -297,6 +301,7 @@ def _resolve_tool_context(
             room_state_querier=None,
             room_state_putter=None,
             message_received_depth=0,
+            hook_registry_state=None,
             origin=bridge_context.origin,
         )
 
@@ -318,6 +323,7 @@ def _resolve_tool_context(
         room_state_querier=None,
         room_state_putter=None,
         message_received_depth=0,
+        hook_registry_state=None,
         origin=bridge_context.origin,
     )
 

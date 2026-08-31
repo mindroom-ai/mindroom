@@ -114,6 +114,7 @@ def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> Non
             reconcile_room_directories(
                 output_dir,
                 accumulator.retained_room_keys,
+                trusted_root=accumulator.target.trusted_root,
             )
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(
@@ -173,7 +174,10 @@ def _validated_targets(
             )
             continue
         try:
-            prepare_export_root(accumulator.target.output_dir)
+            prepare_export_root(
+                accumulator.target.output_dir,
+                trusted_root=accumulator.target.trusted_root,
+            )
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(failure_for_target(f"output directory preparation failed: {exc}"))
             logger.warning(

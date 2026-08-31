@@ -28,6 +28,7 @@ class ResolvedAgentWorkspace:
     """Resolved workspace paths for one agent in one execution scope."""
 
     root: Path
+    lexical_root: Path
     context_files: tuple[Path, ...]
     file_memory_path: Path | None
 
@@ -381,6 +382,7 @@ def _resolve_workspace(
     if agent_config.private is None:
         if config.resolve_entity(agent_name).memory_backend != "file":
             return None
+        lexical_root = state_storage_path.expanduser() / "workspace"
         root = resolve_workspace_relative_path(
             state_storage_path,
             "workspace",
@@ -390,6 +392,7 @@ def _resolve_workspace(
             root.mkdir(parents=True, exist_ok=True)
         return ResolvedAgentWorkspace(
             root=root,
+            lexical_root=lexical_root,
             context_files=(),
             file_memory_path=root,
         )
@@ -401,6 +404,7 @@ def _resolve_workspace(
         msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
         raise ValueError(msg)
 
+    lexical_root = state_storage_path.expanduser() / workspace.root_path
     root = resolve_workspace_relative_path(
         state_storage_path,
         workspace.root_path,
@@ -436,6 +440,7 @@ def _resolve_workspace(
 
     return ResolvedAgentWorkspace(
         root=root,
+        lexical_root=lexical_root,
         context_files=context_files,
         file_memory_path=file_memory_path,
     )
