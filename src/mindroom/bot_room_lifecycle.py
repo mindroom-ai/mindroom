@@ -444,6 +444,26 @@ class BotRoomLifecycle:
             if room.inviter is not None:
                 await self.handle_invite(room, room.inviter, send_welcome=False)
 
+    async def _attempt_invite_join(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+    ) -> bool:
+        """Run the one join attempt owned by an exact live invite."""
+        try:
+            join_outcome = await self._join_room_with_decrypt_notice_fence(client, room_id)
+        except (Exception, asyncio.CancelledError):
+            self._discard_invite_if_current(room_id, sender, expected_invite)
+            raise
+        if join_outcome is RoomJoinOutcome.JOINED:
+            return True
+        self._logger().error("Failed to join room", room_id=room_id)
+        self._discard_invite_if_current(room_id, sender, expected_invite)
+        await self._clear_join_decrypt_notice_fence(room_id)
+        return False
+
     async def handle_invite(
         self,
         room: nio.MatrixRoom,
@@ -477,20 +497,15 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            try:
-                join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
-            except (Exception, asyncio.CancelledError):
-                self._discard_invite_if_current(room.room_id, sender, current_invite)
-                raise
-            if join_outcome is not RoomJoinOutcome.JOINED:
-                self._logger().error("Failed to join room", room_id=room.room_id)
-                self._discard_invite_if_current(room.room_id, sender, current_invite)
-                await self._clear_join_decrypt_notice_fence(room.room_id)
+            if not await self._attempt_invite_join(client, room.room_id, sender, current_invite):
                 return
 
             self._logger().info("Joined room", room_id=room.room_id)
             try:
                 accepted = await self._accept_joined_invite(room.room_id, sender, current_invite)
+            except asyncio.CancelledError:
+                self._discard_invite_if_current(room.room_id, sender, current_invite)
+                raise
             except Exception:
                 self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
                 accepted = False

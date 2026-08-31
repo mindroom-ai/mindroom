@@ -137,6 +137,43 @@ async def test_raised_join_failure_consumes_exact_live_invite(
 
 
 @pytest.mark.asyncio
+async def test_postjoin_cancellation_consumes_exact_live_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation after joining cannot reuse the invite that owned the attempt."""
+    config = bind_runtime_paths(
+        Config(
+            administrators=[INVITER_ID],
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(
+                    current_room_members=False,
+                    members_of_rooms=[],
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot, room = _router_bot(config)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_joined=AsyncMock(side_effect=asyncio.CancelledError),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    assert bot.client.invited_rooms == {}
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+    await bot._room_lifecycle.reconcile_invites()
+    assert join_room.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_policy_is_rechecked_after_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
