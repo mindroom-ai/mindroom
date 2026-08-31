@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import AsyncExitStack
 from contextvars import Context
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
@@ -2020,15 +2021,17 @@ class AgentBot:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
         forget_error: Exception | None = None
-        for room_id in departed_room_ids:
-            self._room_lifecycle.discard_live_invite(room_id)
-            try:
-                self._room_lifecycle.forget_invited_room(room_id)
-            except Exception as error:
-                forget_error = forget_error or error
-        await self._membership_fence.fence_reported_departures(membership.departures)
-        for room_id in departed_room_ids:
-            await self._room_lifecycle.settle_authoritative_departure(room_id)
+        async with AsyncExitStack() as ownership:
+            for room_id in sorted(departed_room_ids):
+                await ownership.enter_async_context(self._room_lifecycle.invite_ownership(room_id))
+                self._room_lifecycle.discard_live_invite(room_id)
+                try:
+                    self._room_lifecycle.forget_invited_room(room_id)
+                except Exception as error:
+                    forget_error = forget_error or error
+            await self._membership_fence.fence_reported_departures(membership.departures)
+            for room_id in departed_room_ids:
+                await self._room_lifecycle.settle_authoritative_departure(room_id)
         if forget_error is not None:
             raise forget_error
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)

@@ -117,6 +117,26 @@ async def test_invite_reconciliation_uses_only_current_matrix_cache(
 
 
 @pytest.mark.asyncio
+async def test_raised_join_failure_consumes_exact_live_invite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A raised join failure cannot retry without a fresh Matrix invite."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    join_room = AsyncMock(side_effect=OSError("join unavailable"))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+
+    with pytest.raises(OSError, match="join unavailable"):
+        await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    assert bot.client.invited_rooms == {}
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+    await bot._room_lifecycle.reconcile_invites()
+    assert join_room.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_policy_is_rechecked_after_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -592,10 +612,26 @@ async def test_new_acceptance_during_departure_fence_is_not_overwritten(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Departure removes old ownership before awaiting, so later acceptance wins."""
-    config = _router_config(tmp_path)
+    """Departure settles old ownership before a later invite can acquire it."""
+    config = bind_runtime_paths(
+        Config(
+            administrators=[INVITER_ID],
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(
+                    current_room_members=False,
+                    members_of_rooms=[],
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
     bot, _room = _router_bot(config)
     bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    bot._room_lifecycle.apply_continuity_record(
+        bot._sync_continuity_store.update_join_fences(add=(ROOM_ID,)),
+    )
     fence_started = asyncio.Event()
     release_fence = asyncio.Event()
 
@@ -616,8 +652,21 @@ async def test_new_acceptance_during_departure_fence_is_not_overwritten(
     )
     await asyncio.wait_for(fence_started.wait(), timeout=1)
     assert load_invited_rooms(_accepted_path(config)) == set()
-    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+
+    new_invite = nio.MatrixInvitedRoom(ROOM_ID, bot.agent_user.user_id)
+    new_invite.inviter = INVITER_ID
+    bot.client.invited_rooms[ROOM_ID] = new_invite
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    invite = asyncio.create_task(bot._room_lifecycle.handle_invite(new_invite, INVITER_ID))
+    await asyncio.sleep(0)
+    join_room.assert_not_awaited()
+
     release_fence.set()
     await departure
+    await invite
 
+    join_room.assert_awaited_once_with(bot.client, ROOM_ID)
     assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)

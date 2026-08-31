@@ -101,6 +101,10 @@ class BotRoomLifecycle:
             locks[room_id] = lock
         return lock
 
+    def invite_ownership(self, room_id: str) -> AbstractAsyncContextManager[None]:
+        """Serialize live invite work with authoritative departure for one room."""
+        return self._lock_for_room(self._invite_join_locks, room_id)
+
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
         if client is None:
@@ -448,7 +452,7 @@ class BotRoomLifecycle:
         send_welcome: bool = True,
     ) -> None:
         """Accept one current Matrix invite without creating recovery state."""
-        async with self._lock_for_room(self._invite_join_locks, room.room_id):
+        async with self.invite_ownership(room.room_id):
             client = self._client()
             current_invite = client.invited_rooms.get(room.room_id)
             if current_invite is None or current_invite.inviter != sender:
@@ -473,7 +477,11 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
+            try:
+                join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
+            except (Exception, asyncio.CancelledError):
+                self._discard_invite_if_current(room.room_id, sender, current_invite)
+                raise
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
                 self._discard_invite_if_current(room.room_id, sender, current_invite)
