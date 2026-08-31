@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import HTTPException, Request
 
 from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
-from mindroom.authorization import is_platform_administrator, is_sender_allowed_for_agent_credential_management
+from mindroom.authorization import (
+    is_platform_administrator,
+    is_sender_allowed_for_agent_credential_management,
+    is_sender_allowed_for_agent_oauth_connection_management,
+)
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -238,27 +242,6 @@ def require_agent_credential_management_authorized(
     return execution_identity
 
 
-def _require_private_agent_requester_authorized(
-    request: Request,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-) -> ToolExecutionIdentity:
-    """Require a bound requester identity for one requester-private agent."""
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is None:
-        raise HTTPException(status_code=403, detail=f"Agent '{agent_name}' is not requester-private")
-    execution_identity = build_dashboard_execution_identity(
-        request,
-        agent_name,
-        runtime_paths=runtime_paths,
-    )
-    if execution_identity.requester_id is None:
-        raise HTTPException(status_code=403, detail=f"Could not resolve requester identity for agent '{agent_name}'")
-    return execution_identity
-
-
 def require_agent_oauth_connection_authorized(
     request: Request,
     *,
@@ -267,20 +250,22 @@ def require_agent_oauth_connection_authorized(
     agent_name: str,
 ) -> ToolExecutionIdentity:
     """Require requester-private or managed-agent authority for OAuth connections."""
-    agent = config.agents.get(agent_name)
-    if agent is not None and agent.private is not None:
-        return _require_private_agent_requester_authorized(
-            request,
-            config=config,
-            runtime_paths=runtime_paths,
-            agent_name=agent_name,
-        )
-    return require_agent_credential_management_authorized(
+    execution_identity = build_dashboard_execution_identity(
         request,
-        config=config,
+        agent_name,
         runtime_paths=runtime_paths,
-        agent_name=agent_name,
     )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_sender_allowed_for_agent_oauth_connection_management(
+        requester_id,
+        agent_name=agent_name,
+        config=config,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
+        )
+    return execution_identity
 
 
 def require_platform_administrator_authorized(
