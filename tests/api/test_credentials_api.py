@@ -87,6 +87,7 @@ def client(tmp_path: Path) -> TestClient:
             process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
+    _publish_committed_runtime_config(app, _config_with_worker_scope(None))
     return TestClient(app)
 
 
@@ -1503,12 +1504,12 @@ class TestCredentialsAPI:
         assert credentials_target.primary_runtime_scoped_services_for_target(target) == {"acme_oauth"}
         assert credentials_target.primary_runtime_scoped_services_for_target(replace(target, agent_name=None)) == set()
 
-    def test_private_agent_requester_can_save_own_credentials(
+    def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
         client: TestClient,
     ) -> None:
-        """Private-agent writes must use the authenticated requester's isolated store."""
-        runtime_paths = _use_owner_runtime(client.app)
+        """Private-agent self-service stays limited to registered connection credentials."""
+        _use_owner_runtime(client.app)
         config = _config_with_worker_scope(
             None,
             administrators=[],
@@ -1516,32 +1517,12 @@ class TestCredentialsAPI:
             private_per="user_agent",
         )
         _publish_committed_runtime_config(client.app, config)
-        manager = get_runtime_credentials_manager(runtime_paths)
-
         response = client.post(
             "/api/credentials/weather?agent_name=general",
             json={"credentials": {"api_key": "weather-key"}},
         )
 
-        assert response.status_code == 200
-        worker_key = resolve_worker_key(
-            "user_agent",
-            ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="general",
-                requester_id="@alice:example.org",
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
-            ),
-            agent_name="general",
-        )
-        assert worker_key is not None
-        assert manager.for_worker(worker_key).load_credentials("weather") == {
-            "api_key": "weather-key",
-            "_source": "ui",
-        }
+        assert response.status_code == 403
 
     def test_private_agent_requester_cannot_edit_global_oauth_client_config(self, client: TestClient) -> None:
         """Private-agent ownership must not grant deployment-global OAuth client authority."""
@@ -1561,6 +1542,62 @@ class TestCredentialsAPI:
 
         assert response.status_code == 403
         assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_drive_oauth_client") is None
+
+    @pytest.mark.parametrize("agent_name", [None, "general"])
+    @pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+    def test_non_admin_cannot_manage_global_oauth_client_config(
+        self,
+        client: TestClient,
+        agent_name: str | None,
+        method: str,
+    ) -> None:
+        """Neither global access nor agent-manager authority may edit deployment-global OAuth clients."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            administrators=["@admin:example.org"],
+            credential_managers=["@alice:example.org"],
+        )
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {"client_id": "original", "client_secret": "original-secret", "_source": "ui"},
+        )
+        query = f"?agent_name={agent_name}" if agent_name is not None else ""
+
+        response = client.request(
+            method,
+            f"/api/credentials/google_drive_oauth_client{query}",
+            json={"credentials": {"client_id": "attacker", "client_secret": "secret"}},
+        )
+
+        assert response.status_code == 403
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "original",
+            "client_secret": "original-secret",
+            "_source": "ui",
+        }
+
+    @pytest.mark.parametrize("agent_name", [None, "general"])
+    def test_admin_can_manage_global_oauth_client_config(self, client: TestClient, agent_name: str | None) -> None:
+        """Platform administrators retain global OAuth client configuration authority."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        query = f"?agent_name={agent_name}" if agent_name is not None else ""
+
+        response = client.post(
+            f"/api/credentials/google_drive_oauth_client{query}",
+            json={"credentials": {"client_id": "admin-client", "client_secret": "admin-secret"}},
+        )
+
+        assert response.status_code == 200
+        assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_drive_oauth_client") == {
+            "client_id": "admin-client",
+            "client_secret": "admin-secret",
+            "_source": "ui",
+        }
 
     def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
         self,

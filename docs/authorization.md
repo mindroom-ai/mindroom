@@ -121,7 +121,8 @@ Platform administrators may use administrative commands when their independent f
 
 `agents.<name>.credential_managers` also contains concrete Matrix user IDs and does not accept wildcards.
 A credential manager may manage only the named shared agent's credentials and OAuth connections.
-Authenticated requesters may manage credentials and OAuth connections for their own requester-private agent scope without a static credential-manager entry.
+Authenticated requesters may manage OAuth connections for their own requester-private agent scope without a static credential-manager entry.
+Deployment-global OAuth client configuration remains restricted to platform administrators.
 
 Shared-agent dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests resolve to the owner Matrix identity.

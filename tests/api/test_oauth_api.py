@@ -2795,6 +2795,7 @@ def test_generated_mcp_oauth_routes_follow_agent_scope_for_connect_status_and_di
     )
     config_payload = _mcp_oauth_config_payload(worker_scope=authored_worker_scope)
     if private_scope is not None:
+        config_payload["administrators"] = ["@admin:example.org"]
         agent_payload = config_payload["agents"]["general"]
         agent_payload.pop("worker_scope")
         agent_payload["private"] = {"per": private_scope}

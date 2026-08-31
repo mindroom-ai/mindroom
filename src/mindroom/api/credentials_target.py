@@ -14,6 +14,7 @@ from mindroom.api.dashboard_credential_scope import (
     dashboard_scope_label,
     reject_unbound_private_dashboard_requester,
     require_agent_credential_management_authorized,
+    require_platform_administrator_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -101,8 +102,19 @@ def resolve_request_credentials_target(
             request,
         )
 
-    # Plain dashboard credential reads/writes with no agent selection remain global and
-    # must not start depending on a persisted config file.
+    global_config_requested = any(
+        credential_service_policy(service, None).uses_primary_runtime_global_credentials for service in service_names
+    )
+    if global_config_requested:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        require_platform_administrator_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    # Non-global dashboard credential reads/writes with no agent selection retain the
+    # legacy primary-runtime target without requiring a persisted config file.
     if agent_name is None and not execution_scope_override_provided:
         return RequestCredentialsTarget(
             runtime_paths=runtime_paths,
@@ -134,7 +146,8 @@ def resolve_request_credentials_target(
         )
     execution_scope = scope_request.requested_execution_scope
     allow_private_agent_requester = (
-        scope_request.persisted_policy is not None
+        allow_private_scopes
+        and scope_request.persisted_policy is not None
         and scope_request.persisted_policy.is_private
         and execution_scope in {"user", "user_agent"}
         and not any(
@@ -167,11 +180,7 @@ def resolve_request_credentials_target(
         execution_scope=execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
     )
-    if (
-        not allow_private_scopes
-        and not allow_private_agent_requester
-        and not dashboard_credentials_supported_for_scope(execution_scope)
-    ):
+    if not allow_private_scopes and not dashboard_credentials_supported_for_scope(execution_scope):
         raise HTTPException(
             status_code=400,
             detail=(

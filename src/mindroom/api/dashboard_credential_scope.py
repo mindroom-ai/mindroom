@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import HTTPException, Request
 
 from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.authorization import is_platform_administrator, is_sender_allowed_for_agent_credential_management
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -237,4 +237,22 @@ def require_agent_credential_management_authorized(
         allow_private_agent_requester=allow_private_agent_requester,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
+    return execution_identity
+
+
+def require_platform_administrator_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
+    """Require platform-administrator authority for a global credential target."""
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        "global_credentials",
+        runtime_paths=runtime_paths,
+    )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_platform_administrator(requester_id, config):
+        raise HTTPException(status_code=403, detail="Not authorized to manage global credential configuration")
     return execution_identity

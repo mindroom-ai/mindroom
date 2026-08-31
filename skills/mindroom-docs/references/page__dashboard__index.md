@@ -231,7 +231,8 @@ Credentials support scoping via query parameters:
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
 Agent-scoped credential routes for shared agents require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
-Requester-private agents allow authenticated requesters to manage credentials in their own isolated scope.
+Requester-private agents allow authenticated requesters to manage OAuth connections in their own isolated scope.
+Deployment-global OAuth client configuration requires platform-administrator authority, with or without `agent_name`.
 Responder access and room membership never grant credential-management access.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
