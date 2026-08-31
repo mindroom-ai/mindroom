@@ -135,8 +135,11 @@ The tokenless room-member baseline remains pending across rejected response atte
 After a live reset from a certified checkpoint, unseen state-block joins also enter the exact durable dispatch path so a join omitted from the replay timeline is not lost.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
-Invites take neither path and are not journalled at all: an invite carries no Matrix event ID to key a durable row on, and it does not need one, because an invite the bot has not acted on reappears in every sync response until it does.
-The homeserver is therefore already providing the redelivery a journal row would have, so invite handling is a plain background task.
+Invites take neither durable event path because an invite snapshot carries no Matrix event ID to key a journal row on.
+`_on_invite_before_sync_certification` instead persists the inviter as limited pending work before starting a plain background task.
+On later trusted syncs, MindRoom retries that pending work only while nio still caches the exact invite or uses it with an existing join fence to leave an unaccepted completed join.
+Neither a saved pending record nor a cached invite recreates the narrow live-inviter authorization exception.
+Incremental `/sync` does not promise to repeat an unchanged invite, so interrupted live authorization can require a new invitation.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.

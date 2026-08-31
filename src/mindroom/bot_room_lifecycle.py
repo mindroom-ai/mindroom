@@ -83,6 +83,14 @@ class _CurrentRoomInvite:
     inviter_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class _InviteJoinCleanup:
+    """The exact invite attempt whose successful join must be undone."""
+
+    invite: _CurrentRoomInvite | None
+    inviter_id: str
+
+
 class BotRoomLifecycle:
     """Own room joins, leaves, invite handling, and invited-room persistence."""
 
@@ -99,6 +107,7 @@ class BotRoomLifecycle:
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._current_room_invites = {}
         self._current_room_invite_revision = 0
+        self._invite_join_cleanups: dict[str, _InviteJoinCleanup] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
@@ -157,6 +166,11 @@ class BotRoomLifecycle:
     def has_pending_join_decrypt_fences(self) -> bool:
         """Return whether any durable join fence needs sync settlement."""
         return bool(self._decrypt_notice_fenced_room_ids)
+
+    @property
+    def has_pending_invite_work(self) -> bool:
+        """Return whether a later trusted sync should retry invite work."""
+        return bool(self._pending_room_invites)
 
     async def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
@@ -247,6 +261,7 @@ class BotRoomLifecycle:
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
+        self._invite_join_cleanups.pop(room_id, None)
         self._current_room_invites.pop(room_id, None)
         self._forget_accepted_invited_room(room_id)
         self._forget_pending_room_invite(room_id)
@@ -510,14 +525,78 @@ class BotRoomLifecycle:
         """Re-evaluate pending invites without recreating live invite evidence."""
         client = self._client()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
-        for room_id, sender in tuple(self._pending_room_invites.items()):
+        pending_invites = tuple(self._pending_room_invites.items())
+        needs_joined_rooms = any(
+            room_id in self._invite_join_cleanups
+            or room_id in self._decrypt_notice_fenced_room_ids
+            or client.invited_rooms.get(room_id) is None
+            for room_id, _sender in pending_invites
+        )
+        joined_rooms = await get_joined_rooms(client) if needs_joined_rooms else None
+        configured_rooms = set(self.deps.get_configured_rooms())
+        for room_id, sender in pending_invites:
             room = client.invited_rooms.get(room_id)
-            if room is None or room.inviter != sender:
-                continue
             expected_invite = self._current_room_invites.get(room_id)
             if expected_invite is None or expected_invite.inviter_id != sender:
                 expected_invite = None
+            if joined_rooms is not None and room_id in joined_rooms:
+                await self._reconcile_joined_pending_invite(
+                    room_id,
+                    sender,
+                    expected_invite,
+                    configured_rooms,
+                )
+                continue
+            if joined_rooms is not None and room is None:
+                await self._reconcile_absent_pending_invite(room_id, sender)
+                continue
+            if room is None or room.inviter != sender:
+                continue
             await self._handle_invite(room, sender, expected_invite)
+
+    async def _reconcile_joined_pending_invite(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+        configured_rooms: set[str],
+    ) -> None:
+        """Preserve accepted rooms and leave joined rooms with unfinished acceptance."""
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if self._pending_room_invites.get(room_id) != sender:
+                return
+            if room_id in configured_rooms or room_id in self.invited_rooms:
+                await self._settle_preserved_pending_invite(room_id, sender)
+                return
+            await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
+
+    async def _settle_preserved_pending_invite(self, room_id: str, sender: str) -> None:
+        """Discard obsolete pending work once the joined room is already preserved."""
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite is None:
+            self._forget_pending_room_invite(room_id, expected_sender_id=sender)
+        elif current_invite.inviter_id == sender:
+            self._complete_recorded_room_invite(room_id, sender, current_invite)
+        else:
+            return
+        if room_id in self._decrypt_notice_fenced_room_ids:
+            await self._clear_join_decrypt_notice_fence(room_id)
+        self._invite_join_cleanups.pop(room_id, None)
+
+    async def _reconcile_absent_pending_invite(self, room_id: str, sender: str) -> None:
+        """Settle cleanup after authoritative membership no longer contains the room."""
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if self._pending_room_invites.get(room_id) != sender:
+                return
+            cleanup = self._invite_join_cleanups.get(room_id)
+            if cleanup is not None:
+                await self._finish_unaccepted_invite_leave(room_id, cleanup)
+                return
+            if self._current_room_invites.get(room_id) is not None:
+                return
+            self._forget_pending_room_invite(room_id, expected_sender_id=sender)
+            if room_id in self._decrypt_notice_fenced_room_ids:
+                await self._clear_join_decrypt_notice_fence(room_id)
 
     async def _handle_invite(
         self,
@@ -567,7 +646,7 @@ class BotRoomLifecycle:
                     msg = f"Failed to join invited room {room.room_id}"
                     raise RuntimeError(msg)
                 if not self._should_accept_invite():
-                    await self._leave_disabled_invite_join(room.room_id, sender, expected_invite)
+                    await self._leave_unaccepted_invite_join(room.room_id, sender, expected_invite)
                     return
 
             await self._finish_joined_invite(
@@ -609,12 +688,14 @@ class BotRoomLifecycle:
         if newly_joined:
             self._logger().info("Joined room", room_id=room_id)
             if not self._invite_attempt_is_current(room_id, sender, expected_invite):
+                await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
                 return
         await self.deps.on_room_joined(room_id)
         if not self._should_accept_invite():
-            await self._leave_disabled_invite_join(room_id, sender, expected_invite)
+            await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
             return
         if not self._invite_attempt_is_current(room_id, sender, expected_invite):
+            await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
             return
         self._remember_invited_room(room_id)
         if newly_joined:
@@ -622,21 +703,39 @@ class BotRoomLifecycle:
         await self._send_invite_welcome(room_id, sender)
         self._complete_recorded_room_invite(room_id, sender, expected_invite)
 
-    async def _leave_disabled_invite_join(
+    async def _leave_unaccepted_invite_join(
         self,
         room_id: str,
         sender: str,
         expected_invite: _CurrentRoomInvite | None,
     ) -> None:
-        """Leave a join that completed after invite acceptance was disabled."""
+        """Leave a successful join that no longer has local acceptance ownership."""
+        cleanup = self._invite_join_cleanups.setdefault(
+            room_id,
+            _InviteJoinCleanup(invite=expected_invite, inviter_id=sender),
+        )
         client = self._client()
-        client.invited_rooms.pop(room_id, None)
         if not await leave_room(client, room_id):
-            msg = f"Failed to leave disabled invited room {room_id}"
+            msg = f"Failed to leave unaccepted invited room {room_id}"
             raise RuntimeError(msg)
-        await self._clear_join_decrypt_notice_fence(room_id)
+        await self._finish_unaccepted_invite_leave(room_id, cleanup)
+
+    async def _finish_unaccepted_invite_leave(
+        self,
+        room_id: str,
+        cleanup: _InviteJoinCleanup,
+    ) -> None:
+        """Settle local state after Matrix confirms an unaccepted join is gone."""
         await self.deps.on_room_left(room_id)
-        self._complete_recorded_room_invite(room_id, sender, expected_invite)
+        if room_id in self._decrypt_notice_fenced_room_ids:
+            await self._clear_join_decrypt_notice_fence(room_id)
+        current_invite = self._current_room_invites.get(room_id)
+        if current_invite == cleanup.invite:
+            self._complete_recorded_room_invite(room_id, cleanup.inviter_id, cleanup.invite)
+            self._client().invited_rooms.pop(room_id, None)
+        elif current_invite is None:
+            self._forget_pending_room_invite(room_id, expected_sender_id=cleanup.inviter_id)
+        self._invite_join_cleanups.pop(room_id, None)
 
     def _invite_attempt_is_current(
         self,

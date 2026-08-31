@@ -1747,6 +1747,8 @@ class AgentBot:
     ) -> None:
         """Run side effects that do not own raw sync checkpoint safety."""
         await self._refresh_agent_reply_memberships_if_needed()
+        if self._room_lifecycle.has_pending_invite_work:
+            await self.reconcile_pending_invites()
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
         self._schedule_delivery_recovery()
