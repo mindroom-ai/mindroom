@@ -385,6 +385,28 @@ async def test_join_fence_restore_keeps_durable_fences_when_inventory_unavailabl
 
 
 @pytest.mark.asyncio
+async def test_restart_restores_failed_leave_protection_for_unowned_joined_room(
+    tmp_path: Path,
+) -> None:
+    """A durable fence must still protect an unowned joined room after restart."""
+    room_id = "!unowned:localhost"
+    first_bot = _agent_bot(tmp_path)
+    first_bot._sync_continuity_store.update_join_fences(add=(room_id,))
+    restarted_bot = _agent_bot(tmp_path)
+    restarted_bot.client = make_matrix_client_mock(user_id=restarted_bot.agent_user.user_id)
+
+    with patch(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        new=AsyncMock(return_value=[room_id]),
+    ):
+        await restarted_bot._room_lifecycle.restore_pending_join_decrypt_fences()
+
+    await restarted_bot._room_lifecycle.observe_trusted_sync_rooms([room_id])
+
+    assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+
+
+@pytest.mark.asyncio
 async def test_sliding_response_skips_continuity_write_without_join_fences(
     tmp_path: Path,
 ) -> None:
@@ -2229,6 +2251,18 @@ async def test_live_invite_failure_does_not_rewind_classic_cursor(
     )
     assert isinstance(event, nio.InviteEvent)
     await bot._on_invite_before_sync_certification(room, event)
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_after_invite",
+            "rooms": {
+                "invite": {room.room_id: {"invite_state": {"events": []}}},
+                "join": {},
+                "leave": {},
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    await bot._apply_own_room_membership_from_sync(response)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert bot.client.next_batch == "s_after_invite"

@@ -397,6 +397,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
+    _pending_sync_invites: list[tuple[nio.MatrixRoom, str]]
     _sync_continuity_store: SyncContinuityStore
     _sync_checkpoint_trust: SyncCheckpointTrust
 
@@ -485,6 +486,7 @@ class AgentBot:
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
+        self._pending_sync_invites = []
 
         async def send_room_lifecycle_response(
             *,
@@ -1840,6 +1842,7 @@ class AgentBot:
         try:
             await self._apply_sync_response(_response)
         finally:
+            self._pending_sync_invites.clear()
             # nio states an event's provenance once, to admission, and only for
             # the response carrying it. Anything this response's own consumers
             # did not read is stale the moment the response is done.
@@ -2006,15 +2009,29 @@ class AgentBot:
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
-        await self._apply_own_room_membership(
+        await self._apply_own_room_membership_before_invites(
             own_membership_from_sync(response, self_user_id=self.agent_user.user_id),
         )
 
     async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
         """Apply this bot's room memberships reported by one sliding sync response."""
-        await self._apply_own_room_membership(
+        await self._apply_own_room_membership_before_invites(
             own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id),
         )
+
+    async def _apply_own_room_membership_before_invites(self, membership: OwnRoomMembership) -> None:
+        """Apply one response's membership snapshot before starting its invite work."""
+        try:
+            await self._apply_own_room_membership(membership)
+        except BaseException:
+            self._pending_sync_invites.clear()
+            raise
+        pending_invites, self._pending_sync_invites = self._pending_sync_invites, []
+        for room, sender in pending_invites:
+            create_background_task(
+                self._room_lifecycle.handle_invite(room, sender),
+                owner=self._runtime_view,
+            )
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
@@ -2482,17 +2499,14 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.InviteEvent,
     ) -> None:
-        """Start best-effort work for one authenticated self-invite."""
+        """Queue one authenticated self-invite behind its response membership snapshot."""
         if (
             not isinstance(event, nio.InviteMemberEvent)
             or event.membership != "invite"
             or event.state_key != self.matrix_id.full_id
         ):
             return
-        create_background_task(
-            self._room_lifecycle.handle_invite(room, event.sender),
-            owner=self._runtime_view,
-        )
+        self._pending_sync_invites.append((room, event.sender))
 
     def _room_for_journal_event(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""

@@ -593,6 +593,46 @@ async def test_welcome_failure_does_not_revoke_acceptance(
 
 
 @pytest.mark.asyncio
+async def test_welcome_does_not_hold_invite_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Best-effort welcome delivery cannot block later room reconciliation."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    welcome_started = asyncio.Event()
+    release_welcome = asyncio.Event()
+    ownership_acquired = asyncio.Event()
+
+    async def delayed_welcome(_room_id: str, _sender: str) -> None:
+        welcome_started.set()
+        await release_welcome.wait()
+
+    async def acquire_room_ownership() -> None:
+        async with bot._room_lifecycle.invite_ownership(ROOM_ID):
+            ownership_acquired.set()
+
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", delayed_welcome)
+    invite = asyncio.create_task(bot._room_lifecycle.handle_invite(room, INVITER_ID))
+    await asyncio.wait_for(welcome_started.wait(), timeout=1)
+    later_owner = asyncio.create_task(acquire_room_ownership())
+    try:
+        await asyncio.wait_for(ownership_acquired.wait(), timeout=1)
+    finally:
+        release_welcome.set()
+        await invite
+        await later_owner
+
+
+@pytest.mark.asyncio
 async def test_absent_accepted_room_is_not_rejoined(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -715,6 +755,27 @@ async def test_failed_unowned_leave_keeps_join_fence(
     await bot.leave_unconfigured_rooms()
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_authoritative_inventory_when_ownership_recheck_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transient second inventory failure cannot abandon a room already found unowned."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(side_effect=[[ROOM_ID], None]),
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+
+    await bot.leave_unconfigured_rooms()
+
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
 
 
 @pytest.mark.asyncio

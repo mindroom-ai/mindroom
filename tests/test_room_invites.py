@@ -65,6 +65,26 @@ async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteE
     await bot._room_lifecycle.handle_invite(room, event.sender)
 
 
+async def _apply_classic_invite_membership(
+    bot: AgentBot,
+    room_id: str,
+    *,
+    next_batch: str,
+) -> None:
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": next_batch,
+            "rooms": {
+                "invite": {room_id: {"invite_state": {"events": []}}},
+                "join": {},
+                "leave": {},
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    await bot._apply_own_room_membership_from_sync(response)
+
+
 def _router_user() -> AgentMatrixUser:
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -464,6 +484,11 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     room.inviter = event.sender
     bot.client.invited_rooms = {room.room_id: room}
     await bot._on_invite_before_sync_certification(room, event)
+    await _apply_classic_invite_membership(
+        bot,
+        room.room_id,
+        next_batch="s_invalid_state",
+    )
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
@@ -536,12 +561,93 @@ async def test_initial_sync_invite_is_current_membership_work(
     bot.client.invited_rooms = {room.room_id: room}
 
     await bot._on_invite_before_sync_certification(room, event)
+    await _apply_classic_invite_membership(
+        bot,
+        room.room_id,
+        next_batch="s_initial_invite",
+    )
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)
     assert bot._room_lifecycle.invited_rooms == {room.room_id}
     assert await bot._journal_dispatcher.store.pending() == ()
+
+
+@pytest.mark.parametrize("sync_mode", ["classic", "sliding"])
+@pytest.mark.asyncio
+async def test_sync_membership_applies_before_invite_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sync_mode: str,
+) -> None:
+    """One response's invite snapshot cannot revoke acceptance started from that response."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_invite",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:localhost",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+    room = nio.MatrixInvitedRoom("!ordered-invite:localhost", bot.agent_user.user_id)
+    room.inviter = event.sender
+    bot.client.invited_rooms = {room.room_id: room}
+
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    if sync_mode == "classic":
+        response = nio.SyncResponse.from_dict(
+            {
+                "next_batch": "s_after_invite",
+                "rooms": {
+                    "invite": {room.room_id: {"invite_state": {"events": []}}},
+                    "join": {},
+                    "leave": {},
+                },
+            },
+        )
+        assert isinstance(response, nio.SyncResponse)
+        await bot._apply_own_room_membership_from_sync(response)
+    else:
+        response = nio.SlidingSyncResponse.from_dict(
+            {
+                "pos": "s_after_invite",
+                "rooms": {
+                    room.room_id: {
+                        "membership": "invite",
+                        "timeline": [],
+                    },
+                },
+            },
+        )
+        assert isinstance(response, nio.SlidingSyncResponse)
+        await bot._apply_own_room_membership_from_sliding_sync(response)
+
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    join_room.assert_awaited_once_with(bot.client, room.room_id)
+    assert load_invited_rooms(_invited_rooms_path(config, ROUTER_AGENT_NAME)) == {room.room_id}
 
 
 @pytest.mark.asyncio
@@ -582,6 +688,13 @@ async def test_invite_sync_callback_runs_live_join_in_background(tmp_path: Path)
         bot._on_invite_before_sync_certification(room, event),
     )
     try:
+        await callback_task
+        assert not join_started.is_set()
+        await _apply_classic_invite_membership(
+            bot,
+            room.room_id,
+            next_batch="s_background_invite",
+        )
         await asyncio.wait_for(join_started.wait(), timeout=1)
         await asyncio.sleep(0)
         assert callback_task.done()
@@ -1258,9 +1371,19 @@ async def test_redelivered_invite_does_not_retry_a_failed_welcome(
     room.inviter = event.sender
     bot.client.invited_rooms = {room.room_id: room}
     await bot._on_invite_before_sync_certification(room, event)
+    await _apply_classic_invite_membership(
+        bot,
+        room.room_id,
+        next_batch="s_first_redelivery",
+    )
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     await bot._on_invite_before_sync_certification(room, event)
+    await _apply_classic_invite_membership(
+        bot,
+        room.room_id,
+        next_batch="s_second_redelivery",
+    )
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)

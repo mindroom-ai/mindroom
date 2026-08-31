@@ -176,9 +176,12 @@ class BotRoomLifecycle:
                 pending_join_decrypt_fence_count=len(self._decrypt_notice_fenced_room_ids),
             )
             return
+        joined_room_ids = set(joined_rooms)
+        protected_room_ids = (self._decrypt_notice_fenced_room_ids & joined_room_ids) - await self._owned_room_ids()
+        self._join_fence_protected_room_ids.update(protected_room_ids)
         record = await asyncio.to_thread(
             self.deps.continuity_store.update_join_fences,
-            retain=joined_rooms,
+            retain=joined_room_ids,
         )
         self.apply_continuity_record(record)
 
@@ -348,7 +351,7 @@ class BotRoomLifecycle:
     async def _leave_owned_room(self, room_id: str, *, recheck_ownership: bool) -> None:
         """Acquire room ownership and finish one still-required leave."""
         async with self.invite_ownership(room_id):
-            if recheck_ownership and room_id not in await self._rooms_to_leave():
+            if recheck_ownership and room_id in await self._owned_room_ids():
                 return
             await self._leave_room_with_confirmed_cleanup(room_id)
 
@@ -411,17 +414,19 @@ class BotRoomLifecycle:
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None:
             return []
+        return list(set(joined_rooms) - await self._owned_room_ids())
 
-        current_rooms = set(joined_rooms)
-        configured_rooms = set(self.deps.get_configured_rooms())
+    async def _owned_room_ids(self) -> set[str]:
+        """Return rooms currently owned by configuration or accepted membership."""
+        owned_room_ids = set(self.deps.get_configured_rooms())
         if self._should_persist_invited_rooms():
-            configured_rooms.update(await self._accepted_rooms_snapshot())
+            owned_room_ids.update(await self._accepted_rooms_snapshot())
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
             if root_space_id is not None:
-                configured_rooms.add(root_space_id)
+                owned_room_ids.add(root_space_id)
 
-        return list(current_rooms - configured_rooms)
+        return owned_room_ids
 
     async def send_welcome_message_if_empty(
         self,
@@ -551,6 +556,7 @@ class BotRoomLifecycle:
         send_welcome: bool = True,
     ) -> None:
         """Accept one current Matrix invite without creating recovery state."""
+        welcome_after_acceptance = False
         async with self.invite_ownership(room.room_id):
             client = self._client()
             current_invite = client.invited_rooms.get(room.room_id)
@@ -593,11 +599,12 @@ class BotRoomLifecycle:
                 return
 
             self._discard_invite_if_current(room.room_id, sender, current_invite)
-            if send_welcome:
-                try:
-                    await self._send_invite_welcome(room.room_id, sender)
-                except Exception:
-                    self._logger().exception("invite_welcome_failed", room_id=room.room_id)
+            welcome_after_acceptance = send_welcome
+        if welcome_after_acceptance:
+            try:
+                await self._send_invite_welcome(room.room_id, sender)
+            except Exception:
+                self._logger().exception("invite_welcome_failed", room_id=room.room_id)
 
     async def _accept_joined_invite(
         self,

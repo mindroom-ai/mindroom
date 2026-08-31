@@ -114,7 +114,7 @@ An authoritative leave or ban revokes both live invite work and accepted-room pr
 An authoritative final invite fences the ended membership epoch, tears down room-scoped calls, and revokes accepted-room preservation while retaining the new live invite evidence, while unresolved Sliding Sync membership does none of those things.
 A confirmed runtime-owned local leave, including entity removal, immediately revokes accepted-room preservation, while transient invite evidence is consumed only by its exact invite attempt or an authoritative departure.
 Configured-room reconciliation and runtime-owned self-leaves share one per-room owner, so an older invite attempt cannot leave after configured setup has taken ownership.
-Changes to the router's invite or responder-access policy immediately reconcile cached invites and accepted-room ownership.
+Changes to the router's invite or responder-access policy immediately reconsider cached invites, while disabling invite acceptance also stops preserving accepted ad-hoc rooms.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
 A same-sender cancellation and reinvite that overlaps an in-flight join may be consumed by that attempt and require another invitation.
