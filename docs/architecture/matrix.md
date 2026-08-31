@@ -114,7 +114,7 @@ An event reaches an agent through durable admission, never straight from the syn
 5. `TurnController` owns the turn and the agent responds in thread.
 
 Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
-The authenticated callback creates process-local evidence for that exact inviter, and a different inviter, departure, or sync-generation reset invalidates the evidence.
+The authenticated callback creates process-local evidence for that exact inviter, and a different inviter, departure, receive-loop restart, or sync-position reset invalidates the evidence.
 MindRoom rechecks that generation before persisting the room as accepted.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 

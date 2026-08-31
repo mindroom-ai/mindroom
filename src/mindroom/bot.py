@@ -1293,6 +1293,7 @@ class AgentBot:
         first ``SyncResponse`` or ``SyncError`` arrives.  The watchdog has its
         own startup timeout for the pre-first-response window.
         """
+        self._invalidate_invite_sync_state()
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
@@ -1325,6 +1326,19 @@ class AgentBot:
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
         self._invalidate_agent_reply_memberships(reason=reason)
+
+    def _invalidate_invite_sync_state(self, room_ids: Iterable[str] | None = None) -> None:
+        """Discard invite evidence owned by an ended receive generation."""
+        invalidated_room_ids = None if room_ids is None else frozenset(room_ids)
+        self._room_lifecycle.invalidate_current_invite_evidence(invalidated_room_ids)
+        client = self.client
+        if client is None:
+            return
+        if invalidated_room_ids is None:
+            client.invited_rooms.clear()
+            return
+        for room_id in invalidated_room_ids:
+            client.invited_rooms.pop(room_id, None)
 
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck this bot's active calls against the shared reply policy."""
@@ -1472,7 +1486,7 @@ class AgentBot:
         staged = client.has_uncommitted_classic_sync_state
         if not force and not staged and (client.next_batch or None) == retry_token:
             return False, retry_token is not None
-        self._room_lifecycle.invalidate_current_invite_evidence()
+        self._invalidate_invite_sync_state()
         reset_completed = False
         try:
             await client.reset_classic_sync_state()
@@ -1919,7 +1933,7 @@ class AgentBot:
             # sync checkpoint, so classic token rejection must not run here.
             self._warn_if_sliding_sync_never_succeeded(_response)
             if _response.status_code == "M_UNKNOWN_POS":
-                self._room_lifecycle.invalidate_current_invite_evidence()
+                self._invalidate_invite_sync_state()
                 self._invalidate_agent_reply_memberships(reason="sliding_sync_position_reset")
             return
         if _response.status_code == "M_UNKNOWN_POS":
@@ -2023,13 +2037,17 @@ class AgentBot:
         departed_room_ids = membership.departed_room_ids
         final_invited_room_ids = membership.invited_room_ids
         final_departed_room_ids = departed_room_ids - final_invited_room_ids
-        self._room_lifecycle.invalidate_current_invite_evidence(final_departed_room_ids)
+        self._invalidate_invite_sync_state(final_departed_room_ids)
+        cleanup_failures: list[Exception] = []
         for room_id in final_departed_room_ids:
-            if self.client is not None:
-                self.client.invited_rooms.pop(room_id, None)
+            try:
+                self._room_lifecycle.forget_invited_room(room_id)
+            except Exception as error:
+                self.logger.exception("Failed to forget departed invited room", room_id=room_id)
+                cleanup_failures.append(error)
         await self._membership_fence.fence_reported_departures(membership.departures)
-        for room_id in final_departed_room_ids:
-            self._room_lifecycle.forget_invited_room(room_id)
+        if cleanup_failures:
+            raise cleanup_failures[0]
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
             membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
@@ -2487,7 +2505,6 @@ class AgentBot:
             or event.state_key != self.matrix_id.full_id
         ):
             return
-        self._room_lifecycle.forget_accepted_invited_room(room.room_id)
         current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(

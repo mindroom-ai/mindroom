@@ -15,7 +15,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room, leave_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -248,12 +248,14 @@ class BotRoomLifecycle:
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         self._current_room_invites.pop(room_id, None)
+        self._forget_accepted_invited_room(room_id)
         self._forget_pending_room_invite(room_id)
-        self.forget_accepted_invited_room(room_id)
 
-    def forget_accepted_invited_room(self, room_id: str) -> None:
+    def _forget_accepted_invited_room(self, room_id: str) -> None:
         """Stop preserving an accepted room without discarding a fresh reinvite."""
-        if not self._should_persist_invited_rooms():
+        invited_rooms_path = self._invited_rooms_file_path()
+        durable_rooms = load_invited_rooms(invited_rooms_path) if invited_rooms_path.exists() else set()
+        if room_id not in durable_rooms:
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
             msg = f"Failed to forget invited room {room_id}"
@@ -278,12 +280,12 @@ class BotRoomLifecycle:
     def record_current_room_invite(self, room_id: str, sender_id: str) -> _CurrentRoomInvite:
         """Persist an invite and bind its callback to one process-local generation."""
         current_invite = self._current_room_invites.get(room_id)
-        if current_invite is not None and current_invite.inviter_id != sender_id:
-            self._current_room_invites.pop(room_id)
-        self._record_pending_room_invite(room_id, sender_id)
-        current_invite = self._current_room_invites.get(room_id)
         if current_invite is not None and current_invite.inviter_id == sender_id:
+            self._record_pending_room_invite(room_id, sender_id)
             return current_invite
+        self._current_room_invites.pop(room_id, None)
+        self._forget_accepted_invited_room(room_id)
+        self._record_pending_room_invite(room_id, sender_id)
         self._current_room_invite_revision += 1
         current_invite = _CurrentRoomInvite(
             revision=self._current_room_invite_revision,
@@ -564,6 +566,9 @@ class BotRoomLifecycle:
                         return
                     msg = f"Failed to join invited room {room.room_id}"
                     raise RuntimeError(msg)
+                if not self._should_accept_invite():
+                    await self._leave_disabled_invite_join(room.room_id, sender, expected_invite)
+                    return
 
             await self._finish_joined_invite(
                 room.room_id,
@@ -606,12 +611,31 @@ class BotRoomLifecycle:
             if not self._invite_attempt_is_current(room_id, sender, expected_invite):
                 return
         await self.deps.on_room_joined(room_id)
+        if not self._should_accept_invite():
+            await self._leave_disabled_invite_join(room_id, sender, expected_invite)
+            return
         if not self._invite_attempt_is_current(room_id, sender, expected_invite):
             return
         self._remember_invited_room(room_id)
         if newly_joined:
             self._handled_invite_room_ids.add(room_id)
         await self._send_invite_welcome(room_id, sender)
+        self._complete_recorded_room_invite(room_id, sender, expected_invite)
+
+    async def _leave_disabled_invite_join(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> None:
+        """Leave a join that completed after invite acceptance was disabled."""
+        client = self._client()
+        client.invited_rooms.pop(room_id, None)
+        if not await leave_room(client, room_id):
+            msg = f"Failed to leave disabled invited room {room_id}"
+            raise RuntimeError(msg)
+        await self._clear_join_decrypt_notice_fence(room_id)
+        await self.deps.on_room_left(room_id)
         self._complete_recorded_room_invite(room_id, sender, expected_invite)
 
     def _invite_attempt_is_current(
