@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.authorization import is_sender_allowed_for_agent_oauth_connection_management
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -87,7 +87,7 @@ def resolve_oauth_reset_target(
         msg = "OAuth reset is available only during an agent request."
         raise OAuthResetTargetError(msg)
     requester_id = execution_identity.requester_id
-    if requester_id is None or not is_sender_allowed_for_agent_credential_management(
+    if requester_id is None or not is_sender_allowed_for_agent_oauth_connection_management(
         requester_id,
         agent_name=agent_name,
         config=config,
