@@ -2481,11 +2481,12 @@ class AgentBot:
             or event.state_key != self.matrix_id.full_id
         ):
             return
-        self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
+        current_invite = self._room_lifecycle.record_current_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(
                 room,
                 event.sender,
+                current_invite,
             ),
             owner=self._runtime_view,
         )
