@@ -178,7 +178,7 @@ class BotRoomLifecycle:
     @property
     def has_pending_invite_work(self) -> bool:
         """Return whether a later trusted sync should retry invite work."""
-        return bool(self._pending_room_invites)
+        return bool(self._pending_room_invites or self._invite_join_cleanups)
 
     async def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
@@ -367,11 +367,20 @@ class BotRoomLifecycle:
             msg = f"Failed to persist invited room {room_id}"
             raise OSError(msg)
 
-    async def _send_invite_welcome(self, room_id: str, sender: str) -> None:
+    async def _send_invite_welcome(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> None:
         """Finish router welcome delivery or leave the invite retryable."""
         if self.deps.agent_name != ROUTER_AGENT_NAME:
             return
-        if await self.send_welcome_message_if_empty(room_id, sender):
+        if await self.send_welcome_message_if_empty(
+            room_id,
+            sender,
+            expected_invite=expected_invite,
+        ):
             return
         msg = f"Failed to complete welcome message for {room_id}"
         raise RuntimeError(msg)
@@ -430,6 +439,8 @@ class BotRoomLifecycle:
         self,
         room_id: str,
         visible_to_sender_id: str | None = None,
+        *,
+        expected_invite: _CurrentRoomInvite | None = None,
     ) -> bool:
         """Send the router welcome message only when the room has no other history."""
         if visible_to_sender_id is None:
@@ -438,12 +449,18 @@ class BotRoomLifecycle:
                 return True
             return await self._send_welcome_message_if_empty_admitted(room_id, None)
         async with self.deps.admit_response():
-            return await self._send_welcome_message_if_empty_admitted(room_id, visible_to_sender_id)
+            return await self._send_welcome_message_if_empty_admitted(
+                room_id,
+                visible_to_sender_id,
+                expected_invite=expected_invite,
+            )
 
     async def _send_welcome_message_if_empty_admitted(
         self,
         room_id: str,
         visible_to_sender_id: str | None,
+        *,
+        expected_invite: _CurrentRoomInvite | None = None,
     ) -> bool:
         """Check room history and deliver a welcome inside the caller's admission slot."""
         async with self._lock_for_room(self._welcome_locks, room_id):
@@ -462,13 +479,10 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not is_sender_allowed_for_agent_reply_in_room(
-                    visible_to_sender_id,
-                    self.deps.agent_name,
-                    self._config(),
+                if visible_to_sender_id is not None and not await self._welcome_sender_is_authorized(
                     room_id,
-                    self.deps.runtime_paths,
-                    self.deps.runtime.agent_reply_memberships,
+                    visible_to_sender_id,
+                    expected_invite,
                 ):
                     self._logger().debug(
                         "invite_welcome_suppressed_by_reply_permissions",
@@ -490,6 +504,32 @@ class BotRoomLifecycle:
                 self._welcomed_room_ids.add(room_id)
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
+
+    async def _welcome_sender_is_authorized(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: _CurrentRoomInvite | None,
+    ) -> bool:
+        """Authorize a welcome using normal access or its exact joined invite."""
+        if is_sender_allowed_for_agent_reply_in_room(
+            sender,
+            self.deps.agent_name,
+            self._config(),
+            room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        ):
+            return True
+        if (
+            expected_invite is None
+            or expected_invite.inviter_id != sender
+            or not self._should_accept_invite()
+            or not self._invite_generation_is_current(room_id, expected_invite)
+            or not await self._inviter_is_authorized_after_join(room_id, sender)
+        ):
+            return False
+        return self._should_accept_invite() and self._invite_generation_is_current(room_id, expected_invite)
 
     async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""
@@ -533,7 +573,10 @@ class BotRoomLifecycle:
         """Re-evaluate pending invites without recreating live invite evidence."""
         client = self._client()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
-        pending_invites = tuple(self._pending_room_invites.items())
+        invite_work = dict(self._pending_room_invites)
+        for room_id, cleanup in self._invite_join_cleanups.items():
+            invite_work.setdefault(room_id, cleanup.inviter_id)
+        pending_invites = tuple(invite_work.items())
         needs_joined_rooms = any(
             room_id in self._invite_join_cleanups
             or room_id in self._decrypt_notice_fenced_room_ids
@@ -547,6 +590,8 @@ class BotRoomLifecycle:
             expected_invite = self._current_room_invites.get(room_id)
             if expected_invite is None or expected_invite.inviter_id != sender:
                 expected_invite = None
+            if joined_rooms is None and room_id in self._invite_join_cleanups:
+                continue
             if joined_rooms is not None and room_id in joined_rooms:
                 await self._reconcile_joined_pending_invite(
                     room_id,
@@ -571,7 +616,7 @@ class BotRoomLifecycle:
     ) -> None:
         """Preserve accepted rooms and leave joined rooms with unfinished acceptance."""
         async with self._lock_for_room(self._invite_join_locks, room_id):
-            if self._pending_room_invites.get(room_id) != sender:
+            if not self._invite_reconciliation_is_current(room_id, sender):
                 return
             if room_id in configured_rooms:
                 await self._settle_configured_pending_invite(room_id, sender)
@@ -618,7 +663,7 @@ class BotRoomLifecycle:
             current_invite = self._current_room_invites.get(room_id)
             if current_invite is not None and current_invite.inviter_id != sender:
                 return True
-            await self._send_invite_welcome(room_id, sender)
+            await self._send_invite_welcome(room_id, sender, expected_invite)
             if current_invite is None:
                 self._forget_pending_room_invite(room_id, expected_sender_id=sender)
             else:
@@ -631,7 +676,7 @@ class BotRoomLifecycle:
     async def _reconcile_absent_pending_invite(self, room_id: str, sender: str) -> None:
         """Settle cleanup after authoritative membership no longer contains the room."""
         async with self._lock_for_room(self._invite_join_locks, room_id):
-            if self._pending_room_invites.get(room_id) != sender:
+            if not self._invite_reconciliation_is_current(room_id, sender):
                 return
             cleanup = self._invite_join_cleanups.get(room_id)
             if cleanup is not None:
@@ -642,6 +687,13 @@ class BotRoomLifecycle:
             self._forget_pending_room_invite(room_id, expected_sender_id=sender)
             if room_id in self._decrypt_notice_fenced_room_ids:
                 await self._clear_join_decrypt_notice_fence(room_id)
+
+    def _invite_reconciliation_is_current(self, room_id: str, sender: str) -> bool:
+        """Return whether pending acceptance or cleanup still owns this work."""
+        if self._pending_room_invites.get(room_id) == sender:
+            return True
+        cleanup = self._invite_join_cleanups.get(room_id)
+        return cleanup is not None and cleanup.inviter_id == sender
 
     async def _handle_invite(
         self,
@@ -741,24 +793,54 @@ class BotRoomLifecycle:
         if not self._invite_attempt_is_current(room_id, sender, expected_invite):
             await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
             return
-        if newly_joined and not await self._inviter_is_authorized_after_join(room_id, sender):
-            self._logger().info(
-                "invite_authorization_not_confirmed_after_join",
-                room_id=room_id,
-                sender=sender,
-            )
-            await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
-            return
+        if newly_joined:
+            inviter_authorized = await self._inviter_is_authorized_after_join(room_id, sender)
+            if (
+                not self._should_accept_invite()
+                or not self._invite_attempt_is_current(room_id, sender, expected_invite)
+                or not inviter_authorized
+            ):
+                self._logger().info(
+                    "invite_authorization_not_confirmed_after_join",
+                    room_id=room_id,
+                    sender=sender,
+                )
+                await self._leave_unaccepted_invite_join(room_id, sender, expected_invite)
+                return
         self._remember_invited_room(room_id)
         if newly_joined:
             self._handled_invite_room_ids.add(room_id)
-        await self._send_invite_welcome(room_id, sender)
+        await self._send_invite_welcome(room_id, sender, expected_invite)
         self._complete_recorded_room_invite(room_id, sender, expected_invite)
 
     async def _inviter_is_authorized_after_join(self, room_id: str, sender: str) -> bool:
         """Recheck current policy using authoritative post-join membership."""
         config = self._config()
-        if is_sender_allowed_for_responder(
+        if self._inviter_is_authorized_without_current_room(room_id, sender, config):
+            return True
+        if not resolve_responder_access(config, self.deps.agent_name).current_room_members:
+            return False
+        current_members = await get_room_members(self._client(), room_id)
+        if current_members is None or sender not in current_members:
+            return False
+        latest_config = self._config()
+        return (
+            self._inviter_is_authorized_without_current_room(
+                room_id,
+                sender,
+                latest_config,
+            )
+            or resolve_responder_access(latest_config, self.deps.agent_name).current_room_members
+        )
+
+    def _inviter_is_authorized_without_current_room(
+        self,
+        room_id: str,
+        sender: str,
+        config: Config,
+    ) -> bool:
+        """Apply every current policy grant except same-room membership."""
+        return is_sender_allowed_for_responder(
             sender,
             self.deps.agent_name,
             room_id,
@@ -766,12 +848,7 @@ class BotRoomLifecycle:
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
             include_current_room_members=False,
-        ):
-            return True
-        if not resolve_responder_access(config, self.deps.agent_name).current_room_members:
-            return False
-        current_members = await get_room_members(self._client(), room_id)
-        return current_members is not None and sender in current_members
+        )
 
     async def _leave_unaccepted_invite_join(
         self,
@@ -788,6 +865,8 @@ class BotRoomLifecycle:
         if not await leave_room(client, room_id):
             msg = f"Failed to leave unaccepted invited room {room_id}"
             raise RuntimeError(msg)
+        if self._current_room_invites.get(room_id) == cleanup.invite:
+            self._current_room_invites.pop(room_id, None)
         await self._finish_unaccepted_invite_leave(room_id, cleanup)
 
     async def _finish_unaccepted_invite_leave(
@@ -805,6 +884,7 @@ class BotRoomLifecycle:
             self._client().invited_rooms.pop(room_id, None)
         elif current_invite is None:
             self._forget_pending_room_invite(room_id, expected_sender_id=cleanup.inviter_id)
+            self._client().invited_rooms.pop(room_id, None)
         self._invite_join_cleanups.pop(room_id, None)
 
     def _invite_attempt_is_current(
