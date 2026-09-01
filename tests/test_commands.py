@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.authorization import (
+    ensure_room_membership_synced,
+    responder_candidate_entities_from_cached_room,
+)
 from mindroom.commands.handler import generate_welcome_message_for_room, handle_command
 from mindroom.commands.parsing import (
     _COMMAND_DOCS,
@@ -551,6 +555,68 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
     response_text = send_response.await_args.args[0]
     assert "\u2022 **@code**: Writes code" in response_text
     assert "@research" not in response_text
+
+
+@pytest.mark.asyncio
+async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_path: Path) -> None:
+    """Live scheduling must not retry a failed membership refresh from the same turn."""
+    config = Config()
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router"})
+    membership_index = isolated_membership_index()
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.add_member("@mindroom_router:localhost", "Router", None)
+    room.add_member("@alice:localhost", "Alice", None)
+    client = AsyncMock()
+    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    send_response = AsyncMock(return_value="$schedule-response")
+    command = Command(
+        type=CommandType.SCHEDULE,
+        args={"full_text": "in 5 minutes check logs"},
+        raw_text="!schedule in 5 minutes check logs",
+    )
+    event = SimpleNamespace(
+        sender="@alice:localhost",
+        event_id="$schedule",
+        body=command.raw_text,
+        source={"content": {"body": command.raw_text}},
+    )
+
+    async def cached_responder_candidates(candidate_room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
+        return responder_candidate_entities_from_cached_room(
+            candidate_room,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(room.room_id, None, event.event_id),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=send_response,
+        responder_candidates_for_room=cached_responder_candidates,
+        agent_reply_memberships=membership_index,
+    )
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id=event.sender,
+    )
+
+    assert client.joined_members.await_count == 1
+    assert "No agents or teams" in send_response.await_args.args[0]
 
 
 @pytest.mark.asyncio

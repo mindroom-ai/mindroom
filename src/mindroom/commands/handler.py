@@ -78,6 +78,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_room,
     )
 
 
