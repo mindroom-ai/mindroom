@@ -6,6 +6,8 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
+import pytest
+
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -131,9 +133,13 @@ def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path
     assert payload["public_key_fingerprint"].startswith("sha256:")
 
 
-def test_external_trigger_admin_uses_current_policy(tmp_path: Path) -> None:
-    """A long-lived tool context must not retain revoked trigger-admin power."""
-    old_config = _config(admin_users=["@admin:example.org"])
+@pytest.mark.parametrize("administrator_source", ["trigger", "platform"])
+def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrator_source: str) -> None:
+    """A long-lived tool context must not retain either revoked admin grant."""
+    old_config = _config(
+        admin_users=["@admin:example.org"] if administrator_source == "trigger" else None,
+        platform_administrators=["@admin:example.org"] if administrator_source == "platform" else None,
+    )
     current_config = _config(admin_users=[])
     context = replace(
         _context(tmp_path, requester_id="@admin:example.org", config=old_config),

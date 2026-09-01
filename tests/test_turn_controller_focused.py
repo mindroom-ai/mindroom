@@ -1745,6 +1745,51 @@ async def test_bridge_alias_crosses_execution_seam_as_one_canonical_requester(tm
 
 
 @pytest.mark.asyncio
+async def test_trusted_router_relay_preserves_transport_sender_while_canonicalizing_requester(tmp_path: Path) -> None:
+    """A trusted relay keeps its bot provenance while the human owns execution."""
+    canonical_sender = "@owner:localhost"
+    bridge_sender = "@bridge_owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[canonical_sender]),
+                ),
+            },
+            authorization={"aliases": {canonical_sender: [bridge_sender]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    router_sender = _entity_user_id(config, ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general use my private state",
+                "msgtype": "m.text",
+                constants.ORIGINAL_SENDER_KEY: bridge_sender,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+            "event_id": "$router-relay:localhost",
+            "sender": router_sender,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == canonical_sender
+    assert request.response_envelope.requester_id == canonical_sender
+    assert request.response_envelope.origin.transport_sender_id == router_sender
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     tmp_path: Path,

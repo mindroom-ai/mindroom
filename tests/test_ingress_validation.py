@@ -45,6 +45,15 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
+    internal_user_id = mindroom_user_id(config, runtime_paths)
+    assert internal_user_id is not None
+    non_human_senders = (
+        ids["test_agent"].full_id,
+        ids["router"].full_id,
+        "@bridge_bot:localhost",
+        internal_user_id,
+    )
+    config.authorization.aliases[canonical_human].extend(non_human_senders)
     runtime = BotRuntimeState(
         client=None,
         config=config,
@@ -128,8 +137,20 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         payload_metadata=DispatchPayloadMetadata(original_sender=bridge_human),
     )
 
-    for non_human_sender in ("@bridge_bot:localhost", mindroom_user_id(config, runtime_paths)):
-        assert non_human_sender is not None
+    for non_human_sender in non_human_senders:
+        assert validator.requester_user_id(sender=non_human_sender, source=None) == non_human_sender
+
+    self_echo = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$self-echo",
+            "sender": agent_id.full_id,
+            "origin_server_ts": 1234567890,
+            "content": {"msgtype": "m.text", "body": "self echo"},
+        },
+    )
+    assert await validator.precheck_event(room, self_echo) is None
+
+    for non_human_sender in ("@bridge_bot:localhost", internal_user_id):
         assert (
             validator.requester_user_id(
                 sender=agent_id.full_id,

@@ -141,7 +141,7 @@ The same responder gate covers text, media, calls, reactions, approval actors, e
 
 MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.
 The raw authenticated Matrix sender remains transport provenance and is not used as a second downstream ownership decision.
-One canonical requester therefore owns the same requester-scoped conversations, state, credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
+One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
 
 An agent's `private` field controls requester-private state placement.
 It does not authorize anyone to interact with the agent.
@@ -175,6 +175,8 @@ These ownership rules do not create additional responder access.
 
 `authorization.aliases` maps bridge-created identities before access checks.
 It maps bridge-created Matrix IDs to a canonical Matrix user before access, administration, or credential checks.
+Both the bridge identity and canonical identity must represent humans; managed responders, configured bot accounts, and MindRoom's internal account are never remapped into human requesters.
+Alias definitions are flat, so a canonical identity cannot also appear as another identity's alias.
 
 ```yaml
 authorization:

@@ -35,9 +35,11 @@ Tool approval is an additional action gate and does not replace conversation acc
 Every inbound Matrix turn has two identities.
 
 - `transport_sender_id` is the exact authenticated Matrix account that sent the event.
-- `requester_id` is the canonical principal that owns the resulting conversation, state, credentials, approvals, schedules, triggers, scripts, attachments, and usage.
+- `requester_id` is the canonical principal that owns the resulting conversation, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage.
 
-The ingress boundary must select the trusted requester first and then resolve `authorization.aliases` exactly once.
+The ingress boundary must select the trusted requester first and then resolve `authorization.aliases` for human identities.
+Managed responders, configured bot accounts, and MindRoom's internal account must retain their transport identity even if a malformed runtime configuration lists them as aliases.
+Alias configuration must reject chains, cycles, and self-aliases so canonicalization is idempotent at downstream policy boundaries.
 The exact transport sender remains available through `TurnOrigin` for Matrix provenance, membership, and transport-specific behavior.
 Downstream ownership code must receive the canonical requester instead of independently deciding whether to resolve aliases.
 
@@ -156,6 +158,8 @@ The remaining work is documentation, generated starter clarity, and focused test
 10. A configured alias receives the same trigger-administrator result as its canonical principal.
 11. Revoking both forms of trigger administration takes effect through the current config provider.
 12. The generated starter configuration explicitly authors its effective conversation access.
+13. Managed responders, configured bot accounts, and MindRoom's internal account cannot be remapped into human requesters.
+14. Alias chains, cycles, and self-aliases are rejected so repeated policy resolution remains idempotent.
 
 ## Implementation plan
 
