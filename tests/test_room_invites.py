@@ -771,6 +771,40 @@ async def test_live_invite_reconciliation_coalesces_requests_while_pass_is_block
 
 
 @pytest.mark.asyncio
+async def test_live_invite_reconciliation_continues_after_one_invite_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One failed invite must not strand later cached invites."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    first = nio.MatrixInvitedRoom("!first:localhost", bot.agent_user.user_id)
+    first.inviter = "@first:localhost"
+    second = nio.MatrixInvitedRoom("!second:localhost", bot.agent_user.user_id)
+    second.inviter = "@second:localhost"
+    bot.client.invited_rooms = {first.room_id: first, second.room_id: second}
+    handled_room_ids: list[str] = []
+
+    async def handle_invite(room: nio.MatrixInvitedRoom, _sender: str) -> None:
+        if room is first:
+            message = "first invite failed"
+            raise OSError(message)
+        handled_room_ids.append(room.room_id)
+
+    monkeypatch.setattr(bot._room_lifecycle, "handle_invite", handle_invite)
+
+    await bot._room_lifecycle.reconcile_invites()
+
+    assert handled_room_ids == [second.room_id]
+
+
+@pytest.mark.asyncio
 async def test_sync_response_does_not_wait_for_invite_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1946,6 +1980,52 @@ async def test_router_invite_welcome_requires_current_reply_authorization(
     await bot._send_welcome_message_if_empty(room.room_id, sender_id)
 
     send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_router_invite_welcome_uses_authoritative_joined_members_before_index_refresh(
+    tmp_path: Path,
+) -> None:
+    """The accepted inviter may receive the fixed welcome before router sync catches up."""
+    sender_id = "@alice:localhost"
+    room_id = "!adhoc:localhost"
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.rooms = {}
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id=room_id,
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[
+                nio.RoomMember(sender_id, None, None),
+                nio.RoomMember(bot.agent_user.user_id, None, None),
+            ],
+            room_id=room_id,
+        ),
+    )
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
+
+    await bot._room_lifecycle.send_welcome_message_if_empty(room_id, sender_id)
+
+    send_response.assert_awaited_once()
 
 
 @pytest.mark.asyncio

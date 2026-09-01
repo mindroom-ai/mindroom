@@ -77,6 +77,7 @@ That welcome message lists:
 Startup welcomes with no requester list configured room responders when the room is statically configured.
 Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
 The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
+If the router-owned membership index has not published the newly joined room yet, that callback confirms the inviter through a fresh authoritative joined-members query under the latest policy.
 
 Use `!hi` in any room to see the welcome message again.
 

@@ -365,7 +365,7 @@ def test_stale_continuity_publication_cannot_restore_removed_join_fence(
 async def test_join_fence_restore_keeps_durable_fences_when_inventory_unavailable(
     tmp_path: Path,
 ) -> None:
-    """Transient joined-room failure must preserve safe fences without aborting startup."""
+    """Unknown restored fences stay protected until ownership is classified."""
     room_id = "!room:localhost"
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -379,6 +379,8 @@ async def test_join_fence_restore_keeps_durable_fences_when_inventory_unavailabl
         ),
     ):
         await bot._room_lifecycle.restore_pending_join_decrypt_fences()
+
+    await bot._room_lifecycle.observe_trusted_sync_rooms([room_id])
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
     assert any(entry["event"] == "matrix_join_fence_restore_joined_rooms_unavailable" for entry in logs)

@@ -110,9 +110,10 @@ Internal MindRoom identities bypass responder restrictions because they are syst
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 For ordinary activity, the router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
-An authenticated self-invite is the narrow pre-join exception: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy `current_room_members` for that invite only.
+An authenticated self-invite is a narrow bootstrap exception for the router: when invite acceptance is enabled, the exact inviter in Matrix's current invite cache may satisfy the router's `current_room_members` policy for that invite only.
+Agents and teams may use `current_room_members` for invite acceptance only when the router-owned index already authorizes that inviter in the room; otherwise they require an administrator, static user, internal identity, or grant-room authorization.
 One live cache entry owns at most one join attempt, and a failed attempt requires fresh invite evidence.
-After joining, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on `current_room_members`.
+After the router joins, MindRoom reloads the current policy and requires the inviter to remain a joined member when acceptance depended on the bootstrap exception.
 The cached invite object must still identify the authenticated sender, but a joined sync normally removes its cache entry, so absence after a successful join does not revoke acceptance while a still-present different invite fails closed.
 An authoritative leave or ban revokes both live invite work and accepted-room preservation.
 An authoritative final invite fences the ended membership epoch, tears down room-scoped calls, and revokes accepted-room preservation while retaining the new live invite evidence, while unresolved Sliding Sync membership does none of those things.
@@ -123,9 +124,10 @@ Accepted-room storage preserves an existing ad-hoc membership across restart but
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
 Interrupted acceptance or failed compensation can leave the bot joined until ordinary cleanup or restart; the room is not preserved, decrypt failures stay silent, and every event still passes the normal post-join access policy.
 A same-sender cancellation and reinvite that overlaps an in-flight join may be consumed by that attempt and require another invitation.
-For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
+For an ad-hoc room where an ordinarily authorized agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
-The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
+The same responder policy covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
+The immediate router invite welcome may confirm the inviter through a fresh authoritative joined-members query while the router-owned index catches up to the new room.
 
 ## Platform and credential authority
 

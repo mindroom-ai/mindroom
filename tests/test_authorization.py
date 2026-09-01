@@ -15,7 +15,8 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.config.agent import TeamConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
 from tests.identity_helpers import entity_ids
@@ -49,6 +50,8 @@ def _invite_allowed(
     config: object,
     memberships: AgentReplyMembershipIndex,
     *,
+    agent_name: str = "talent",
+    room_id: str = "!current:example.com",
     current_inviter_id: str | None = None,
     joined_member_ids: set[str] | None = None,
 ) -> bool:
@@ -57,7 +60,8 @@ def _invite_allowed(
     assert isinstance(config, Config)
     return is_sender_allowed_for_agent_invite(
         sender_id,
-        "talent",
+        agent_name,
+        room_id,
         config,
         runtime_paths_for(config),
         memberships,
@@ -110,15 +114,39 @@ async def test_current_room_member_can_use_responder(tmp_path: Path) -> None:
 
 
 def test_only_exact_live_inviter_satisfies_prejoin_current_room_access(tmp_path: Path) -> None:
-    """Pre-join current-room access belongs only to Matrix's exact live inviter."""
+    """Only the router may bootstrap current-room access from a live invite."""
     sender_id = "@member:example.com"
     config = membership_config(
         tmp_path,
         access={"current_room_members": True, "members_of_rooms": []},
     )
+    config.teams["crew"] = TeamConfig(
+        display_name="Crew",
+        role="Crew team",
+        agents=["talent"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
     memberships = AgentReplyMembershipIndex()
 
-    assert _invite_allowed(sender_id, config, memberships, current_inviter_id=sender_id)
+    assert is_sender_allowed_for_agent_invite(
+        sender_id,
+        ROUTER_AGENT_NAME,
+        "!current:example.com",
+        config,
+        runtime_paths_for(config),
+        memberships,
+        current_inviter_id=sender_id,
+    )
+    assert not _invite_allowed(sender_id, config, memberships, current_inviter_id=sender_id)
+    assert not is_sender_allowed_for_agent_invite(
+        sender_id,
+        "crew",
+        "!current:example.com",
+        config,
+        runtime_paths_for(config),
+        memberships,
+        current_inviter_id=sender_id,
+    )
     assert not _invite_allowed(sender_id, config, memberships, current_inviter_id="@other:example.com")
     assert not _invite_allowed(sender_id, config, memberships)
 
@@ -132,8 +160,48 @@ def test_postjoin_current_room_access_requires_joined_inviter(tmp_path: Path) ->
     )
     memberships = AgentReplyMembershipIndex()
 
-    assert _invite_allowed(sender_id, config, memberships, joined_member_ids={sender_id})
-    assert not _invite_allowed(sender_id, config, memberships, joined_member_ids={"@other:example.com"})
+    assert _invite_allowed(
+        sender_id,
+        config,
+        memberships,
+        agent_name=ROUTER_AGENT_NAME,
+        joined_member_ids={sender_id},
+    )
+    assert not _invite_allowed(
+        sender_id,
+        config,
+        memberships,
+        agent_name=ROUTER_AGENT_NAME,
+        joined_member_ids={"@other:example.com"},
+    )
+    assert not _invite_allowed(sender_id, config, memberships, joined_member_ids={sender_id})
+
+
+@pytest.mark.asyncio
+async def test_non_router_invites_use_established_router_current_room_access(tmp_path: Path) -> None:
+    """Agents and teams may consume current-room authority the router already owns."""
+    sender_id = "@member:example.com"
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["current"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    config.teams["crew"] = TeamConfig(
+        display_name="Crew",
+        role="Crew team",
+        agents=["talent"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    memberships = await membership_index(config, {"current": {sender_id}})
+
+    assert _invite_allowed(sender_id, config, memberships, room_id="!current:example.com")
+    assert _invite_allowed(
+        sender_id,
+        config,
+        memberships,
+        agent_name="crew",
+        room_id="!current:example.com",
+    )
 
 
 @pytest.mark.asyncio

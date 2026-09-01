@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
@@ -82,6 +82,7 @@ def is_sender_allowed_for_agent_reply_in_room(
 def is_sender_allowed_for_agent_invite(
     sender_id: str,
     agent_name: str,
+    room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
@@ -91,21 +92,20 @@ def is_sender_allowed_for_agent_invite(
 ) -> bool:
     """Authorize one live invite before or after its join.
 
-    Ordinary access never depends on the invited room's not-yet-authoritative
-    membership snapshot. ``current_room_members`` is instead satisfied by the
-    exact live inviter before joining or by an authoritative joined-members
-    query afterward.
+    Ordinary access uses the router-owned room-membership index. Only the
+    router may bootstrap that index from the exact live inviter before joining
+    or from an authoritative joined-members query afterward.
     """
     if is_sender_allowed_for_responder(
         sender_id,
         agent_name,
-        None,
+        room_id,
         config,
         runtime_paths,
         membership_index,
     ):
         return True
-    if not resolve_responder_access(config, agent_name).current_room_members:
+    if agent_name != ROUTER_AGENT_NAME or not resolve_responder_access(config, agent_name).current_room_members:
         return False
     return sender_id == current_inviter_id or (joined_member_ids is not None and sender_id in joined_member_ids)
 

@@ -202,6 +202,8 @@ class BotRoomLifecycle:
         self.apply_continuity_record(await asyncio.to_thread(self.deps.continuity_store.load))
         if not self._decrypt_notice_fenced_room_ids:
             return
+        pending_room_ids = set(self._decrypt_notice_fenced_room_ids)
+        self._join_fence_protected_room_ids.update(pending_room_ids)
         joined_rooms = await get_joined_rooms(self._client())
         if joined_rooms is None:
             self._logger().warning(
@@ -211,11 +213,12 @@ class BotRoomLifecycle:
             return
         joined_room_ids = set(joined_rooms)
         protected_room_ids = (self._decrypt_notice_fenced_room_ids & joined_room_ids) - await self._owned_room_ids()
-        self._join_fence_protected_room_ids.update(protected_room_ids)
         record = await asyncio.to_thread(
             self.deps.continuity_store.update_join_fences,
             retain=joined_room_ids,
         )
+        self._join_fence_protected_room_ids.difference_update(pending_room_ids)
+        self._join_fence_protected_room_ids.update(protected_room_ids)
         self.apply_continuity_record(record)
 
     async def _join_room_with_decrypt_notice_fence(
@@ -524,14 +527,26 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not is_sender_allowed_for_agent_reply_in_room(
+                sender_allowed = visible_to_sender_id is None or is_sender_allowed_for_agent_reply_in_room(
                     visible_to_sender_id,
                     self.deps.agent_name,
                     self._config(),
                     room_id,
                     self.deps.runtime_paths,
                     self.deps.runtime.agent_reply_memberships,
-                ):
+                )
+                if visible_to_sender_id is not None and not sender_allowed:
+                    joined_member_ids = await get_room_members(client, room_id)
+                    sender_allowed = is_sender_allowed_for_agent_invite(
+                        visible_to_sender_id,
+                        self.deps.agent_name,
+                        room_id,
+                        self._config(),
+                        self.deps.runtime_paths,
+                        self.deps.runtime.agent_reply_memberships,
+                        joined_member_ids=joined_member_ids,
+                    )
+                if not sender_allowed:
                     self._logger().debug(
                         "invite_welcome_suppressed_by_reply_permissions",
                         user_id=visible_to_sender_id,
@@ -586,7 +601,12 @@ class BotRoomLifecycle:
         """Re-evaluate only invites currently cached by Matrix."""
         for room in tuple(self._client().invited_rooms.values()):
             if room.inviter is not None:
-                await self.handle_invite(room, room.inviter)
+                try:
+                    await self.handle_invite(room, room.inviter)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._logger().exception("live_invite_reconciliation_failed", room_id=room.room_id)
 
     async def _attempt_invite_join(
         self,
@@ -632,6 +652,7 @@ class BotRoomLifecycle:
             if not is_sender_allowed_for_agent_invite(
                 sender,
                 self.deps.agent_name,
+                room.room_id,
                 self._config(),
                 self.deps.runtime_paths,
                 self.deps.runtime.agent_reply_memberships,
@@ -695,6 +716,7 @@ class BotRoomLifecycle:
         invite_allowed = is_sender_allowed_for_agent_invite(
             sender,
             self.deps.agent_name,
+            room_id,
             self._config(),
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
@@ -704,6 +726,7 @@ class BotRoomLifecycle:
             invite_allowed = self._should_accept_invite() and is_sender_allowed_for_agent_invite(
                 sender,
                 self.deps.agent_name,
+                room_id,
                 self._config(),
                 self.deps.runtime_paths,
                 self.deps.runtime.agent_reply_memberships,
