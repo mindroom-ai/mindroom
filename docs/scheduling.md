@@ -69,6 +69,10 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
+Schedules are room-managed resources rather than creator-private resources.
+Thread context filters schedule listings for usability, but it is not an authorization boundary.
+An authorized participant in the room can edit or cancel any room schedule by task ID, and `!cancel_schedule all` applies to the whole room.
+
 ## Silent Delivery
 
 Schedules are visible by default.

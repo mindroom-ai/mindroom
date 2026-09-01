@@ -13,8 +13,8 @@ from weakref import WeakValueDictionary
 import nio
 
 from mindroom.durable_write import write_json_file_durable
-from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
@@ -165,11 +165,7 @@ def _human_room_member_user_id(
 ) -> str | None:
     """Return the affected human user ID for one membership event, or None."""
     user_id = event.state_key
-    if (
-        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
-        or user_id in config.bot_accounts
-        or user_id == mindroom_user_id(config, runtime_paths)
-    ):
+    if not is_human_requester_id(user_id, config, runtime_paths):
         return None
     return user_id
 

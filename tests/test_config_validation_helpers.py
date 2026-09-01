@@ -65,6 +65,21 @@ def test_duplicate_validators_preserve_error_order(factory: object, match: str) 
 
 
 @pytest.mark.parametrize(
+    "aliases",
+    [
+        {"@alice:example.com": ["@bridge:example.com"], "@carol:example.com": ["@alice:example.com"]},
+        {"@alice:example.com": ["@bob:example.com"], "@bob:example.com": ["@alice:example.com"]},
+        {"@alice:example.com": ["@alice:example.com"]},
+    ],
+    ids=["chain", "cycle", "self-alias"],
+)
+def test_authorization_aliases_reject_canonical_ids_as_aliases(aliases: dict[str, list[str]]) -> None:
+    """Alias resolution must remain idempotent at every authorization boundary."""
+    with pytest.raises(ValueError, match="Canonical Matrix user IDs cannot also be bridge aliases"):
+        AuthorizationConfig(aliases=aliases)
+
+
+@pytest.mark.parametrize(
     ("factory", "match"),
     [
         (

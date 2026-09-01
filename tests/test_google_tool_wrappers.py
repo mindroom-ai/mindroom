@@ -24,6 +24,7 @@ from googleapiclient import http as google_http_module
 from googleapiclient.errors import HttpError
 
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
@@ -477,7 +478,7 @@ def test_scoped_oauth_client_connection_required_uses_shared_instruction(
     tool._oauth_provider = GoogleDriveTools._oauth_provider
     tool._runtime_paths = runtime_paths
     tool._worker_target = None
-    tool._authorization = None
+    tool._config = None
     tool._creds_manager = get_runtime_credentials_manager(runtime_paths)
 
     seen: list[object] = []
@@ -1701,7 +1702,7 @@ def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
     alias = "@telegram_alice:example.org"
     canonical = "@alice:example.org"
     canonical_access_token = "canonical-access-token"  # noqa: S105
-    authorization = AuthorizationConfig(aliases={canonical: [alias]})
+    config = Config(authorization=AuthorizationConfig(aliases={canonical: [alias]}))
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -1715,8 +1716,9 @@ def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
     raw_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
     canonical_target = oauth_credentials_worker_target(
         GoogleDriveTools._oauth_provider,
+        runtime_paths,
         raw_target,
-        authorization=authorization,
+        config=config,
     )
     assert canonical_target is not None
     save_scoped_credentials(
@@ -1739,7 +1741,7 @@ def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=raw_target,
-        authorization=authorization,
+        runtime_config=config,
     )
 
     assert tool.creds.token == canonical_access_token

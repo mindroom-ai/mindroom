@@ -333,6 +333,10 @@ class MCPServerManager:
     ) -> list[MCPServerState] | None:
         """Atomically replace changed base generations and detach their scoped sessions."""
         retired_states: list[MCPServerState] = []
+        previous_config = self._config
+        requester_alias_policy_changed = previous_config is not None and (
+            previous_config.authorization.aliases != config.authorization.aliases
+        )
 
         async with self._state_lifecycle_lock:
             if self._shutdown:
@@ -342,13 +346,7 @@ class MCPServerManager:
                 if (
                     server_config is not None
                     and state.config == server_config
-                    and (
-                        state.config.auth is None
-                        or (
-                            state.oauth_authorization is not None
-                            and state.oauth_authorization.aliases == config.authorization.aliases
-                        )
-                    )
+                    and (state.config.auth is None or not requester_alias_policy_changed)
                 ):
                     continue
                 self._states.pop(server_id)
@@ -370,9 +368,6 @@ class MCPServerManager:
                     config=server_config,
                     config_generation=self._last_config_generation,
                     oauth_provider_id=provider_id,
-                    oauth_authorization=(
-                        config.authorization.model_copy(deep=True) if provider_id is not None else None
-                    ),
                 )
             self._config = config
         return retired_states
@@ -630,7 +625,7 @@ class MCPServerManager:
             self.runtime_paths,
             credentials_manager or get_runtime_credentials_manager(self.runtime_paths),
             worker_target,
-            authorization=state.oauth_authorization,
+            config=self._config,
         )
 
     def _scope_session_key(
@@ -813,7 +808,6 @@ class MCPServerManager:
                     config=base_state.config,
                     config_generation=key.config_generation,
                     oauth_provider_id=key.provider_id,
-                    oauth_authorization=base_state.oauth_authorization,
                     oauth_credential_scope=key.credential_scope,
                 )
                 self._scoped_states[key] = state

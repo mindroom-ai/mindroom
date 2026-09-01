@@ -160,7 +160,8 @@ class _InteractiveSelectionDispatch:
     response_factory: Callable[[], Awaitable[bool]]
     response_target: MessageTarget
     source_event_id: str
-    user_id: str
+    transport_sender_id: str
+    requester_user_id: str
     selected_value: str
 
 
@@ -776,7 +777,8 @@ class TurnController:
                 source_handed_off = await self._handle_interactive_selection(
                     room,
                     selection=selection,
-                    user_id=envelope.requester_id,
+                    transport_sender_id=envelope.origin.transport_sender_id,
+                    requester_user_id=envelope.requester_id,
                     source_event_id=prepared_event.event_id,
                 )
                 return _IngressAdmissionOutcome.DEFERRED if source_handed_off else _IngressAdmissionOutcome.CONSUMED
@@ -1311,7 +1313,8 @@ class TurnController:
         self,
         *,
         target: MessageTarget,
-        user_id: str,
+        transport_sender_id: str,
+        requester_user_id: str,
         source_event_id: str,
         selected_value: str,
         attachment_ids: tuple[str, ...] = (),
@@ -1326,10 +1329,10 @@ class TurnController:
             mentioned_agents=(),
             agent_name=self.deps.agent_name,
             origin=classify_turn_origin(
-                transport_sender_id=user_id,
-                requester_id=user_id,
-                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
-                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
+                transport_sender_id=transport_sender_id,
+                requester_id=requester_user_id,
+                sender_entity_name=registry.current_entity_name_for_user_id(transport_sender_id),
+                requester_entity_name=registry.current_entity_name_for_user_id(requester_user_id),
                 source_kind=MESSAGE_SOURCE_KIND,
                 original_sender=None,
                 trusted_user_relay=False,
@@ -1342,13 +1345,15 @@ class TurnController:
         *,
         response_target: MessageTarget,
         source_event_id: str,
-        user_id: str,
+        transport_sender_id: str,
+        requester_user_id: str,
         selected_value: str,
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
         response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
-            user_id=user_id,
+            transport_sender_id=transport_sender_id,
+            requester_user_id=requester_user_id,
             source_event_id=source_event_id,
             selected_value=selected_value,
         )
@@ -1427,13 +1432,15 @@ class TurnController:
             response_factory=lambda: self._handle_interactive_selection(
                 room,
                 selection=selection,
-                user_id=user_id,
+                transport_sender_id=user_id,
+                requester_user_id=requester_user_id,
                 source_event_id=source_event_id,
                 response_target=response_target,
             ),
             response_target=response_target,
             source_event_id=source_event_id,
-            user_id=user_id,
+            transport_sender_id=user_id,
+            requester_user_id=requester_user_id,
             selected_value=selection.selected_value,
         )
         pending_event = PendingEvent(
@@ -1481,7 +1488,8 @@ class TurnController:
             dispatch.response_factory,
             response_target=dispatch.response_target,
             source_event_id=dispatch.source_event_id,
-            user_id=dispatch.user_id,
+            transport_sender_id=dispatch.transport_sender_id,
+            requester_user_id=dispatch.requester_user_id,
             selected_value=dispatch.selected_value,
         )
         item.finish_once(lambda: None)
@@ -1492,7 +1500,8 @@ class TurnController:
         room: nio.MatrixRoom,
         *,
         selection: interactive.InteractiveSelection,
-        user_id: str,
+        transport_sender_id: str,
+        requester_user_id: str,
         source_event_id: str,
         response_target: MessageTarget | None = None,
     ) -> bool:
@@ -1502,7 +1511,8 @@ class TurnController:
             return await self._execute_interactive_selection(
                 room,
                 selection=selection,
-                user_id=user_id,
+                transport_sender_id=transport_sender_id,
+                requester_user_id=requester_user_id,
                 source_event_id=source_event_id,
                 response_target=target,
             )
@@ -1525,7 +1535,8 @@ class TurnController:
         room: nio.MatrixRoom,
         *,
         selection: interactive.InteractiveSelection,
-        user_id: str,
+        transport_sender_id: str,
+        requester_user_id: str,
         source_event_id: str,
         response_target: MessageTarget,
     ) -> bool:
@@ -1534,13 +1545,14 @@ class TurnController:
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(user_id, room.room_id):
+            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
                 await self.deps.settle_dispatch_sources((source_event_id,))
                 return False
             return await self._execute_admitted_interactive_selection(
                 room,
                 selection=selection,
-                user_id=user_id,
+                transport_sender_id=transport_sender_id,
+                requester_user_id=requester_user_id,
                 source_event_id=source_event_id,
                 response_target=response_target,
             )
@@ -1550,7 +1562,8 @@ class TurnController:
         room: nio.MatrixRoom,
         *,
         selection: interactive.InteractiveSelection,
-        user_id: str,
+        transport_sender_id: str,
+        requester_user_id: str,
         source_event_id: str,
         response_target: MessageTarget,
     ) -> bool:
@@ -1574,7 +1587,7 @@ class TurnController:
                 discovery_event_ids=(
                     (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
                 ),
-                requester_id=user_id,
+                requester_id=requester_user_id,
                 correlation_id=source_event_id,
             ),
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
@@ -1656,7 +1669,8 @@ class TurnController:
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
         response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
-            user_id=user_id,
+            transport_sender_id=transport_sender_id,
+            requester_user_id=requester_user_id,
             source_event_id=source_event_id,
             selected_value=selection.selected_value,
             attachment_ids=selection_attachment_ids,
@@ -1676,7 +1690,7 @@ class TurnController:
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
-                user_id=user_id,
+                user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,

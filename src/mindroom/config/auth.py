@@ -26,10 +26,15 @@ class AuthorizationConfig(BaseModel):
     @field_validator("aliases")
     @classmethod
     def validate_unique_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
-        """Ensure each alias is assigned to at most one canonical user."""
-        duplicates = duplicate_items([alias for alias_list in aliases.values() for alias in alias_list])
+        """Ensure aliases have one canonical user and cannot form chains."""
+        alias_values = [alias for alias_list in aliases.values() for alias in alias_list]
+        duplicates = duplicate_items(alias_values)
         if duplicates:
             msg = f"Duplicate bridge aliases are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        canonical_aliases = [canonical for canonical in aliases if canonical in alias_values]
+        if canonical_aliases:
+            msg = f"Canonical Matrix user IDs cannot also be bridge aliases: {', '.join(canonical_aliases)}"
             raise ValueError(msg)
         return aliases
 

@@ -18,7 +18,7 @@ from github import Auth, Github, GithubException
 from github.GithubRetry import GithubRetry
 from github.Requester import Requester
 
-from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
@@ -289,13 +289,13 @@ class GithubTools(AgnoGithubTools):
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None = None,
+        runtime_config: Config | None = None,
         **kwargs: object,
     ) -> None:
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
-        self._authorization = authorization
+        self._config = runtime_config
         self._oauth_provider = github_oauth_provider()
         explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
             runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
@@ -324,7 +324,7 @@ class GithubTools(AgnoGithubTools):
             self._runtime_paths,
             self._credentials_manager,
             self._worker_target,
-            authorization=self._authorization,
+            config=self._config,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:

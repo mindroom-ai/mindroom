@@ -222,7 +222,7 @@ def _configured_function_surface(
                 tool_config.name,
                 context.runtime_paths,
                 worker_target=None,
-                authorization=context.config.authorization,
+                runtime_config=context.config,
                 tool_config_overrides=dict(tool_config.tool_config_overrides),
             )
         except Exception as exc:

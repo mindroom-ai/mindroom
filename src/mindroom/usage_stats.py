@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage_stats_storage import (
     TOKEN_FIELDS,
     UsageRunNode,
@@ -193,6 +194,7 @@ class _UsageAccumulator:
         row: UsageSessionRow,
         *,
         config: Config,
+        runtime_paths: RuntimePaths,
         scope: _Scope,
         expected_agent: str | None,
         expected_requester: str | None,
@@ -206,6 +208,7 @@ class _UsageAccumulator:
                 row_totals = _self_row_totals(
                     row,
                     config=config,
+                    runtime_paths=runtime_paths,
                     expected_agent=expected_agent,
                     expected_requester=expected_requester,
                     seen_runs=self.seen_runs,
@@ -236,6 +239,7 @@ class _ModelUsageAccumulator:
         row: UsageSessionRow,
         *,
         config: Config,
+        runtime_paths: RuntimePaths,
         scope: _Scope,
         expected_agent: str | None,
         expected_requester: str | None,
@@ -247,6 +251,7 @@ class _ModelUsageAccumulator:
             entries = _model_entries_for_row(
                 row,
                 config=config,
+                runtime_paths=runtime_paths,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
@@ -280,9 +285,10 @@ def collect_self_usage(
             execution_identity=execution_identity,
         ),
         config=config,
+        runtime_paths=runtime_paths,
         scope="self",
         expected_agent=agent_name,
-        expected_requester=config.authorization.resolve_alias(requester_id),
+        expected_requester=resolve_human_requester_alias(requester_id, config, runtime_paths),
     )
 
 
@@ -291,6 +297,7 @@ def collect_admin_usage(*, config: Config, runtime_paths: RuntimePaths) -> Usage
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
         config=config,
+        runtime_paths=runtime_paths,
         scope="admin",
         expected_agent=None,
         expected_requester=None,
@@ -301,6 +308,7 @@ def _collect_usage(
     *,
     sources: Iterable[UsageStorageSource | UsageStorageDiagnostic],
     config: Config,
+    runtime_paths: RuntimePaths,
     scope: _Scope,
     expected_agent: str | None,
     expected_requester: str | None,
@@ -324,6 +332,7 @@ def _collect_usage(
             usage.add_row(
                 item,
                 config=config,
+                runtime_paths=runtime_paths,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
@@ -331,6 +340,7 @@ def _collect_usage(
             model_usage.add_row(
                 item,
                 config=config,
+                runtime_paths=runtime_paths,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
@@ -407,6 +417,7 @@ def _model_entries_for_row(
     row: UsageSessionRow,
     *,
     config: Config,
+    runtime_paths: RuntimePaths,
     scope: _Scope,
     expected_agent: str | None,
     expected_requester: str | None,
@@ -420,7 +431,9 @@ def _model_entries_for_row(
     entries: list[tuple[UsageRunNode, TokenTotals]] = []
     for run in row.runs:
         if scope == "self" and not row.source.requester_isolated:
-            requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+            requester_id = (
+                resolve_human_requester_alias(run.requester_id, config, runtime_paths) if run.requester_id else None
+            )
             if requester_id is None:
                 raise ValueError
             if requester_id != expected_requester:
@@ -435,6 +448,7 @@ def _self_row_totals(
     row: UsageSessionRow,
     *,
     config: Config,
+    runtime_paths: RuntimePaths,
     expected_agent: str | None,
     expected_requester: str | None,
     seen_runs: set[tuple[str, str, str]],
@@ -446,7 +460,9 @@ def _self_row_totals(
     total = TokenTotals()
     accepted = False
     for run in row.runs:
-        requester_id = config.authorization.resolve_alias(run.requester_id) if run.requester_id else None
+        requester_id = (
+            resolve_human_requester_alias(run.requester_id, config, runtime_paths) if run.requester_id else None
+        )
         if requester_id is None:
             raise ValueError
         if requester_id != expected_requester:

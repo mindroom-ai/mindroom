@@ -58,6 +58,9 @@ teams:
     rooms:
       - team-room
 
+    # Accept all, none, or matching inviter ID patterns
+    accept_invites: true
+
     # Model for team coordination (default: "default")
     model: sonnet
 
@@ -85,6 +88,7 @@ teams:
 | `agents` | Yes | - | List of agent names that compose this team |
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
+| `accept_invites` | No | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID after human-only alias resolution; non-human accounts retain their exact transport ID |
 | `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
 | `model` | No | `default` | Model used for team coordination and synthesis |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
@@ -95,6 +99,9 @@ teams:
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 Each configured team must contain at least one unique, known agent.
 Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
+
+Invitation acceptance is independent from team conversation access.
+After joining, the team applies its ordinary `access` policy to every interaction.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.

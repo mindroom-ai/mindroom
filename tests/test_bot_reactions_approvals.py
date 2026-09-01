@@ -21,6 +21,7 @@ from agno.tools.function import Function
 
 from mindroom import approval_manager, approval_transport, interactive
 from mindroom.ai import _attach_blocking_pause_presentation
+from mindroom.approval_inbound import maybe_handle_tool_approval_reply
 from mindroom.approval_manager import (
     initialize_approval_store,
 )
@@ -126,12 +127,16 @@ async def _cancel_dispatch_retry(bot: AgentBot) -> None:
     await bot._journal_dispatcher.stop()
 
 
-def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageText:
+def _approval_reply_event(
+    event_id: str = "$approval-reply",
+    *,
+    sender: str = "@user:localhost",
+) -> nio.RoomMessageText:
     event = nio.Event.parse_event(
         {
             "type": "m.room.message",
             "event_id": event_id,
-            "sender": "@user:localhost",
+            "sender": sender,
             "origin_server_ts": 1,
             "content": {
                 "msgtype": "m.text",
@@ -161,12 +166,18 @@ def _approval_action_event(event_id: str, *, status: str) -> nio.UnknownEvent:
     return event
 
 
-def _reaction_event(key: str, event_id: str, *, timestamp: int = 1) -> nio.ReactionEvent:
+def _reaction_event(
+    key: str,
+    event_id: str,
+    *,
+    sender: str = "@user:localhost",
+    timestamp: int = 1,
+) -> nio.ReactionEvent:
     event = nio.Event.parse_event(
         {
             "type": "m.reaction",
             "event_id": event_id,
-            "sender": "@user:localhost",
+            "sender": sender,
             "origin_server_ts": timestamp,
             "content": {
                 "m.relates_to": {
@@ -1118,7 +1129,8 @@ class TestAgentBot(AgentBotTestBase):
             prepare_forever,
             response_target=target,
             source_event_id="$reaction",
-            user_id="@user:localhost",
+            transport_sender_id="@user:localhost",
+            requester_user_id="@user:localhost",
             selected_value="Selected",
         )
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
@@ -1158,7 +1170,8 @@ class TestAgentBot(AgentBotTestBase):
             response,
             response_target=target,
             source_event_id="$reaction",
-            user_id="@user:localhost",
+            transport_sender_id="@user:localhost",
+            requester_user_id="@user:localhost",
             selected_value="Selected",
         )
         await bot._response_runner.drain_inbox_responses()
@@ -1195,7 +1208,8 @@ class TestAgentBot(AgentBotTestBase):
             hand_off_response,
             response_target=target,
             source_event_id="$reaction",
-            user_id="@user:localhost",
+            transport_sender_id="@user:localhost",
+            requester_user_id="@user:localhost",
             selected_value="Selected",
         )
         await bot._response_runner.drain_inbox_responses()
@@ -1230,7 +1244,8 @@ class TestAgentBot(AgentBotTestBase):
             await controller._handle_interactive_selection(
                 room,
                 selection=selection,
-                user_id="@user:localhost",
+                transport_sender_id="@user:localhost",
+                requester_user_id="@user:localhost",
                 source_event_id="$reaction",
                 response_target=target,
             )
@@ -1268,7 +1283,8 @@ class TestAgentBot(AgentBotTestBase):
                 controller._handle_interactive_selection(
                     room,
                     selection=selection,
-                    user_id="@user:localhost",
+                    transport_sender_id="@user:localhost",
+                    requester_user_id="@user:localhost",
                     source_event_id="$reaction",
                     response_target=target,
                 ),
@@ -1745,7 +1761,8 @@ class TestAgentBot(AgentBotTestBase):
                     response,
                     response_target=target,
                     source_event_id="$reaction",
-                    user_id="@user:localhost",
+                    transport_sender_id="@user:localhost",
+                    requester_user_id="@user:localhost",
                     selected_value=selection.selected_value,
                 )
                 if failure_stage == "queued_cancel":
@@ -1919,6 +1936,65 @@ class TestAgentBot(AgentBotTestBase):
 
             assert [target.resolved_thread_id for target in resolved_targets] == [None]
             assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
+        finally:
+            await bot._response_runner.drain_inbox_responses()
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_executes_as_canonical_human_requester(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A bridge reaction preserves transport identity but owns work as its canonical human."""
+        owner_id = "@owner:localhost"
+        bridge_id = "@bridge:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization.aliases = {owner_id: [bridge_id]}
+        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[owner_id])
+        runtime_paths = runtime_paths_for(config)
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        reaction = _reaction_event("👍", "$alias-interactive-reaction", sender=bridge_id)
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose one",
+            selection_key="👍",
+            selected_label="Selected",
+            selected_value="Selected",
+            thread_id="$thread",
+        )
+        captured_requests: list[ResponseRequest] = []
+
+        async def generate_locked(
+            _self: ResponseRunner,
+            request: ResponseRequest,
+            *,
+            resolved_target: MessageTarget,
+            early_placeholder_state: object,
+        ) -> str:
+            del resolved_target, early_placeholder_state
+            captured_requests.append(request)
+            return "$response"
+
+        bot._conversation_resolver.fetch_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
+        bot._visible_responses.recovered_response_event_id = AsyncMock(return_value=None)
+        bot._visible_responses.deliver_recoverable_text = AsyncMock(return_value="$ack")
+        try:
+            with (
+                _mock_interactive_claim(bot, selection),
+                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+            ):
+                await _dispatch_reaction(bot, room, reaction)
+                await bot._response_runner.drain_inbox_responses()
+
+            assert len(captured_requests) == 1
+            request = captured_requests[0]
+            assert request.user_id == owner_id
+            assert request.response_envelope.origin.transport_sender_id == bridge_id
+            assert request.response_envelope.origin.requester_id == owner_id
         finally:
             await bot._response_runner.drain_inbox_responses()
 
@@ -2967,6 +3043,73 @@ class TestAgentBot(AgentBotTestBase):
             status="approved",
             reason=None,
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("configured_bot", "expected_sender"),
+        [(False, "@owner:localhost"), (True, "@bridge:localhost")],
+    )
+    async def test_approval_reaction_canonicalizes_only_human_aliases(
+        self,
+        configured_bot: bool,
+        expected_sender: str,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval ownership uses a canonical human requester without remapping bots."""
+        owner_id = "@owner:localhost"
+        bridge_id = "@bridge:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization.aliases = {owner_id: [bridge_id]}
+        config.bot_accounts = [bridge_id] if configured_bot else []
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event = _reaction_event("✅", "$alias-approval", sender=bridge_id)
+
+        with patch(
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+        ) as handle_matrix_approval_action:
+            await _dispatch_reaction(bot, room, event)
+
+        action = handle_matrix_approval_action.await_args.args[0]
+        assert action.sender_id == expected_sender
+
+    @pytest.mark.asyncio
+    async def test_approval_denial_reply_uses_canonical_human_requester(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A bridge alias may deny the canonical human requester's pending approval."""
+        owner_id = "@owner:localhost"
+        bridge_id = "@bridge:localhost"
+        config = self._config_for_storage(tmp_path)
+        config.authorization.aliases = {owner_id: [bridge_id]}
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _approval_reply_event(sender=bridge_id)
+
+        with patch(
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+        ) as handle_matrix_approval_action:
+            handled = await maybe_handle_tool_approval_reply(
+                room=room,
+                event=event,
+                config=config,
+                runtime_paths=runtime_paths,
+                orchestrator=None,
+                logger=bot.logger,
+                membership_index=bot._runtime_view.agent_reply_memberships,
+            )
+
+        assert handled
+        action = handle_matrix_approval_action.await_args.args[0]
+        assert action.sender_id == owner_id
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_for_promoted_plain_reply_target(

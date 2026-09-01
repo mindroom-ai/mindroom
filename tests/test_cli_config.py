@@ -312,6 +312,11 @@ class TestConfigInit:
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
         assert mind["rooms"] == ["personal"]
+        assert mind["access"] == {
+            "current_room_members": False,
+            "members_of_rooms": ["personal"],
+            "users": [],
+        }
         assert mind["context_files"] == [
             "SOUL.md",
             "AGENTS.md",

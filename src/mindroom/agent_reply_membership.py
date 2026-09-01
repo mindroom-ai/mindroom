@@ -12,6 +12,7 @@ from mindroom.access_policy import resolve_responder_access
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
+from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -109,6 +110,7 @@ class AgentReplyMembershipIndex:
         sender_id: str,
         joined_rooms: Sequence[str],
         config: Config,
+        runtime_paths: RuntimePaths,
     ) -> bool:
         """Return whether a sender is joined to any ready configured grant room."""
         snapshot = self._snapshot
@@ -118,11 +120,17 @@ class AgentReplyMembershipIndex:
         return any(
             room.ready
             and room.room_key in allowed_room_keys
-            and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config)
+            and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config, runtime_paths)
             for room in snapshot.rooms
         )
 
-    def is_current_room_member(self, sender_id: str, room_id: str, config: Config) -> bool:
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
         """Return whether the authoritative snapshot joins a sender to one current room."""
         snapshot = self._snapshot
         if snapshot.policy_signature != _agent_reply_membership_policy_signature(config):
@@ -130,7 +138,7 @@ class AgentReplyMembershipIndex:
         return any(
             room.ready
             and room.room_id == room_id
-            and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config)
+            and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config, runtime_paths)
             for room in snapshot.rooms
         )
 
@@ -552,11 +560,18 @@ def _raw_membership_matches_sender(
     raw_user_ids: frozenset[str],
     sender_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
-    """Match current alias equivalence against the raw Matrix membership roster."""
-    authorization = config.authorization
-    canonical_sender = authorization.resolve_alias(sender_id)
-    equivalent_user_ids = {canonical_sender, *authorization.aliases.get(canonical_sender, ())}
+    """Match one canonical human requester against the raw Matrix membership roster."""
+    canonical_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
+    equivalent_user_ids = {
+        canonical_sender,
+        *(
+            alias
+            for alias in config.authorization.aliases.get(canonical_sender, ())
+            if resolve_human_requester_alias(alias, config, runtime_paths) == canonical_sender
+        ),
+    }
     return not raw_user_ids.isdisjoint(equivalent_user_ids)
 
 

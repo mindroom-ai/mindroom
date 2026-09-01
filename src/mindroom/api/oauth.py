@@ -232,7 +232,7 @@ def _resolve_oauth_credentials_target(
         target.base_manager,
         worker_target_for_credentials_target(target),
         execution_identity=target.execution_identity,
-        authorization=snapshot.runtime_config.authorization if snapshot.runtime_config is not None else None,
+        config=snapshot.runtime_config,
     )
     worker_target = context.worker_target
     if worker_target is None or worker_target.worker_key is None:
@@ -339,7 +339,12 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
         config is None
         or not agent_name
         or not requester_id
-        or not is_sender_allowed_for_agent_oauth_connection_management(requester_id, agent_name, config)
+        or not is_sender_allowed_for_agent_oauth_connection_management(
+            requester_id,
+            agent_name,
+            config,
+            snapshot.runtime_paths,
+        )
     ):
         raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
     return config
@@ -379,7 +384,7 @@ def _conversation_connect_context(
         get_runtime_credentials_manager(runtime_paths),
         worker_target,
         execution_identity=identity,
-        authorization=config.authorization,
+        config=config,
     )
     if target.binding != oauth_credential_binding(provider, context.worker_target):
         raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONVERSATION_MESSAGE)
@@ -417,13 +422,13 @@ def _conversation_context_from_pending_payload(
 
 
 def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
-    dashboard_identity = build_dashboard_execution_identity(request, "oauth", runtime_paths=runtime_paths)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    if dashboard_identity.requester_id and snapshot.runtime_config is not None:
-        dashboard_identity = replace(
-            dashboard_identity,
-            requester_id=snapshot.runtime_config.authorization.resolve_alias(dashboard_identity.requester_id),
-        )
+    dashboard_identity = build_dashboard_execution_identity(
+        request,
+        "oauth",
+        config=snapshot.runtime_config,
+        runtime_paths=runtime_paths,
+    )
     if requester_id and requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth link does not belong to the current user")
 

@@ -8,7 +8,8 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+When an OAuth request targets a shared agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+An authenticated requester may manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
 Responder access and room membership never grant OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.

@@ -1685,7 +1685,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.accept_invites` defaults to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs to restrict inviters
+- Router, agent, and team `accept_invites` policies default to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs matched after human-only alias resolution; non-human accounts retain their exact transport ID
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room before the call executes.
 - Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` allows the current Matrix transport account's user ID.
@@ -1767,6 +1767,13 @@ agents:
 
     # Accept all, none, or matching inviter ID patterns
     accept_invites: true
+
+    # Conversation access is separate from invitation acceptance
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - lobby
+      users: []
 
     # Enable markdown formatting
     markdown: true
@@ -1884,9 +1891,8 @@ Use `memory_backend: none` for stateless agents that should skip prompt memory l
 Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
-Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
-`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after identity alias resolution.
+Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
+`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
 Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
 The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
@@ -2909,6 +2915,9 @@ teams:
     rooms:
       - team-room
 
+    # Accept all, none, or matching inviter ID patterns
+    accept_invites: true
+
     # Model for team coordination (default: "default")
     model: sonnet
 
@@ -2936,6 +2945,7 @@ teams:
 | `agents` | Yes | - | List of agent names that compose this team |
 | `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
 | `rooms` | No | `[]` | List of room names the team responds in |
+| `accept_invites` | No | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID after human-only alias resolution; non-human accounts retain their exact transport ID |
 | `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
 | `model` | No | `default` | Model used for team coordination and synthesis |
 | `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
@@ -2946,6 +2956,9 @@ teams:
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 Each configured team must contain at least one unique, known agent.
 Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
+
+Invitation acceptance is independent from team conversation access.
+After joining, the team applies its ordinary `access` policy to every interaction.
 
 `num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
 When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
@@ -13635,7 +13648,8 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+When an OAuth request targets a shared agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+An authenticated requester may manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
 Responder access and room membership never grant OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
@@ -15975,6 +15989,10 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
+Schedules are room-managed resources rather than creator-private resources.
+Thread context filters schedule listings for usability, but it is not an authorization boundary.
+An authorized participant in the room can edit or cancel any room schedule by task ID, and `!cancel_schedule all` applies to the whole room.
+
 ## Silent Delivery
 
 Schedules are visible by default.
@@ -16134,9 +16152,13 @@ external_trigger_policy:
 
 `enabled: false` makes signed and capability trigger endpoints return not found.
 
-`admin_users` can list, rotate, enable, disable, or delete triggers across owners.
+Top-level platform `administrators` can list, rotate, enable, disable, or delete triggers across owners.
 
-Admin-created triggers are still owned by the admin requester, but admins can choose a different target agent, team, or room.
+`admin_users` adds trigger-only administrators who receive the same cross-owner trigger authority without receiving wider platform authority.
+
+Both administrator lists use canonical identities after `authorization.aliases` resolution.
+
+Administrator-created triggers are still owned by the administrator requester, but administrators can choose a different target agent, team, or room.
 
 Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
 
@@ -16189,7 +16211,7 @@ For a non-admin caller, the target agent and room are the current agent and curr
 `target_thread_id` and `new_thread` are mutually exclusive.
 With `new_thread`, each delivery posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
-For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
+For an administrator caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 
 The tool returns `/api/triggers/<trigger_id>` when creation succeeds.
 
@@ -16237,7 +16259,7 @@ The trigger owner is the private-scope requester for the triggered turn.
 
 A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
 
-An admin-created trigger for another private agent still wakes the admin's private state, because trigger ownership always stays with the requester that created it.
+An administrator-created trigger for another private agent still wakes the administrator's private state, because trigger ownership always stays with the requester that created it.
 
 The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
 
@@ -16392,6 +16414,23 @@ Use [External Triggers](https://docs.mindroom.chat/external-triggers/) directly 
 
 MindRoom keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
 
+## Authority at a glance
+
+MindRoom answers five authority questions independently.
+
+| Question | Owner |
+| --- | --- |
+| Who may make a router, agent, or team join a room? | That entity's `accept_invites` policy |
+| Who may interact with a responder? | That responder's `access` policy |
+| Whose state and credentials does an interaction use? | State follows the canonical requester and agent private policy; credentials follow the effective requester, requester-agent, shared-agent, or global scope |
+| Who may administer platform or credential configuration? | Platform configuration uses `administrators`; shared-agent credentials use `administrators` or `agents.<name>.credential_managers`; authenticated requesters may manage their own requester-private OAuth connections |
+| Who may execute one sensitive tool action? | Tool availability plus any applicable tool approval policy |
+
+No answer grants another authority.
+Joining a room does not grant conversation access, and conversation access does not grant credential management.
+Requester-private state placement does not grant access to the agent.
+Tool approval is an additional action gate and does not replace conversation access.
+
 ## Configuration
 
 ```yaml
@@ -16418,6 +16457,8 @@ agents:
   code:
     display_name: Code
     rooms: [engineering]
+    accept_invites:
+      - "@owner:example.com"
     access:
       current_room_members: false
       members_of_rooms: [engineering]
@@ -16486,8 +16527,11 @@ Responder access supports three independent clauses.
 - `members_of_rooms` allows authoritative joined members of any listed managed room.
 - `users` allows canonical Matrix user IDs or glob patterns.
 
-Agent and team access defaults `members_of_rooms` to that responder's configured `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
+A requester is allowed when any configured clause matches.
+
+Agent and team access defaults `members_of_rooms` to that responder's configured managed `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
 Only managed room keys are inferred this way: raw Matrix room IDs and full aliases listed in `rooms` produce no membership grant, and explicit `members_of_rooms` entries must also name configured managed room keys.
+The configured rooms used by `members_of_rooms` are managed grant rooms; they are not a separate identity or invitation concept.
 The router defaults `current_room_members` to `true`.
 An explicit `members_of_rooms: []` disables inferred room grants.
 
@@ -16499,11 +16543,21 @@ The router owns this authoritative index, so it must be joined to a room before 
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 Inbound invitation policy is independent from responder access.
-Accepting an invitation grants room membership but never grants permission to interact with the router or an agent.
-The router and agents use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
+Accepting an invitation grants room membership but never grants permission to interact with the router, an agent, or a team.
+The router, agents, and teams use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
 Every interaction after joining still uses the responder rules above.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
+
+## Requester identity and private state
+
+MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.
+The raw authenticated Matrix sender remains transport provenance and is not used as a second downstream ownership decision.
+One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
+
+An agent's `private` field controls requester-private state placement.
+It does not authorize anyone to interact with the agent.
+MindRoom checks the agent's ordinary `access` policy before selecting a requester-private instance.
 
 ## Platform and credential authority
 
@@ -16521,10 +16575,20 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 `!config` remains disabled by default through `authorization.config_command_enabled`.
 When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a platform administrator.
 
+## Tool approval and resource ownership
+
+Conversation access allows a requester to ask a responder to act, but the responder must still have the tool and any configured approval must still succeed.
+Tool approval is bound to the canonical requester who initiated the action and rechecks current responder access.
+
+Schedules are room-managed resources, while external triggers, background scripts, attachments, requester-private workers, and requester-scoped credentials are requester-owned.
+These ownership rules do not create additional responder access.
+
 ## Bridge aliases
 
 `authorization.aliases` maps bridge-created identities before access checks.
 It maps bridge-created Matrix IDs to a canonical Matrix user before access, administration, or credential checks.
+Both the bridge identity and canonical identity must represent humans; managed responders, configured bot accounts, and MindRoom's internal account are never remapped into human requesters.
+Alias definitions are flat, so a canonical identity cannot also appear as another identity's alias.
 
 ```yaml
 authorization:

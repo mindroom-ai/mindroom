@@ -636,6 +636,7 @@ def _text_event(
     event_id: str = _EVENT_ID,
     thread_id: str | None = None,
     origin_server_ts: int = 1_000_000,
+    sender: str = _SENDER,
 ) -> nio.RoomMessageText:
     content: dict[str, Any] = {"body": body, "msgtype": "m.text"}
     if thread_id is not None:
@@ -644,7 +645,7 @@ def _text_event(
         {
             "content": content,
             "event_id": event_id,
-            "sender": _SENDER,
+            "sender": sender,
             "origin_server_ts": origin_server_ts,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
@@ -1710,6 +1711,82 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_bridge_alias_crosses_execution_seam_as_one_canonical_requester(tmp_path: Path) -> None:
+    """Requester-owned execution must not split one human across configured bridge identities."""
+    canonical_sender = "@owner:localhost"
+    bridge_sender = "@bridge_owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[canonical_sender]),
+                ),
+            },
+            authorization={"aliases": {canonical_sender: [bridge_sender]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    room.add_member(bridge_sender, bridge_sender, None)
+    event = _text_event("use my private state", sender=bridge_sender)
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == canonical_sender
+    assert request.response_envelope.requester_id == canonical_sender
+    assert request.response_envelope.origin.transport_sender_id == bridge_sender
+
+
+@pytest.mark.asyncio
+async def test_trusted_router_relay_preserves_transport_sender_while_canonicalizing_requester(tmp_path: Path) -> None:
+    """A trusted relay keeps its bot provenance while the human owns execution."""
+    canonical_sender = "@owner:localhost"
+    bridge_sender = "@bridge_owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[canonical_sender]),
+                ),
+            },
+            authorization={"aliases": {canonical_sender: [bridge_sender]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    router_sender = _entity_user_id(config, ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general use my private state",
+                "msgtype": "m.text",
+                constants.ORIGINAL_SENDER_KEY: bridge_sender,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+            "event_id": "$router-relay:localhost",
+            "sender": router_sender,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == canonical_sender
+    assert request.response_envelope.requester_id == canonical_sender
+    assert request.response_envelope.origin.transport_sender_id == router_sender
 
 
 @pytest.mark.asyncio
@@ -3329,7 +3406,8 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3410,7 +3488,8 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
         harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=source_event_id,
         ),
     )
@@ -3453,13 +3532,15 @@ async def test_edited_question_selection_uses_its_exact_source_as_turn_identity(
     await harness.controller._handle_interactive_selection(
         room,
         selection=original,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$original-selection:localhost",
     )
     await harness.controller._handle_interactive_selection(
         room,
         selection=replacement,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$replacement-selection:localhost",
     )
 
@@ -3523,7 +3604,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 
@@ -3536,7 +3618,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id=selection_event_id,
     )
 
@@ -3577,7 +3660,8 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -3618,7 +3702,8 @@ async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3655,7 +3740,8 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 
@@ -3702,7 +3788,8 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id=selection_event_id,
     )
 
@@ -3766,7 +3853,8 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3811,7 +3899,8 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3872,7 +3961,8 @@ async def test_interactive_selection_failure_leaves_the_notice_to_the_outbox(
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -3903,7 +3993,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -3935,7 +4026,8 @@ async def test_interactive_selection_interruption_registers_exact_source_before_
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 

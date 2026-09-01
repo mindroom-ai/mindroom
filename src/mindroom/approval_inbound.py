@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     handle_matrix_approval_action,
@@ -82,10 +83,11 @@ async def handle_tool_approval_action(
     """Resolve one approval action only when the sender still has access."""
     if approval_event_id is None:
         return False
+    requester_id = resolve_human_requester_alias(sender_id, config, runtime_paths)
 
     def authorize_responder(entity_name: str) -> bool:
         allowed = is_sender_allowed_for_responder(
-            sender_id,
+            requester_id,
             entity_name,
             room.room_id,
             config,
@@ -95,14 +97,15 @@ async def handle_tool_approval_action(
         if not allowed:
             logger.debug(
                 "ignoring_tool_approval_action_from_unauthorized_sender",
-                user_id=sender_id,
+                user_id=requester_id,
+                transport_sender_id=sender_id,
                 entity_name=entity_name,
             )
         return allowed
 
     action = MatrixApprovalAction(
         room_id=room.room_id,
-        sender_id=sender_id,
+        sender_id=requester_id,
         card_event_id=approval_event_id,
         status=status,
         reason=reason,

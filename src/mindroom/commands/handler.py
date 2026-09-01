@@ -19,9 +19,13 @@ from mindroom.commands.parsing import Command, CommandType, get_command_help, ge
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import (
+    configured_routable_entity_ids_for_room,
+    entity_identity_registry,
+)
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.scheduling import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -310,7 +314,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = get_command_help(topic)
 
     elif command.type == CommandType.RELOAD_PLUGINS:
-        if not is_platform_administrator(requester_user_id, context.config):
+        if not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         elif context.reload_plugins is None:
             response_text = "❌ Plugin reload unavailable."
@@ -411,10 +415,14 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         authorization = context.config.authorization
         if not authorization.config_command_enabled:
             response_text = "❌ Config command disabled."
-        elif not is_platform_administrator(requester_user_id, context.config):
+        elif not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         else:
-            resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
+            resolved_requester_user_id = resolve_human_requester_alias(
+                requester_user_id,
+                context.config,
+                context.runtime_paths,
+            )
             # Handle config command
             args_text = command.args.get("args_text", "")
             response_text, change_info = await handle_config_command(

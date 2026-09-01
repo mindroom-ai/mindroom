@@ -226,6 +226,7 @@ teams:
     agents: [research, code]
     mode: coordinate  # "coordinate" or "collaborate"
     model: "default"  # Optional model override
+    accept_invites: true  # Accept all, none, or matching inviter ID patterns
     num_history_runs: 8  # Optional team-scoped replay policy
     num_history_messages: null  # Optional; mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
@@ -241,6 +242,7 @@ teams:
 
 - **coordinate**: A lead agent orchestrates the others
 - **collaborate**: All members respond in parallel with a consensus summary
+- **accept_invites**: Accept every direct Matrix room invite with `true`, none with `false` or `[]`, or exact and wildcard inviter Matrix user IDs from a list
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
 - **compaction**: Optional team-owned required-compaction overrides for the shared team scope
@@ -670,6 +672,7 @@ teams:
     role: "Collaborative research"
     agents: [assistant]
     mode: coordinate
+    accept_invites: true
 
 # Defaults
 defaults:

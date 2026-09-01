@@ -24,6 +24,7 @@ def _runtime_config(
     *,
     member_rooms: list[str],
     aliases: dict[str, list[str]] | None = None,
+    bot_accounts: list[str] | None = None,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -43,6 +44,7 @@ def _runtime_config(
             "authorization": {
                 "aliases": aliases or {},
             },
+            "bot_accounts": bot_accounts or [],
             "router": {
                 "access": {
                     "current_room_members": False,
@@ -134,8 +136,53 @@ async def test_refresh_canonicalizes_authoritative_joined_members(tmp_path: Path
 
     await index.refresh(config, runtime_paths, client)
 
-    assert index.is_allowed("@alice:example.com", ["project"], config)
-    assert index.is_allowed("@telegram_alice:example.com", ["project"], config)
+    assert index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
+    assert index.is_allowed("@telegram_alice:example.com", ["project"], config, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_configured_bot_alias_cannot_prove_human_grant_room_membership(tmp_path: Path) -> None:
+    """A configured bot in a grant room must not impersonate its canonical human alias."""
+    room_id = "!project:example.com"
+    owner_id = "@owner:example.com"
+    bot_id = "@bridgebot:example.com"
+    config, runtime_paths = _runtime_config(
+        tmp_path,
+        member_rooms=["project"],
+        aliases={owner_id: [bot_id]},
+        bot_accounts=[bot_id],
+    )
+    _persist_room(runtime_paths, "project", room_id)
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = _joined_members(room_id, bot_id)
+    index = AgentReplyMembershipIndex()
+
+    await index.refresh(config, runtime_paths, client)
+
+    assert not index.is_allowed(owner_id, ["project"], config, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_managed_agent_alias_cannot_prove_human_grant_room_membership(tmp_path: Path) -> None:
+    """A managed agent in a grant room must not impersonate its canonical human alias."""
+    room_id = "!project:example.com"
+    owner_id = "@owner:example.com"
+    managed_agent_id = "@mindroom_assistant:example.com"
+    config, runtime_paths = _runtime_config(
+        tmp_path,
+        member_rooms=["project"],
+        aliases={owner_id: [managed_agent_id]},
+    )
+    _persist_room(runtime_paths, "project", room_id)
+    client = AsyncMock()
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = _joined_members(room_id, managed_agent_id)
+    index = AgentReplyMembershipIndex()
+
+    await index.refresh(config, runtime_paths, client)
+
+    assert not index.is_allowed(owner_id, ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -156,7 +203,7 @@ async def test_refresh_uses_any_ready_joined_room(tmp_path: Path) -> None:
 
     await index.refresh(config, runtime_paths, client)
 
-    assert index.is_allowed("@alice:example.com", ["project", "secondary"], config)
+    assert index.is_allowed("@alice:example.com", ["project", "secondary"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -172,7 +219,7 @@ async def test_ready_room_can_grant_while_another_room_awaits_retry(tmp_path: Pa
     await index.refresh(config, runtime_paths, client)
 
     assert index.needs_refresh(config)
-    assert index.is_allowed("@alice:example.com", ["project", "secondary"], config)
+    assert index.is_allowed("@alice:example.com", ["project", "secondary"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -185,7 +232,7 @@ async def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
 
     await index.refresh(config, runtime_paths, client)
 
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
     client.joined_members.assert_not_awaited()
 
 
@@ -201,7 +248,7 @@ async def test_router_not_joined_to_grant_room_fails_closed(tmp_path: Path) -> N
 
     await index.refresh(config, runtime_paths, client)
 
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
     client.joined_members.assert_not_awaited()
 
 
@@ -222,7 +269,7 @@ async def test_failed_joined_members_snapshot_fails_closed(tmp_path: Path) -> No
 
     await index.refresh(config, runtime_paths, client)
 
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -246,7 +293,7 @@ async def test_non_join_transition_revokes_ready_member(tmp_path: Path, membersh
         control_user_id="@mindroom_router:example.com",
     )
 
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -269,7 +316,7 @@ async def test_join_transition_adds_member_to_ready_snapshot(tmp_path: Path) -> 
         control_user_id="@mindroom_router:example.com",
     )
 
-    assert index.is_allowed("@alice:example.com", ["project"], config)
+    assert index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -300,7 +347,7 @@ async def test_alias_departure_preserves_other_joined_identity_for_canonical_use
         control_user_id="@mindroom_router:example.com",
     )
 
-    assert index.is_allowed("@alice:example.com", ["project"], config)
+    assert index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -325,7 +372,7 @@ async def test_control_client_departure_marks_grant_room_unready(tmp_path: Path)
     )
 
     assert index.needs_refresh(config)
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -362,7 +409,7 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
         await refresh_task
 
     assert index.needs_refresh(config)
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -397,7 +444,7 @@ async def test_unrelated_membership_event_does_not_fence_inflight_refresh(tmp_pa
     release_query.set()
     await refresh_task
 
-    assert index.is_allowed("@alice:example.com", ["project"], config)
+    assert index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> None:
@@ -413,7 +460,7 @@ def test_transition_cannot_make_unready_room_authoritative(tmp_path: Path) -> No
         control_user_id="@mindroom_router:example.com",
     )
 
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -432,7 +479,7 @@ async def test_room_grant_policy_change_invalidates_old_snapshot(tmp_path: Path)
         member_rooms=["secondary"],
     )
 
-    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config)
+    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -457,8 +504,8 @@ async def test_alias_policy_change_reuses_raw_membership_snapshot(tmp_path: Path
     )
 
     assert not index.needs_refresh(changed_config)
-    assert not index.is_allowed("@alice:example.com", ["project"], changed_config)
-    assert index.is_allowed("@bob:example.com", ["project"], changed_config)
+    assert not index.is_allowed("@alice:example.com", ["project"], changed_config, runtime_paths)
+    assert index.is_allowed("@bob:example.com", ["project"], changed_config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -482,8 +529,8 @@ async def test_refresh_adopts_changed_policy_without_external_invalidation(tmp_p
     await index.refresh(changed_config, runtime_paths, client)
 
     assert not index.needs_refresh(changed_config)
-    assert index.is_allowed("@bob:example.com", ["secondary"], changed_config)
-    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config)
+    assert index.is_allowed("@bob:example.com", ["secondary"], changed_config, runtime_paths)
+    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -501,7 +548,7 @@ async def test_invalidation_revokes_ready_members_until_refresh(tmp_path: Path) 
     index.invalidate(config, reason="sync_restart")
 
     assert index.needs_refresh(config)
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 def test_current_room_only_invalidation_requests_authoritative_refresh(tmp_path: Path) -> None:
@@ -536,7 +583,7 @@ async def test_new_current_room_transition_requests_authoritative_refresh(tmp_pa
 
     assert changed
     assert index.needs_refresh(config)
-    assert not index.is_current_room_member(control_user_id, room_id, config)
+    assert not index.is_current_room_member(control_user_id, room_id, config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -574,9 +621,9 @@ async def test_current_room_refresh_reuses_ready_room_snapshots(tmp_path: Path) 
         second_room_id,
         new_room_id,
     ]
-    assert index.is_current_room_member("@alice:example.com", first_room_id, config)
-    assert index.is_current_room_member("@bob:example.com", second_room_id, config)
-    assert index.is_current_room_member(control_user_id, new_room_id, config)
+    assert index.is_current_room_member("@alice:example.com", first_room_id, config, runtime_paths)
+    assert index.is_current_room_member("@bob:example.com", second_room_id, config, runtime_paths)
+    assert index.is_current_room_member(control_user_id, new_room_id, config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -590,7 +637,7 @@ async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: P
     client.joined_members.return_value = _joined_members(room_id, control_user_id, "@alice:example.com")
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
-    assert index.is_current_room_member("@alice:example.com", room_id, config)
+    assert index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
     changed = index.mark_control_room_unready(
         config,
@@ -601,7 +648,7 @@ async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: P
 
     assert changed
     assert index.needs_refresh(config)
-    assert not index.is_current_room_member("@alice:example.com", room_id, config)
+    assert not index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -634,7 +681,7 @@ async def test_invalidation_during_refresh_prevents_stale_publication(tmp_path: 
 
     assert client.joined_members.await_count == 1
     assert index.needs_refresh(config)
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -673,7 +720,7 @@ async def test_live_transition_fences_refresh_for_newly_resolved_room(tmp_path: 
 
     assert client.joined_members.await_count == 1
     assert index.needs_refresh(config)
-    assert not index.is_allowed("@alice:example.com", ["project"], config)
+    assert not index.is_allowed("@alice:example.com", ["project"], config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -705,4 +752,4 @@ async def test_old_policy_refresh_cannot_publish_after_policy_replacement(tmp_pa
 
     assert index.snapshot.policy_signature == _agent_reply_membership_policy_signature(changed_config)
     assert index.needs_refresh(changed_config)
-    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config)
+    assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config, runtime_paths)

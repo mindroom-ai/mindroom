@@ -3132,7 +3132,7 @@ def test_requester_scoped_conversation_link_for_user_agent_uses_user_store(tmp_p
         session_id=None,
     )
     runtime_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    oauth_target = oauth_lifecycle.oauth_credentials_worker_target(provider, runtime_target)
+    oauth_target = oauth_lifecycle.oauth_credentials_worker_target(provider, runtime_paths, runtime_target)
     assert oauth_target is not None
     assert oauth_target.worker_scope == "user"
     connect_url = urlparse(oauth_service.oauth_connect_url(provider, runtime_paths, worker_target=oauth_target))
@@ -3202,7 +3202,7 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
         runtime_paths,
         get_runtime_credentials_manager(runtime_paths),
         raw_target,
-        authorization=config.authorization,
+        config=config,
     )
     assert context.worker_target is not None
     assert context.worker_target.execution_identity is not None

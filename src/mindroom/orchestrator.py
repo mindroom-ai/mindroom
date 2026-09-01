@@ -1368,7 +1368,7 @@ class _MultiAgentOrchestrator:
         await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
 
     async def reconcile_pending_invites(self) -> None:
-        """Recheck cached invites against router, agent, or legacy team policy."""
+        """Recheck cached invites against each router, agent, or team policy."""
         await asyncio.gather(*(bot.reconcile_pending_invites() for bot in self.agent_bots.values()))
 
     async def revoke_reply_authorized_calls(self) -> None:

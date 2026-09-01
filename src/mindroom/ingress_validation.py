@@ -22,10 +22,11 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry, is_human_requester_id
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
@@ -78,36 +79,42 @@ class IngressValidator:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
+        requester_id: str
         if isinstance(content, dict):
             original_sender = content.get(ORIGINAL_SENDER_KEY)
             if not isinstance(original_sender, str):
-                return get_effective_sender_id_for_reply_permissions(
+                requester_id = get_effective_sender_id_for_reply_permissions(
                     sender,
                     source_dict,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                 )
-            source_kind = source_kind_from_content(content)
-            trusted_requester = requester_id_from_trusted_original_sender(
-                original_sender=original_sender,
-                original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                original_sender_is_human=is_human_requester_id(
-                    original_sender,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                ),
-                source_kind=source_kind,
-                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
-                    sender=sender,
+            else:
+                source_kind = source_kind_from_content(content)
+                trusted_requester = requester_id_from_trusted_original_sender(
+                    original_sender=original_sender,
+                    original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
+                    original_sender_is_human=is_human_requester_id(
+                        original_sender,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
                     source_kind=source_kind,
-                ),
+                    sender_trusts_original_sender=self._should_trust_original_sender_metadata(
+                        sender=sender,
+                        source_kind=source_kind,
+                    ),
+                )
+                requester_id = trusted_requester if trusted_requester is not None else sender
+        else:
+            requester_id = get_effective_sender_id_for_reply_permissions(
+                sender,
+                source_dict,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
             )
-            if trusted_requester is not None:
-                return trusted_requester
-            return sender
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
+        return resolve_human_requester_alias(
+            requester_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )

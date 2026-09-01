@@ -18,6 +18,7 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -41,14 +42,14 @@ def is_sender_allowed_for_responder(
 ) -> bool:
     """Apply the complete membership policy for one responder."""
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
-    resolved_sender = config.authorization.resolve_alias(sender_id)
+    resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
     allowed = allowed or resolved_sender in config.administrators
     allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
     allowed = allowed or (
         room_id is not None
         and access.current_room_members
-        and membership_index.is_current_room_member(resolved_sender, room_id, config)
+        and membership_index.is_current_room_member(resolved_sender, room_id, config, runtime_paths)
     )
     return allowed or (
         bool(access.members_of_rooms)
@@ -56,6 +57,7 @@ def is_sender_allowed_for_responder(
             resolved_sender,
             access.members_of_rooms,
             config,
+            runtime_paths,
         )
     )
 
@@ -114,12 +116,13 @@ def is_sender_allowed_for_agent_credential_management(
     sender_id: str,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
     agent = config.agents.get(agent_name)
     if agent is None:
         return False
-    resolved_sender = config.authorization.resolve_alias(sender_id)
+    resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     return resolved_sender in config.administrators or resolved_sender in agent.credential_managers
 
 
@@ -127,6 +130,7 @@ def is_sender_allowed_for_agent_oauth_connection_management(
     sender_id: str,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Check whether a requester may manage their OAuth connection for one agent.
 
@@ -140,12 +144,12 @@ def is_sender_allowed_for_agent_oauth_connection_management(
         return False
     if agent.private is not None:
         return True
-    return is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config)
+    return is_sender_allowed_for_agent_credential_management(sender_id, agent_name, config, runtime_paths)
 
 
-def is_platform_administrator(sender_id: str, config: Config) -> bool:
+def is_platform_administrator(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return whether a requester has platform-wide administrative authority."""
-    resolved_sender = config.authorization.resolve_alias(sender_id)
+    resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     return resolved_sender in config.administrators
 
 
