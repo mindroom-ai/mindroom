@@ -321,11 +321,20 @@ def _collect_usage(
                 usage.unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
                 continue
-            row = (
-                _canonicalize_run_requesters(item, config, runtime_paths)
-                if scope == "self" and not item.source.requester_isolated
-                else item
-            )
+            row = item
+            if scope == "self" and not item.source.requester_isolated:
+                row = replace(
+                    item,
+                    runs=tuple(
+                        replace(
+                            run,
+                            requester_id=resolve_human_requester_alias(run.requester_id, config, runtime_paths),
+                        )
+                        if run.requester_id is not None
+                        else run
+                        for run in item.runs
+                    ),
+                )
             usage.add_row(
                 row,
                 scope=scope,
@@ -461,26 +470,6 @@ def _self_row_totals(
         total = total.plus(run_totals)
         accepted = True
     return total if accepted else None
-
-
-def _canonicalize_run_requesters(
-    row: UsageSessionRow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> UsageSessionRow:
-    """Resolve historical human aliases once at the storage-read boundary."""
-    return replace(
-        row,
-        runs=tuple(
-            replace(
-                run,
-                requester_id=resolve_human_requester_alias(run.requester_id, config, runtime_paths),
-            )
-            if run.requester_id is not None
-            else run
-            for run in row.runs
-        ),
-    )
 
 
 def _admin_entity_id(row: UsageSessionRow) -> str | None:
