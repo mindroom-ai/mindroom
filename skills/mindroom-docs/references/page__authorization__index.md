@@ -10,8 +10,8 @@ MindRoom answers five authority questions independently.
 | --- | --- |
 | Who may make a router, agent, or team join a room? | That entity's `accept_invites` policy |
 | Who may interact with a responder? | That responder's `access` policy |
-| Whose state and credentials does an interaction use? | The canonical requester plus the agent's requester-private and worker scope |
-| Who may administer platform or credential configuration? | `administrators` and `agents.<name>.credential_managers` |
+| Whose state and credentials does an interaction use? | State follows the canonical requester and agent private policy; credentials follow the effective requester, requester-agent, shared-agent, or global scope |
+| Who may administer platform or credential configuration? | Platform configuration uses `administrators`; shared-agent credentials use `administrators` or `agents.<name>.credential_managers`; authenticated requesters may manage their own requester-private OAuth connections |
 | Who may execute one sensitive tool action? | Tool availability plus any applicable tool approval policy |
 
 No answer grants another authority.
