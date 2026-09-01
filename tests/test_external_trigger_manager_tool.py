@@ -39,6 +39,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(
     *,
     admin_users: list[str] | None = None,
+    platform_administrators: list[str] | None = None,
     private_watcher: bool = False,
     private_other: bool = False,
 ) -> Config:
@@ -67,7 +68,7 @@ def _config(
             },
             "rooms": {"lobby": {"display_name": "Lobby"}, "other-room": {"display_name": "Other"}},
             "external_trigger_policy": {"admin_users": admin_users or []},
-            "administrators": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
+            "administrators": platform_administrators or [],
         },
     )
     if private_watcher:
@@ -376,6 +377,50 @@ def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) ->
         "room_id": "other-room",
         "thread_id": "$target-thread",
     }
+
+
+def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
+    """Platform administrators must receive trigger administration without a second allowlist."""
+    requester = "@platform-admin:example.org"
+    config = _config(platform_administrators=[requester])
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=requester, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "platform-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == requester
+    assert payload["trigger"]["target"]["agent"] == "other"
+
+
+def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) -> None:
+    """A configured bridge alias must receive its canonical trigger administrator authority."""
+    canonical_admin = "@trigger-admin:example.org"
+    alias_admin = "@bridge-trigger-admin:example.org"
+    config = _config(admin_users=[canonical_admin])
+    config.authorization.aliases = {canonical_admin: [alias_admin]}
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=alias_admin, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "alias-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == alias_admin
+    assert payload["trigger"]["target"]["agent"] == "other"
 
 
 def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:

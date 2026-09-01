@@ -202,12 +202,12 @@ The remaining work is documentation, generated starter clarity, and focused test
 - Modify `tests/test_external_trigger_manager_tool.py`.
 - Modify `tests/test_external_trigger_store.py`.
 
-- [ ] Write failing tests for platform administrators, additive trigger administrators, aliases, and live revocation.
-- [ ] Run those tests with `uv run pytest -n auto` and confirm platform-administrator and alias cases fail.
-- [ ] Implement one pure alias-aware trigger-administrator predicate.
-- [ ] Use it for cross-target creation, listing, mutation, key rotation, and deletion.
-- [ ] Run the focused external-trigger policy, manager, store, and API tests.
-- [ ] Commit the independently testable trigger authority change.
+- [x] Write failing tests for platform administrators, additive trigger administrators, aliases, and live revocation.
+- [x] Run those tests with `uv run pytest -n auto` and confirm platform-administrator and alias cases fail.
+- [x] Implement one pure alias-aware trigger-administrator predicate.
+- [x] Use it for cross-target creation, listing, mutation, key rotation, and deletion.
+- [x] Run the focused external-trigger policy, manager, store, and API tests.
+- [x] Commit the independently testable trigger authority change.
 
 ### Task 4: Make the authored model explicit
 
@@ -260,4 +260,5 @@ The remaining work is documentation, generated starter clarity, and focused test
 - [x] Defined explicit production changes, accepted semantics, non-goals, and required tests.
 - [x] Task 1 canonicalizes trusted requesters once at Matrix ingress while preserving transport identity.
 - [x] Task 2 gives teams the same dedicated invitation policy and removes their lifecycle exception.
+- [x] Task 3 makes platform and additive external-trigger administrators use one alias-aware predicate.
 - [ ] Implementation and verification remain.

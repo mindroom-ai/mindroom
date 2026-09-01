@@ -40,6 +40,8 @@ def _runtime_paths(tmp_path: Path, *, server_name: str = "example.org") -> Runti
 
 def _config(
     *,
+    administrators: list[str] | None = None,
+    authorization_aliases: dict[str, list[str]] | None = None,
     bot_accounts: list[str] | None = None,
     mindroom_user: dict[str, str] | None = None,
     **policy_overrides: object,
@@ -59,7 +61,8 @@ def _config(
             "external_trigger_policy": policy_overrides,
             "bot_accounts": bot_accounts or [],
             "mindroom_user": mindroom_user,
-            "administrators": [_OWNER],
+            "administrators": [_OWNER] if administrators is None else administrators,
+            "authorization": {"aliases": authorization_aliases or {}},
         },
     )
 
@@ -473,6 +476,27 @@ def test_non_owner_cannot_modify_trigger_but_admin_can(tmp_path: Path) -> None:
         store.set_enabled(record.trigger_id, enabled=False, actor_user_id="@other:example.org", config=config)
 
     updated = store.set_enabled(record.trigger_id, enabled=False, actor_user_id="@admin:example.org", config=config)
+
+    assert updated.enabled is False
+
+
+def test_platform_admin_alias_can_modify_another_owners_trigger(tmp_path: Path) -> None:
+    """Stored trigger mutation must honor aliased platform-administrator authority."""
+    platform_admin = "@platform-admin:example.org"
+    platform_admin_alias = "@bridge-platform-admin:example.org"
+    config = _config(
+        administrators=[_OWNER, platform_admin],
+        authorization_aliases={platform_admin: [platform_admin_alias]},
+    )
+    store = ExternalTriggerStore(_runtime_paths(tmp_path))
+    record = _create(store, config)
+
+    updated = store.set_enabled(
+        record.trigger_id,
+        enabled=False,
+        actor_user_id=platform_admin_alias,
+        config=config,
+    )
 
     assert updated.enabled is False
 

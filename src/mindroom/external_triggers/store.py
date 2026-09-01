@@ -31,6 +31,7 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.entity_rooms import get_rooms_for_entity
+from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import matrix_state_for_runtime, resolve_room_id
@@ -493,7 +494,7 @@ class ExternalTriggerStore:
         if record is None:
             msg = f"external trigger not found: {trigger_id}"
             raise ExternalTriggerStoreError(msg)
-        if actor_user_id != record.owner_user_id and actor_user_id not in config.external_trigger_policy.admin_users:
+        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(config, actor_user_id):
             msg = "external trigger can only be changed by its owner or an external trigger admin"
             raise ExternalTriggerStoreError(msg)
         return record
