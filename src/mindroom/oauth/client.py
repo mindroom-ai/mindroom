@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
     from structlog.stdlib import BoundLogger
 
-    from mindroom.config.auth import AuthorizationConfig
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -74,21 +74,21 @@ def active_oauth_credential_context(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     *,
-    authorization: AuthorizationConfig | None,
+    config: Config | None,
 ) -> OAuthCredentialContext:
     """Resolve OAuth storage from the active tool call and its configured fallback."""
     execution_identity = active_tool_execution_identity(None)
     if execution_identity is None and worker_target is not None:
         execution_identity = worker_target.execution_identity
     runtime_context = get_tool_runtime_context()
-    resolved_authorization = runtime_context.config.authorization if runtime_context is not None else authorization
+    resolved_config = runtime_context.current_config if runtime_context is not None else config
     return resolve_oauth_credential_context(
         provider,
         runtime_paths,
         credentials_manager,
         worker_target,
         execution_identity=execution_identity,
-        authorization=resolved_authorization,
+        config=resolved_config,
     )
 
 
@@ -156,7 +156,7 @@ class ScopedOAuthClientMixin:
     _runtime_paths: RuntimePaths
     _creds_manager: CredentialsManager
     _worker_target: ResolvedWorkerTarget | None
-    _authorization: AuthorizationConfig | None
+    _config: Config | None
     _provided_creds: bool
     _provided_credentials: GoogleOAuthCredentials | None
     _provided_credentials_lock: threading.RLock
@@ -189,7 +189,7 @@ class ScopedOAuthClientMixin:
         self,
         *,
         worker_target: ResolvedWorkerTarget | None,
-        authorization: AuthorizationConfig | None,
+        config: Config | None,
         provided_creds: Any,  # noqa: ANN401
         logger: BoundLogger,
         defer_to_original_auth: bool = False,
@@ -197,7 +197,7 @@ class ScopedOAuthClientMixin:
     ) -> Any:  # noqa: ANN401
         """Prepare OAuth state and initial credentials for the tool."""
         self._worker_target = worker_target
-        self._authorization = authorization
+        self._config = config
         self._provided_creds = provided_creds is not None
         self._provided_credentials_lock = threading.RLock()
         self._oauth_quota_project_id = quota_project_id
@@ -398,7 +398,7 @@ class ScopedOAuthClientMixin:
             self._runtime_paths,
             self._creds_manager,
             self._worker_target,
-            authorization=self._authorization,
+            config=self._config,
         )
 
     def _connection_required(self, *, reason: str | None = None) -> OAuthConnectionRequired:

@@ -91,6 +91,7 @@ def resolve_oauth_reset_target(
         requester_id,
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
     ):
         msg = "The current requester is not authorized to manage this agent's credentials."
         raise OAuthResetTargetError(msg)
@@ -134,7 +135,7 @@ def resolve_oauth_reset_target(
         get_runtime_credentials_manager(runtime_paths),
         resolved_worker_target,
         execution_identity=execution_identity,
-        authorization=config.authorization,
+        config=config,
     )
     credential_target = credential_context.worker_target
     if (

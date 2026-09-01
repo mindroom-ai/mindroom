@@ -355,6 +355,7 @@ def _build_oauth_onboarding_guidance(
         runtime_context.requester_id,
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
     ):
         return (
             f"\n\nNo OAuth connect link was issued because the current requester is not authorized to manage "
@@ -384,9 +385,10 @@ def _build_oauth_onboarding_guidance(
             continue
         credential_target = oauth_credentials_worker_target(
             provider,
+            runtime_paths,
             worker_target,
             execution_identity=target_identity,
-            authorization=config.authorization,
+            config=config,
         )
         connect_url = oauth_connect_url(provider, runtime_paths, worker_target=credential_target)
         requires_host_browser = oauth_connect_url_requires_host_browser(connect_url)
@@ -853,7 +855,11 @@ class ConfigManagerTools(Toolkit):
     def _configuration_mutation_authorization_error(config: Config) -> str | None:
         """Deny full configuration writes without a current platform administrator."""
         runtime_context = get_tool_runtime_context()
-        if runtime_context is not None and is_platform_administrator(runtime_context.requester_id, config):
+        if runtime_context is not None and is_platform_administrator(
+            runtime_context.requester_id,
+            config,
+            runtime_context.runtime_paths,
+        ):
             return None
         return f"{_PLATFORM_ADMIN_REQUIRED_MESSAGE}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
 

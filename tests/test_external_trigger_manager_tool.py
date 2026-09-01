@@ -429,6 +429,29 @@ def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) ->
     assert payload["trigger"]["target"]["agent"] == "other"
 
 
+def test_bot_alias_cannot_inherit_trigger_admin_authority(tmp_path: Path) -> None:
+    """A configured bot alias must not inherit a human trigger-admin grant."""
+    canonical_admin = "@trigger-admin:example.org"
+    bot_alias = "@bridgebot:example.org"
+    config = _config(admin_users=[canonical_admin])
+    config.bot_accounts = [bot_alias]
+    config.authorization.aliases = {canonical_admin: [bot_alias]}
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=bot_alias, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "bot-alias-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Only external trigger admins" in payload["message"]
+
+
 def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:
     """Admin-created private cross-target triggers should stay owned by the admin requester."""
     config = _config(admin_users=["@admin:example.org"], private_other=True)

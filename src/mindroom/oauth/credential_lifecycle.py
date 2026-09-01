@@ -27,12 +27,13 @@ from mindroom.oauth.providers import (
     OAuthTokenResult,
     is_terminal_oauth_refresh_error_code,
 )
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 
-    from mindroom.config.auth import AuthorizationConfig
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
@@ -291,15 +292,19 @@ class OAuthCredentialConflictError(OAuthProviderError):
 
 def oauth_credentials_worker_target(
     provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
-    authorization: AuthorizationConfig | None = None,
+    config: Config | None = None,
 ) -> ResolvedWorkerTarget | None:
     """Return one OAuth-only canonical target under the provider identity policy."""
     identity = execution_identity or (worker_target.execution_identity if worker_target is not None else None)
-    if identity is not None and identity.requester_id and authorization is not None:
-        identity = replace(identity, requester_id=authorization.resolve_alias(identity.requester_id))
+    if identity is not None and identity.requester_id and config is not None:
+        identity = replace(
+            identity,
+            requester_id=resolve_human_requester_alias(identity.requester_id, config, runtime_paths),
+        )
     if provider.requester_scoped_credentials:
         if identity is None or not identity.requester_id:
             return None
@@ -325,7 +330,7 @@ def resolve_oauth_credential_context(
     worker_target: ResolvedWorkerTarget | None,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
-    authorization: AuthorizationConfig | None = None,
+    config: Config | None = None,
 ) -> OAuthCredentialContext:
     """Resolve the canonical identity and storage target for one OAuth credential scope."""
     return OAuthCredentialContext(
@@ -334,9 +339,10 @@ def resolve_oauth_credential_context(
         credentials_manager=credentials_manager,
         worker_target=oauth_credentials_worker_target(
             provider,
+            runtime_paths,
             worker_target,
             execution_identity=execution_identity,
-            authorization=authorization,
+            config=config,
         ),
     )
 

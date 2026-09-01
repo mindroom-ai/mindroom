@@ -5,14 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import (
-    extract_server_name_from_homeserver,
     room_alias_identifier_candidates,
 )
+from mindroom.requester_identity import mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-
-_INTERNAL_USER_ENTITY_NAME = "user"
 
 
 class MissingManagedEntityAccountError(RuntimeError):
@@ -238,8 +236,7 @@ def managed_entity_power_user_ids_for_room(
 
 def _matrix_domain(runtime_paths: RuntimePaths) -> str:
     """Return the Matrix domain for one explicit runtime context."""
-    homeserver = runtime_matrix_homeserver(runtime_paths)
-    return extract_server_name_from_homeserver(homeserver, runtime_paths)
+    return runtime_matrix_domain(runtime_paths)
 
 
 @dataclass(frozen=True)
@@ -334,31 +331,6 @@ def _validate_internal_user_id_is_unique(
             f"{internal_user_id} is also used by {entity_name!r}"
         )
         raise DuplicateManagedEntityIdentityError(msg)
-
-
-def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
-    """Return the configured internal user's full Matrix ID."""
-    if config.mindroom_user is None:
-        return None
-    domain = _matrix_domain(runtime_paths)
-    return managed_account_user_id(
-        managed_account_key(_INTERNAL_USER_ENTITY_NAME),
-        domain,
-        runtime_paths,
-    )
-
-
-def is_human_requester_id(
-    user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether one Matrix user ID represents a human requester."""
-    if entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id):
-        return False
-    if user_id in config.bot_accounts:
-        return False
-    return user_id != mindroom_user_id(config, runtime_paths)
 
 
 def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:

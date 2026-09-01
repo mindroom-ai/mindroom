@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from mindroom.constants import ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.access import InviteAcceptancePolicy
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -129,14 +131,19 @@ def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptan
     return None
 
 
-def is_inviter_allowed(config: Config, agent_name: str, sender_id: str) -> bool:
-    """Apply one router or agent's dedicated inbound invitation policy."""
+def is_inviter_allowed(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    sender_id: str,
+) -> bool:
+    """Apply one configured entity's dedicated inbound invitation policy."""
     policy = _invite_acceptance_policy(config, agent_name)
     if isinstance(policy, bool):
         return policy
     if policy is None:
         return False
-    canonical_sender = config.authorization.resolve_alias(sender_id)
+    canonical_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     return any(fnmatchcase(canonical_sender, pattern) for pattern in policy)
 
 

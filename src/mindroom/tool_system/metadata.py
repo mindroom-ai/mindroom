@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-    from mindroom.config.auth import AuthorizationConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -567,7 +566,7 @@ def _build_managed_tool_init_kwargs(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
-    authorization: AuthorizationConfig | None,
+    runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
     worker_tools_override: list[str] | None,
 ) -> dict[str, object]:
@@ -580,8 +579,8 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = credentials_manager
         elif init_arg == ToolManagedInitArg.WORKER_TARGET:
             init_kwargs[init_arg.value] = worker_target
-        elif init_arg == ToolManagedInitArg.AUTHORIZATION:
-            init_kwargs[init_arg.value] = authorization
+        elif init_arg == ToolManagedInitArg.RUNTIME_CONFIG:
+            init_kwargs[init_arg.value] = runtime_config
         elif init_arg == ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT:
             init_kwargs[init_arg.value] = tool_output_workspace_root
         elif init_arg == ToolManagedInitArg.WORKER_TOOLS_OVERRIDE:
@@ -615,7 +614,7 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
-    authorization: AuthorizationConfig | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -685,7 +684,7 @@ def _build_tool_instance(
             runtime_paths=runtime_paths,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
-            authorization=authorization,
+            runtime_config=runtime_config,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
         ),
@@ -731,7 +730,7 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
-    authorization: AuthorizationConfig | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -755,7 +754,7 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
-        authorization=authorization,
+        runtime_config=runtime_config,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,

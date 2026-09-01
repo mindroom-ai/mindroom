@@ -17,8 +17,8 @@ from mindroom.approval_manager import (
     ToolApprovalTransportError,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.entity_resolution import is_human_requester_id
 from mindroom.logging_config import get_logger
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:

@@ -237,6 +237,7 @@ def require_agent_credential_management_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
     return execution_identity
@@ -260,6 +261,7 @@ def require_agent_oauth_connection_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
     ):
         raise HTTPException(
             status_code=403,
@@ -281,6 +283,6 @@ def require_platform_administrator_authorized(
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id
-    if requester_id is None or not is_platform_administrator(requester_id, config):
+    if requester_id is None or not is_platform_administrator(requester_id, config, runtime_paths):
         raise HTTPException(status_code=403, detail="Not authorized to manage global credential configuration")
     return execution_identity

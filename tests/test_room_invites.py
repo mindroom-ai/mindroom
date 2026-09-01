@@ -48,6 +48,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -109,59 +110,85 @@ def _router_user() -> AgentMatrixUser:
     ],
 )
 def test_invitation_policy_is_independent_for_every_responder(
+    tmp_path: Path,
     policy: bool | list[str],
     sender_id: str,
     expected: bool,
 ) -> None:
     """The dedicated invite policy must decide joins without responder access."""
-    config = Config(
-        router=RouterConfig(model="default", accept_invites=policy),
-        agents={
-            "research": AgentConfig(
-                display_name="Research",
-                accept_invites=policy,
-            ),
-        },
-        teams={
-            "reviewers": TeamConfig(
-                display_name="Reviewers",
-                role="Review work",
-                agents=["research"],
-                accept_invites=policy,
-            ),
-        },
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(model="default", accept_invites=policy),
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    accept_invites=policy,
+                ),
+            },
+            teams={
+                "reviewers": TeamConfig(
+                    display_name="Reviewers",
+                    role="Review work",
+                    agents=["research"],
+                    accept_invites=policy,
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
     )
-    assert is_inviter_allowed(config, ROUTER_AGENT_NAME, sender_id) is expected
-    assert is_inviter_allowed(config, "research", sender_id) is expected
-    assert is_inviter_allowed(config, "reviewers", sender_id) is expected
+    runtime_paths = runtime_paths_for(config)
+    assert is_inviter_allowed(config, runtime_paths, ROUTER_AGENT_NAME, sender_id) is expected
+    assert is_inviter_allowed(config, runtime_paths, "research", sender_id) is expected
+    assert is_inviter_allowed(config, runtime_paths, "reviewers", sender_id) is expected
     assert should_accept_invites(config, ROUTER_AGENT_NAME) is bool(policy)
     assert should_accept_invites(config, "research") is bool(policy)
     assert should_accept_invites(config, "reviewers") is bool(policy)
 
 
-def test_invitation_policy_resolves_aliases_before_matching() -> None:
+def test_invitation_policy_resolves_aliases_before_matching(tmp_path: Path) -> None:
     """An inviter alias must match the same canonical pattern as conversation access."""
-    config = Config(
-        router=RouterConfig(model="default", accept_invites=["@owner:example.com"]),
-        agents={
-            "research": AgentConfig(
-                display_name="Research",
-                accept_invites=["@owner:example.com"],
-            ),
-        },
-        teams={
-            "reviewers": TeamConfig(
-                display_name="Reviewers",
-                role="Review work",
-                agents=["research"],
-                accept_invites=["@owner:example.com"],
-            ),
-        },
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(model="default", accept_invites=["@owner:example.com"]),
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    accept_invites=["@owner:example.com"],
+                ),
+            },
+            teams={
+                "reviewers": TeamConfig(
+                    display_name="Reviewers",
+                    role="Review work",
+                    agents=["research"],
+                    accept_invites=["@owner:example.com"],
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
     )
     config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
-    assert is_inviter_allowed(config, ROUTER_AGENT_NAME, "@bridge-owner:example.com") is True
-    assert is_inviter_allowed(config, "research", "@bridge-owner:example.com") is True
-    assert is_inviter_allowed(config, "reviewers", "@bridge-owner:example.com") is True
+    runtime_paths = runtime_paths_for(config)
+    entity_ids(config, runtime_paths)
+    assert is_inviter_allowed(config, runtime_paths, ROUTER_AGENT_NAME, "@bridge-owner:example.com") is True
+    assert is_inviter_allowed(config, runtime_paths, "research", "@bridge-owner:example.com") is True
+    assert is_inviter_allowed(config, runtime_paths, "reviewers", "@bridge-owner:example.com") is True
+
+
+def test_invitation_policy_does_not_resolve_configured_bot_alias(tmp_path: Path) -> None:
+    """A configured bot alias must not inherit a human invitation grant."""
+    human_id = "@owner:example.com"
+    bot_id = "@bridgebot:example.com"
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(model="default", accept_invites=[human_id]),
+            bot_accounts=[bot_id],
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    config.authorization.aliases = {human_id: [bot_id]}
+
+    assert is_inviter_allowed(config, runtime_paths_for(config), ROUTER_AGENT_NAME, bot_id) is False
 
 
 def _live_router_invite_scenario(

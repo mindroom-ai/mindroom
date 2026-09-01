@@ -68,7 +68,42 @@ def test_administrator_bypasses_responder_policy(tmp_path: Path) -> None:
     config = membership_config(tmp_path, administrators=["@admin:example.com"], access={"users": []})
 
     assert _allowed("@admin:example.com", config, AgentReplyMembershipIndex())
-    assert is_platform_administrator("@admin:example.com", config)
+    assert is_platform_administrator("@admin:example.com", config, runtime_paths_for(config))
+
+
+def test_bot_alias_cannot_inherit_human_authority(tmp_path: Path) -> None:
+    """A configured bot alias must not become its canonical human principal."""
+    human_id = "@owner:example.com"
+    bot_id = "@bridgebot:example.com"
+    config = membership_config(
+        tmp_path,
+        administrators=[human_id],
+        access={"users": [human_id]},
+        credential_managers=[human_id],
+    )
+    config.bot_accounts = [bot_id]
+    config.authorization.aliases = {human_id: [bot_id]}
+
+    assert not _allowed(bot_id, config, AgentReplyMembershipIndex())
+    runtime_paths = runtime_paths_for(config)
+    assert not is_platform_administrator(bot_id, config, runtime_paths)
+    assert not is_sender_allowed_for_agent_credential_management(bot_id, "talent", config, runtime_paths)
+
+
+def test_managed_entity_alias_cannot_inherit_human_administration(tmp_path: Path) -> None:
+    """A managed entity alias must not inherit human control-plane authority."""
+    human_id = "@owner:example.com"
+    config = membership_config(
+        tmp_path,
+        administrators=[human_id],
+        credential_managers=[human_id],
+    )
+    runtime_paths = runtime_paths_for(config)
+    managed_id = entity_ids(config, runtime_paths)["talent"].full_id
+    config.authorization.aliases = {human_id: [managed_id]}
+
+    assert not is_platform_administrator(managed_id, config, runtime_paths)
+    assert not is_sender_allowed_for_agent_credential_management(managed_id, "talent", config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -131,10 +166,11 @@ def test_credential_authority_is_separate_from_conversation_access(tmp_path: Pat
         credential_managers=["@manager:example.com"],
     )
 
-    assert is_sender_allowed_for_agent_credential_management("@manager:example.com", "talent", config)
+    runtime_paths = runtime_paths_for(config)
+    assert is_sender_allowed_for_agent_credential_management("@manager:example.com", "talent", config, runtime_paths)
     assert not _allowed("@manager:example.com", config, AgentReplyMembershipIndex())
     assert _allowed("@member:example.com", config, AgentReplyMembershipIndex())
-    assert not is_sender_allowed_for_agent_credential_management("@member:example.com", "talent", config)
+    assert not is_sender_allowed_for_agent_credential_management("@member:example.com", "talent", config, runtime_paths)
 
 
 def test_unknown_agent_credential_management_fails_closed(tmp_path: Path) -> None:
@@ -145,6 +181,7 @@ def test_unknown_agent_credential_management_fails_closed(tmp_path: Path) -> Non
         "@admin:example.com",
         "missing",
         config,
+        runtime_paths_for(config),
     )
 
 

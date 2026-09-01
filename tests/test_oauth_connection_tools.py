@@ -231,8 +231,9 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
     provider = google_drive_oauth_provider()
     canonical_target = oauth_credentials_worker_target(
         provider,
+        context.runtime_paths,
         worker_target,
-        authorization=context.config.authorization,
+        config=context.config,
     )
     assert canonical_target is not None
 
@@ -242,6 +243,29 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
     intent = _reset_intent(result, provider=provider, context=context)
     assert intent.requester_id == "@alice:example.org"
     assert intent.binding.worker_key == canonical_target.worker_key
+
+
+def test_oauth_target_does_not_canonicalize_configured_bot_alias(tmp_path: Path) -> None:
+    """A configured bot alias must retain its own OAuth requester scope."""
+    bot_alias = "@bridgebot:example.org"
+    _tool, context, worker_target = _tool_and_context(
+        tmp_path,
+        worker_scope="user_agent",
+        requester_id=bot_alias,
+        aliases={"@alice:example.org": [bot_alias]},
+    )
+    context.config.bot_accounts = [bot_alias]
+
+    resolved_target = oauth_credentials_worker_target(
+        google_drive_oauth_provider(),
+        context.runtime_paths,
+        worker_target,
+        config=context.config,
+    )
+
+    assert resolved_target is not None
+    assert resolved_target.execution_identity is not None
+    assert resolved_target.execution_identity.requester_id == bot_alias
 
 
 @pytest.mark.asyncio

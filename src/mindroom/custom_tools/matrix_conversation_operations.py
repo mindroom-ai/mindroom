@@ -16,7 +16,6 @@ from mindroom.custom_tools.attachments import (
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.entity_resolution import is_human_requester_id
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
@@ -32,6 +31,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
+from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

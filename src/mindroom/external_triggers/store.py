@@ -494,7 +494,11 @@ class ExternalTriggerStore:
         if record is None:
             msg = f"external trigger not found: {trigger_id}"
             raise ExternalTriggerStoreError(msg)
-        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(config, actor_user_id):
+        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(
+            config,
+            self._runtime_paths,
+            actor_user_id,
+        ):
             msg = "external trigger can only be changed by its owner or an external trigger admin"
             raise ExternalTriggerStoreError(msg)
         return record

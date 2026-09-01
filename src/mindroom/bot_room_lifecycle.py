@@ -469,7 +469,16 @@ class BotRoomLifecycle:
         if current_invite is None or current_invite.inviter is None:
             return None
         sender = current_invite.inviter
-        return sender if is_inviter_allowed(self._config(), self.deps.agent_name, sender) else None
+        return (
+            sender
+            if is_inviter_allowed(
+                self._config(),
+                self.deps.runtime_paths,
+                self.deps.agent_name,
+                sender,
+            )
+            else None
+        )
 
     async def _handle_invite(
         self,

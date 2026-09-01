@@ -22,10 +22,11 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry, is_human_requester_id
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
@@ -115,12 +116,7 @@ class IngressValidator:
         config = self.deps.runtime.config
         if not is_human_requester_id(requester_id, config, self.deps.runtime_paths):
             return requester_id
-        canonical_requester = config.authorization.resolve_alias(requester_id)
-        return (
-            canonical_requester
-            if is_human_requester_id(canonical_requester, config, self.deps.runtime_paths)
-            else requester_id
-        )
+        return resolve_human_requester_alias(requester_id, config, self.deps.runtime_paths)
 
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""

@@ -755,7 +755,7 @@ def _resolve_entrypoint(
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
-            authorization=config.authorization,
+            runtime_config=config,
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,

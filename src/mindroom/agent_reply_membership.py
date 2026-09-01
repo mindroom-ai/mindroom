@@ -553,10 +553,9 @@ def _raw_membership_matches_sender(
     sender_id: str,
     config: Config,
 ) -> bool:
-    """Match current alias equivalence against the raw Matrix membership roster."""
+    """Match one canonical human requester against the raw Matrix membership roster."""
     authorization = config.authorization
-    canonical_sender = authorization.resolve_alias(sender_id)
-    equivalent_user_ids = {canonical_sender, *authorization.aliases.get(canonical_sender, ())}
+    equivalent_user_ids = {sender_id, *authorization.aliases.get(sender_id, ())}
     return not raw_user_ids.isdisjoint(equivalent_user_ids)
 
 

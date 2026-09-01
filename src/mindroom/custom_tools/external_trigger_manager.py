@@ -60,7 +60,11 @@ class ExternalTriggerManagerTools(Toolkit):
 
     @staticmethod
     def _is_admin(context: ToolRuntimeContext) -> bool:
-        return is_external_trigger_administrator(context.config, context.requester_id)
+        return is_external_trigger_administrator(
+            context.current_config,
+            context.runtime_paths,
+            context.requester_id,
+        )
 
     @classmethod
     def _target(

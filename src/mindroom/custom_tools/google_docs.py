@@ -10,7 +10,7 @@ from agno.tools import Toolkit
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from mindroom.config.auth import AuthorizationConfig  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -64,7 +64,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
-        authorization: AuthorizationConfig | None = None,
+        runtime_config: Config | None = None,
         create_document: bool = True,
         read_document: bool = True,
         edit_document: bool = True,
@@ -87,7 +87,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
 
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
-            authorization=authorization,
+            config=runtime_config,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,

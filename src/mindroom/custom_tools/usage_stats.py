@@ -10,6 +10,7 @@ from agno.tools import Toolkit
 
 from mindroom.authorization import is_platform_administrator
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -77,7 +78,7 @@ class UsageStatsTools(Toolkit):
                 "Usage statistics admin scope is not enabled for this agent.",
             )
         config = resolved.current_config
-        if not is_platform_administrator(resolved.requester_id, config):
+        if not is_platform_administrator(resolved.requester_id, config, resolved.runtime_paths):
             return self._error(
                 "authorization_error",
                 "Usage statistics admin access is not authorized for this requester.",
@@ -96,7 +97,11 @@ class UsageStatsTools(Toolkit):
             )
         context = resolved
         config = context.current_config
-        requester_id = config.authorization.resolve_alias(context.requester_id)
+        requester_id = resolve_human_requester_alias(
+            context.requester_id,
+            config,
+            context.runtime_paths,
+        )
         execution_identity = replace(
             build_execution_identity_from_runtime_context(context),
             agent_name=self._agent_name,

@@ -136,8 +136,11 @@ class _ConfigStub:
     ) -> None:
         self.mcp_servers = mcp_servers
         self.authorization = authorization or AuthorizationConfig()
+        self.bot_accounts: list[str] = []
         self.plugins: list[object] = []
         self.agents: dict[str, object] = {}
+        self.teams: dict[str, object] = {}
+        self.mindroom_user = None
         self.defaults = type("_DefaultsStub", (), {"allow_self_config": False})()
 
     def get_entities_referencing_tools(self, _tool_names: set[str]) -> set[str]:
@@ -1834,38 +1837,6 @@ async def test_mcp_manager_serializes_requester_oauth_token_resolution(
     assert second_result[1].headers == {"Authorization": "Bearer alice-token"}
     assert first_result[1].version == second_result[1].version
     assert max_active_token_resolutions == 1
-
-
-@pytest.mark.asyncio
-async def test_mcp_manager_resolves_oauth_alias_context_once(tmp_path: Path) -> None:
-    """A chained alias map must not key a session for one requester while loading another's token."""
-    runtime_paths = _runtime_paths(tmp_path)
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    manager = MCPServerManager(runtime_paths)
-    authorization = AuthorizationConfig(
-        aliases={
-            "@canonical-a:example.test": ["@bridge:example.test"],
-            "@canonical-b:example.test": ["@canonical-a:example.test"],
-        },
-    )
-    await manager.sync_servers(
-        _ConfigStub({"demo": _oauth_mcp_config()}, authorization=authorization),
-    )
-    bridge_target = _worker_target("@bridge:example.test")
-    canonical_a_target = _worker_target("@canonical-a:example.test")
-    canonical_b_target = _worker_target("@canonical-b:example.test")
-    _save_mcp_oauth_credentials(runtime_paths, canonical_a_target, "canonical-a-token")
-    _save_mcp_oauth_credentials(runtime_paths, canonical_b_target, "canonical-b-token")
-
-    state, lease = await manager._request_state_and_headers(
-        "demo",
-        credentials_manager=credentials_manager,
-        worker_target=bridge_target,
-    )
-
-    assert lease.headers == {"Authorization": "Bearer canonical-a-token"}
-    assert next(iter(manager._scoped_states.values())) is state
-    assert next(iter(manager._scoped_states)).credential_scope.worker_key == canonical_a_target.worker_key
 
 
 @pytest.mark.asyncio

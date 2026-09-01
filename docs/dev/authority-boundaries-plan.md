@@ -37,11 +37,12 @@ Every inbound Matrix turn has two identities.
 - `transport_sender_id` is the exact authenticated Matrix account that sent the event.
 - `requester_id` is the canonical principal that owns the resulting conversation, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage.
 
-The ingress boundary must select the trusted requester first and then resolve `authorization.aliases` for human identities.
+The ingress boundary must select the trusted requester first and then use the shared human-requester resolver.
 Managed responders, configured bot accounts, and MindRoom's internal account must retain their transport identity even if a malformed runtime configuration lists them as aliases.
 Alias configuration must reject chains, cycles, and self-aliases so canonicalization is idempotent at downstream policy boundaries.
 The exact transport sender remains available through `TurnOrigin` for Matrix provenance, membership, and transport-specific behavior.
-Downstream ownership code must receive the canonical requester instead of independently deciding whether to resolve aliases.
+Downstream ownership code must receive the canonical requester.
+Any independent boundary that accepts a raw Matrix ID, including invitations and dashboard requests, must use the same human-requester resolver instead of reading the alias map directly.
 
 This change intentionally makes one human use one requester-owned scope when they enter through a canonical Matrix account or a configured bridge alias.
 It must not trust unverified original-sender metadata or turn a managed bot account into a human requester.
@@ -126,11 +127,12 @@ This PR does not add creator-only schedule permissions or new resource ACLs.
 
 ## Selected implementation
 
-The implementation has three production changes.
+The implementation has four production changes.
 
-1. Canonicalize the trusted requester once in `IngressValidator.requester_user_id` while retaining the raw transport sender in `TurnOrigin`.
+1. Put human requester classification and alias resolution in one leaf policy module, use it at ingress, and retain the raw transport sender in `TurnOrigin`.
 2. Add `accept_invites` to `TeamConfig` and remove the room-lifecycle branch that authorizes legacy team invitations through responder access.
 3. Make platform administrators and additive trigger administrators share one alias-aware external-trigger administrator predicate.
+4. Route raw-ID policy and requester-owned OAuth boundaries through the same human-requester resolver without changing OAuth storage or lifecycle semantics.
 
 The remaining work is documentation, generated starter clarity, and focused tests.
 
@@ -160,6 +162,7 @@ The remaining work is documentation, generated starter clarity, and focused test
 12. The generated starter configuration explicitly authors its effective conversation access.
 13. Managed responders, configured bot accounts, and MindRoom's internal account cannot be remapped into human requesters.
 14. Alias chains, cycles, and self-aliases are rejected so repeated policy resolution remains idempotent.
+15. A configured bot alias cannot inherit responder, administrator, invitation, trigger, or OAuth ownership authority from a human.
 
 ## Implementation plan
 
@@ -170,10 +173,12 @@ The remaining work is documentation, generated starter clarity, and focused test
 - Modify `tests/test_ingress_validation.py`.
 - Modify `tests/test_turn_controller_focused.py` to prove the canonical requester reaches the response envelope used for requester-owned scope selection.
 - Modify `src/mindroom/ingress_validation.py`.
+- Create `src/mindroom/requester_identity.py` as the shared leaf policy owner.
 
 - [x] Write failing tests for direct aliases, trusted relayed aliases, preserved transport identity, and requester-owned scope reuse.
 - [x] Run the focused tests with `uv run pytest -n auto` and confirm the new expectations fail.
 - [x] Resolve aliases only after the trusted requester has been selected.
+- [x] Route raw-ID policy and requester-owned storage boundaries through the shared human-only resolver.
 - [x] Keep `event.sender` as `TurnOrigin.transport_sender_id`.
 - [x] Run the focused ingress, turn-origin, runtime-resolution, and private-identity tests.
 - [x] Commit the independently testable identity boundary change.
@@ -241,11 +246,11 @@ The remaining work is documentation, generated starter clarity, and focused test
 
 ### Task 5: Verify the exact PR head
 
-- [ ] Run every affected Python test file with `uv run pytest -n auto`.
-- [ ] Run `uv run pre-commit run --all-files` after `uv sync --all-extras` in this worktree.
-- [ ] Run the full suite with `uv run pytest -n auto`.
-- [ ] Inspect the production diff and remove any abstraction or branch not required by this contract.
-- [ ] Verify invitation lifecycle code did not grow beyond the team-policy simplification.
+- [x] Run every affected Python test file with `uv run pytest -n auto`.
+- [x] Run `uv run pre-commit run --all-files` after `uv sync --all-extras` in this worktree.
+- [x] Run the full suite with `uv run pytest -n auto`.
+- [x] Inspect the production diff and remove any abstraction or branch not required by this contract.
+- [x] Verify invitation lifecycle code did not grow beyond the team-policy simplification.
 - [ ] Run `git status --short` before staging.
 - [ ] Scan all proposed public content and likely generated references for prohibited private identifiers.
 - [ ] Stage only explicit intended paths and inspect the staged diff.
