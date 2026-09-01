@@ -212,15 +212,12 @@ class TestTeamRoomMembership:
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-        monkeypatch.setattr(
-            "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-            lambda *_args, **_kwargs: True,
-        )
         monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
-        room = MagicMock(room_id="!team-room:localhost")
-        room.canonical_alias = None
+        room = nio.MatrixInvitedRoom("!team-room:localhost", team_user.user_id)
         event = MagicMock(sender="@user:localhost")
+        room.inviter = event.sender
+        bot.client.invited_rooms = {room.room_id: room}
 
         bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
