@@ -1460,6 +1460,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$source",
@@ -1507,6 +1508,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = self._router_relay_event()
         ingress_started = asyncio.Event()
         release_ingress = asyncio.Event()
@@ -1555,6 +1557,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$followup",
@@ -1801,6 +1804,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": f"${source_kind}",
@@ -2518,6 +2522,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
         event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="photo.jpg")

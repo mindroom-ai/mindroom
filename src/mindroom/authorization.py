@@ -233,10 +233,10 @@ def get_available_responders_in_room(
 
     The router is excluded because it is not a regular conversation participant.
     """
-    return _available_responders_from_member_ids(joined_member_ids(room), config, runtime_paths)
+    return _available_responders_from_member_ids(cached_joined_member_ids(room), config, runtime_paths)
 
 
-def joined_member_ids(room: nio.MatrixRoom) -> frozenset[str]:
+def cached_joined_member_ids(room: nio.MatrixRoom) -> frozenset[str]:
     """Return cached room members that are joined rather than merely invited."""
     return frozenset(room.users).difference(room.invited_users)
 
@@ -287,6 +287,47 @@ def _apply_authoritative_joined_members(
     room.members_synced = True
 
 
+async def ensure_room_membership_synced(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    *,
+    sender_id: str,
+) -> bool:
+    """Refresh an incomplete room-member cache before membership-sensitive decisions."""
+    if room.members_synced:
+        return True
+
+    cached_member_count = len(cached_joined_member_ids(room))
+    try:
+        response = await client.joined_members(room.room_id)
+    except Exception as exc:
+        logger.warning(
+            "authoritative_room_membership_fetch_failed",
+            room_id=room.room_id,
+            sender_id=sender_id,
+            error=str(exc),
+        )
+        return False
+    if not isinstance(response, nio.JoinedMembersResponse):
+        logger.warning(
+            "authoritative_room_membership_fetch_failed",
+            room_id=room.room_id,
+            sender_id=sender_id,
+            error=str(response),
+        )
+        return False
+
+    _apply_authoritative_joined_members(room, response.members)
+    logger.info(
+        "authoritative_room_membership_refreshed",
+        room_id=room.room_id,
+        sender_id=sender_id,
+        cached_member_count=cached_member_count,
+        refreshed_member_count=len(response.members),
+    )
+    return True
+
+
 async def _get_available_responders_for_sender_authoritative(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
@@ -308,38 +349,17 @@ async def _get_available_responders_for_sender_authoritative(
     if room.members_synced:
         return cached_visible_responders
 
-    response = await client.joined_members(room.room_id)
-    if not isinstance(response, nio.JoinedMembersResponse):
-        logger.warning(
-            "authoritative_room_membership_fetch_failed",
-            room_id=room.room_id,
-            sender_id=sender_id,
-            error=str(response),
-        )
+    if not await ensure_room_membership_synced(client, room, sender_id=sender_id):
         return cached_visible_responders
 
-    _apply_authoritative_joined_members(room, response.members)
-    refreshed_room_responders = _available_responders_from_member_ids(
-        (member.user_id for member in response.members),
-        config,
-        runtime_paths,
-    )
-    refreshed_responders = filter_responders_by_sender_permissions(
-        refreshed_room_responders,
+    return filter_responders_by_sender_permissions(
+        get_available_responders_in_room(room, config, runtime_paths),
         sender_id,
         config,
         runtime_paths,
         membership_index,
         room.room_id,
     )
-    logger.info(
-        "authoritative_room_membership_refreshed",
-        room_id=room.room_id,
-        sender_id=sender_id,
-        cached_responder_count=len(cached_room_responders),
-        refreshed_responder_count=len(refreshed_responders),
-    )
-    return refreshed_responders
 
 
 def responder_candidate_entities_from_cached_room(

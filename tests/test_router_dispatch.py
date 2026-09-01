@@ -638,6 +638,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -722,6 +723,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -908,6 +910,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {
             "@mindroom_router:localhost": MagicMock(),
@@ -956,6 +959,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.encrypted = False
         room.users = {

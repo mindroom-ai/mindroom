@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
 from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
@@ -2195,6 +2196,11 @@ class TurnController:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if is_nonterminal_stream:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        await ensure_room_membership_synced(
+            self._client(),
+            room,
+            sender_id=prechecked_event.requester_user_id,
+        )
 
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
@@ -2335,6 +2341,11 @@ class TurnController:
                 sender=prechecked_event.event.sender,
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        await ensure_room_membership_synced(
+            self._client(),
+            room,
+            sender_id=prechecked_event.requester_user_id,
+        )
         pending_turn = TurnRecord.create([prechecked_event.event.event_id], completed=False)
         turn_claim = await self._claim_live_turn(
             pending_turn,

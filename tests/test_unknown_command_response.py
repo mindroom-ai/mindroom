@@ -60,6 +60,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
@@ -155,6 +156,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
@@ -267,6 +269,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
