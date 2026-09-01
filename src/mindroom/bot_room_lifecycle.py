@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -94,8 +95,8 @@ class BotRoomLifecycle:
         self._join_fence_protected_room_ids: set[str] = set()
         self._accepted_rooms_awaiting_joined_setup: set[str] = set()
         self._next_invite_join_generation = 0
-        self._active_invite_join_generations: dict[str, int] = {}
-        self._accepted_invite_join_generations: dict[str, int] = {}
+        self._active_invite_join_generations: dict[str, set[int]] = {}
+        self._invalidated_invite_join_generations: set[int] = set()
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
@@ -143,24 +144,28 @@ class BotRoomLifecycle:
         """Return whether startup skipped setup for an accepted room."""
         return bool(self._accepted_rooms_awaiting_joined_setup)
 
-    @property
-    def active_invite_join_generations(self) -> dict[str, int]:
-        """Return exact serialized invite joins that have reached network work."""
-        return dict(self._active_invite_join_generations)
+    def invalidate_active_invite_joins(self, room_ids: Iterable[str]) -> None:
+        """Fail closed joins overlapped by authoritative ownership loss."""
+        for room_id in room_ids:
+            generations = self._active_invite_join_generations.get(room_id)
+            if generations:
+                self._invalidated_invite_join_generations.update(generations)
 
-    def consume_ownership_losses_overlapped_by_accepted_join(
-        self,
-        invite_join_generations: Mapping[str, int],
-    ) -> frozenset[str]:
-        """Consume response losses made stale by a later accepted invite join."""
-        superseded_room_ids = frozenset(
-            room_id
-            for room_id, generation in invite_join_generations.items()
-            if self._accepted_invite_join_generations.get(room_id) == generation
-        )
-        for room_id in superseded_room_ids:
-            self._accepted_invite_join_generations.pop(room_id, None)
-        return superseded_room_ids
+    @asynccontextmanager
+    async def _invite_join_ownership(self, room_id: str) -> AsyncIterator[int]:
+        """Own one queued invite generation and its serialized room work."""
+        self._next_invite_join_generation += 1
+        generation = self._next_invite_join_generation
+        room_generations = self._active_invite_join_generations.setdefault(room_id, set())
+        room_generations.add(generation)
+        try:
+            async with self.invite_ownership(room_id):
+                yield generation
+        finally:
+            room_generations.discard(generation)
+            if not room_generations:
+                self._active_invite_join_generations.pop(room_id, None)
+            self._invalidated_invite_join_generations.discard(generation)
 
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
@@ -282,7 +287,6 @@ class BotRoomLifecycle:
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         self._accepted_rooms_awaiting_joined_setup.discard(room_id)
-        self._accepted_invite_join_generations.pop(room_id, None)
         invited_rooms_file_exists = self._invited_rooms_file_path().exists()
         if not self._should_persist_invited_rooms() and not invited_rooms_file_exists:
             self.invited_rooms.discard(room_id)
@@ -461,7 +465,6 @@ class BotRoomLifecycle:
     async def settle_authoritative_departure(self, room_id: str) -> None:
         """Clear transient join state after Matrix authoritatively reports departure."""
         self._join_fence_protected_room_ids.discard(room_id)
-        self._accepted_invite_join_generations.pop(room_id, None)
         if self.decrypt_notice_is_fenced(room_id):
             await self._clear_join_decrypt_notice_fence(room_id)
 
@@ -591,8 +594,11 @@ class BotRoomLifecycle:
         room_id: str,
         sender: str,
         expected_invite: nio.MatrixInvitedRoom,
+        invite_join_generation: int,
     ) -> bool:
         """Run the one join attempt owned by an exact live invite."""
+        if invite_join_generation in self._invalidated_invite_join_generations:
+            return False
         try:
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room_id)
         except (Exception, asyncio.CancelledError):
@@ -614,7 +620,7 @@ class BotRoomLifecycle:
     ) -> None:
         """Accept one current Matrix invite without creating recovery state."""
         welcome_after_acceptance = False
-        async with self.invite_ownership(room.room_id):
+        async with self._invite_join_ownership(room.room_id) as invite_join_generation:
             client = self._client()
             current_invite = client.invited_rooms.get(room.room_id)
             if current_invite is None or current_invite.inviter != sender:
@@ -637,31 +643,33 @@ class BotRoomLifecycle:
                     room_id=room.room_id,
                 )
                 return
-
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            self._next_invite_join_generation += 1
-            invite_join_generation = self._next_invite_join_generation
-            self._active_invite_join_generations[room.room_id] = invite_join_generation
+            if not await self._attempt_invite_join(
+                client,
+                room.room_id,
+                sender,
+                current_invite,
+                invite_join_generation,
+            ):
+                return
+
+            self._logger().info("Joined room", room_id=room.room_id)
             try:
-                if not await self._attempt_invite_join(client, room.room_id, sender, current_invite):
-                    return
-
-                self._logger().info("Joined room", room_id=room.room_id)
-                try:
-                    accepted = await self._accept_joined_invite(room.room_id, sender, current_invite)
-                except asyncio.CancelledError:
-                    self._discard_invite_if_current(room.room_id, sender, current_invite)
-                    raise
-                except Exception:
-                    self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
-                    accepted = False
-                if not accepted:
-                    await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
-                    return
-
-                self._accepted_invite_join_generations[room.room_id] = invite_join_generation
-            finally:
-                self._active_invite_join_generations.pop(room.room_id, None)
+                accepted = await self._accept_joined_invite(
+                    room.room_id,
+                    sender,
+                    current_invite,
+                    invite_join_generation,
+                )
+            except asyncio.CancelledError:
+                self._discard_invite_if_current(room.room_id, sender, current_invite)
+                raise
+            except Exception:
+                self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
+                accepted = False
+            if not accepted:
+                await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
+                return
 
             self._discard_invite_if_current(room.room_id, sender, current_invite)
             welcome_after_acceptance = send_welcome
@@ -676,8 +684,11 @@ class BotRoomLifecycle:
         room_id: str,
         sender: str,
         expected_invite: nio.MatrixInvitedRoom,
+        invite_join_generation: int,
     ) -> bool:
         """Recheck current policy and persist one confirmed joined invite."""
+        if invite_join_generation in self._invalidated_invite_join_generations:
+            return False
         await self.deps.on_room_joined(room_id)
         if not self._should_accept_invite():
             return False
@@ -698,12 +709,16 @@ class BotRoomLifecycle:
                 self.deps.runtime.agent_reply_memberships,
                 joined_member_ids=joined_member_ids,
             )
-        if not invite_allowed:
-            return False
-        if expected_invite.inviter != sender:
-            return False
         current_invite = self._client().invited_rooms.get(room_id)
-        if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
+        if (
+            not invite_allowed
+            or expected_invite.inviter != sender
+            or (
+                current_invite is not None
+                and (current_invite is not expected_invite or current_invite.inviter != sender)
+            )
+            or invite_join_generation in self._invalidated_invite_join_generations
+        ):
             return False
         self._remember_invited_room(room_id)
         self._join_fence_protected_room_ids.discard(room_id)

@@ -117,6 +117,7 @@ Configured-room reconciliation and runtime-owned self-leaves share one per-room 
 Changes to the router's invite or responder-access policy immediately reconsider cached invites, while disabling invite acceptance also stops preserving accepted ad-hoc rooms.
 Accepted-room storage preserves an existing ad-hoc membership across restart but never authorizes joining an absent room.
 MindRoom does not persist unfinished invite attempts, so interruption or a temporary failure before acceptance may require another invitation even though ordinary post-join failures receive one best-effort leave.
+Interrupted acceptance or failed compensation can leave the bot joined until ordinary cleanup or restart; the room is not preserved, decrypt failures stay silent, and every event still passes the normal post-join access policy.
 A same-sender cancellation and reinvite that overlaps an in-flight join may be consumed by that attempt and require another invitation.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 

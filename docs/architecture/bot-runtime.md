@@ -149,6 +149,7 @@ Multi-room cleanup attempts every room before reporting the first failure.
 Ordinary failures after Matrix confirms the join receive one best-effort compensating leave, while interruption or an earlier join failure may require the user to invite the bot again.
 A same-sender cancellation and reinvite that overlaps an in-flight join may also require another invitation rather than creating process-local recovery ownership.
 A compensating leave restores its decrypt-notice fence before network I/O, and a failed leave protects that fence until Matrix confirms departure or legitimate configured or accepted ownership takes over.
+Interrupted acceptance or failed compensation can leave the bot joined until ordinary cleanup or restart; the room is not preserved, and all traffic remains subject to normal post-join authorization.
 Confirmed-leave cleanup has independent task ownership, settles accepted ownership, decrypt fencing, and the local departure fence independently, and keeps caller cancellation primary if cleanup also fails.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.

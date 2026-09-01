@@ -732,6 +732,45 @@ async def test_config_reconciliation_waits_for_current_sync_membership(
 
 
 @pytest.mark.asyncio
+async def test_live_invite_reconciliation_coalesces_requests_while_pass_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Repeated policy changes create one dirty follow-up pass, not more workers."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    pass_started = asyncio.Event()
+    release_pass = asyncio.Event()
+    pass_count = 0
+
+    async def blocked_reconciliation() -> None:
+        nonlocal pass_count
+        pass_count += 1
+        pass_started.set()
+        await release_pass.wait()
+
+    monkeypatch.setattr(bot._room_lifecycle, "reconcile_invites", blocked_reconciliation)
+    await bot.reconcile_live_invites()
+    await asyncio.wait_for(pass_started.wait(), timeout=1)
+    try:
+        for _ in range(20):
+            await bot.reconcile_live_invites()
+        await asyncio.sleep(0)
+        assert pass_count == 1
+    finally:
+        release_pass.set()
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert pass_count == 2
+
+
+@pytest.mark.asyncio
 async def test_sync_response_does_not_wait_for_invite_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
