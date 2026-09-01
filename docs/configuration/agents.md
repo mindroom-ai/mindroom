@@ -179,7 +179,8 @@ The dashboard Agents tab exposes this as the **Memory Backend** selector for eac
 Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
 Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted to preserve memberships Matrix reports as joined.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
-For agent and team invites, `current_room_members` requires the router-owned membership index to already authorize the inviter in that room; only the router can bootstrap its own index from the exact authenticated live inviter.
+Requester-private agents may bootstrap `current_room_members` from the exact authenticated live inviter because execution state is isolated by requester.
+Shared agents and teams require the router-owned membership index to already authorize the inviter in that room.
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When an otherwise authorized agent needs a missing router for approval, the agent can call `invite_router` to invite it into the current room and then retry.
 The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
