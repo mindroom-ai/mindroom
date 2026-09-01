@@ -37,6 +37,18 @@ _SEGMENT_METADATA_KEYS = frozenset(
     },
 )
 _MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
+_CODE_REGION_PATTERN = re.compile(r"(<code\b[^>]*>.*?</code>)", re.DOTALL)
+
+
+def _user_id_boundary_pattern(user_ids: list[str]) -> re.Pattern[str]:
+    """Match whole user IDs only, longest first, never inside a longer token.
+
+    A bare substring test both attributes a prefix-overlapping ID (``@a:s`` inside
+    ``@a:s2``) and matches inside URLs; the lookarounds restrict matches to
+    positions the mention pipeline could have produced.
+    """
+    alternation = "|".join(re.escape(user_id) for user_id in sorted(user_ids, key=lambda uid: -len(uid)))
+    return re.compile(r"(?<![\w@.:/=-])(?:" + alternation + r")(?![\w:/=-])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,32 +116,44 @@ def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _chunk_mentions(source: Mapping[str, Any], body: str) -> dict[str, Any] | None:
-    """Return the mention metadata for just the users one chunk names.
+    """Return the mention metadata for just the mentions one chunk carries.
 
     ``m.mentions`` must travel with the event whose body carries the mention;
     leaving every mentioned user on the first segment both misattributes the
-    mention and can notify a user whose name never visibly arrived.
+    mention and can notify a user whose name never visibly arrived. A room
+    mention follows the same rule for the ``@room`` text.
     """
     mentions = source.get("m.mentions")
     if not isinstance(mentions, Mapping):
         return None
+    chunk_mentions: dict[str, Any] = {}
     user_ids = mentions.get("user_ids")
-    if not isinstance(user_ids, list):
-        return None
-    present = [user_id for user_id in user_ids if isinstance(user_id, str) and user_id in body]
-    return {"user_ids": present} if present else None
+    if isinstance(user_ids, list):
+        candidates = [user_id for user_id in user_ids if isinstance(user_id, str)]
+        if candidates:
+            present = set(_user_id_boundary_pattern(candidates).findall(body))
+            if present:
+                chunk_mentions["user_ids"] = [user_id for user_id in candidates if user_id in present]
+    if mentions.get("room") is True and "@room" in body:
+        chunk_mentions["room"] = True
+    return chunk_mentions or None
 
 
 def _render_segment_html(source: Mapping[str, Any], body: str) -> str:
-    """Render one chunk, restoring mention pills its plain body cannot carry."""
+    """Render one chunk, restoring mention pills its plain body cannot carry.
+
+    Substitution is boundary-aware and skips code regions: a user ID appearing
+    as literal text (code span, URL path) is content, not a mention.
+    """
     formatted = markdown_to_html(body)
     pills = _mention_pills(source)
     if not pills:
         return formatted
-    # One pass, longest ID first: a user ID can prefix another, and a second
-    # pass would match inside the anchor an earlier replacement inserted.
-    pattern = re.compile("|".join(re.escape(user_id) for user_id in sorted(pills, key=lambda uid: -len(uid))))
-    return pattern.sub(lambda match: pills[match.group(0)], formatted)
+    pattern = _user_id_boundary_pattern(list(pills))
+    parts = _CODE_REGION_PATTERN.split(formatted)
+    return "".join(
+        part if part.startswith("<code") else pattern.sub(lambda match: pills[match.group(0)], part) for part in parts
+    )
 
 
 def _rich_text_content(
@@ -168,18 +192,19 @@ def _edit_content_chunk(
     source: Mapping[str, Any],
     body: str,
 ) -> dict[str, Any]:
-    """Build the first edit event with one complete rich-text chunk."""
+    """Build the first edit event with one complete rich-text chunk.
+
+    The outer envelope keeps the source edit's own ``m.mentions`` -- for an
+    edit that is the revision delta, and re-deriving it from one chunk could
+    re-notify recipients an earlier revision already mentioned. The resolved
+    per-chunk set lives under ``m.new_content``.
+    """
     replacement = _rich_text_content(source, body, include_mentions=True)
     candidate = {key: value for key, value in content.items() if key not in _SEGMENT_FIRST_DROPPED_KEYS}
     candidate["body"] = f"* {body}"
     candidate["format"] = "org.matrix.custom.html"
     candidate["formatted_body"] = _render_segment_html(source, candidate["body"])
     candidate["m.new_content"] = replacement
-    chunk_mentions = _chunk_mentions(source, body)
-    if chunk_mentions is None:
-        candidate.pop("m.mentions", None)
-    else:
-        candidate["m.mentions"] = chunk_mentions
     return candidate
 
 
@@ -300,7 +325,7 @@ def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
     while pos < end:
         line_end = text.find("\n", pos, end)
         line_end = end if line_end == -1 else line_end
-        match = re.match(r"[ \t]*((?:>[ \t]?)*)(`{3,}|~{3,})(.*)", text[pos:line_end])
+        match = re.match(r"[ \t]*((?:>[ \t]{0,3})*)(`{3,}|~{3,})(.*)", text[pos:line_end])
         if match:
             quote_depth = match.group(1).count(">")
             marker = match.group(2)

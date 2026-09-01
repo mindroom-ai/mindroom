@@ -4,6 +4,7 @@ from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
+    _chunk_mentions,
     _estimated_event_size,
     _render_segment_html,
     _unclosed_fence_start,
@@ -281,6 +282,75 @@ def test_prefix_overlapping_mentions_do_not_nest_pills() -> None:
     assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in rendered
     assert '<a href="https://matrix.to/#/@alice:localhost2">@Alice Two</a>' in rendered
     assert rendered.count("<a ") == 2
+    # The shorter ID must not be attributed to a chunk that names only the longer one.
+    assert _chunk_mentions(content, "ping @alice:localhost2 again") == {"user_ids": ["@alice:localhost2"]}
+    assert _chunk_mentions(content, body) == {"user_ids": ["@alice:localhost", "@alice:localhost2"]}
+
+
+def test_pill_restoration_leaves_literal_code_text_alone() -> None:
+    """A user ID inside a code span is content, not a mention."""
+    body = "Thanks @alice:localhost; the literal `@alice:localhost` stays code."
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": '<p>Thanks <a href="https://matrix.to/#/@alice:localhost">@Alice</a>.</p>',
+        "m.mentions": {"user_ids": ["@alice:localhost"]},
+    }
+
+    rendered = _render_segment_html(content, body)
+
+    assert '<a href="https://matrix.to/#/@alice:localhost">@Alice</a>' in rendered
+    assert "<code>@alice:localhost</code>" in rendered
+    assert rendered.count("<a ") == 1
+
+
+def test_room_mention_travels_with_its_segment() -> None:
+    """The room flag follows the chunk whose body carries ``@room``."""
+    lead = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
+    body = f"{lead}\n\n@room please review."
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+        "m.mentions": {"room": True},
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False)
+
+    assert segmented is not None
+    parts = [segmented.first, *segmented.continuations]
+    mentioned = [part for part in parts if "@room" in part["body"]]
+    assert len(mentioned) == 1
+    assert mentioned[0]["m.mentions"] == {"room": True}
+    assert all("m.mentions" not in part for part in parts if part is not mentioned[0])
+
+
+def test_edit_keeps_the_outer_mention_delta() -> None:
+    """An edit's outer m.mentions is the revision delta and stays verbatim."""
+    body = _body() + "\n\nThanks @alice:localhost."
+    mentions = {"user_ids": ["@alice:localhost"]}
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content={
+            "msgtype": "m.text",
+            "body": body,
+            "format": "org.matrix.custom.html",
+            "formatted_body": markdown_to_html(body),
+            "m.mentions": mentions,
+        },
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert segmented.first["m.mentions"] == mentions
+    # The mention landed in a continuation, so the first chunk's resolved set is empty...
+    assert "m.mentions" not in segmented.first["m.new_content"]
+    mentioned = [part for part in segmented.continuations if "@alice:localhost" in part["body"]]
+    assert len(mentioned) == 1
+    assert mentioned[0]["m.mentions"] == mentions
 
 
 def test_unclosed_fence_requires_same_marker_and_length() -> None:
@@ -302,3 +372,8 @@ def test_unclosed_fence_inside_a_block_quote() -> None:
     assert _unclosed_fence_start(wrong_depth_closes, 0, len(wrong_depth_closes)) == 0
     quoted_closes = quoted_open + "> ```\n"
     assert _unclosed_fence_start(quoted_closes, 0, len(quoted_closes)) is None
+    # CommonMark allows up to three spaces of indentation after the quote marker.
+    indented_open = ">   ```python\n>   code\n"
+    assert _unclosed_fence_start(indented_open, 0, len(indented_open)) == 0
+    indented_closes = indented_open + ">   ```\n"
+    assert _unclosed_fence_start(indented_closes, 0, len(indented_closes)) is None
