@@ -14,7 +14,6 @@ import pytest
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -126,58 +125,6 @@ async def test_live_inviter_can_satisfy_current_room_members(
 
     join_room.assert_awaited_once_with(bot.client, ROOM_ID)
     assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
-
-
-@pytest.mark.asyncio
-async def test_private_agent_accepts_exact_live_inviter(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A requester-private agent may bootstrap access from its exact live inviter."""
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    private=AgentPrivateConfig(per="user"),
-                    access=ResponderAccessConfig(
-                        current_room_members=True,
-                        members_of_rooms=[],
-                    ),
-                ),
-            },
-            router=RouterConfig(model="default"),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=AgentMatrixUser(
-            agent_name="mind",
-            user_id="@mind:localhost",
-            display_name="Mind",
-            password=TEST_PASSWORD,
-        ),
-        storage_path=runtime_paths_for(config).storage_root,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    invited_room = nio.MatrixInvitedRoom(ROOM_ID, bot.agent_user.user_id)
-    invited_room.inviter = INVITER_ID
-    bot.client.invited_rooms = {ROOM_ID: invited_room}
-    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.get_room_members",
-        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
-    )
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
-
-    await bot._room_lifecycle.handle_invite(invited_room, INVITER_ID)
-
-    join_room.assert_awaited_once_with(bot.client, ROOM_ID)
-    assert load_invited_rooms(invited_rooms_path(runtime_paths_for(config).storage_root, "mind")) == {ROOM_ID}
 
 
 @pytest.mark.asyncio
@@ -1212,7 +1159,7 @@ async def test_compensating_leave_restores_fence_before_network_leave(
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", delayed_failed_leave)
 
     invite = asyncio.create_task(bot._room_lifecycle.handle_invite(room, INVITER_ID))
-    await asyncio.wait_for(leave_started.wait(), timeout=5)
+    await asyncio.wait_for(leave_started.wait(), timeout=1)
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(ROOM_ID)
 

@@ -136,8 +136,8 @@ After a live reset from a certified checkpoint, unseen state-block joins also en
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
 Invites take neither path and are not journalled because Matrix's current invite cache owns their lifetime.
-The router and requester-private agents may bootstrap `current_room_members` from the exact inviter on a current authenticated self-invite.
-Shared agents and teams require the router-owned index or another ordinary authorization source before starting a join.
+Only the router may bootstrap `current_room_members` from the exact inviter on a current authenticated self-invite.
+Agents and teams require the router-owned index or another ordinary authorization source before starting a join.
 Each live invite cache entry owns at most one join attempt, so a failed attempt requires fresh Matrix invite evidence.
 The inviter must pass access before the join, and the latest access policy plus any required joined-membership evidence are checked again after the join.
 The cached invite object must still identify the authenticated sender, but a joined sync normally removes its cache entry, so absence after a successful join does not revoke acceptance while a still-present different invite makes the attempt fail closed.

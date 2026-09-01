@@ -15,7 +15,7 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.config.agent import AgentPrivateConfig, TeamConfig
+from mindroom.config.agent import TeamConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
@@ -113,8 +113,8 @@ async def test_current_room_member_can_use_responder(tmp_path: Path) -> None:
     assert not _allowed(sender_id, config, memberships, room_id="!other:example.com")
 
 
-def test_shared_entities_cannot_bootstrap_current_room_access(tmp_path: Path) -> None:
-    """Shared agents and teams cannot bootstrap access from a live invite."""
+def test_only_exact_live_inviter_satisfies_prejoin_current_room_access(tmp_path: Path) -> None:
+    """Only the router may bootstrap current-room access from a live invite."""
     sender_id = "@member:example.com"
     config = membership_config(
         tmp_path,
@@ -149,36 +149,6 @@ def test_shared_entities_cannot_bootstrap_current_room_access(tmp_path: Path) ->
     )
     assert not _invite_allowed(sender_id, config, memberships, current_inviter_id="@other:example.com")
     assert not _invite_allowed(sender_id, config, memberships)
-
-
-def test_requester_private_agent_can_bootstrap_current_room_access(tmp_path: Path) -> None:
-    """A private agent may use its exact inviter for requester-isolated access."""
-    sender_id = "@member:example.com"
-    config = membership_config(
-        tmp_path,
-        access={"current_room_members": True, "members_of_rooms": []},
-    )
-    config.agents["talent"].private = AgentPrivateConfig(per="user")
-    memberships = AgentReplyMembershipIndex()
-
-    assert _invite_allowed(sender_id, config, memberships, current_inviter_id=sender_id)
-    assert _invite_allowed(sender_id, config, memberships, joined_member_ids={sender_id})
-    assert not _invite_allowed(
-        sender_id,
-        config,
-        memberships,
-        current_inviter_id="@other:example.com",
-    )
-    assert not _invite_allowed(
-        sender_id,
-        config,
-        memberships,
-        joined_member_ids={"@other:example.com"},
-    )
-    access = config.agents["talent"].access
-    assert access is not None
-    access.current_room_members = False
-    assert not _invite_allowed(sender_id, config, memberships, current_inviter_id=sender_id)
 
 
 def test_postjoin_current_room_access_requires_joined_inviter(tmp_path: Path) -> None:

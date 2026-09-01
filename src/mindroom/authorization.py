@@ -92,9 +92,9 @@ def is_sender_allowed_for_agent_invite(
 ) -> bool:
     """Authorize one live invite before or after its join.
 
-    Ordinary access uses the router-owned room-membership index. The router and
-    requester-private agents may bootstrap access from the exact live inviter
-    before joining or from an authoritative joined-members query afterward.
+    Ordinary access uses the router-owned room-membership index. Only the
+    router may bootstrap that index from the exact live inviter before joining
+    or from an authoritative joined-members query afterward.
     """
     if is_sender_allowed_for_responder(
         sender_id,
@@ -105,12 +105,7 @@ def is_sender_allowed_for_agent_invite(
         membership_index,
     ):
         return True
-    agent = config.agents.get(agent_name)
-    may_bootstrap_current_room_access = agent_name == ROUTER_AGENT_NAME or (
-        agent is not None and agent.private is not None
-    )
-    access = resolve_responder_access(config, agent_name)
-    if not may_bootstrap_current_room_access or not access.current_room_members:
+    if agent_name != ROUTER_AGENT_NAME or not resolve_responder_access(config, agent_name).current_room_members:
         return False
     return sender_id == current_inviter_id or (joined_member_ids is not None and sender_id in joined_member_ids)
 
