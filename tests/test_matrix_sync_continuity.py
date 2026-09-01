@@ -38,6 +38,7 @@ from mindroom.matrix.client_session import MatrixSyncStorage
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.sync_certification import SyncRecoveryOutcome, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.sync_recovery_escape import _CLASSIC_SYNC_RECOVERY_STALL_LIMIT
 from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
@@ -384,6 +385,42 @@ async def test_join_fence_restore_keeps_durable_fences_when_inventory_unavailabl
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
     assert any(entry["event"] == "matrix_join_fence_restore_joined_rooms_unavailable" for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_successful_sync_retries_unknown_join_fence_classification(
+    tmp_path: Path,
+) -> None:
+    """A later sync retries startup classification and leaves an unowned joined room."""
+    room_id = "!unowned:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot._sync_continuity_store.update_join_fences(add=(room_id,))
+    leave_room = AsyncMock(return_value=True)
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_left=AsyncMock(),
+    )
+
+    with (
+        patch(
+            "mindroom.bot_room_lifecycle.get_joined_rooms",
+            new=AsyncMock(side_effect=[None, [room_id]]),
+        ),
+        patch("mindroom.matrix.rooms.leave_room", new=leave_room),
+    ):
+        await bot._room_lifecycle.restore_pending_join_decrypt_fences()
+        await bot._apply_own_room_membership_before_invites(
+            OwnRoomMembership(
+                joined_room_ids=frozenset({room_id}),
+                left_room_ids=frozenset(),
+                invited_room_ids=frozenset(),
+                departures=(),
+            ),
+        )
+
+    leave_room.assert_awaited_once_with(bot.client, room_id)
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
 @pytest.mark.asyncio

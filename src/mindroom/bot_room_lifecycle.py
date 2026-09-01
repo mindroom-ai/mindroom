@@ -93,6 +93,7 @@ class BotRoomLifecycle:
         self._welcomed_room_ids: set[str] = set()
         self._decrypt_notice_fenced_room_ids: set[str] = set()
         self._join_fence_protected_room_ids: set[str] = set()
+        self._unclassified_restored_join_fence_room_ids: set[str] = set()
         self._accepted_rooms_awaiting_joined_setup: set[str] = set()
         self._next_invite_join_generation = 0
         self._active_invite_join_generations: dict[str, set[int]] = {}
@@ -206,20 +207,57 @@ class BotRoomLifecycle:
         self._join_fence_protected_room_ids.update(pending_room_ids)
         joined_rooms = await get_joined_rooms(self._client())
         if joined_rooms is None:
+            self._unclassified_restored_join_fence_room_ids.update(pending_room_ids)
             self._logger().warning(
                 "matrix_join_fence_restore_joined_rooms_unavailable",
                 pending_join_decrypt_fence_count=len(self._decrypt_notice_fenced_room_ids),
             )
             return
-        joined_room_ids = set(joined_rooms)
-        protected_room_ids = (self._decrypt_notice_fenced_room_ids & joined_room_ids) - await self._owned_room_ids()
+        await self._classify_restored_join_fences(pending_room_ids, set(joined_rooms))
+
+    async def _classify_restored_join_fences(
+        self,
+        pending_room_ids: set[str],
+        joined_room_ids: set[str],
+    ) -> tuple[str, ...]:
+        """Classify restored fences once Matrix's joined inventory is authoritative."""
+        protected_room_ids = (pending_room_ids & joined_room_ids) - await self._owned_room_ids()
         record = await asyncio.to_thread(
             self.deps.continuity_store.update_join_fences,
-            retain=joined_room_ids,
+            remove=pending_room_ids - joined_room_ids,
         )
         self._join_fence_protected_room_ids.difference_update(pending_room_ids)
         self._join_fence_protected_room_ids.update(protected_room_ids)
+        self._unclassified_restored_join_fence_room_ids.difference_update(pending_room_ids)
         self.apply_continuity_record(record)
+        return tuple(sorted(protected_room_ids))
+
+    async def retry_unclassified_restored_join_fences(self) -> None:
+        """Retry startup classification after Matrix's joined inventory recovers."""
+        pending_room_ids = set(self._unclassified_restored_join_fence_room_ids)
+        if not pending_room_ids:
+            return
+        joined_rooms = await get_joined_rooms(self._client())
+        if joined_rooms is None:
+            return
+        unowned_joined_room_ids = await self._classify_restored_join_fences(
+            pending_room_ids,
+            set(joined_rooms),
+        )
+        if not unowned_joined_room_ids:
+            return
+        try:
+            await self._leave_rooms_with_ownership(
+                list(unowned_joined_room_ids),
+                recheck_ownership=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._logger().exception(
+                "restored_join_fence_cleanup_failed",
+                room_ids=unowned_joined_room_ids,
+            )
 
     async def _join_room_with_decrypt_notice_fence(
         self,
@@ -597,9 +635,15 @@ class BotRoomLifecycle:
         self._logger().info("Welcome message sent", room_id=room_id)
         return True
 
-    async def reconcile_invites(self) -> None:
+    async def reconcile_invites(
+        self,
+        *,
+        should_continue: Callable[[], bool] | None = None,
+    ) -> bool:
         """Re-evaluate only invites currently cached by Matrix."""
         for room in tuple(self._client().invited_rooms.values()):
+            if should_continue is not None and not should_continue():
+                return False
             if room.inviter is not None:
                 try:
                     await self.handle_invite(room, room.inviter)
@@ -607,6 +651,7 @@ class BotRoomLifecycle:
                     raise
                 except Exception:
                     self._logger().exception("live_invite_reconciliation_failed", room_id=room.room_id)
+        return True
 
     async def _attempt_invite_join(
         self,
@@ -767,6 +812,12 @@ class BotRoomLifecycle:
         except Exception as error:
             fence_error = error
             self._logger().exception("invite_compensating_leave_fence_failed", room_id=room_id)
+        current_invite = self._client().invited_rooms.get(room_id)
+        if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
+            self._logger().info("invite_compensating_leave_skipped_for_replacement", room_id=room_id)
+            if fence_error is not None:
+                raise fence_error
+            return
         try:
             confirmed = await self._leave_room_with_confirmed_cleanup(room_id)
         except asyncio.CancelledError:

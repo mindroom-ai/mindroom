@@ -1366,7 +1366,12 @@ class AgentBot:
                 if self._sync_response_applying:
                     return
                 self._live_invite_reconciliation_pending = False
-                await self._room_lifecycle.reconcile_invites()
+                completed = await self._room_lifecycle.reconcile_invites(
+                    should_continue=lambda: not self._sync_response_applying,
+                )
+                if not completed:
+                    self._live_invite_reconciliation_pending = True
+                    return
         finally:
             self._live_invite_reconciliation_running = False
             if self._live_invite_reconciliation_pending and not self._sync_response_applying:
@@ -2071,6 +2076,7 @@ class AgentBot:
         except BaseException:
             self._pending_sync_invites.clear()
             raise
+        await self._room_lifecycle.retry_unclassified_restored_join_fences()
         if self._room_lifecycle.has_pending_joined_room_setup:
             create_background_task(
                 self._room_lifecycle.restore_pending_joined_room_setup(),

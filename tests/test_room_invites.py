@@ -749,11 +749,12 @@ async def test_live_invite_reconciliation_coalesces_requests_while_pass_is_block
     release_pass = asyncio.Event()
     pass_count = 0
 
-    async def blocked_reconciliation() -> None:
+    async def blocked_reconciliation(**_kwargs: object) -> bool:
         nonlocal pass_count
         pass_count += 1
         pass_started.set()
         await release_pass.wait()
+        return True
 
     monkeypatch.setattr(bot._room_lifecycle, "reconcile_invites", blocked_reconciliation)
     await bot.reconcile_live_invites()
@@ -892,8 +893,9 @@ async def test_sync_spawned_room_lifecycle_tasks_use_detached_context(
         network_calls.append("sent")
         return nio.RoomLeaveResponse()
 
-    async def membership_work(*_args: object) -> None:
+    async def membership_work(*_args: object, **_kwargs: object) -> bool:
         await client._run_room_membership_reset(room_id, send_leave)
+        return True
 
     empty_membership = OwnRoomMembership(
         joined_room_ids=frozenset(),

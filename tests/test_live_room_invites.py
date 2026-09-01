@@ -444,11 +444,11 @@ async def test_configured_reconciliation_waits_for_invite_ownership_before_readi
 
 
 @pytest.mark.asyncio
-async def test_replaced_live_invite_cannot_be_accepted_or_deleted(
+async def test_replaced_live_invite_survives_rejected_old_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An old join attempt cannot consume newer Matrix invite ownership."""
+    """Compensating an old join cannot reject the newer Matrix invite."""
     config = bind_runtime_paths(
         Config(
             administrators=[INVITER_ID],
@@ -465,21 +465,28 @@ async def test_replaced_live_invite_cannot_be_accepted_or_deleted(
     )
     bot, room = _router_bot(config)
     replacement_inviter = "@replacement:localhost"
+    server_membership = "invite"
 
     async def join_after_replacement(_client: object, _room_id: str) -> RoomJoinOutcome:
         room.inviter = replacement_inviter
         return RoomJoinOutcome.JOINED
 
+    async def leave_current_membership(_client: object, _room_id: str) -> bool:
+        nonlocal server_membership
+        server_membership = "leave"
+        return True
+
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.join_room",
         AsyncMock(side_effect=join_after_replacement),
     )
-    leave_room = AsyncMock(return_value=True)
+    leave_room = AsyncMock(side_effect=leave_current_membership)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
 
     await bot._room_lifecycle.handle_invite(room, INVITER_ID)
 
-    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    leave_room.assert_not_awaited()
+    assert server_membership == "invite"
     assert load_invited_rooms(_accepted_path(config)) == set()
     assert bot.client.invited_rooms == {ROOM_ID: room}
     assert room.inviter == replacement_inviter
@@ -1342,6 +1349,76 @@ async def test_departure_admitted_while_invite_waits_for_room_owner_prevents_joi
 
     join_room.assert_not_awaited()
     assert load_invited_rooms(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
+async def test_departure_admission_pauses_remaining_invite_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pass cannot start later stale invite work after sync pre-admission."""
+    config = _router_config(tmp_path)
+    bot, first_room = _router_bot(config)
+    first_room_id = "!first:localhost"
+    second_room_id = "!second:localhost"
+    first_room.room_id = first_room_id
+    second_room = nio.MatrixInvitedRoom(second_room_id, bot.agent_user.user_id)
+    second_room.inviter = INVITER_ID
+    bot.client.invited_rooms = {
+        first_room_id: first_room,
+        second_room_id: second_room,
+    }
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    original_handle_invite = bot._room_lifecycle.handle_invite
+
+    async def block_first_invite(room: nio.MatrixRoom, sender: str) -> None:
+        if room is first_room:
+            first_started.set()
+            await release_first.wait()
+            return
+        await original_handle_invite(room, sender)
+
+    monkeypatch.setattr(bot._room_lifecycle, "handle_invite", block_first_invite)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot.reconcile_live_invites()
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_second_departed",
+            "rooms": {
+                "join": {},
+                "invite": {},
+                "leave": {second_room_id: {"timeline": {"events": []}, "state": {"events": []}}},
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    bot._before_sync_response_admission(response)
+    release_first.set()
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    join_room.assert_not_awaited()
+    assert bot._live_invite_reconciliation_pending
+    await bot._apply_own_room_membership_before_invites(
+        OwnRoomMembership(
+            joined_room_ids=frozenset(),
+            left_room_ids=frozenset({second_room_id}),
+            invited_room_ids=frozenset(),
+            departures=(ReportedDeparture(room_id=second_room_id, observation_id="second-departed"),),
+        ),
+    )
+    bot._sync_response_applying = False
+    bot._schedule_live_invite_reconciliation()
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    join_room.assert_not_awaited()
 
 
 @pytest.mark.asyncio
