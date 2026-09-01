@@ -180,8 +180,9 @@ def own_membership_from_sliding_sync(
             invited_room_ids.add(room_id)
             if room.membership == "invite":
                 authoritative_invited_room_ids.add(room_id)
-                if not observed:
+                if not observed or observed[-1].rejoined_after:
                     observed = (
+                        *observed,
                         ReportedDeparture(
                             room_id=room_id,
                             observation_id=_sync_departure_observation_id(

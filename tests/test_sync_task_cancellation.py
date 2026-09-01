@@ -93,6 +93,7 @@ from tests.conftest import (
     install_call_manager_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    membership_epoch_is_active,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -1964,6 +1965,42 @@ def test_sliding_own_membership_counts_a_rejoined_room_departing_twice() -> None
         ReportedDeparture(room_id="!churned:localhost", observation_id="$leave", rejoined_after=True),
         ReportedDeparture(room_id="!churned:localhost", observation_id="$kick"),
     )
+
+
+@pytest.mark.asyncio
+async def test_sliding_final_invite_after_rejoin_fences_the_new_membership(
+    tmp_path: Path,
+) -> None:
+    """A final invite ends the membership that restarted inside the timeline."""
+    user_id = "@mindroom_code:localhost"
+    room_id = "!room:localhost"
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            room_id: nio.SlidingSyncRoom(
+                membership="invite",
+                timeline=[
+                    _member_event("$leave", user_id=user_id, membership="leave", ts=1),
+                    _member_event("$rejoin", user_id=user_id, membership="join", ts=2),
+                ],
+            ),
+        },
+    )
+    membership = own_membership_from_sliding_sync(response, self_user_id=user_id)
+    bot = _sliding_response_bot(tmp_path)
+    principal = bot._journal_principal()
+
+    await bot._membership_fence.fence_reported_departures(membership.departures)
+
+    assert membership.departures == (
+        ReportedDeparture(room_id=room_id, observation_id="$leave", rejoined_after=True),
+        ReportedDeparture(
+            room_id=room_id,
+            observation_id=f"sliding-invite:pos:{room_id}",
+        ),
+    )
+    assert await principal.membership_epoch(room_id) == 2
+    assert not await membership_epoch_is_active(principal, room_id, 2)
 
 
 def test_sliding_own_membership_does_not_invent_a_rejoin_between_departures() -> None:
