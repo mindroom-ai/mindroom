@@ -1885,6 +1885,8 @@ The dashboard Agents tab exposes this as the **Memory Backend** selector for eac
 Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
 Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
 Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
+Only the router can use the exact sender of a fresh authenticated invite as a pre-join `current_room_members` exception.
+Agents and teams always require ordinary authorization before accepting an invite.
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
 The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
@@ -3081,6 +3083,10 @@ The router has two configuration options:
 | `model` | string | `"default"` | Model to use for routing decisions |
 | `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
 
+When `current_room_members` is enabled, the exact sender of a fresh authenticated router invitation may authorize that invitation before the router joins.
+Saved pending records cannot provide this exception, and normal authorization applies after joining.
+A failed or interrupted live attempt may require the inviter to invite the router again.
+
 ## How Routing Works
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
@@ -3134,7 +3140,7 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely from persisted state.
 The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
@@ -16486,6 +16492,11 @@ Internal MindRoom identities bypass responder restrictions because they are syst
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
+A fresh authenticated self-invite callback is the only pre-join exception.
+When the router uses `current_room_members`, the exact inviter may authorize that router invitation.
+The exception never applies to agents or teams, saved pending records, or cache-only observations.
+After joining through the exception, MindRoom rechecks the latest policy and requires the inviter to remain a joined member before preserving the room.
+If that live attempt fails or the process stops before preservation, the inviter may need to invite the router again.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
@@ -17008,7 +17019,9 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
+The homeserver repeats an unacted-on invite in sync responses, and MindRoom separately stores the pending room and inviter for ordinary authorization recovery.
+That pending record cannot recreate the live router bootstrap exception, so `_on_invite` remains a plain background task for fresh invitation authority.
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
 
 ### Streaming Responses

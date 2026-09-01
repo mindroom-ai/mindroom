@@ -21,8 +21,8 @@ Never compensate by leaving a room.
 - [x] Task 2 completed with a router-only pure authorization rule.
 - [x] Task 3 completed with authenticated self-invite admission and one process-local token.
 - [x] Task 4 completed with final authorization, replacement safety, and no compensating leave.
-- [ ] Task 5 is in progress.
-- [ ] Task 6 is pending.
+- [x] Task 5 completed with production edits limited to the three scoped files and no new durable state or retry owner.
+- [ ] Task 6 is in progress; the exact implementation file set passes 73 focused tests, all repository hooks, and the full suite with 15,446 passed and 23 skipped, while staging, commit, push, and independent reviews remain.
 
 ## Global constraints
 

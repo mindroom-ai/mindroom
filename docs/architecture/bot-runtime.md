@@ -135,8 +135,10 @@ The tokenless room-member baseline remains pending across rejected response atte
 After a live reset from a certified checkpoint, unseen state-block joins also enter the exact durable dispatch path so a join omitted from the replay timeline is not lost.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
-Invites take neither path and are not journalled at all: an invite carries no Matrix event ID to key a durable row on, and it does not need one, because an invite the bot has not acted on reappears in every sync response until it does.
-The homeserver is therefore already providing the redelivery a journal row would have, so invite handling is a plain background task.
+Invite callbacks are not written to the event journal because invite events do not provide a stable event ID.
+The homeserver repeats an unacted-on invite in sync responses, while a separate pending-invite record stores the room and inviter so ordinary authorization can reconsider unfinished work.
+That pending record is work evidence only and cannot recreate the live router bootstrap exception.
+Invite handling remains a plain background task.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.

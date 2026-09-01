@@ -109,7 +109,9 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
+The homeserver repeats an unacted-on invite in sync responses, and MindRoom separately stores the pending room and inviter for ordinary authorization recovery.
+That pending record cannot recreate the live router bootstrap exception, so `_on_invite` remains a plain background task for fresh invitation authority.
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
 
 ### Streaming Responses

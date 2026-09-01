@@ -556,7 +556,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),
         ):
-            bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
+            bot._room_lifecycle._record_pending_room_invite(mock_room.room_id, mock_event.sender)
             await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
 
         assert join_room.await_count == expected_join_calls

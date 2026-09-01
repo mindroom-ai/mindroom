@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def allows_live_inviter_bootstrap(entity_name: str, config: Config) -> bool:
+    """Allow only the router's fresh inviter to bridge pre-join membership."""
+    return entity_name == ROUTER_AGENT_NAME and resolve_responder_access(config, entity_name).current_room_members
 
 
 def is_sender_allowed_for_responder(

@@ -26,6 +26,10 @@ The router has two configuration options:
 | `model` | string | `"default"` | Model to use for routing decisions |
 | `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
 
+When `current_room_members` is enabled, the exact sender of a fresh authenticated router invitation may authorize that invitation before the router joins.
+Saved pending records cannot provide this exception, and normal authorization applies after joining.
+A failed or interrupted live attempt may require the inviter to invite the router again.
+
 ## How Routing Works
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
@@ -79,7 +83,7 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely from persisted state.
 The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
