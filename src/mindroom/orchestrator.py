@@ -1041,7 +1041,7 @@ class _MultiAgentOrchestrator:
             new_config,
             changed_server_ids,
         )
-        self.config = new_config
+        self._publish_config_with_room_ownership(new_config)
         if reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
@@ -1334,6 +1334,22 @@ class _MultiAgentOrchestrator:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
 
+    def _publish_config_with_room_ownership(self, config: Config) -> None:
+        """Publish one config and its resolved room ownership without suspension."""
+        room_updates = [
+            (
+                bot,
+                resolve_room_aliases(
+                    get_rooms_for_entity(bot.agent_name, config),
+                    runtime_paths=self.runtime_paths,
+                ),
+            )
+            for bot in self.agent_bots.values()
+        ]
+        self.config = config
+        for bot, room_ids in room_updates:
+            bot.rooms = room_ids
+
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         if bot.agent_name == ROUTER_AGENT_NAME:
@@ -1531,7 +1547,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
-        self.config = new_config
+        self._publish_config_with_room_ownership(new_config)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -1857,7 +1873,7 @@ class _MultiAgentOrchestrator:
                     plan.changed_mcp_servers,
                 )
                 # Only apply the new config after validation and account checks succeed.
-                self.config = new_config
+                self._publish_config_with_room_ownership(new_config)
                 if reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)

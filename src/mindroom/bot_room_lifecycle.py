@@ -855,9 +855,7 @@ class BotRoomLifecycle:
         expected_invite: nio.MatrixInvitedRoom,
     ) -> None:
         """Attempt one compensating leave without creating retry ownership."""
-        if room_id in self.deps.get_configured_rooms():
-            self._discard_invite_if_current(room_id, sender, expected_invite)
-            await self._on_configured_room_joined(room_id)
+        if await self._retain_configured_room(room_id, sender, expected_invite):
             return
 
         self._discard_invite_if_current(room_id, sender, expected_invite)
@@ -868,6 +866,31 @@ class BotRoomLifecycle:
         except Exception as error:
             fence_error = error
             self._logger().exception("invite_compensating_leave_fence_failed", room_id=room_id)
+        if await self._current_owner_blocks_compensating_leave(
+            room_id,
+            sender,
+            expected_invite,
+            fence_error,
+        ):
+            return
+        try:
+            confirmed = await self._leave_room_with_confirmed_cleanup(room_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._logger().exception("invite_compensating_leave_cleanup_failed", room_id=room_id)
+            return
+        if not confirmed and fence_error is not None:
+            raise fence_error
+
+    async def _current_owner_blocks_compensating_leave(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+        fence_error: Exception | None,
+    ) -> bool:
+        """Return whether current invite or config ownership now keeps the room."""
         current_invite = self._client().invited_rooms.get(room_id)
         if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
             replacement_inviter = current_invite.inviter
@@ -884,16 +907,25 @@ class BotRoomLifecycle:
                 self._logger().info("invite_compensating_leave_skipped_for_replacement", room_id=room_id)
                 if fence_error is not None:
                     raise fence_error
-                return
-        try:
-            confirmed = await self._leave_room_with_confirmed_cleanup(room_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._logger().exception("invite_compensating_leave_cleanup_failed", room_id=room_id)
-            return
-        if not confirmed and fence_error is not None:
+                return True
+        if room_id not in self.deps.get_configured_rooms():
+            return False
+        if fence_error is not None:
             raise fence_error
+        return True
+
+    async def _retain_configured_room(
+        self,
+        room_id: str,
+        sender: str,
+        expected_invite: nio.MatrixInvitedRoom,
+    ) -> bool:
+        """Keep and initialize a joined room claimed by the current config."""
+        if room_id not in self.deps.get_configured_rooms():
+            return False
+        self._discard_invite_if_current(room_id, sender, expected_invite)
+        await self._on_configured_room_joined(room_id)
+        return True
 
     def _discard_invite_if_current(
         self,

@@ -14,6 +14,7 @@ import pytest
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -440,7 +441,7 @@ async def test_configured_reconciliation_waits_for_invite_ownership_before_readi
     await configured
 
     configured_setup.assert_awaited_once_with(ROOM_ID)
-    assert join_room.await_count == 2
+    assert join_room.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1165,6 +1166,62 @@ async def test_compensating_leave_restores_fence_before_network_leave(
 
     release_leave.set()
     await invite
+
+
+@pytest.mark.asyncio
+async def test_compensating_leave_rechecks_configured_ownership_after_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config publication must own a room before compensation resumes."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    updated_config = bind_runtime_paths(
+        Config(
+            agents={
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    rooms=[ROOM_ID],
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        runtime_paths_for(config),
+    )
+    fence_started = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def blocked_fence(_room_id: str) -> None:
+        fence_started.set()
+        await release_fence.wait()
+
+    monkeypatch.setattr(
+        bot._room_lifecycle,
+        "_ensure_join_decrypt_notice_fence",
+        blocked_fence,
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+    configured_setup = AsyncMock()
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_configured_room_joined=configured_setup,
+    )
+
+    compensation = asyncio.create_task(
+        bot._room_lifecycle._leave_unaccepted_invite(ROOM_ID, INVITER_ID, room),
+    )
+    await asyncio.wait_for(fence_started.wait(), timeout=1)
+
+    # The config setter publishes desired room ownership atomically.
+    bot.config = updated_config
+    assert ROOM_ID in bot.rooms
+
+    release_fence.set()
+    await compensation
+
+    leave_room.assert_not_awaited()
+    configured_setup.assert_not_awaited()
 
 
 @pytest.mark.asyncio

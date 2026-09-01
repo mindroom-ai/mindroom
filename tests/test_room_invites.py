@@ -940,6 +940,68 @@ async def test_sync_spawned_room_lifecycle_tasks_use_detached_context(
 
 
 @pytest.mark.asyncio
+async def test_joined_room_setup_recovery_is_single_flight_across_syncs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Overlapping sync responses coalesce joined-room setup recovery."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot._room_lifecycle._accepted_rooms_awaiting_joined_setup.add("!pending:localhost")
+    monkeypatch.setattr(bot, "_apply_own_room_membership", AsyncMock())
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+    active_recoveries = 0
+    max_active_recoveries = 0
+    recovery_attempts = 0
+
+    async def blocked_recovery() -> None:
+        nonlocal active_recoveries, max_active_recoveries, recovery_attempts
+        recovery_attempts += 1
+        active_recoveries += 1
+        max_active_recoveries = max(max_active_recoveries, active_recoveries)
+        recovery_started.set()
+        try:
+            await release_recovery.wait()
+        finally:
+            active_recoveries -= 1
+
+    monkeypatch.setattr(
+        bot._room_lifecycle,
+        "restore_pending_joined_room_setup",
+        blocked_recovery,
+    )
+    membership = OwnRoomMembership(
+        joined_room_ids=frozenset(),
+        left_room_ids=frozenset(),
+        invited_room_ids=frozenset(),
+        departures=(),
+    )
+
+    await bot._apply_own_room_membership_before_invites(membership)
+    await asyncio.wait_for(recovery_started.wait(), timeout=1)
+    for _ in range(4):
+        await bot._apply_own_room_membership_before_invites(membership)
+        await asyncio.sleep(0)
+
+    assert max_active_recoveries == 1
+
+    release_recovery.set()
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert recovery_attempts == 1
+
+    await bot._apply_own_room_membership_before_invites(membership)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    assert recovery_attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_invite_sync_callback_runs_live_join_in_background(tmp_path: Path) -> None:
     """Live invite admission must not hold the sync loop across network work."""
     config = bind_runtime_paths(

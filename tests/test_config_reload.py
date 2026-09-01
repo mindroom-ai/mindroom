@@ -1902,6 +1902,143 @@ def test_config_update_plan_reconciles_router_rooms_when_invite_policy_changes(
     assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
+@pytest.mark.asyncio
+async def test_config_publication_updates_restarting_bot_room_ownership_before_await(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A published config owns its rooms before later reload work can suspend."""
+    room_id = "!newly-configured:localhost"
+    inviter_id = "@owner:localhost"
+    current_config = _runtime_bound_config(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    rooms=[room_id],
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator.config = current_config
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=current_config,
+        runtime_paths=runtime_paths_for(current_config),
+    )
+    bot.client = AsyncMock()
+    invite = MagicMock()
+    invite.inviter = inviter_id
+    bot.client.invited_rooms = {room_id: invite}
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: bot}
+    plan = ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        configured_entities={ROUTER_AGENT_NAME},
+        entities_to_restart={ROUTER_AGENT_NAME},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+    fence_started = asyncio.Event()
+    release_fence = asyncio.Event()
+    publication_reached = asyncio.Event()
+    release_reload = asyncio.Event()
+    complete_calls = 0
+
+    async def blocked_fence(_room_id: str) -> None:
+        fence_started.set()
+        await release_fence.wait()
+
+    async def apply_update_plan(
+        _runtime: object,
+        _plan: ConfigUpdatePlan,
+        *,
+        plugins_changed: bool,
+    ) -> None:
+        assert plugins_changed is False
+
+    async def complete_worker_replacement(_runtime: object) -> None:
+        nonlocal complete_calls
+        complete_calls += 1
+        if complete_calls == 1:
+            publication_reached.set()
+            await release_reload.wait()
+
+    monkeypatch.setattr(bot._room_lifecycle, "_ensure_join_decrypt_notice_fence", blocked_fence)
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+    monkeypatch.setattr(orchestrator, "_prepare_accounts_for_config_update", AsyncMock())
+    monkeypatch.setattr(orchestrator._startup_maintenance, "cancel", AsyncMock(return_value=False))
+    monkeypatch.setattr(orchestrator, "_stop_entities_before_mcp_sync", AsyncMock(return_value=set()))
+    monkeypatch.setattr(orchestrator, "_sync_mcp_manager", AsyncMock(return_value=set()))
+    monkeypatch.setattr(
+        orchestrator._external_trigger_runtime,
+        "sync_api_config_snapshot",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_restart_changed_entities",
+        AsyncMock(return_value=({ROUTER_AGENT_NAME}, [], [])),
+    )
+    monkeypatch.setattr(orchestrator, "_reconcile_post_update_rooms", AsyncMock())
+    monkeypatch.setattr(orchestrator, "_recover_pending_replacement_rooms", AsyncMock())
+    monkeypatch.setattr(orchestrator, "_finalize_config_reload", AsyncMock())
+
+    with (
+        patch.object(
+            type(orchestrator.script_runtime),
+            "apply_update_plan",
+            new=apply_update_plan,
+        ),
+        patch.object(
+            type(orchestrator.script_runtime),
+            "complete_worker_replacement",
+            new=complete_worker_replacement,
+        ),
+    ):
+        compensation = asyncio.create_task(
+            bot._room_lifecycle._leave_unaccepted_invite(room_id, inviter_id, invite),
+        )
+        await asyncio.wait_for(fence_started.wait(), timeout=1)
+        reload_task = asyncio.create_task(
+            orchestrator._apply_config_update_plan(current_config, plan, ()),
+        )
+        try:
+            await asyncio.wait_for(publication_reached.wait(), timeout=1)
+
+            assert orchestrator.config is new_config
+            assert room_id in bot.rooms
+
+            release_fence.set()
+            await compensation
+            leave_room.assert_not_awaited()
+
+            release_reload.set()
+            assert await reload_task
+        finally:
+            release_fence.set()
+            release_reload.set()
+            await asyncio.gather(compensation, reload_task, return_exceptions=True)
+
+
 def test_config_update_plan_reconciles_router_invites_when_access_changes() -> None:
     """Router access changes immediately reconsider invites cached by Matrix."""
     old_config = _runtime_bound_config(

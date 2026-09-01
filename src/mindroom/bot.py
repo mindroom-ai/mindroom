@@ -368,6 +368,7 @@ class AgentBot:
     _sync_shutting_down: bool
     _delivery_recovery_wake: asyncio.Event
     _delivery_recovery_task: asyncio.Task[None] | None
+    _joined_room_setup_recovery_task: asyncio.Task[None] | None
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -455,6 +456,7 @@ class AgentBot:
         self._sync_shutting_down = False
         self._delivery_recovery_wake = asyncio.Event()
         self._delivery_recovery_task = None
+        self._joined_room_setup_recovery_task = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -974,7 +976,10 @@ class AgentBot:
     @config.setter
     def config(self, value: Config) -> None:
         """Update the canonical live config."""
+        room_refs = get_rooms_for_entity(self.agent_name, value)
+        resolved_rooms = resolve_room_aliases(room_refs, runtime_paths=self.runtime_paths)
         self._runtime_view.config = value
+        self.rooms = resolved_rooms
         if self._call_manager is not None:
             self._call_manager.update_config(value)
 
@@ -2082,13 +2087,7 @@ class AgentBot:
             self._pending_sync_invites.clear()
             raise
         await self._room_lifecycle.retry_unclassified_restored_join_fences()
-        if self._room_lifecycle.has_pending_joined_room_setup:
-            create_background_task(
-                self._room_lifecycle.restore_pending_joined_room_setup(),
-                name=f"matrix_joined_room_setup_{self.agent_name}",
-                owner=self._runtime_view,
-                context=Context(),
-            )
+        self._schedule_joined_room_setup_recovery()
         pending_invites, self._pending_sync_invites = self._pending_sync_invites, []
         for room, sender in pending_invites:
             create_background_task(
@@ -2096,6 +2095,20 @@ class AgentBot:
                 owner=self._runtime_view,
                 context=Context(),
             )
+
+    def _schedule_joined_room_setup_recovery(self) -> None:
+        """Coalesce sync-triggered joined-room setup into one task."""
+        if not self._room_lifecycle.has_pending_joined_room_setup:
+            return
+        task = self._joined_room_setup_recovery_task
+        if task is not None and not task.done():
+            return
+        self._joined_room_setup_recovery_task = create_background_task(
+            self._room_lifecycle.restore_pending_joined_room_setup(),
+            name=f"matrix_joined_room_setup_{self.agent_name}",
+            owner=self._runtime_view,
+            context=Context(),
+        )
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
