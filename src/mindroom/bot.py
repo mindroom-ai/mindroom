@@ -1053,6 +1053,10 @@ class AgentBot:
             room_id for room_id in (*self.rooms, *self._room_lifecycle.invited_rooms) if room_id.startswith("!")
         )
 
+    def publish_persisted_invited_room(self, room_id: str) -> None:
+        """Publish accepted ownership persisted by another runtime component."""
+        self._room_lifecycle.publish_persisted_invited_room(room_id)
+
     @property
     def agent_name(self) -> str:
         """Get the agent name from username."""

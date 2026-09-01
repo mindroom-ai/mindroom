@@ -80,6 +80,8 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
 
     from mindroom.config.main import Config
@@ -179,8 +181,14 @@ def build_hook_matrix_admin(
     runtime_paths: RuntimePaths,
     *,
     config: Config | None = None,
+    on_created_room_persisted: Callable[[str], None] | None = None,
 ) -> HookMatrixAdmin:
     """Lazily import the concrete matrix admin builder to avoid package cycles."""
     from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
-    return build_hook_matrix_admin(client, runtime_paths, config=config)
+    return build_hook_matrix_admin(
+        client,
+        runtime_paths,
+        config=config,
+        on_created_room_persisted=on_created_room_persisted,
+    )

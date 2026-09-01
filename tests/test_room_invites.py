@@ -1183,8 +1183,44 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
     assert left_room_ids == ["!stale:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_hook_created_room_publishes_live_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The runtime hook admin must publish a created room to its lifecycle owner."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.homeserver = "http://localhost:8008"
+    bot.client.user_id = bot.agent_user.user_id
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = config
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: bot}
+    monkeypatch.setattr(
+        "mindroom.hooks.matrix_admin.create_room",
+        AsyncMock(return_value="!hook-created:localhost"),
+    )
+
+    admin = orchestrator.hook_matrix_admin()
+    assert admin is not None
+    assert await admin.create_room(name="Hook-created room") == "!hook-created:localhost"
+
+    assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
+    assert bot.approval_room_ids == frozenset({"!hook-created:localhost"})
 
 
 @pytest.mark.asyncio
@@ -1487,11 +1523,11 @@ def test_agent_retries_failed_persisted_invited_room_forget(
 
 
 @pytest.mark.asyncio
-async def test_failed_forget_keeps_durable_owner_without_mutating_live_state(
+async def test_failed_forget_does_not_resurrect_revoked_ownership(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A failed durable forget cannot silently discard accepted ownership."""
+    """A failed durable forget must keep the departed room eligible for cleanup."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -1520,7 +1556,7 @@ async def test_failed_forget_keeps_durable_owner_without_mutating_live_state(
         lambda *_args, **_kwargs: MatrixState(),
     )
 
-    assert await bot._room_lifecycle._rooms_to_leave() == []
+    assert await bot._room_lifecycle._rooms_to_leave() == ["!departed:localhost"]
     assert bot._room_lifecycle.invited_rooms == set()
 
 

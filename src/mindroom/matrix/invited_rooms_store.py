@@ -73,13 +73,13 @@ def _save_json(path: Path, value: object) -> bool:
     return True
 
 
-def remember_invited_room(path: Path, room_id: str) -> None:
-    """Add one room using fresh durable state."""
+def remember_invited_room(path: Path, room_id: str) -> bool:
+    """Add one room using fresh durable state and report persistence success."""
     room_ids = load_invited_rooms(path)
     if room_id in room_ids:
-        return
+        return True
     room_ids.add(room_id)
-    save_invited_rooms(path, room_ids)
+    return save_invited_rooms(path, room_ids)
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:

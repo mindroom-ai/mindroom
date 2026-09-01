@@ -653,10 +653,14 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
     orchestrator.hook_registry.has_hooks.return_value = True
     router_client = AsyncMock(spec=nio.AsyncClient)
     router_client.homeserver = "http://localhost:8008"
-    orchestrator.agent_bots["router"] = SimpleNamespace(
-        client=router_client,
-        _hook_send_message=AsyncMock(),
+    router_bot = make_test_agent_bot(
+        agent_user=_router_user("@mindroom_router:localhost"),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
     )
+    router_bot.client = router_client
+    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with patch("mindroom.orchestrator.emit", new=AsyncMock()) as mock_emit:
         await orchestrator._emit_config_reloaded(

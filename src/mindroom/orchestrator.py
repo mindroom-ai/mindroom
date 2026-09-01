@@ -1203,7 +1203,12 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None:
             return None
-        return build_hook_matrix_admin(router_bot.client, self.runtime_paths, config=self.config)
+        return build_hook_matrix_admin(
+            router_bot.client,
+            self.runtime_paths,
+            config=self.config,
+            on_created_room_persisted=router_bot.publish_persisted_invited_room,
+        )
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""

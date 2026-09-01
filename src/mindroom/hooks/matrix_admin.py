@@ -20,6 +20,8 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -33,6 +35,7 @@ class _BoundHookMatrixAdmin:
     client: nio.AsyncClient
     runtime_paths: RuntimePaths
     config: Config | None = None
+    on_created_room_persisted: Callable[[str], None] | None = None
 
     async def resolve_alias(self, alias: str) -> str | None:
         """Resolve one room alias and return the room ID when it exists."""
@@ -154,7 +157,8 @@ class _BoundHookMatrixAdmin:
         if entity_name is None or not should_persist_invited_rooms(self.config, entity_name):
             return
         path = invited_rooms_path(self.runtime_paths.storage_root, entity_name)
-        remember_invited_room(path, room_id)
+        if remember_invited_room(path, room_id) and self.on_created_room_persisted is not None:
+            self.on_created_room_persisted(room_id)
 
     def _managed_entity_name_for_user_id(self, user_id: str | None) -> str | None:
         """Return the configured bot entity name for one managed Matrix user ID."""
@@ -178,6 +182,12 @@ def build_hook_matrix_admin(
     runtime_paths: RuntimePaths,
     *,
     config: Config | None = None,
+    on_created_room_persisted: Callable[[str], None] | None = None,
 ) -> HookMatrixAdmin:
     """Return a minimal hook-facing Matrix admin helper bound to one client."""
-    return _BoundHookMatrixAdmin(client=client, runtime_paths=runtime_paths, config=config)
+    return _BoundHookMatrixAdmin(
+        client=client,
+        runtime_paths=runtime_paths,
+        config=config,
+        on_created_room_persisted=on_created_room_persisted,
+    )

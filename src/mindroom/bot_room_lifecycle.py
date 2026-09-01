@@ -95,6 +95,7 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         self.invited_rooms = self._load_invited_rooms()
+        self._invited_rooms_revision = 0
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._welcomed_room_ids: set[str] = set()
@@ -102,6 +103,7 @@ class BotRoomLifecycle:
         self._join_fence_protected_room_ids: set[str] = set()
         self._unclassified_restored_join_fence_room_ids: set[str] = set()
         self._accepted_rooms_awaiting_joined_setup: set[str] = set()
+        self._pending_forgotten_invited_rooms: set[str] = set()
         self._next_invite_join_generation = 0
         self._active_invite_join_generations: dict[str, set[int]] = {}
         self._invalidated_invite_join_generations: set[int] = set()
@@ -348,11 +350,26 @@ class BotRoomLifecycle:
         return load_invited_rooms(self._invited_rooms_file_path())
 
     async def _accepted_rooms_snapshot(self) -> set[str]:
-        """Read accepted ownership without mutating the lifecycle's live state."""
+        """Publish fresh durable ownership without resurrecting pending removals."""
         if not self._should_persist_invited_rooms():
             return set(self.invited_rooms)
+        read_revision = self._invited_rooms_revision
         durable_rooms = await asyncio.to_thread(load_invited_rooms, self._invited_rooms_file_path())
-        return durable_rooms | self.invited_rooms
+        if read_revision != self._invited_rooms_revision:
+            return set(self.invited_rooms)
+        room_ids = (durable_rooms | self.invited_rooms) - self._pending_forgotten_invited_rooms
+        self._replace_invited_rooms(room_ids)
+        return set(room_ids)
+
+    def publish_persisted_invited_room(self, room_id: str) -> None:
+        """Publish ownership already persisted by another runtime component."""
+        self._pending_forgotten_invited_rooms.discard(room_id)
+        self._replace_invited_rooms(self.invited_rooms | {room_id})
+
+    def _replace_invited_rooms(self, room_ids: Iterable[str]) -> None:
+        """Publish one live accepted-room revision."""
+        self.invited_rooms = set(room_ids)
+        self._invited_rooms_revision += 1
 
     def discard_live_invite(self, room_id: str) -> None:
         """Revoke transient invite ownership after an authoritative departure."""
@@ -365,7 +382,7 @@ class BotRoomLifecycle:
         self._accepted_rooms_awaiting_joined_setup.discard(room_id)
         invited_rooms_file_exists = self._invited_rooms_file_path().exists()
         if not self._should_persist_invited_rooms() and not invited_rooms_file_exists:
-            self.invited_rooms.discard(room_id)
+            self._replace_invited_rooms(self.invited_rooms - {room_id})
         elif not self._update_invited_room(room_id, remember=False):
             msg = f"Failed to forget invited room {room_id}"
             raise OSError(msg)
@@ -375,15 +392,16 @@ class BotRoomLifecycle:
         """Merge one update with durable and in-memory state before saving."""
         room_ids = load_invited_rooms(self._invited_rooms_file_path()) | self.invited_rooms
         if remember:
+            self._pending_forgotten_invited_rooms.discard(room_id)
             room_ids.add(room_id)
         else:
-            room_ids.discard(room_id)
+            self._pending_forgotten_invited_rooms.add(room_id)
+        room_ids.difference_update(self._pending_forgotten_invited_rooms)
 
         saved = save_invited_rooms(self._invited_rooms_file_path(), room_ids)
         if saved:
-            self.invited_rooms = room_ids
-        elif not remember:
-            self.invited_rooms.discard(room_id)
+            self._pending_forgotten_invited_rooms.clear()
+        self._replace_invited_rooms(room_ids)
         return saved
 
     def _remember_invited_room(self, room_id: str) -> None:
