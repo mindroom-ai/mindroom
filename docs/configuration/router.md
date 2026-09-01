@@ -14,7 +14,7 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Accept all, no, or matching inviter ID patterns (default: true)
+  # Accept all, none, or matching inviter ID patterns (default: true)
   accept_invites: true
 
 ```
@@ -104,7 +104,8 @@ The router creates and manages rooms:
 
 Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
 The tool can invite only the persisted router identity and only into the agent's current room.
-The router accepts the invite and persists the room only when `router.accept_invites` allows the configured agent's Matrix ID.
+The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
+A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
 The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 

@@ -800,7 +800,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.accept_invites` defaults to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs to restrict inviters
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room before the call executes.
-- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` allows that agent's Matrix ID.
+- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` allows the current Matrix transport account's user ID.
+- During team execution, the transport identity is the team's Matrix account rather than the member agent's account.
 - The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 - When the router is absent, `invite_router` is the recovery path; after the router auto-accepts, the agent can retry the approval-gated call.
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))

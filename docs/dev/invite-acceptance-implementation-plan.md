@@ -107,4 +107,7 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 - [x] The third review round found one shared authority defect in queued and recovered work.
 - [x] Current Matrix invite state now owns inviter authorization immediately before the join request, while durable pending state only wakes work.
 - [x] Cross-model consultation was attempted for the third-round architecture decision; the local agent CLI was unavailable, so the decision used the inspected code and nio behavior.
+- [x] The fourth review round produced one approval and found two documentation and transport-identity coverage gaps.
+- [x] Invite recovery now consistently describes and tests the current Matrix transport account, including team-member execution through a distinct team account.
+- [x] Invite recovery documentation no longer promises homeserver redelivery after checkpoint advancement.
 - [ ] A fresh two-reviewer round remains before the final deletion-only commit.

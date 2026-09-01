@@ -53,7 +53,7 @@ agents:
       - lobby
       - dev
 
-    # Accept all, no, or matching inviter ID patterns
+    # Accept all, none, or matching inviter ID patterns
     accept_invites: true
 
     # Enable markdown formatting
@@ -137,7 +137,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows that agent |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -180,7 +180,8 @@ The agent continues to apply `access.users`, `access.current_room_members`, and 
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
 The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
-The router accepts and persists that internal invite when `router.accept_invites` allows the agent's Matrix ID.
+The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
+For a team execution, that identity is the team's Matrix account rather than the member agent's account.
 
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.

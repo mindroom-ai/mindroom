@@ -1688,7 +1688,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.accept_invites` defaults to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs to restrict inviters
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room before the call executes.
-- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` allows that agent's Matrix ID.
+- Every concrete Matrix agent operating in a room has a zero-argument `invite_router` recovery tool that invites the router into its current room when `router.accept_invites` allows the current Matrix transport account's user ID.
+- During team execution, the transport identity is the team's Matrix account rather than the member agent's account.
 - The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 - When the router is absent, `invite_router` is the recovery path; after the router auto-accepts, the agent can retry the approval-gated call.
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
@@ -1764,7 +1765,7 @@ agents:
       - lobby
       - dev
 
-    # Accept all, no, or matching inviter ID patterns
+    # Accept all, none, or matching inviter ID patterns
     accept_invites: true
 
     # Enable markdown formatting
@@ -1848,7 +1849,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows that agent |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -1891,7 +1892,8 @@ The agent continues to apply `access.users`, `access.current_room_members`, and 
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
 The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
-The router accepts and persists that internal invite when `router.accept_invites` allows the agent's Matrix ID.
+The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
+For a team execution, that identity is the team's Matrix account rather than the member agent's account.
 
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
@@ -3072,7 +3074,7 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Accept all, no, or matching inviter ID patterns (default: true)
+  # Accept all, none, or matching inviter ID patterns (default: true)
   accept_invites: true
 
 ```
@@ -3162,7 +3164,8 @@ The router creates and manages rooms:
 
 Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
 The tool can invite only the persisted router identity and only into the agent's current room.
-The router accepts the invite and persists the room only when `router.accept_invites` allows the configured agent's Matrix ID.
+The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
+A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
 The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 
@@ -17021,9 +17024,11 @@ An event reaches an agent through durable admission, never straight from the syn
 5. `TurnController` owns the turn and the agent responds in thread.
 
 Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
-The homeserver repeats an unacted-on invite in sync responses, and MindRoom separately stores the pending room and inviter to wake unfinished work.
+`_on_invite_before_sync_certification` stores the pending room and inviter before starting plain background handling.
+The pending record wakes unfinished work, but it does not make Matrix repeat an already-checkpointed invite and does not grant authority.
 The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
-`_on_invite` remains a plain background task, while all activity after joining uses ordinary responder conversation authorization.
+A restart without current invite-cache evidence may require another invitation.
+All activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
 
 ### Streaming Responses

@@ -136,8 +136,10 @@ After a live reset from a certified checkpoint, unseen state-block joins also en
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
 Invite callbacks are not written to the event journal because invite events do not provide a stable event ID.
-The homeserver repeats an unacted-on invite in sync responses, while a separate pending-invite record wakes reconsideration of unfinished work.
+`_on_invite_before_sync_certification` stores a pending room and inviter before starting plain background handling.
+The pending record wakes reconsideration of unfinished work, but it does not make Matrix repeat an already-checkpointed invite.
 That record never grants inviter authority: routers and agents re-read the current inviter from nio after the join fence is durable and immediately before starting the Matrix join request.
+A restart without current invite-cache evidence may require another invitation.
 Invite handling remains a plain background task and remains independent from responder conversation authorization.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.

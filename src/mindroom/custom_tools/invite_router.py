@@ -71,7 +71,7 @@ class InviteRouterTools(Toolkit):
         transport_agent_name = context.transport_agent_name or context.agent_name
         transport_agent_id = identities.current_id(transport_agent_name).full_id
         if not is_inviter_allowed(config, ROUTER_AGENT_NAME, transport_agent_id):
-            return "Error: Router auto-accept does not allow this agent."
+            return "Error: Router auto-accept does not allow this Matrix transport account."
         if membership == "invite":
             return "Router invite pending; retry after it joins."
 
