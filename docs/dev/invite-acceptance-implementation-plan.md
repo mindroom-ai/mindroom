@@ -22,7 +22,7 @@ Never compensate by leaving a room.
 - [x] Task 3 completed with authenticated self-invite admission and one process-local token.
 - [x] Task 4 completed with final authorization, replacement safety, and no compensating leave.
 - [x] Task 5 completed with production edits limited to the three scoped files and no new durable state or retry owner.
-- [ ] Task 6 is in progress; the implementation was pushed after 73 focused tests, all repository hooks, and the full suite with 15,446 passed and 23 skipped, while two independent reviews are in progress.
+- [ ] Task 6 is in progress; the first independent review round found two valid authorization-boundary gaps, which now pass 75 focused tests, all repository hooks, and the full suite with 15,450 passed and 23 skipped, while commit, push, and fresh reviews remain.
 
 ## Global constraints
 

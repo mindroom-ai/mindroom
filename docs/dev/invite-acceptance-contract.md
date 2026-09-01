@@ -158,6 +158,8 @@ There are no persisted `observed`, `authorized`, `leaving`, generation, revision
 10. A recovered durable pending invite may retry with ordinary authorization but cannot bootstrap `current_room_members`.
 11. Final rejection does not persist acceptance and does not call Matrix leave.
 12. Post-join messages continue through ordinary authorization.
+13. Bootstrap membership validation remains required when ordinary authorization becomes available after the join begins.
+14. `accept_invites` and process-local token ownership are rechecked after the room lock and fence persistence, immediately before Matrix join.
 
 Tests for new automatic retry, bootstrap restart recovery, welcome retry guarantees, new durable pending states, repeated cancellation recovery, and exact convergence of accepted failure modes are prohibited unless this contract is explicitly changed.
 Existing baseline tests for ordinary pending-invite recovery remain valid.

@@ -187,16 +187,20 @@ class BotRoomLifecycle:
         room_id: str,
     ) -> RoomJoinOutcome:
         """Fence decrypt callbacks before a live join can race its first sync."""
+        await self._add_join_decrypt_notice_fence(room_id)
+        join_outcome = await join_room(client, room_id)
+        if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
+            await self._clear_join_decrypt_notice_fence(room_id)
+        return join_outcome
+
+    async def _add_join_decrypt_notice_fence(self, room_id: str) -> None:
+        """Persist and publish the fence required before one Matrix join."""
         self.apply_continuity_record(
             await asyncio.to_thread(
                 self.deps.continuity_store.update_join_fences,
                 add=(room_id,),
             ),
         )
-        join_outcome = await join_room(client, room_id)
-        if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
-            await self._clear_join_decrypt_notice_fence(room_id)
-        return join_outcome
 
     async def _clear_join_decrypt_notice_fence(self, room_id: str) -> None:
         """Clear a join fence after the current join work becomes terminal."""
@@ -504,37 +508,80 @@ class BotRoomLifecycle:
             self.deps.runtime.agent_reply_memberships,
         )
 
+    def _invite_authorization(
+        self,
+        room_id: str,
+        sender: str,
+        live_invite: _LiveRoomInvite | None,
+        config: Config,
+    ) -> tuple[bool, bool]:
+        """Return whether the invite is allowed and whether it needs bootstrap."""
+        if live_invite is not None and self._live_room_invites.get(room_id) is not live_invite:
+            return False, False
+        ordinary_allowed = self._ordinary_invite_allowed(room_id, sender, config)
+        bootstrap_required = (
+            not ordinary_allowed
+            and live_invite is not None
+            and allows_live_inviter_bootstrap(self.deps.agent_name, config)
+        )
+        return ordinary_allowed or bootstrap_required, bootstrap_required
+
+    async def _join_authorized_invite(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        sender: str,
+        live_invite: _LiveRoomInvite | None,
+    ) -> tuple[RoomJoinOutcome, bool] | None:
+        """Fence, revalidate, and perform one authorized invite join."""
+        await self._add_join_decrypt_notice_fence(room_id)
+        if not self._should_accept_invite():
+            await self._clear_join_decrypt_notice_fence(room_id)
+            return None
+        invite_allowed, bootstrap_required = self._invite_authorization(
+            room_id,
+            sender,
+            live_invite,
+            self._config(),
+        )
+        if not invite_allowed:
+            await self._clear_join_decrypt_notice_fence(room_id)
+            return None
+        join_outcome = await join_room(client, room_id)
+        if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
+            await self._clear_join_decrypt_notice_fence(room_id)
+        return join_outcome, bootstrap_required
+
     async def _final_invite_allowed(
         self,
         room_id: str,
         sender: str,
         live_invite: _LiveRoomInvite | None,
+        *,
+        bootstrap_required: bool,
     ) -> bool:
         config = self._config()
         if not self._should_accept_invite():
             return False
-        if self._ordinary_invite_allowed(room_id, sender, config):
-            return live_invite is None or self._live_room_invites.get(room_id) is live_invite
-        if (
-            live_invite is None
-            or self._live_room_invites.get(room_id) is not live_invite
-            or not allows_live_inviter_bootstrap(self.deps.agent_name, config)
-        ):
+        invite_allowed, final_bootstrap_required = self._invite_authorization(
+            room_id,
+            sender,
+            live_invite,
+            config,
+        )
+        if not invite_allowed:
             return False
+        if not bootstrap_required and not final_bootstrap_required:
+            return True
         members = await get_room_members(self._client(), room_id)
         config = self._config()
-        return (
-            self._should_accept_invite()
-            and self._live_room_invites.get(room_id) is live_invite
-            and (
-                self._ordinary_invite_allowed(room_id, sender, config)
-                or (
-                    allows_live_inviter_bootstrap(self.deps.agent_name, config)
-                    and members is not None
-                    and sender in members
-                )
-            )
+        invite_allowed, _ = self._invite_authorization(
+            room_id,
+            sender,
+            live_invite,
+            config,
         )
+        return self._should_accept_invite() and invite_allowed and members is not None and sender in members
 
     async def _handle_invite(
         self,
@@ -546,16 +593,16 @@ class BotRoomLifecycle:
     ) -> None:
         """Accept one invite when its inviter currently passes responder access."""
         client = self._client()
-        if not self._should_accept_invite():
-            self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
-            return
-
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
-            if live_invite is not None and self._live_room_invites.get(room.room_id) is not live_invite:
+            if not self._should_accept_invite():
+                self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
                 return
             config = self._config()
-            invite_allowed = self._ordinary_invite_allowed(room.room_id, sender, config) or (
-                live_invite is not None and allows_live_inviter_bootstrap(self.deps.agent_name, config)
+            invite_allowed, bootstrap_required = self._invite_authorization(
+                room.room_id,
+                sender,
+                live_invite,
+                config,
             )
             if not invite_allowed:
                 self._logger().debug(
@@ -574,7 +621,15 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
+            join_attempt = await self._join_authorized_invite(
+                client,
+                room.room_id,
+                sender,
+                live_invite,
+            )
+            if join_attempt is None:
+                return
+            join_outcome, bootstrap_required = join_attempt
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
                 if join_outcome is RoomJoinOutcome.ACCESS_DENIED and not invite_is_current:
@@ -588,7 +643,12 @@ class BotRoomLifecycle:
                 raise RuntimeError(msg)
 
             self._logger().info("Joined room", room_id=room.room_id)
-            if await self._final_invite_allowed(room.room_id, sender, live_invite):
+            if await self._final_invite_allowed(
+                room.room_id,
+                sender,
+                live_invite,
+                bootstrap_required=bootstrap_required,
+            ):
                 await self.deps.on_room_joined(room.room_id)
                 if live_invite is not None and self._live_room_invites.get(room.room_id) is not live_invite:
                     return

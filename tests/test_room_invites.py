@@ -707,6 +707,113 @@ async def test_live_router_invite_revalidates_after_join_without_leaving(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_bootstrap_inviter_must_still_be_joined_when_ordinary_access_appears(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Later ordinary access must not erase bootstrap membership validation."""
+    sender_id = "@owner:localhost"
+    config, bot, room, event = _live_router_invite_scenario(tmp_path, sender_id=sender_id)
+    bot.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(members=[], room_id=room.room_id),
+    )
+
+    async def join_then_add_ordinary_access(_client: object, _room_id: str) -> RoomJoinOutcome:
+        config.router.access = ResponderAccessConfig(current_room_members=False, users=[sender_id])
+        return RoomJoinOutcome.JOINED
+
+    join_room = AsyncMock(side_effect=join_then_add_ordinary_access)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    join_room.assert_awaited_once_with(bot.client, room.room_id)
+    bot.client.joined_members.assert_awaited_once_with(room.room_id)
+    assert bot._room_lifecycle.invited_rooms == set()
+    bot.client.room_leave.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_accept_invites_rechecked_after_waiting_for_room_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A task blocked on the room lock must observe disabled invite acceptance."""
+    sender_id = "@owner:localhost"
+    config, bot, room, _event = _live_router_invite_scenario(tmp_path, sender_id=sender_id)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    live_invite = bot._room_lifecycle.record_live_room_invite(room.room_id, sender_id)
+    lock = bot._room_lifecycle._lock_for_room(bot._room_lifecycle._invite_join_locks, room.room_id)
+    await lock.acquire()
+    lock_request_started = asyncio.Event()
+
+    def record_lock_request(_locks: dict[str, asyncio.Lock], _room_id: str) -> asyncio.Lock:
+        lock_request_started.set()
+        return lock
+
+    monkeypatch.setattr(bot._room_lifecycle, "_lock_for_room", record_lock_request)
+    task = asyncio.create_task(bot._room_lifecycle.handle_recorded_invite(room, sender_id, live_invite))
+    await asyncio.wait_for(lock_request_started.wait(), timeout=1)
+    config.router.accept_invites = False
+    lock.release()
+
+    await task
+
+    join_room.assert_not_awaited()
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room.room_id: sender_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("authority_change", ["policy-disabled", "invite-replaced"])
+async def test_invite_revalidated_after_fence_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authority_change: str,
+) -> None:
+    """Fence persistence must not separate validation from the Matrix join."""
+    sender_id = "@owner:localhost"
+    config, bot, room, _event = _live_router_invite_scenario(tmp_path, sender_id=sender_id)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    update_join_fences = bot._sync_continuity_store.update_join_fences
+    fence_started = threading.Event()
+    release_fence = threading.Event()
+
+    def block_fence_persistence(
+        *,
+        add: tuple[str, ...] = (),
+        remove: tuple[str, ...] = (),
+        retain: tuple[str, ...] | None = None,
+    ) -> object:
+        if add:
+            fence_started.set()
+            assert release_fence.wait(timeout=2)
+        return update_join_fences(add=add, remove=remove, retain=retain)
+
+    monkeypatch.setattr(bot._sync_continuity_store, "update_join_fences", block_fence_persistence)
+    live_invite = bot._room_lifecycle.record_live_room_invite(room.room_id, sender_id)
+    task = asyncio.create_task(bot._room_lifecycle.handle_recorded_invite(room, sender_id, live_invite))
+    assert await asyncio.to_thread(fence_started.wait, 2)
+    if authority_change == "policy-disabled":
+        config.router.accept_invites = False
+    else:
+        bot._room_lifecycle.record_live_room_invite(room.room_id, sender_id)
+    release_fence.set()
+
+    await task
+
+    join_room.assert_not_awaited()
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room.room_id: sender_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_recovered_invite_cannot_bootstrap_current_room_members(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
