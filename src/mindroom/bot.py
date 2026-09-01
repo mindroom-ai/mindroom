@@ -2472,7 +2472,7 @@ class AgentBot:
 
         An invite has no Matrix event ID to key durable work on.
         Persist its room and inviter before network work moves to the
-        background so access changes and process restarts can reconcile it.
+        background so policy changes and process restarts can reconcile it.
         """
         if (
             not isinstance(event, nio.InviteMemberEvent)
@@ -2480,9 +2480,9 @@ class AgentBot:
             or event.membership != "invite"
         ):
             return
-        live_invite = self._room_lifecycle.record_live_room_invite(room.room_id, event.sender)
+        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
-            self._room_lifecycle.handle_recorded_invite(room, event.sender, live_invite),
+            self._room_lifecycle.handle_recorded_invite(room, event.sender),
             owner=self._runtime_view,
         )
 

@@ -16,7 +16,12 @@ from pydantic import (
     model_validator,
 )
 
-from mindroom.config.access import ResponderAccessConfig, RoomJoinPolicy, validate_concrete_matrix_user_ids
+from mindroom.config.access import (
+    InviteAcceptancePolicy,
+    ResponderAccessConfig,
+    RoomJoinPolicy,
+    validate_concrete_matrix_user_ids,
+)
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.models import (
@@ -202,7 +207,10 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Concrete Matrix user IDs allowed to manage this agent's credentials",
     )
-    accept_invites: bool = Field(default=True, description="Whether this agent accepts room invites")
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether this agent accepts all, no, or matching inviter room invites",
+    )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
     learning_mode: AgentLearningMode | None = Field(

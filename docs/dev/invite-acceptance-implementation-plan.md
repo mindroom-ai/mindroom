@@ -1,175 +1,98 @@
-# Minimal Live Invite Bootstrap Implementation Plan
+# Independent Invite Policy Implementation Plan
 
-> Execute this plan task by task with test-first changes and verification checkpoints.
+> Execute this plan test-first and keep each change minimal.
 > This plan and `invite-acceptance-contract.md` are temporary development artifacts and must be deleted in the final commit before merge.
 
-**Goal:** Allow only the router to use the exact sender of a fresh authenticated self-invite as a narrow pre-join `current_room_members` bootstrap, while preserving existing ordinary invite recovery and avoiding new lifecycle machinery.
+**Goal:** Make `accept_invites` the sole inbound invitation policy for the router and agents while leaving responder conversation access unchanged.
 
-**Architecture:** Start from `origin/main`.
-Keep the existing durable pending-invite store unchanged for ordinary authorization and recovery.
-Add one immutable process-local token per live invite callback.
-Let `BotRoomLifecycle` validate the token, perform one join, re-read current authorization after the join, and persist acceptance only after final validation.
-Never compensate by leaving a room.
-
-**Tech stack:** Python 3.13, asyncio, matrix-nio, pytest, pytest-xdist, pre-commit.
+**Architecture:** Extend `accept_invites` from a boolean to a boolean-or-pattern-list policy.
+Evaluate that policy at the existing room-lifecycle join boundary.
+Remove invite-time responder authorization and the process-local bootstrap machinery from the current PR.
+Keep existing pending work, room locking, join fencing, accepted-room persistence, and team behavior unchanged.
 
 **Authoritative contract:** `docs/dev/invite-acceptance-contract.md`
 
-## Progress
-
-- [x] Task 1 completed from current `origin/main`; the initial focused surface passed with 60 tests.
-- [x] Task 2 completed with a router-only pure authorization rule.
-- [x] Task 3 completed with authenticated self-invite admission and one process-local token.
-- [x] Task 4 completed with final authorization, replacement safety, and no compensating leave.
-- [x] Task 5 completed with production edits limited to the three scoped files and no new durable state or retry owner.
-- [ ] Task 6 is in progress; the first independent review round's two valid authorization-boundary gaps are fixed and pushed after 75 focused tests, all repository hooks, and 15,450 full-suite passes, while two fresh reviews are in progress.
-
 ## Global constraints
 
-- Restrict production changes to `src/mindroom/authorization.py`, `src/mindroom/bot_room_lifecycle.py`, and `src/mindroom/bot.py`.
-- Do not change persistence schemas, room cleanup, configuration publication, the orchestrator, or sync continuity.
-- Keep the runtime change to one callback token flowing through the existing room lock and join owner.
-- Use the existing per-room invite lock.
 - Run every pytest command with `-n auto`.
-- Preserve unrelated work and never stage with `git add .` or `git add -A`.
-- Update the contract before implementation if a required guarantee or accepted failure changes.
+- Use the same alias resolution and case-sensitive wildcard semantics as responder `access.users`.
+- Do not change responder authorization behavior.
+- Do not add persistence fields, invite tokens, lifecycle states, retry workers, compensating leaves, or cleanup branches.
+- Preserve unrelated work and stage only explicit paths.
+- Update the contract before changing a guarantee or accepted failure.
 
-## Task 1: Establish the clean baseline
-
-**Files:**
-- Add: `docs/dev/invite-acceptance-contract.md`
-- Add: `docs/dev/invite-acceptance-implementation-plan.md`
-
-1. Create a persistent worktree and branch from `origin/main`.
-2. Run `uv sync --all-extras`.
-3. Copy this contract and plan into the new worktree with `apply_patch`.
-4. Run the baseline invite and authorization suites.
-
-Command:
-
-```bash
-uv run pytest -n auto --no-cov -q tests/test_authorization.py tests/test_room_invites.py
-```
-
-5. Record the baseline result before changing runtime code.
-
-## Task 2: Define the narrow authorization rule
+## Task 1: Define configuration semantics
 
 **Files:**
-- Modify: `tests/test_authorization.py`
-- Modify: `src/mindroom/authorization.py`
+- Modify `src/mindroom/config/access.py` or another existing leaf config module for the shared policy type and validation helper.
+- Modify `src/mindroom/config/agent.py` for agent configuration.
+- Modify `src/mindroom/config/models.py` for router configuration.
+- Modify focused configuration tests.
 
-1. Add failing tests for a pure helper named `allows_live_inviter_bootstrap`.
-2. Prove that it returns true only for the router when the current configuration enables `current_room_members`.
-3. Prove that it returns false for agents, teams, and the router when that policy is disabled.
-4. Run the focused authorization tests and confirm the new tests fail for the missing helper.
-5. Implement the helper using `resolve_responder_access` and `ROUTER_AGENT_NAME`.
-6. Run the focused authorization tests again.
+1. Add tests that parse `true`, `false`, exact-ID lists, wildcard lists, and empty lists for both router and agent configuration.
+2. Run those tests and confirm the list forms fail before production changes.
+3. Add a shared `bool | list[str]` invitation-policy type with unique pattern validation.
+4. Preserve `true` as the default.
+5. Run the focused tests and confirm all forms pass.
 
-Command:
-
-```bash
-uv run pytest -n auto --no-cov -q tests/test_authorization.py
-```
-
-## Task 3: Admit only authenticated live invite callbacks
+## Task 2: Define invitation-policy evaluation
 
 **Files:**
-- Modify: `tests/test_room_invites.py`
-- Modify: `src/mindroom/bot_room_lifecycle.py`
-- Modify: `src/mindroom/bot.py`
+- Modify `src/mindroom/matrix/invited_rooms_store.py` or a more focused existing invite-policy leaf.
+- Modify focused invite-policy tests.
 
-1. Add failing tests proving that stripped room metadata, an invite for another state key, and a non-invite membership event create no pending work and no token.
-2. Add a frozen `LiveRoomInvite` dataclass whose unique process-local identity represents one room and sender callback generation.
-3. Add `record_live_room_invite(room_id, sender_id) -> LiveRoomInvite`.
-4. Persist the existing pending record first, then replace the room's process-local token synchronously.
-5. Change the authenticated self-invite callback to create the live token and pass it to `handle_recorded_invite`.
-6. Keep reconciliation calls tokenless so durable or cache-only work cannot bootstrap.
-7. Add sender-aware pending deletion so old work cannot remove a newer sender's durable record.
-8. Run the focused callback and invite tests.
+1. Add tests for boolean policy, exact matching, wildcard matching, alias resolution, empty lists, and nonmatching lists.
+2. Run the tests and confirm they fail for the missing evaluator.
+3. Implement one pure evaluator for router and agent inviters.
+4. Keep the existing broad `should_accept_invites` helper for non-sender-specific callers by treating a nonempty list as enabled.
+5. Run the focused evaluator tests.
 
-Command:
-
-```bash
-uv run pytest -n auto --no-cov -q tests/test_room_invites.py -k "invite and (callback or metadata or state_key or membership or pending)"
-```
-
-## Task 4: Join and validate without compensating leave
+## Task 3: Simplify the join boundary
 
 **Files:**
-- Modify: `tests/test_room_invites.py`
-- Modify: `src/mindroom/bot_room_lifecycle.py`
+- Modify `tests/test_room_invites.py`.
+- Modify `src/mindroom/bot.py`.
+- Modify `src/mindroom/bot_room_lifecycle.py`.
+- Restore `src/mindroom/authorization.py` to its baseline responsibilities.
 
-1. Add failing tests for the exact fresh router inviter using `current_room_members`.
-2. Add failing tests proving that agents, teams, durable recovered records, and cache-only records cannot use the bootstrap.
-3. Add a failing test proving that normal nio invite-cache removal after a successful join does not revoke the process-local token.
-4. Add a failing test proving that a same-sender replacement callback creates a newer generation and prevents old work from persisting or deleting the newer pending record.
-5. Add failing tests proving that configuration revocation and inviter departure during `join` prevent accepted-room persistence.
-6. Add assertions that final rejection never calls Matrix leave.
-7. Under the existing room lock, evaluate ordinary authorization first and use the bootstrap helper only for the current live token.
-8. After a successful join, re-read `self._config()` and re-evaluate ordinary authorization.
-9. If current policy still permits the live router bootstrap, call the existing authoritative `get_room_members` helper and require the inviter to be joined.
-10. Confirm the token is still current before setup and persistence.
-11. On final rejection, delete only pending work owned by the current token and return without calling leave.
-12. On success, retain the existing setup, accepted-room persistence, handled marker, welcome, and pending deletion ordering.
-13. Run all invite and authorization tests.
+1. Add or change tests proving the router, a shared agent, and a requester-private agent accept valid invitations according to `accept_invites` without consulting responder access.
+2. Add a test proving an accepted inviter can still be denied by ordinary post-join responder authorization.
+3. Add tests proving exact and wildcard invitation lists allow matching senders and reject other senders.
+4. Add callback-boundary tests for valid self-membership invitations and irrelevant Matrix state events.
+5. Run the tests and confirm the corrected behavior fails on the current router-bootstrap implementation.
+6. Remove the live invite token, bootstrap helper, post-join membership query, and invite-time responder authorization for router and agents.
+7. Evaluate the latest invitation policy under the existing room lock immediately before the existing fenced join.
+8. Retain existing setup, persistence, welcome, pending-work, and team behavior.
+9. Run the focused invitation and authorization suites.
 
-Command:
-
-```bash
-uv run pytest -n auto --no-cov -q tests/test_authorization.py tests/test_room_invites.py
-```
-
-## Task 5: Check scope and documentation
+## Task 4: Align documentation and generated references
 
 **Files:**
-- Modify only invite-related documentation already changed by the replacement patch, if necessary.
+- Modify invite-related user documentation.
+- Regenerate checked-in MindRoom documentation references using the repository workflow.
 
-1. Review every changed line against the authoritative contract.
-2. Remove tests or code that promise accepted failure recovery.
-3. Confirm no production file outside the three-file allowlist changed.
-4. Measure runtime source size.
+1. Document all three `accept_invites` forms.
+2. State explicitly that invitation acceptance and conversation authorization are independent.
+3. Remove router-bootstrap and invite-time `current_room_members` language.
+4. Confirm one sentence per Markdown source line.
 
-Commands:
+## Task 5: Verify and publish the exact review head
 
-```bash
-git diff --name-only origin/main
-git diff --numstat origin/main -- src
-git diff --check
-```
+1. Run the complete affected test surface with `-n auto`.
+2. Run `uv run pre-commit run --all-files`.
+3. Run `uv run pytest -n auto`.
+4. Inspect source diff size and remove leftover bootstrap machinery or tests.
+5. Run `git status --short` before staging.
+6. Scan proposed public content and generated references for prohibited private identifiers.
+7. Stage only intended paths and inspect the staged diff.
+8. Commit without amending and push the exact verified head to PR 1931.
+9. Update the PR title and body to the independent invite-policy contract.
+10. Request two fresh independent full reviews of the same exact implementation head.
+11. Delete both temporary development documents in the final commit before merge.
 
-5. Use source size as a diagnostic and stop if the change introduces another owner, durable state, retry path, cleanup branch, or production file.
+## Progress
 
-## Task 6: Verify and prepare the exact review head
-
-1. Run the complete affected test surface.
-
-Command:
-
-```bash
-uv run pytest -n auto --no-cov -q tests/test_authorization.py tests/test_room_invites.py tests/test_bot_ready_hook.py tests/test_matrix_sync_continuity.py tests/test_multi_agent_bot.py tests/test_team_invitations.py
-```
-
-2. Run repository hooks.
-
-Command:
-
-```bash
-uv run pre-commit run --all-files
-```
-
-3. Run the full repository test suite if the focused surface and hooks pass.
-
-Command:
-
-```bash
-uv run pytest -n auto
-```
-
-4. Run `git status --short` before staging.
-5. Scan proposed public content and generated references for forbidden private identifiers.
-6. Stage only the intended files by explicit path and verify the staged diff.
-7. Create a new commit without amending.
-8. Push only after the exact local head passes verification.
-9. Request two fresh independent full reviews against the contract on the same exact head.
-10. Treat findings about explicitly accepted failures as scope proposals, not implementation defects.
+- [x] The original product regression and configuration ownership were reconstructed from the first commit of PR 1925.
+- [x] The contract now separates inbound invitation policy from post-join responder access.
+- [ ] Task 1 is next and must begin with failing configuration tests.
+- [ ] Tasks 2 through 5 remain pending.

@@ -8,20 +8,14 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import (
-    allows_live_inviter_bootstrap,
     get_effective_sender_id_for_reply_permissions,
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_responder,
 )
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
-from tests.access_schema_support import (
-    membership_config,
-    membership_index,
-    unresolved_membership_index,
-    with_responder_access,
-)
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
 from tests.identity_helpers import entity_ids
 
@@ -75,24 +69,6 @@ def test_administrator_bypasses_responder_policy(tmp_path: Path) -> None:
 
     assert _allowed("@admin:example.com", config, AgentReplyMembershipIndex())
     assert is_platform_administrator("@admin:example.com", config)
-
-
-def test_live_inviter_bootstrap_is_router_only(tmp_path: Path) -> None:
-    """An agent must not inherit the router's pre-join membership exception."""
-    config = membership_config(tmp_path)
-    with_responder_access(config, ROUTER_AGENT_NAME, current_room_members=True)
-    with_responder_access(config, "talent", current_room_members=True)
-
-    assert allows_live_inviter_bootstrap(ROUTER_AGENT_NAME, config)
-    assert not allows_live_inviter_bootstrap("talent", config)
-
-
-def test_live_inviter_bootstrap_requires_current_room_policy(tmp_path: Path) -> None:
-    """Disabling current-room access must disable the invite bootstrap."""
-    config = membership_config(tmp_path)
-    with_responder_access(config, ROUTER_AGENT_NAME, current_room_members=False)
-
-    assert not allows_live_inviter_bootstrap(ROUTER_AGENT_NAME, config)
 
 
 @pytest.mark.asyncio

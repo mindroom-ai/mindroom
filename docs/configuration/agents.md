@@ -57,7 +57,7 @@ agents:
       - lobby
       - dev
 
-    # Accept authorized ad-hoc room invites for this agent
+    # Accept all, no, or matching inviter ID patterns
     accept_invites: true
 
     # Enable markdown formatting
@@ -141,7 +141,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when `router.accept_invites` is enabled |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows that agent |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -178,13 +178,13 @@ Unset `memory_search` fields inherit from top-level `memory.search`.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
 Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
-Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
-Only the router can use the exact sender of a fresh authenticated invite as a pre-join `current_room_members` exception.
-Agents and teams always require ordinary authorization before accepting an invite.
+`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after identity alias resolution.
+Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
+The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
 When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
 The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
-The router accepts and persists that authorized internal invite when `router.accept_invites` is enabled.
+The router accepts and persists that internal invite when `router.accept_invites` allows the agent's Matrix ID.
 
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.

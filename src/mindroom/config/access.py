@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from mindroom.config.validation import duplicate_items
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -19,6 +19,16 @@ def _validate_unique_entries(values: list[str], *, field_name: str) -> list[str]
         msg = f"Duplicate {field_name} are not allowed: {', '.join(duplicates)}"
         raise ValueError(msg)
     return values
+
+
+def _validate_invite_acceptance_policy(value: bool | list[str]) -> bool | list[str]:
+    """Reject duplicate inviter patterns while preserving boolean policies."""
+    if isinstance(value, list):
+        _validate_unique_entries(value, field_name="accept_invites")
+    return value
+
+
+InviteAcceptancePolicy = Annotated[bool | list[str], AfterValidator(_validate_invite_acceptance_policy)]
 
 
 def validate_concrete_matrix_user_ids(

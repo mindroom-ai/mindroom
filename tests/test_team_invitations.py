@@ -222,7 +222,7 @@ class TestTeamRoomMembership:
         room.canonical_alias = None
         event = MagicMock(sender="@user:localhost")
 
-        bot._room_lifecycle._record_pending_room_invite(room.room_id, event.sender)
+        bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
 
         join_room.assert_awaited_once_with(bot.client, "!team-room:localhost")

@@ -144,6 +144,32 @@ def test_router_access_users_preserve_omitted_current_room_default() -> None:
 
 
 @pytest.mark.parametrize(
+    "policy",
+    [
+        [],
+        ["@owner:example.com"],
+        ["@*:trusted.example.com"],
+    ],
+)
+def test_router_and_agent_accept_invites_support_user_patterns(policy: list[str]) -> None:
+    """Invitation policy must support exact IDs, wildcards, and an empty deny list."""
+    config = Config.model_validate(
+        {
+            "router": {"accept_invites": policy},
+            "agents": {
+                "research": {
+                    "display_name": "Research",
+                    "accept_invites": policy,
+                },
+            },
+        },
+    )
+
+    assert config.router.accept_invites == policy
+    assert config.agents["research"].accept_invites == policy
+
+
+@pytest.mark.parametrize(
     ("payload", "duplicate"),
     [
         ({"administrators": ["@admin:example.com", "@admin:example.com"]}, "administrators"),
@@ -170,6 +196,21 @@ def test_router_access_users_preserve_omitted_current_room_default() -> None:
                 },
             },
             "credential_managers",
+        ),
+        (
+            {"router": {"accept_invites": ["@owner:example.com", "@owner:example.com"]}},
+            "accept_invites",
+        ),
+        (
+            {
+                "agents": {
+                    "one": {
+                        "display_name": "One",
+                        "accept_invites": ["@owner:example.com", "@owner:example.com"],
+                    },
+                },
+            },
+            "accept_invites",
         ),
     ],
 )
