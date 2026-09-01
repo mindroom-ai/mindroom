@@ -265,6 +265,63 @@ async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
 
 
+@pytest.mark.asyncio
+async def test_authoritative_departure_revokes_current_invite_before_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A leave observed while invite fencing is pending must prevent the join from starting."""
+    _config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    update_join_fences = bot._sync_continuity_store.update_join_fences
+    invite_fence_started = threading.Event()
+    release_invite_fence = threading.Event()
+    departure_started = asyncio.Event()
+    release_departure = asyncio.Event()
+
+    def block_invite_fence_persistence(
+        *,
+        add: tuple[str, ...] = (),
+        remove: tuple[str, ...] = (),
+        retain: tuple[str, ...] | None = None,
+    ) -> object:
+        if add:
+            invite_fence_started.set()
+            assert release_invite_fence.wait(timeout=2)
+        return update_join_fences(add=add, remove=remove, retain=retain)
+
+    async def block_departure_fence(_fence: object, _departures: object) -> None:
+        departure_started.set()
+        await release_departure.wait()
+
+    monkeypatch.setattr(bot._sync_continuity_store, "update_join_fences", block_invite_fence_persistence)
+    monkeypatch.setattr(type(bot._membership_fence), "fence_reported_departures", block_departure_fence)
+    invite_task = asyncio.create_task(_handle_invite(bot, room, event))
+    departure_task: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(invite_fence_started.wait, 2)
+        response = MagicMock(spec=nio.SyncResponse)
+        response.next_batch = "s_after_cancel"
+        response.rooms = MagicMock(join={}, invite={}, leave={room.room_id: MagicMock()})
+        departure_task = asyncio.create_task(bot._apply_own_room_membership_from_sync(response))
+        await asyncio.wait_for(departure_started.wait(), timeout=2)
+
+        release_invite_fence.set()
+        await invite_task
+
+        join_room.assert_not_awaited()
+        client = bot.client
+        assert client is not None
+        assert room.room_id not in client.invited_rooms
+    finally:
+        release_invite_fence.set()
+        release_departure.set()
+        if departure_task is not None:
+            await departure_task
+
+
 @pytest.fixture
 def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with agents and teams."""

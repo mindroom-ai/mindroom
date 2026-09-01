@@ -110,4 +110,6 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 - [x] The fourth review round produced one approval and found two documentation and transport-identity coverage gaps.
 - [x] Invite recovery now consistently describes and tests the current Matrix transport account, including team-member execution through a distinct team account.
 - [x] Invite recovery documentation no longer promises homeserver redelivery after checkpoint advancement.
+- [x] The fifth review round produced one approval and one reproduced pre-join cancellation finding.
+- [x] Authoritative own-membership departures now invalidate nio's stale invite cache before asynchronous departure fencing.
 - [ ] A fresh two-reviewer round remains before the final deletion-only commit.

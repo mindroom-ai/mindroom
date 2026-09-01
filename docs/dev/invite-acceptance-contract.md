@@ -62,6 +62,7 @@ Room metadata and membership events targeting another account are not invitation
 The authenticated event sender is the inviter checked by a list-valued `accept_invites` policy.
 The durable pending record wakes unfinished work but never supplies current inviter authority.
 For routers and agents, the current matrix-nio invite cache must still identify the inviter when the join starts.
+An authoritative own-membership departure must remove that cache evidence before asynchronous departure fencing.
 
 ## Intended flow
 
@@ -109,6 +110,7 @@ These outcomes are non-blocking unless they bypass the configured invitation pol
 12. Existing team invitation behavior remains unchanged.
 13. A queued replacement invite is evaluated by its current sender immediately before the join request starts.
 14. A durable pending record without current Matrix invite evidence does not start a router or agent join.
+15. An authoritative departure observed before the join request starts revokes cached invite evidence before asynchronous fencing.
 
 ## Review contract
 

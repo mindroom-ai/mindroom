@@ -139,6 +139,7 @@ Invite callbacks are not written to the event journal because invite events do n
 `_on_invite_before_sync_certification` stores a pending room and inviter before starting plain background handling.
 The pending record wakes reconsideration of unfinished work, but it does not make Matrix repeat an already-checkpointed invite.
 That record never grants inviter authority: routers and agents re-read the current inviter from nio after the join fence is durable and immediately before starting the Matrix join request.
+The own-membership sync path clears nio's invited-room cache entry before asynchronous departure fencing when Matrix reports a departure.
 A restart without current invite-cache evidence may require another invitation.
 Invite handling remains a plain background task and remains independent from responder conversation authorization.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
