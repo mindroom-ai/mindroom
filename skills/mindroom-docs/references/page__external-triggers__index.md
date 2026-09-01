@@ -69,9 +69,13 @@ external_trigger_policy:
 
 `enabled: false` makes signed and capability trigger endpoints return not found.
 
-`admin_users` can list, rotate, enable, disable, or delete triggers across owners.
+Top-level platform `administrators` can list, rotate, enable, disable, or delete triggers across owners.
 
-Admin-created triggers are still owned by the admin requester, but admins can choose a different target agent, team, or room.
+`admin_users` adds trigger-only administrators who receive the same cross-owner trigger authority without receiving wider platform authority.
+
+Both administrator lists use canonical identities after `authorization.aliases` resolution.
+
+Administrator-created triggers are still owned by the administrator requester, but administrators can choose a different target agent, team, or room.
 
 Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
 
@@ -124,7 +128,7 @@ For a non-admin caller, the target agent and room are the current agent and curr
 `target_thread_id` and `new_thread` are mutually exclusive.
 With `new_thread`, each delivery posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
-For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
+For an administrator caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 
 The tool returns `/api/triggers/<trigger_id>` when creation succeeds.
 
@@ -172,7 +176,7 @@ The trigger owner is the private-scope requester for the triggered turn.
 
 A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
 
-An admin-created trigger for another private agent still wakes the admin's private state, because trigger ownership always stays with the requester that created it.
+An administrator-created trigger for another private agent still wakes the administrator's private state, because trigger ownership always stays with the requester that created it.
 
 The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
 

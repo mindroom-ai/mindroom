@@ -2,6 +2,23 @@
 
 MindRoom keeps room invitations, conversation access, Matrix power, platform administration, and credential management independent.
 
+## Authority at a glance
+
+MindRoom answers five authority questions independently.
+
+| Question | Owner |
+| --- | --- |
+| Who may make a router, agent, or team join a room? | That entity's `accept_invites` policy |
+| Who may interact with a responder? | That responder's `access` policy |
+| Whose state and credentials does an interaction use? | The canonical requester plus the agent's requester-private and worker scope |
+| Who may administer platform or credential configuration? | `administrators` and `agents.<name>.credential_managers` |
+| Who may execute one sensitive tool action? | Tool availability plus any applicable tool approval policy |
+
+No answer grants another authority.
+Joining a room does not grant conversation access, and conversation access does not grant credential management.
+Requester-private state placement does not grant access to the agent.
+Tool approval is an additional action gate and does not replace conversation access.
+
 ## Configuration
 
 ```yaml
@@ -28,6 +45,8 @@ agents:
   code:
     display_name: Code
     rooms: [engineering]
+    accept_invites:
+      - "@owner:example.com"
     access:
       current_room_members: false
       members_of_rooms: [engineering]
@@ -96,8 +115,11 @@ Responder access supports three independent clauses.
 - `members_of_rooms` allows authoritative joined members of any listed managed room.
 - `users` allows canonical Matrix user IDs or glob patterns.
 
-Agent and team access defaults `members_of_rooms` to that responder's configured `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
+A requester is allowed when any configured clause matches.
+
+Agent and team access defaults `members_of_rooms` to that responder's configured managed `rooms` when the `access` block is omitted or its `members_of_rooms` field is omitted.
 Only managed room keys are inferred this way: raw Matrix room IDs and full aliases listed in `rooms` produce no membership grant, and explicit `members_of_rooms` entries must also name configured managed room keys.
+The configured rooms used by `members_of_rooms` are managed grant rooms; they are not a separate identity or invitation concept.
 The router defaults `current_room_members` to `true`.
 An explicit `members_of_rooms: []` disables inferred room grants.
 
@@ -109,11 +131,21 @@ The router owns this authoritative index, so it must be joined to a room before 
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
 Inbound invitation policy is independent from responder access.
-Accepting an invitation grants room membership but never grants permission to interact with the router or an agent.
-The router and agents use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
+Accepting an invitation grants room membership but never grants permission to interact with the router, an agent, or a team.
+The router, agents, and teams use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
 Every interaction after joining still uses the responder rules above.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
+
+## Requester identity and private state
+
+MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.
+The raw authenticated Matrix sender remains transport provenance and is not used as a second downstream ownership decision.
+One canonical requester therefore owns the same requester-scoped conversations, state, credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
+
+An agent's `private` field controls requester-private state placement.
+It does not authorize anyone to interact with the agent.
+MindRoom checks the agent's ordinary `access` policy before selecting a requester-private instance.
 
 ## Platform and credential authority
 
@@ -130,6 +162,14 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 `!config` remains disabled by default through `authorization.config_command_enabled`.
 When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a platform administrator.
+
+## Tool approval and resource ownership
+
+Conversation access allows a requester to ask a responder to act, but the responder must still have the tool and any configured approval must still succeed.
+Tool approval is bound to the canonical requester who initiated the action and rechecks current responder access.
+
+Schedules are room-managed resources, while external triggers, background scripts, attachments, requester-private workers, and requester-scoped credentials are requester-owned.
+These ownership rules do not create additional responder access.
 
 ## Bridge aliases
 

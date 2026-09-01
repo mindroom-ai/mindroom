@@ -56,6 +56,13 @@ agents:
     # Accept all, none, or matching inviter ID patterns
     accept_invites: true
 
+    # Conversation access is separate from invitation acceptance
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - lobby
+      users: []
+
     # Enable markdown formatting
     markdown: true
 
@@ -172,8 +179,7 @@ Use `memory_backend: none` for stateless agents that should skip prompt memory l
 Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
-Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
+Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
 `true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after identity alias resolution.
 Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
 The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.

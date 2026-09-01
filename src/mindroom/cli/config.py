@@ -992,6 +992,11 @@ agents:
     rooms:
       - personal
     accept_invites: true
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - personal
+      users: []
     context_files:
       - SOUL.md
       - AGENTS.md

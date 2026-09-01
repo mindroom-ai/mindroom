@@ -218,21 +218,22 @@ The remaining work is documentation, generated starter clarity, and focused test
 - Modify `docs/authorization.md`.
 - Modify `docs/configuration/agents.md`.
 - Modify `docs/configuration/teams.md`.
+- Modify `docs/configuration/index.md` and `docs/dev/agent_configuration.md` where they summarize team invitation configuration.
 - Modify `docs/configuration/router.md` only if its shared invitation wording becomes inaccurate.
 - Modify `docs/oauth-framework.md`.
 - Modify `docs/external-triggers.md`.
 - Modify `docs/scheduling.md` only to clarify existing room ownership where its current wording is ambiguous.
 
-- [ ] Add a failing generated-config assertion for explicit agent access.
-- [ ] Author the starter agent's effective `current_room_members`, `members_of_rooms`, and `users` values.
-- [ ] Document the five authority questions and their independence.
-- [ ] Document OR semantics, hidden defaults, managed grant rooms, and requester-private state.
-- [ ] Correct OAuth documentation so requester-private self-management matches runtime behavior.
-- [ ] Document platform trigger administrators and additive `admin_users`.
-- [ ] Add `accept_invites` to team configuration documentation.
-- [ ] Keep one sentence per Markdown source line.
-- [ ] Run generated documentation checks and focused config tests.
-- [ ] Commit the documentation and starter-configuration clarification.
+- [x] Add a failing generated-config assertion for explicit agent access.
+- [x] Author the starter agent's effective `current_room_members`, `members_of_rooms`, and `users` values.
+- [x] Document the five authority questions and their independence.
+- [x] Document OR semantics, hidden defaults, managed grant rooms, and requester-private state.
+- [x] Correct OAuth documentation so requester-private self-management matches runtime behavior.
+- [x] Document platform trigger administrators and additive `admin_users`.
+- [x] Add `accept_invites` to team configuration documentation.
+- [x] Keep one sentence per Markdown source line.
+- [x] Run generated documentation checks and focused config tests.
+- [x] Commit the documentation and starter-configuration clarification.
 
 ### Task 5: Verify the exact PR head
 
@@ -261,4 +262,5 @@ The remaining work is documentation, generated starter clarity, and focused test
 - [x] Task 1 canonicalizes trusted requesters once at Matrix ingress while preserving transport identity.
 - [x] Task 2 gives teams the same dedicated invitation policy and removes their lifecycle exception.
 - [x] Task 3 makes platform and additive external-trigger administrators use one alias-aware predicate.
-- [ ] Implementation and verification remain.
+- [x] The scoped implementation is complete.
+- [ ] Whole-PR verification and review remain.
